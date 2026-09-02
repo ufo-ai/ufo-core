@@ -1,6 +1,7 @@
 """The `object_tools` capability cases run concurrently against one workspace and each grader finds
 its own durable rows by term, so a term that appears in another case's ask grades that case's row
-and flips the verdict with the order the cases finish."""
+and flips the verdict with the order the cases finish. The scenarios are the second family, on a
+workspace of their own, and hold to the same rule among themselves."""
 
 import ast
 from pathlib import Path
@@ -12,6 +13,7 @@ import sqlalchemy as sa
 from evals.suites.object_tools import (
     CASES,
     ROW_TERMS,
+    SCENARIOS,
     SHARED_ARCHIVE_APP,
     SINGLE_RUN_FIRES,
     _graded_run_count,
@@ -45,8 +47,17 @@ PROSPECTIVE_RUN_ONCE_REPLIES = (
 )
 
 
+def _families() -> tuple[dict[str, str], ...]:
+    """What each case asks for, grouped by the workspace its family runs against: the capability
+    cases share one and run concurrently, the scenarios share another."""
+    return (
+        {case.name: case.message.lower() for case in CASES},
+        {case.name: case.user.scenario_block().lower() for case in SCENARIOS},
+    )
+
+
 def test_every_row_term_belongs_to_a_case_and_is_matchable() -> None:
-    asks = {case.name: case.message.lower() for case in CASES}
+    asks = {name: ask for family in _families() for name, ask in family.items()}
 
     assert set(ROW_TERMS) <= set(asks)
     assert [term for terms in ROW_TERMS.values() for term in terms if term != term.lower()] == []
@@ -60,13 +71,13 @@ def test_every_row_term_belongs_to_a_case_and_is_matchable() -> None:
 
 
 def test_no_row_term_matches_another_cases_ask() -> None:
-    asks = {case.name: case.message.lower() for case in CASES}
-
     collisions = [
         (owner, term, other)
+        for family in _families()
         for owner, terms in ROW_TERMS.items()
+        if owner in family
         for term in terms
-        for other, ask in asks.items()
+        for other, ask in family.items()
         if other != owner and term in ask
     ]
 

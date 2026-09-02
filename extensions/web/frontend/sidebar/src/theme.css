@@ -4,6 +4,11 @@
    sheet must carry their classes the way it carries every view's — a utility only an app page
    uses would otherwise vanish from the build no bundler ever sees them in. */
 @source "../../../../app_*/ufo_ext_*/skills/*/app.tsx";
+/* The first run is one component both shells draw, and it lives in the other shell's tree, outside
+   this sheet's source root — so its utilities are generated here only because this line names it.
+   Without it the run still mounts and works while the head loses its height and the progress steps
+   their width. */
+@source "../../src/views/FirstRun.tsx";
 @source inline("text-fill-ink");
 
 
@@ -147,6 +152,10 @@
   --color-surface: var(--bkgd-100);
   --color-ink: var(--text-primary);
   --color-ink-soft: var(--text-secondary);
+  /* A third rank of type, quieter than soft and stronger than faint. Mixed from the palette's
+     own steps, because the seven steps are the whole palette and a fourth literal would not be
+     one of them. */
+  --color-ink-quiet: color-mix(in srgb, var(--text-secondary) 70%, var(--bkgd-100));
   /* The third and last text tone the comps draw: a placeholder, and an act the member cannot take
      yet. Secondary held back over the pane, so it fades in both schemes without naming a colour. */
   --color-ink-faint: color-mix(in srgb, var(--text-secondary) 50%, var(--bkgd-100));
@@ -278,6 +287,9 @@
   --text-body: 15px;
   --text-subtitle: 16px;
   --text-title: 24px;
+  /* The figure a measure is read as: the one step above the scale's chrome, because a tile is
+     scanned for its number and every other word on it is there to qualify that number. */
+  --text-figure: 32px;
 
   /* The one tracking the type carries: half a percent, so a heading and a chip open by the same
      ratio at any size rather than each carrying its own hand-set figure. */

@@ -19,7 +19,6 @@ from ufo_ext_web.surface import (
     ARTIFACTS_SLOT,
     CHANGES_SLOT,
     HOMEPAGE_SEED_PREFIX,
-    IMESSAGE_STEP_FLAG,
     LANES_SHELL_FLAG,
     MAIN_AGENT_FLAG,
     PORTAL_SURFACES,
@@ -58,7 +57,6 @@ FLAGS = (
         key=PORTAL_SURFACES["installed-skills"],
         what="The Skills tab offers the workspace's own skills.",
     ),
-    FlagSpec(key=IMESSAGE_STEP_FLAG, what="The first run offers the iMessage step."),
     FlagSpec(
         key=LANES_SHELL_FLAG,
         what="The portal serves the lanes shell rather than the sidebar shell.",

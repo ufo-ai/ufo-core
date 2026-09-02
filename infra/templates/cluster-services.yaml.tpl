@@ -75,6 +75,10 @@ spec:
     - {secretKey: BROWSERBASE_API_KEY, remoteRef: {key: ${secret_api_keys}, property: browserbase-api-key}}
     - {secretKey: TURBOPUFFER_API_KEY, remoteRef: {key: ${secret_api_keys}, property: turbopuffer-api-key}}
     - {secretKey: PERPLEXITY_API_KEY, remoteRef: {key: ${secret_api_keys}, property: perplexity-api-key}}
+    # Sign-up enrichment reads this key in-process to look a member's company up. An unseeded key
+    # builds no provider: the extension then registers neither the action nor the job, the first run
+    # offers no website step, and the member states their business themselves.
+    - {secretKey: PEOPLE_DATA_LABS_API_KEY, remoteRef: {key: ${secret_api_keys}, property: people-data-labs-api-key}}
     - {secretKey: METRONOME_BEARER_TOKEN, remoteRef: {key: ${secret_api_keys}, property: metronome-bearer-token}}
     # Billing: the Stripe key mints the customer and the portal sessions, and the portal
     # configuration is what keeps subscription mutation out of the member's hands.

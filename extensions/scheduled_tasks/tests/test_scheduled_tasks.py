@@ -94,6 +94,7 @@ def _task_manifest(
     prompt: str,
     description: str = "",
     expires_at: datetime | None = None,
+    run_now: bool | None = None,
 ) -> str:
     return yaml.safe_dump(
         {
@@ -104,6 +105,7 @@ def _task_manifest(
                 "prompt": prompt,
                 "description": description,
                 "expires_at": expires_at,
+                **({} if run_now is None else {"run_now": run_now}),
             },
         }
     )
@@ -927,6 +929,45 @@ async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
     assert turns[0]["dispatch_enqueued_at"] is not None
     assert turns[1]["dispatch_enqueued_at"] is None
     assert dbos.enqueued == [str(turns[0]["id"])]
+
+
+async def test_run_now_fires_at_once_and_keeps_the_schedule_after_it(db: None) -> None:
+    """`run_now: true` puts the first fire in the present, so the next tick claims it and the
+    member reads a first report without waiting for the cron. The fire after it is the schedule's
+    own, and an apply that omits `run_now` still waits for the schedule."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    applied_at = datetime.now(UTC)
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest(
+                "competitive-intel-daily", DAILY_9AM, "watch the competitors", run_now=True
+            ),
+        )
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest("quiet-digest", DAILY_9AM, "watch the warehouse"),
+        )
+        applied = {task.name: task for task in await _store().list()}
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        after = {task.name: task for task in await _store().list()}
+        turns = await _turns(conversation_id)
+    immediate = applied["competitive-intel-daily"]
+    waiting = applied["quiet-digest"]
+    assert applied_at <= immediate.next_run_at <= datetime.now(UTC)
+    assert waiting.next_run_at == next_fire(DAILY_9AM, applied_at)
+    assert ["watch the competitors" in turn["inbound"] for turn in turns] == [True]
+    assert after["competitive-intel-daily"].next_run_at == next_fire(DAILY_9AM, datetime.now(UTC))
+    assert after["competitive-intel-daily"].last_run_at is not None
+    assert after["quiet-digest"].last_run_at is None
 
 
 async def test_deleted_task_stops_and_leaves_the_listing(db: None) -> None:
@@ -1960,6 +2001,37 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
     assert after_edit[0].expires_at == expiry
     assert after_edit[0].created_by_member_id == creator
     assert after_delete == ()
+
+
+async def test_admin_cannot_force_another_members_task_to_run_now(db: None) -> None:
+    """`run_now` fires the creator's prompt at once under the creator's authority, so it is content
+    the creator owns rather than cadence an admin manages: an admin who created nothing is refused
+    and the next fire stays where the schedule put it, and the creator's own ask fires."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    admin = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC), is_admin=True)
+    creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
+    creator_ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
+    )
+    admin_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=admin)
+    apply = _object_tool("object_apply")
+    forced = yaml.safe_dump(
+        {"kind": SCHEDULED_TASK_KIND, "name": "digest", "spec": {"run_now": True}}
+    )
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            creator_ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, "watch the warehouse"),
+        )
+        [applied] = await _store().list()
+        with pytest.raises(AdminRequired, match="creator"):
+            await _dispatch(apply, admin_ctx, manifest=forced)
+        [refused] = await _store().list()
+        await _dispatch(apply, creator_ctx, manifest=forced)
+        [creator_forced] = await _store().list()
+    assert refused.next_run_at == applied.next_run_at
+    assert creator_forced.next_run_at <= datetime.now(UTC)
 
 
 async def test_main_controls_a_members_child_agent_task_without_moving_it(

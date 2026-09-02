@@ -2058,42 +2058,6 @@ class SurfaceContext:
             member_id=row.member_id, claim_expires_at=expires_at, proved_by=row.proved_by
         )
 
-    async def member_surface_claim(self, surface: str, member_id: UUID) -> AddressClaim | None:
-        """This workspace's claim on one address of `surface` that names `member_id` — the claim a
-        member holds rather than the one an address names, so a portal can read its own member's
-        reservation without knowing the address the member stated. A member may hold several rows
-        of one surface, since the keyspace is (surface, address) and a reservation lapses in place:
-        the strongest one answers, a proved claim ahead of a reservation and the latest reservation
-        ahead of an older one. None when the member holds no claim on this surface."""
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(
-                        tables.surface_address.c.member_id,
-                        tables.surface_address.c.claim_expires_at,
-                        tables.surface_address.c.proved_by,
-                    )
-                    .where(
-                        tables.surface_address.c.surface == surface,
-                        tables.surface_address.c.workspace_id == self.workspace_id,
-                        tables.surface_address.c.member_id == member_id,
-                    )
-                    .order_by(
-                        tables.surface_address.c.proved_by.is_(None),
-                        tables.surface_address.c.claim_expires_at.desc(),
-                    )
-                    .limit(1)
-                )
-            ).one_or_none()
-        if row is None:
-            return None
-        expires_at = row.claim_expires_at
-        if expires_at is not None and expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        return AddressClaim(
-            member_id=row.member_id, claim_expires_at=expires_at, proved_by=row.proved_by
-        )
-
     async def confirm_address(self, address: str, proved_by: str) -> None:
         """Link one address this surface routes by, against the inbound message that proved it. The
         reservation stops lapsing and the proof id is what a replayed stream recognises, so the

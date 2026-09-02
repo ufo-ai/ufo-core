@@ -38,6 +38,12 @@ spec:
 Re-applying an existing name updates it in place and re-points reporting to the conversation you
 applied it from. `object_explain` with `kind: scheduled_task` shows the spec schema.
 
+### Running one straight away
+
+Add `run_now: true` to the manifest when the member should see a first run rather than wait for the
+first scheduled fire. The task fires once within the minute and keeps its schedule from then on.
+`run_now` is an act, not state: a later apply that omits it changes nothing.
+
 ### Time zones
 
 `schedule` runs in UTC; members speak on their own clock. The `time:` line of the message's
@@ -52,7 +58,8 @@ with no zone named keeps its schedule's frame: `0 9 * * 1-5` moved "to 10am" bec
 For a recurring task that fires daily or more often and can safely stop:
 
 1. Honor the user's duration or run count; otherwise enumerate ten permitted occurrences starting
-   with the first future fire.
+   with the first future fire. A `run_now` fire counts for none of the ten: count from the first
+   scheduled fire after it.
 2. Set `expires_at` to occurrence 11, not occurrence 10. Occurrence 10 completes its task and adds
    a check-in offering `Continue same cadence`, `Change cadence`, and `Stop`.
 3. Re-apply the same name with a new bound only after explicit confirmation.

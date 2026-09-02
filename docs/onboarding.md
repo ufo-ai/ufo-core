@@ -617,6 +617,51 @@ Credential slots are keyed by workspace and slot name, not by extension, so the 
 `request_credentials` fulfillment (manifest) both fill the Slack surface's slots without a separate
 setup API.
 
+## What the first run hands over
+
+The lanes shell's run (`enable-lanes-shell`; the sidebar shell keeps its own) asks for the website,
+the business, the role, and free-text detail, and offers three goals as chips — more revenue, faster
+product development, finding product-market fit. Pressing Next on the last step does three things,
+in this order, and holds the step on a refusal rather than handing over half of it.
+
+| Order | Act | Why it is where it is |
+|---|---|---|
+| 1 | One `record_first_run` write on the memory collection, holding the business, the role, and every picked goal | Every thread below recalls it, so none of them asks what the business does. A thread that started first would race the write. |
+| 2 | One `POST /agents/{id}/chat?conversation=new` per picked goal, each carrying that goal's opening line | The chat POST is the chat transport, so a thread is opened by admitting its first message: the member is the speaker, the rail gains the row, and the turn runs while they are still on the build screen. The line carries its own instructions: the run already knows which goal was picked, so nothing routes and no skill loads. |
+| 3 | The first task's opening line, left for the composer home stands | The member lands on this one and reads it live, so it is founded by the composer on the screen they are looking at rather than by the panel. `competitive-intel` routes on it. |
+
+A goal thread is a conversation like any other: the member opens it from the rail, replies in it,
+and its turn is in the audit record the same way. Nothing about it is a background job — the only
+thing the run does that a member could not do by typing is type it for them.
+
+## Enrichment
+
+The `enrichment` extension guesses who a member works for from their address. One writer fills
+`enrichment_profile`: a per-minute job that enriches every seated member who agreed to be looked up
+and still holds no row (person by email, company by the website they confirmed or, without one, by
+the domain of their address). The portal's `confirm_website` action on the `enrichment_profile` kind
+is that agreement rather than a lookup: it records the consent and the website, drops any row an
+earlier answer wrote, and looks nobody up, so the job builds the profile within the minute. An empty
+website withholds the agreement and drops the row, and a website that names a mail provider is
+recorded as no website, so the company behind `gmail.com` never stands as the workspace's own. The
+`enrichment_profile` kind lists one flat row per member, named by email, and a best-effort
+`user_prompt_submit` hook hands each turn a short walled summary of the company and the speaker.
+The action and the job both run on a provider: `pdl` with no key is no provider at all, so
+the extension registers the kind and the hook alone — no `confirm_website` action, no job — and the
+portal's first run, which draws its website step from the acts the kind presents, skips it and takes
+the business from the member instead.
+
+| Setting | Values |
+|---|---|
+| `UFO_ENRICHMENT_PROVIDER` | `pdl` (default) — People Data Labs; `recorded` — replays the recorded bodies, no network, no key, logs a warning at boot. Any other value refuses to boot. `compose.yaml` sets `recorded`. |
+| `UFO_ENRICHMENT_RECORDINGS` | The recordings file: raw People Data Labs bodies under a `person:<email>` or `company:<website>` key. Required by `recorded`, which answers no match for a key it does not hold. Optional under `pdl`, which then replays a recorded key and appends every body it fetches (a match or a 404). `compose.yaml` names `extensions/enrichment/ufo_ext_enrichment/recordings.json`. |
+| `UFO_PEOPLE_DATA_LABS_API_KEY` | The deploy key `pdl` reads on each lookup (`PEOPLE_DATA_LABS_API_KEY` also satisfies it); `ufoctl init` names it when unset. Optional — a `pdl` deploy without it writes no profiles and offers no website step. |
+
+A 404 from People Data Labs stores a `no_match` row so the address is never looked up again; a 429
+ends that tick and leaves the member due; 401, 402, and 5xx raise. A raise inside the job pauses
+that workspace for the delay the provider asked for or a doubling one and writes no row, so the
+member stays due and is looked up once the provider answers again.
+
 ## Pack placement
 
 The `assistant_hosted` pack includes the slack extension — its durable member surface

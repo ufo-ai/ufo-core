@@ -14,7 +14,7 @@ Metronome **sandbox** token and a Stripe **test-mode** key: `docs/onboarding.md`
 
 import ufo_pack_assistant
 
-from ufo.sdk.manifest import Pack, SkillSpec
+from ufo.sdk.manifest import Pack
 
 NAME = "assistant_billing"
 VERSION = "0.1.0"
@@ -22,12 +22,4 @@ EXTENSIONS = (*ufo_pack_assistant.EXTENSIONS, "metronome")
 
 
 def pack() -> Pack:
-    return Pack(
-        name=NAME,
-        version=VERSION,
-        extensions=EXTENSIONS,
-        skills=tuple(
-            SkillSpec(path=ufo_pack_assistant.SKILLS_DIR / name)
-            for name in ufo_pack_assistant.SKILL_NAMES
-        ),
-    )
+    return Pack(name=NAME, version=VERSION, extensions=EXTENSIONS)

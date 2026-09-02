@@ -671,29 +671,21 @@ CLAIMS = (
         claim="sign-in from the invitation reaches a first-run setup before the agent answers,"
         " not a chat directly",
         corpus="references/getting-started.md",
-        phrase="a short setup asks what they want help with, the tools their team uses, and who"
-        " else\nto invite",
+        phrase="sign-in continues to that page without\nanother action: a short setup",
         source=WEB_APP,
         pattern=r'if \(route\.kind === "first-run"\) \{\n(?:.*\n)*?\s+<FirstRun',
     ),
     Claim(
-        claim="the first-run setup asks the goal, then the tools used, then who to invite,"
-        " in that order",
+        claim="the first-run setup confirms the website, then asks the business, the role, and"
+        " what they want help with, in that order",
         corpus="references/getting-started.md",
-        phrase="a short setup asks what they want help with, the tools their team uses, and who"
-        " else\nto invite",
+        phrase="a short setup confirms their website, then asks about their business, their"
+        " role,\nand what they want help with",
         source=FIRST_RUN_VIEW,
         pattern=(
-            r"\[GOAL_STEP\]: \{\n(?:.*\n)*?\s+\[TOOLS_STEP\]: \{\n(?:.*\n)*?\s+\[TEAM_STEP\]: \{"
+            r"\.\.\.\(confirm \? \[WEBSITE_STEP\] : \[\]\),\n\s+BUSINESS_STEP,\n"
+            r"\s+POSITION_STEP,\n\s+DETAILS_STEP,"
         ),
-    ),
-    Claim(
-        claim="the first-run setup can offer connecting iMessage, gated by the deploy and a flag"
-        " that defaults on",
-        corpus="references/getting-started.md",
-        phrase="then, where the deploy offers it, connecting iMessage",
-        source=WEB_SURFACE,
-        pattern=r"and await flag_enabled\(IMESSAGE_STEP_FLAG, default=True\)",
     ),
     Claim(
         claim="the terminal's concluding choice has a third option that talks instead of"

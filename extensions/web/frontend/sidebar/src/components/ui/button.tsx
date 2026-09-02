@@ -22,6 +22,7 @@ export const buttonVariants = cva(
           "border border-edge bg-transparent text-inherit px-lg py-xs hover:bg-fill",
         row: "border border-edge bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
         quiet: "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
+        mark: "border-0 bg-transparent p-0 text-ink-soft hover:text-ink",
         option: cn(
           "border border-edge-strong bg-transparent text-inherit px-lg py-xs",
           "hover:bg-fill",
@@ -37,6 +38,9 @@ export const buttonVariants = cva(
            the search's lens — instead of at whatever register the surface around it happens to be
            set in. */
         icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
+        /* The mark's own box: the glyph and nothing around it, so a row of acts is a row of marks
+           at the glyph's own pitch rather than a row of boxes with a glyph inside each. */
+        glyph: "size-(--size-glyph) rounded-control p-0 [&_svg]:size-(--size-glyph)",
       },
     },
     defaultVariants: { variant: "outline", size: "default" },

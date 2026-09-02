@@ -20,7 +20,7 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { clearChat, useChat } from "@/lib/chatStore";
-import { CHAT_SURFACE } from "@/lib/mainAgent";
+import { chatSurface } from "@/lib/mainAgent";
 import {
   CHAT_LADDERS,
   CHAT_SHOWN_OPTIONS,
@@ -132,7 +132,7 @@ export function Home({
   onActivity: (conversationId: string) => void;
   onAgents: () => void;
 }) {
-  const chatAgent = agents.find((agent) => agent.app === CHAT_SURFACE) ?? mainAgent;
+  const chatAgent = chatSurface(agents) ?? mainAgent;
   const opens = place.opens;
   useEffect(() => {
     if (opens?.length) return;

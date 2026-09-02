@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.o11y import log
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
     AdminRequired,
@@ -98,6 +99,15 @@ class ScheduledTaskSpec(BaseModel):
             "the next cron fire. Omitted on update preserves it; a new task defaults to running."
         ),
     )
+    run_now: bool | None = Field(
+        default=None,
+        title="Run now",
+        description=(
+            "True fires the task once as soon as it is applied, on top of its schedule; the fire "
+            "after that one is the schedule's own. It is an act rather than state: nothing is "
+            "stored, and an apply that omits it leaves the next fire where the schedule puts it."
+        ),
+    )
 
     @field_validator("expires_at")
     @classmethod
@@ -164,8 +174,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
     conversation as that agent, acting on behalf of the creator.
 
     Content editing is narrower than cadence management: an update keeps the original creator, so
-    an admin may change schedule, expiry, or pause but never the prompt or description that fires as
-    that member against their private capabilities. Every new task requires an acting member."""
+    an admin may change schedule, expiry, or pause but never the prompt, the description, or a
+    `run_now` fire that runs as that member against their private capabilities. Every new task
+    requires an acting member."""
 
     kind_name: ClassVar[str] = SCHEDULED_TASK_KIND
     mutate_gate: ClassVar[str] = SCHEDULE_GATE
@@ -173,8 +184,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
 
     def _admin_can_apply(self, _old: ScheduledTaskSpec, spec: ScheduledTaskSpec) -> bool:
         """Cadence management — schedule, expiry, pause — is an admin's; content is the
-        creator's."""
-        return not {"prompt", "description"}.intersection(spec.model_fields_set)
+        creator's. `run_now` counts as content: it fires the prompt at once under the creator's
+        authority, which is the creator's own act to ask for."""
+        return not {"prompt", "description", "run_now"}.intersection(spec.model_fields_set)
 
     async def member_page(
         self,
@@ -364,6 +376,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         found = await self._find(ctx.ext, name)
         existing = None if found is None else found.task
         scheduler = _require_scheduler(ctx.ext)
+        now = datetime.now(UTC)
         if owner is None:
             if existing is not None:
                 raise ValueError(f"scheduled task {name!r} changed while editing")
@@ -371,7 +384,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 raise ValueError(f"scheduled task {name!r} changed while editing")
             if validated_schedule is None or spec.prompt is None:
                 raise ValueError("creating a scheduled task requires schedule and prompt")
-            next_run_at = next_fire(validated_schedule, datetime.now(UTC))
+            # `run_now` puts the first fire in the past-or-present, so the next runner tick claims
+            # it and the fire after that is the cron's own.
+            next_run_at = now if spec.run_now else next_fire(validated_schedule, now)
             paused = bool(spec.paused)
             _validate_future_fire(next_run_at, spec.expires_at, paused=paused)
             await scheduler.create(
@@ -394,7 +409,14 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 raise AdminRequired(SCHEDULE_GATE)
         elif existing.created_by_member_id != acting_member and not await ctx.speaker_is_admin():
             raise AdminRequired(SCHEDULE_GATE)
-        next_run_at = next_fire(schedule, datetime.now(UTC))
+        next_run_at = now if spec.run_now else next_fire(schedule, now)
+        if spec.run_now:
+            log(
+                "scheduled_task.run_now",
+                task=name,
+                requested_by=acting_member,
+                created_by=existing.created_by_member_id,
+            )
         expires_at = (
             spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
         )

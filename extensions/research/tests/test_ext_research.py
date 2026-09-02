@@ -238,7 +238,7 @@ def test_deep_research_lifts_its_round_budget_above_the_default() -> None:
 
 def test_research_skills_parse_and_index() -> None:
     index = dict(skill_registry((research_manifest.manifest(),)).index())
-    for name in ("research-assistant", "research-report"):
+    for name in ("research-assistant", "research-report", "competitive-intel"):
         assert name in index
 
 

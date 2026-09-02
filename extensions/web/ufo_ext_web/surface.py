@@ -3860,12 +3860,11 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
 
 
 GITHUB_PROVIDER = "github"
-IMESSAGE_EXTENSION = "imessage"
-IMESSAGE_STEP_FLAG = "enable-imessage-step"
-"""Whether the first run offers the iMessage step. It reads open, like every flag withholding a
-screen the product already offers: a deploy with no flag service, an unseeded key and a Flagship
-outage all leave the step where it was."""
 CONNECT_STEP_NAMES = (SURFACE_SLACK, GITHUB_PROVIDER)
+
+"""The kind the enrichment extension keeps a member's company and role on, and the act that fills
+it from a confirmed website. A deploy without that kind offers the first run no website step."""
+PROFILE_KIND = "enrichment_profile"
 CONNECTOR_CATALOG_LIMIT = 50
 CONNECTOR_CATALOG_QUERY_CHARS = 100
 CONNECTOR_CATALOG_CURSOR_CHARS = 500
@@ -3885,39 +3884,6 @@ class ConnectorCatalogTile(BaseModel):
 
     name: str
     label: str
-
-
-class ImessageClaim(BaseModel):
-    """The reader's own claim on the phone the iMessage step reserved, as the first run's watch
-    reads it. `connected` once the phone proved the code, `pending` while a reservation stands,
-    `expired` once none does — the reservation lapsed in place, or the surface released it when the
-    phone answered a lapsed code or opted out. The state, never the claim's rows."""
-
-    state: Literal["pending", "connected", "expired"]
-
-
-async def workspace_imessage_claim(ctx: SurfaceContext, request: Request) -> Response:
-    """The web claim the member the request authenticates holds on one iMessage address. The claim
-    is keyed by the member the code proves rather than the phone they stated, so the read answers
-    for the reader's own claim and no other member's. A member who holds no row reads `expired`
-    rather than `pending`: the step reserves the phone before it answers the member, so a row that
-    is not there is a reservation the surface released — the phone proved a lapsed code, or it
-    opted out — and `pending` would draw the opt-in link again for a claim no row admits."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, _audience = resolved
-    claim = await ctx.member_surface_claim("imessage", member_id)
-    state: Literal["pending", "connected", "expired"]
-    if claim is None:
-        state = "expired"
-    elif claim.proved_by is not None:
-        state = "connected"
-    elif claim.claim_expires_at is not None and claim.claim_expires_at <= datetime.now(UTC):
-        state = "expired"
-    else:
-        state = "pending"
-    return JSONResponse(ImessageClaim(state=state).model_dump(mode="json"))
 
 
 async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
@@ -3943,14 +3909,10 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     surfaces = {entry.surface for entry in await ctx.list_installations()}
     coverage = await ctx.github_coverage(member_id, admin=audience.admin)
     held = {SURFACE_SLACK: SURFACE_SLACK in surfaces, GITHUB_PROVIDER: coverage.git_push}
-    imessage = any(
-        extension.name == IMESSAGE_EXTENSION for extension in ctx.deploy_extensions
-    ) and await flag_enabled(IMESSAGE_STEP_FLAG, default=True)
     model_key_held = await ctx.member_holds_own_model_key(member_id)
     return JSONResponse(
         {
             "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
-            "imessage": imessage,
             "model_key_held": model_key_held,
             "connectors": [
                 ConnectStep(name=tile.name, label=tile.label, installed=held[tile.name]).model_dump(
@@ -3962,6 +3924,9 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
             "actions": {
                 MEMBER_KIND: _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
                 MEMORY_KIND: _action_payloads(ctx.object_actions(MEMORY_KIND, "collection")),
+                PROFILE_KIND: _action_payloads(ctx.object_actions(PROFILE_KIND, "collection"))
+                if ctx.object_kind(PROFILE_KIND) is not None
+                else [],
             },
         }
     )
@@ -5403,7 +5368,6 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/first-run", handler=workspace_first_run),
-    SurfaceRoute(method="GET", path="workspace/imessage-claim", handler=workspace_imessage_claim),
     SurfaceRoute(method="GET", path="workspace/starters", handler=workspace_starters),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),

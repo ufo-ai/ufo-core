@@ -7,7 +7,8 @@ research (the research tools over the Perplexity search backend), brokered conne
 injected at the egress proxy) and MCP,
 the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
 sandbox-chrome cdp provider), website building and the code REPL, document generation,
-todos, durable objectives, scheduled tasks, member-authored skills, the member apps (chat,
+todos, durable objectives, sign-up enrichment (who a member works for, from People Data Labs),
+scheduled tasks, member-authored skills, the member apps (chat,
 radar, tasks, wiki, artifacts, meetings, issues, metrics — each a shipped agent with an editable
 homepage), the member web portal, the
 operator session debugger (and, riding the memory extension, the memory explorer), Cloudflare
@@ -18,9 +19,7 @@ with no managed infrastructure
 pack-level skills or onboarding of its own: each capability's tools, skills, and onboarding ride
 that extension's own manifest, so the pack is nothing but the set that comes up together."""
 
-from pathlib import Path
-
-from ufo.sdk.manifest import Pack, SkillSpec
+from ufo.sdk.manifest import Pack
 
 NAME = "assistant"
 VERSION = "0.1.0"
@@ -36,6 +35,7 @@ EXTENSIONS = (
     "perplexity",
     "todos",
     "objectives",
+    "enrichment",
     "sites",
     "scheduled_tasks",
     "report_digest",
@@ -65,14 +65,5 @@ EXTENSIONS = (
 )
 
 
-SKILLS_DIR = Path(__file__).parent / "skills"
-SKILL_NAMES = ("first-run",)
-
-
 def pack() -> Pack:
-    return Pack(
-        name=NAME,
-        version=VERSION,
-        extensions=EXTENSIONS,
-        skills=tuple(SkillSpec(path=SKILLS_DIR / name) for name in SKILL_NAMES),
-    )
+    return Pack(name=NAME, version=VERSION, extensions=EXTENSIONS)

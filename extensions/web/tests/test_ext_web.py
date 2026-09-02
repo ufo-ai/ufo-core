@@ -2173,185 +2173,82 @@ async def test_workspace_surfaces_names_each_installed_surface_inside_the_audien
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_imessage_claim_reads_the_member_s_own_phone_claim(
+async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The first run's iMessage watch: the claim the reading member holds on the phone the step
-    reserved, as `pending` while the reservation stands, `connected` once the phone proved the
-    code, and `expired` once the window lapsed without a proof. A member who reserved nothing —
-    including a member whose teammate reserved their own phone — reads `expired`, since no
-    reservation of theirs stands, and a member's claim never answers for another's. Refused
-    without a session."""
-    client, workspace_id, _agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    """The first run's projection: the tiles a member picks what their team uses from — Slack and
+    GitHub among them, because a team that uses them says so like any other tool — and the two of
+    those tiles the page can install itself, beside whether the workspace holds them. Each state is
+    the leg that step's own Connect act writes: Slack's surface installation, and GitHub's App
+    installation credential. A broker `github` connection is not that leg, so it leaves the step
+    offering the install; the credential is the whole workspace's, so the step reads connected for a
+    member who owns no connection at all. Refused without a session."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
     other_id, other_token = await _seed_member(workspace_id, "n@example.com")
-    path = "/surface/web/workspace/imessage-claim"
+    path = "/surface/web/workspace/first-run"
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    other_cookie = {"cookie": f"{SESSION_COOKIE}={other_token}"}
-
-    assert (await client.get(path, headers=cookie)).json() == {"state": "expired"}
-    assert (await client.get(path, headers=other_cookie)).json() == {"state": "expired"}
-
-    now = datetime.now(UTC)
-
-    async def _claim(
-        member: UUID,
-        address: str,
-        *,
-        expires_at: datetime | None,
-        proved_by: str | None,
-    ) -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.surface_address).values(
-                    surface="imessage",
-                    address=address,
-                    workspace_id=workspace_id,
-                    member_id=member,
-                    claim_expires_at=expires_at,
-                    proved_by=proved_by,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-
-    await _claim(
-        member_id,
-        "+15594259991",
-        expires_at=now + timedelta(minutes=30),
-        proved_by=None,
-    )
-    held = await client.get(path, headers=cookie)
-    assert held.json() == {"state": "pending"}
-
-    await _claim(other_id, "+15594259992", expires_at=None, proved_by="turn-1")
-    teammate = await client.get(path, headers=cookie)
-    assert teammate.json() == {"state": "pending"}
-    proven = await client.get(path, headers=other_cookie)
-    assert proven.json() == {"state": "connected"}
-
+    bare = await client.get(path, headers=cookie)
+    assert bare.status_code == 200
+    payload = bare.json()
+    assert payload["model_key_held"] is True
+    assert {"gmail", "notion", "linear", "slack", "github"} <= {
+        tile["name"] for tile in payload["providers"]
+    }
+    assert payload["connectors"] == [
+        {"name": "slack", "label": "Slack", "installed": False},
+        {"name": "github", "label": "GitHub", "installed": False},
+    ]
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.surface_address)
-            .where(
-                tables.surface_address.c.surface == "imessage",
-                tables.surface_address.c.member_id == member_id,
-            )
-            .values(
-                claim_expires_at=now - timedelta(minutes=1),
+            sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
+                workspace_id=workspace_id,
+                surface="slack",
+                installation_id="team:T42",
+                agent_id=agent_id,
+                created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
-    lapsed = await client.get(path, headers=cookie)
-    assert lapsed.json() == {"state": "expired"}
-
+    await _seed_connection(workspace_id, agent_id, other_id, "github", shared=False)
+    held = await client.get(path, headers=cookie)
+    assert held.json()["connectors"] == [
+        {"name": "slack", "label": "Slack", "installed": True},
+        {"name": "github", "label": "GitHub", "installed": False},
+    ]
+    owner = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
+    assert owner.json()["connectors"][1] == {
+        "name": "github",
+        "label": "GitHub",
+        "installed": False,
+    }
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot="github_app_installation",
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    connected = await client.get(path, headers=cookie)
+    assert connected.json()["connectors"][1] == {
+        "name": "github",
+        "label": "GitHub",
+        "installed": True,
+    }
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_imessage_claim_answers_the_strongest_of_a_members_rows(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """A member holds one row per phone they stated, so a corrected typo or a second device leaves
-    the lapsed row beside the proved one. The read answers the strongest row — connected once any
-    phone proved the code — rather than failing on the pair, and a member holding two reservations
-    reads the later one."""
-    client, workspace_id, _agent_id = web
-    member_id, token = await _seed_member(workspace_id, "two@example.com")
-    path = "/surface/web/workspace/imessage-claim"
-    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    now = datetime.now(UTC)
-
-    async def _claim(address: str, *, expires_at: datetime | None, proved_by: str | None) -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.surface_address).values(
-                    surface="imessage",
-                    address=address,
-                    workspace_id=workspace_id,
-                    member_id=member_id,
-                    claim_expires_at=expires_at,
-                    proved_by=proved_by,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-
-    await _claim("+15594259001", expires_at=now - timedelta(minutes=10), proved_by=None)
-    lapsed = await client.get(path, headers=cookie)
-    assert lapsed.status_code == 200
-    assert lapsed.json() == {"state": "expired"}
-
-    await _claim("+15594259002", expires_at=now + timedelta(minutes=30), proved_by=None)
-    reserved = await client.get(path, headers=cookie)
-    assert reserved.status_code == 200
-    assert reserved.json() == {"state": "pending"}
-
-    await _claim("+15594259003", expires_at=None, proved_by="turn-2")
-    proved = await client.get(path, headers=cookie)
-    assert proved.status_code == 200
-    assert proved.json() == {"state": "connected"}
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_imessage_claim_reads_a_released_row_as_expired_rather_than_pending(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The iMessage surface releases the row — `release_address` deletes it — when the phone texts
-    a lapsed code or an opt-out word. The watch reads on every three seconds, so a deleted row that
-    read as a reservation would take the page back from the lapsed notice to the opt-in link, and
-    that link admits nothing: the surface answers no message from an address no row claims. A
-    member holding no row reads `expired`, whether the row lapsed first or stood when it went."""
-    client, workspace_id, _agent_id = web
-    member_id, token = await _seed_member(workspace_id, "released@example.com")
-    path = "/surface/web/workspace/imessage-claim"
-    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-
-    async def _claim(expires_at: datetime) -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.surface_address).values(
-                    surface="imessage",
-                    address="+15594259004",
-                    workspace_id=workspace_id,
-                    member_id=member_id,
-                    claim_expires_at=expires_at,
-                    proved_by=None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-
-    async def _release() -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.surface_address).where(
-                    tables.surface_address.c.surface == "imessage",
-                    tables.surface_address.c.address == "+15594259004",
-                    tables.surface_address.c.workspace_id == workspace_id,
-                )
-            )
-
-    await _claim(datetime.now(UTC) - timedelta(minutes=1))
-    lapsed = await client.get(path, headers=cookie)
-    assert lapsed.json() == {"state": "expired"}
-
-    await _release()
-    released = await client.get(path, headers=cookie)
-    assert released.status_code == 200
-    assert released.json() == {"state": "expired"}
-
-    await _claim(datetime.now(UTC) + timedelta(minutes=30))
-    reserved = await client.get(path, headers=cookie)
-    assert reserved.json() == {"state": "pending"}
-
-    await _release()
-    opted_out = await client.get(path, headers=cookie)
-    assert opted_out.status_code == 200
-    assert opted_out.json() == {"state": "expired"}
+    assert set(payload) == {
+        "providers",
+        "connectors",
+        "actions",
+        "model_key_held",
+    }
+    assert [view["name"] for view in payload["actions"]["member"]] == ["add_member"]
+    assert payload["actions"]["enrichment_profile"] == []
 
 
 @pytest.mark.usefixtures("database_url")

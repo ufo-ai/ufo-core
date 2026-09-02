@@ -71,6 +71,7 @@ docker = "ufo_ext_docker:manifest"
 documents = "ufo_ext_documents.manifest:manifest"
 e2b = "ufo_ext_e2b:manifest"
 embed_openai = "ufo_ext_embed_openai:manifest"
+enrichment = "ufo_ext_enrichment.manifest:manifest"
 eval_env = "ufo_ext_eval_env.manifest:manifest"
 flagship = "ufo_ext_flagship:manifest"
 gbrain = "ufo_ext_gbrain.manifest:manifest"
@@ -183,6 +184,7 @@ packages = [
     "extensions/connectors/ufo_ext_connectors",
     "extensions/debugger/ufo_ext_debugger",
     "extensions/documents/ufo_ext_documents",
+    "extensions/enrichment/ufo_ext_enrichment",
     "extensions/gbrain/ufo_ext_gbrain",
     "evals",
     "extensions/eval_env/ufo_ext_eval_env",
@@ -236,8 +238,7 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 "extensions/objectives/migrations" = "ufo_ext_objectives/migrations"
 "extensions/todos/ufo_ext_todos.py" = "ufo_ext_todos/__init__.py"
 "extensions/todos/todo_list_section.md" = "ufo_ext_todos/todo_list_section.md"
-"packs/assistant_dev/ufo_pack_assistant.py" = "ufo_pack_assistant/__init__.py"
-"packs/assistant_dev/skills" = "ufo_pack_assistant/skills"
+"packs/assistant_dev/ufo_pack_assistant.py" = "ufo_pack_assistant.py"
 "packs/assistant_billing/ufo_pack_assistant_billing.py" = "ufo_pack_assistant_billing.py"
 "packs/assistant_eval/ufo_pack_assistant_eval.py" = "ufo_pack_assistant_eval.py"
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "ufo_pack_assistant_hosted/__init__.py"

@@ -80,6 +80,7 @@ import {
   openBuilder,
   openChat,
   openHome,
+  openHomeChat,
   openNewChat,
   openSlot,
   placeAgent,
@@ -97,12 +98,15 @@ import {
   WORKSPACE_TABS,
   homeLaneAgent,
   homeLaneConversation,
+  mintHomeLane,
   standing,
   type Route,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
+import { clearChat } from "@/lib/chatStore";
+import { setPendingAsk } from "@/lib/pendingAsk";
 import { TRACK_MAX_SLOTS, heldTrack } from "@/lib/tracks";
 import { ALL_SURFACES, SurfacesProvider, useSurfaces } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
@@ -284,8 +288,21 @@ export function App({
               {mainAgent ? (
                 <FirstRun
                   agent={mainAgent}
+                  agents={agents}
                   member={member}
-                  onOpenChat={() => openNewChat(mainAgent.id)}
+                  onClose={() => openNewChat(mainAgent.id)}
+                  onHandoff={(text) => {
+                    /* Home stands the chat app's own lane, so the words name that lane and the
+                       agent they address: an ask left for an agent's new chat screen is a screen
+                       home never opens, and it would stand unread beside an empty box. The lane is
+                       cleared first, so a member coming through the run again opens a conversation
+                       of their own rather than the one the last run founded. */
+                    const speaks = chatSurface(agents) ?? mainAgent;
+                    const lane = mintHomeLane(speaks.id, []);
+                    clearChat(lane);
+                    setPendingAsk(speaks.id, text, true, lane);
+                  }}
+                  onDone={() => openHomeChat((chatSurface(agents) ?? mainAgent).id)}
                 />
               ) : (
                 <PaneNote>No such app.</PaneNote>

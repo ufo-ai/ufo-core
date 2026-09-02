@@ -1,0 +1,67 @@
+{
+  "person:alex@simplecasual.com": {
+    "status": 404,
+    "error": {
+      "type": "not_found",
+      "message": "No records were found matching your request"
+    }
+  },
+  "company:simplecasual.com": {
+    "status": 200,
+    "id": "6VWawMMHo89CL2sf0B2BKAr8Qr59",
+    "name": "simple casual",
+    "display_name": "Simple Casual",
+    "size": "1-10",
+    "employee_count": null,
+    "founded": 2013,
+    "industry": "internet",
+    "industry_v2": "technology, information and internet",
+    "naics": [
+      {
+        "naics_code": "54",
+        "sector": "professional, scientific, and technical services",
+        "sub_sector": null,
+        "industry_group": null,
+        "naics_industry": null,
+        "national_industry": null
+      }
+    ],
+    "sic": [
+      {
+        "sic_code": "7389",
+        "major_group": "business services",
+        "industry_group": "miscellaneous business services",
+        "industry_sector": "business services, not elsewhere classified"
+      }
+    ],
+    "location": null,
+    "linkedin_id": "18205131",
+    "linkedin_url": "linkedin.com/company/simple-casual",
+    "linkedin_slug": "simple-casual",
+    "facebook_url": null,
+    "twitter_url": null,
+    "profiles": [
+      "linkedin.com/company/simple-casual",
+      "crunchbase.com/organization/simple-casual",
+      "linkedin.com/company/18205131"
+    ],
+    "website": "simplecasual.com",
+    "ticker": null,
+    "mic_exchange": null,
+    "type": "private",
+    "summary": "keep it simple, keep it casual.",
+    "tags": null,
+    "headline": null,
+    "alternative_names": [],
+    "alternative_domains": [],
+    "affiliated_profiles": [],
+    "total_funding_raised": null,
+    "latest_funding_stage": null,
+    "last_funding_date": null,
+    "number_funding_rounds": null,
+    "funding_stages": [],
+    "employee_count_by_country": null,
+    "dataset_version": "35.1",
+    "likelihood": 6
+  }
+}

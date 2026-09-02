@@ -8,12 +8,15 @@ preference. The user-skill case grades skill loading, persistence, and agent-sco
 The shared-conversation case grades an act that needs a bound member where the model alone can bind
 one: the archive lands only if the call names its `requested_by`, on the first try or after the
 refusal tells it how. `SCENARIOS` are seeded multi-turn conversations whose trials reset and seed
-their scheduled tasks through the real `ScheduleStore`."""
+their scheduled tasks through the real `ScheduleStore` — the workspace's first task among them,
+where the first-run opening line must route to `competitive-intel` and end on one bounded daily
+row."""
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -39,9 +42,10 @@ from evals.harness.capability import (
     CapabilityVerdict,
     DescribedGrader,
     Grader,
+    grading_statement,
 )
 from evals.harness.harness import JsonObject
-from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
+from evals.harness.scenario import ScenarioCase, ScenarioGrader, ScenarioOutcome, ScenarioUser
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
@@ -86,6 +90,13 @@ PREFERENCE_KIND: MemoryKind = "preference"
 REMEMBERED_CADENCE = (
     'The member\'s standing cadence preference: "regularly" means every weekday at 08:00 UTC.'
 )
+FIRST_TASK_CASE = "S08-first-task-competitive-intel"
+FIRST_TASK_COMPETITORS = ("Pentagram", "Koto", "DesignStudio")
+FIRST_TASK_NAMED_MINIMUM = 2
+FIRST_RUN_OPENING = (
+    "I just set up this workspace. My business: Bright Signal, a two-person brand design "
+    "studio. My role: Founder. Set up my first task: a daily competitive analysis."
+)
 SATISFIED_INSTRUCTION = (
     "Accept the assistant's first reasonable confirmation; do not add new requests."
 )
@@ -116,11 +127,12 @@ ROW_TERMS: dict[str, tuple[str, ...]] = {
     "O15-explicit-ten-runs": ("huddle",),
     "O16-a-few-runs": ("warehouse", "temperature"),
     "O17-remembered-cadence": ("staging", "deploy"),
+    FIRST_TASK_CASE: ("competitive",),
 }
-"""The terms each case's grader reads its own durable rows by. The suite runs its cases
+"""The terms each case's grader reads its own durable rows by. The capability cases run
 concurrently against one workspace and `_rows_about` matches a term anywhere in a row's text, so a
 term that appears in another case's ask reads that case's row and grades the wrong turn: every term
-here must stay out of every other ask."""
+here must stay out of every other ask its own family makes."""
 
 
 def _schedule_store() -> ScheduleStore:
@@ -141,6 +153,11 @@ def _task_manifests(output: CapabilityOutput) -> tuple[dict[str, object], ...]:
         if isinstance(document, dict) and set(document) == ENVELOPE_KEYS:
             documents.append(document)
     return tuple(documents)
+
+
+def _manifest_spec(document: dict[str, object]) -> dict[str, object]:
+    spec = document.get("spec")
+    return spec if isinstance(spec, dict) else {}
 
 
 def _no_jargon() -> Grader:
@@ -951,6 +968,83 @@ async def _graded_missing_delete(outcome: ScenarioOutcome) -> CapabilityVerdict:
     return CapabilityVerdict(True, "nothing was created and the member ended satisfied")
 
 
+async def _graded_first_task(output: CapabilityOutput) -> CapabilityVerdict:
+    manifests = [document for document in _task_manifests(output) if document.get("kind") == KIND]
+    if not manifests:
+        return CapabilityVerdict(
+            False, "no successful object_apply carried a valid scheduled_task manifest"
+        )
+    if not any(_manifest_spec(document).get("run_now") is True for document in manifests):
+        return CapabilityVerdict(
+            False, "the first task carries no `run_now`, so nothing runs today"
+        )
+    rows = await _rows_about(FIRST_TASK_CASE)
+    if not rows:
+        return CapabilityVerdict(False, "no durable row carries the competitive analysis")
+    row = rows[-1]
+    fields = row.schedule.split()
+    if (
+        len(fields) != 5
+        or not fields[0].isdigit()
+        or not fields[1].isdigit()
+        or fields[2:] != ["*", "*", "*"]
+    ):
+        return CapabilityVerdict(False, f"schedule {row.schedule!r} is not one fire a day")
+    if row.expires_at is None:
+        return CapabilityVerdict(False, "the daily informational task has no expires_at")
+    # `run_now` holds the immediate fire in `next_run_at`, so the ten-fire bound is counted from
+    # the first cron occurrence after it.
+    scheduled = replace(row, next_run_at=next_fire(row.schedule, _first_fire(row)))
+    permitted, fire = _permitted_fires(scheduled, row.expires_at, BOUNDED_INFORMATIONAL_FIRES)
+    if permitted != BOUNDED_INFORMATIONAL_FIRES or fire != row.expires_at:
+        return CapabilityVerdict(
+            False,
+            f"expires_at bounds {permitted} fires and does not equal fire "
+            f"{BOUNDED_INFORMATIONAL_FIRES + 1}",
+        )
+    named = [name for name in FIRST_TASK_COMPETITORS if name.lower() in row.prompt.lower()]
+    if len(named) < FIRST_TASK_NAMED_MINIMUM:
+        return CapabilityVerdict(
+            False,
+            f"the stored prompt names {len(named)} competitor(s), fewer than "
+            f"{FIRST_TASK_NAMED_MINIMUM}",
+        )
+    recorded = any(
+        call.name == "memory_update"
+        and call.succeeded
+        and any(
+            competitor.lower() in str(call.input.get("body", "")).lower()
+            for competitor in FIRST_TASK_COMPETITORS
+        )
+        for call in output.calls
+    )
+    if not recorded:
+        return CapabilityVerdict(False, "no successful memory_update recorded a competitor")
+    return CapabilityVerdict(
+        True, f"{row.name}: {row.schedule}, {permitted} fires, names {', '.join(named)}"
+    )
+
+
+def _first_task_grader() -> ScenarioGrader:
+    """The trajectory scorers read a `CapabilityOutput`; a scenario hands its grader the outcome,
+    whose `output` is that trajectory reconstructed from every turn of the conversation."""
+    graded = combine(
+        skill_scorer("competitive-intel", "task-scheduling"),
+        DescribedGrader(
+            "the first task lands as one daily scheduled_task that runs now, bounded at ten "
+            "fires, its prompt naming the confirmed competitors, with a competitor written to "
+            "memory",
+            _graded_first_task,
+        ),
+        _no_jargon(),
+    )
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        return await graded(outcome.output)
+
+    return DescribedGrader(grading_statement(graded), grade)
+
+
 SCENARIOS = (
     ScenarioCase(
         "S01-update-in-place",
@@ -1059,5 +1153,20 @@ SCENARIOS = (
             "never claims to have deleted anything.",
         ),
         digest_tag="object-tools:missing-delete",
+    ),
+    ScenarioCase(
+        FIRST_TASK_CASE,
+        ScenarioUser(
+            reason_for_call="The workspace first run just ended and sent your opening line for "
+            f"you, so your first message is exactly this, word for word: {FIRST_RUN_OPENING}",
+            known_info="Your competitors are Pentagram, Koto, and DesignStudio. You want the "
+            "report here in this conversation. You are on UTC, and 8am is fine.",
+            task_instructions="Confirm the competitor list the assistant proposes by naming "
+            "Pentagram, Koto, and DesignStudio. Accept every default it offers. "
+            + SATISFIED_INSTRUCTION,
+        ),
+        _first_task_grader(),
+        seed=_seeded(),
+        digest_tag="object-tools:first-task-competitive-intel",
     ),
 )

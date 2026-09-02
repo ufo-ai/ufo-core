@@ -29,18 +29,20 @@ REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
     "e2b-api-key",
     "turbopuffer-api-key",
 }
-# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/testing/ufo.tf), seeded
-# out-of-band. They are filled with empty strings when the document lacks them, because the cluster
-# projects each one by name: a property Secrets Manager does not hold leaves the ExternalSecret
-# unready and stops the deploy at the forced re-sync. Empty is a state this family answers by
-# itself — the extension builds no provider unless all three are set, so every flag reads its closed
-# default — which is why they stay out of REQUIRED_PROPERTIES.
+# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/testing/ufo.tf) and the
+# sign-up enrichment key, seeded out-of-band. They are filled with empty strings when the document
+# lacks them, because the cluster projects each one by name: a property Secrets Manager does not
+# hold leaves the ExternalSecret unready and stops the deploy at the forced re-sync. Empty is a
+# state each family answers by itself — the extension builds no provider without its keys, so every
+# flag reads its closed default and enrichment registers neither its action nor its job — which is
+# why they stay out of REQUIRED_PROPERTIES.
 FAIL_CLOSED_PROPERTIES = frozenset(
     {
         "cloudflare-account-id",
         "cloudflare-flagship-app-id",
         "cloudflare-flagship-token",
         "cloudflare-flagship-write-token",
+        "people-data-labs-api-key",
     }
 )
 

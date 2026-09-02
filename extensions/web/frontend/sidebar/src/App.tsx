@@ -253,6 +253,7 @@ export function App({
             {mainAgent ? (
               <FirstRun
                 agent={mainAgent}
+                agents={agents}
                 member={member}
                 onOpenChat={() => openNewChat(mainAgent.id)}
               />

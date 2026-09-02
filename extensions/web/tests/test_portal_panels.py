@@ -290,6 +290,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         "description",
         "expires_at",
         "paused",
+        "run_now",
     }
     (row,) = creator_view.json()["objects"]
     assert row["name"] == "daily-brief"

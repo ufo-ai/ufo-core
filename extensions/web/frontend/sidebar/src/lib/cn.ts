@@ -18,7 +18,7 @@ const SPACING = [
 
 const RADIUS = ["sm", "control", "panel", "bubble", "menu", "card"];
 
-const TEXT = ["mono", "small", "label", "ui", "body", "subtitle", "title"];
+const TEXT = ["fine", "mono", "small", "label", "ui", "body", "subtitle", "title", "figure"];
 
 const WEIGHT = ["strong"];
 

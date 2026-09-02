@@ -611,6 +611,31 @@ function timezoneHeader(): Record<string, string> {
   return zone ? { "x-ufo-timezone": zone } : {};
 }
 
+/** Found one conversation on the words that open it, and leave it running. The chat POST is the
+ *  chat transport, so a thread is opened by admitting its first message and nothing else — the
+ *  member is the speaker, the rail gains the row, and the turn runs before anyone reads it.
+ *
+ *  Nothing is tailed and no chat key is held: this is for a conversation the member is not looking
+ *  at, which the first run opens beside the one it hands them. They reach it from the rail later,
+ *  off a transcript that holds everything the turn did. `sendMessage` is the path for a
+ *  conversation somebody is watching, and it is the only one that drives the store.
+ *
+ *  The answer is whether the conversation was founded, so a caller reports the threads that exist
+ *  rather than the threads it asked for. */
+export async function openConversation(agentId: string, text: string): Promise<boolean> {
+  try {
+    const res = await fetch(chatUrl({ key: "", agentId, conversationId: null }), {
+      method: "POST",
+      credentials: "same-origin",
+      body: text,
+      headers: timezoneHeader(),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Admit one message and tail what it landed on.
  *
  *  Whether this delivery opened the run it names is admission's answer, taken under the

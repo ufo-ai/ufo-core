@@ -16,10 +16,10 @@ from evals.harness.capability import WorkspaceFile
 from evals.skill_loading.runner import SkillLoadCase
 
 SKILL_LOADING_PACKS = ("assistant_hosted",)
-"""The pack these cases route against. `first-run` is a pack-level skill: `assistant` and
-`assistant_hosted` carry it, no extension does, and `assistant_eval` passes no `skills=` at all — so
-on that pack the eight `first-run` cases can only self-exclude, and the two cases that forbid
-`first-run` name a distractor no agent could pick. Binding the suite to the hosted arm is the
+"""The pack these cases route against. `customer-onboarding-help` is a pack-level skill: only
+`assistant_hosted` carries it, no extension does, and `assistant_eval` passes no `skills=` at all —
+so on any other pack the cases naming it can only self-exclude, and a case forbidding it names a
+distractor no agent could pick. Binding the suite to the hosted arm is the
 narrower of the two available fixes: it moves these cases to a pack the sweep already runs, and
 leaves every other suite alone. Giving `assistant_eval` the assistant pack's skills instead would
 add those skills to the index in the system prompt of every suite on that arm — a routing change for
@@ -900,6 +900,31 @@ CASES: tuple[SkillLoadCase, ...] = (
         workspace_files=(LOCKED_PDF,),
     ),
     SkillLoadCase(
+        "competitive-first-run-daily-task",
+        "I just set up this workspace. My business: Bright Signal, a two-person brand design "
+        "studio. My role: Founder. Set up my first task: a daily competitive analysis.",
+        expected="competitive-intel",
+        forbidden=("task-scheduling", "research-assistant"),
+    ),
+    SkillLoadCase(
+        "competitive-watch-every-morning",
+        "Keep an eye on our competitors and tell me what changed every morning.",
+        expected="competitive-intel",
+        forbidden=("task-scheduling",),
+    ),
+    SkillLoadCase(
+        "competitive-one-off-notion-pricing",
+        "Who are Notion's main competitors and how do they price?",
+        expected="research-assistant",
+        forbidden=("competitive-intel",),
+    ),
+    SkillLoadCase(
+        "competitive-pause-existing-task",
+        "Pause the competitive intel task until next month.",
+        expected="task-scheduling",
+        forbidden=("competitive-intel",),
+    ),
+    SkillLoadCase(
         "research-browser-vendors",
         "Research the enterprise browser market using multiple current sources and compare the "
         "leading seven vendors in a sourced table.",
@@ -1130,7 +1155,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "application-new-app",
         "Build me a new app.",
         expected="create-application",
-        forbidden=("website-building", "create-skill", "first-run"),
+        forbidden=("website-building", "create-skill"),
     ),
     SkillLoadCase(
         "application-finance-assistant",
@@ -1162,7 +1187,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "application-another-pr-babysitter",
         "We already have several apps. Add a pull request babysitter for our other repository.",
         expected="create-application",
-        forbidden=("first-run", "app-code-babysit"),
+        forbidden=("app-code-babysit",),
     ),
     SkillLoadCase(
         "babysit-sweep-round",
@@ -1177,48 +1202,44 @@ CASES: tuple[SkillLoadCase, ...] = (
         expects_no_load=True,
         forbidden=("app-code-babysit", "create-application"),
     ),
+    # The lanes shell's handoff, and the sidebar shell's — the two shapes a first run actually
+    # sends. Each one now carries its own instructions, so the turn that answers it loads nothing:
+    # a case here that expected a skill would be asserting the round trip the briefs removed.
     SkillLoadCase(
-        "first-run-get-set-up",
-        "Let's get set up.",
-        expected="first-run",
+        "goal-thread-revenue-builds-nothing",
+        "I just set up this workspace. My business: Ledgerloop, bookkeeping for SaaS support "
+        "teams. My role: Founder. My goal: more revenue. Start by working out my funnel as it "
+        "stands from whatever CRM, billing or analytics access I have granted.",
+        expects_no_load=True,
+        forbidden=("create-application", "competitive-intel", "task-scheduling"),
     ),
     SkillLoadCase(
-        "first-run-what-first",
-        "I just signed in and nothing is connected. What should I do first?",
-        expected="first-run",
+        "goal-sidebar-revenue-builds-nothing",
+        "I just set up this workspace. I want to increase revenue, and we use HubSpot and Stripe. "
+        "Start by working out my funnel as it stands from whatever CRM, billing, analytics or "
+        "spreadsheet access I have granted.",
+        expects_no_load=True,
+        forbidden=("create-application", "competitive-intel", "task-scheduling"),
     ),
     SkillLoadCase(
-        "first-run-panel-handoff",
-        "I want to develop products faster, and we use GitHub and Linear.",
-        expected="first-run",
+        "goal-sidebar-operations-builds-nothing",
+        "This is our first workspace. I want to automate operations, and we use Slack and Gmail. "
+        "Start by naming the recurring workflow that costs us the most time and mapping it as it "
+        "runs today.",
+        expects_no_load=True,
+        forbidden=("create-application", "task-scheduling"),
     ),
     SkillLoadCase(
-        "first-run-slack-and-team",
-        "Let's connect Slack and show the team what this can do for them.",
-        expected="first-run",
+        "goal-sidebar-pmf-builds-nothing",
+        "Nothing is set up yet. I want to find product-market fit, and we use Gmail and Meet. "
+        "Start by stating the hypothesis my business implies and counting the candidates I can "
+        "already reach.",
+        expects_no_load=True,
+        forbidden=("create-application", "task-scheduling"),
     ),
     SkillLoadCase(
-        "first-run-first-app",
-        "This is our first workspace. I want to automate operations, and we use Slack and Gmail.",
-        expected="first-run",
-        forbidden=("create-application",),
-    ),
-    SkillLoadCase(
-        "first-run-revenue-goal",
-        "I just set up this workspace. I want to increase revenue, and we use HubSpot and Stripe.",
-        expected="first-run",
-        forbidden=("create-application",),
-    ),
-    SkillLoadCase(
-        "first-run-pmf-goal",
-        "Nothing is set up yet. I want to find product-market fit, and we use Gmail and Meet.",
-        expected="first-run",
-        forbidden=("create-application",),
-    ),
-    SkillLoadCase(
-        "first-run-custom-goal",
-        "This is our first workspace. I want an agent to reduce support response time.",
-        expected="first-run",
-        forbidden=("create-application",),
+        "goal-not-an-application-ask",
+        "This is our first workspace. I want an agent that reduces support response time.",
+        expected="create-application",
     ),
 )

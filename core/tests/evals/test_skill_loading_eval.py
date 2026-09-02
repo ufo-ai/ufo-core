@@ -370,9 +370,9 @@ def test_catalog_names_are_unique() -> None:
 def test_every_catalog_skill_is_loadable_under_the_pack_the_suite_runs_on() -> None:
     """Every skill a case names is one the pack this suite is bound to actually carries — a case
     naming a skill that pack does not ship can only ever self-exclude. Held against the bound pack,
-    not against `assistant`: `first-run` is a pack-level skill, and asserting it against a pack the
-    suite never ran on is what let five cases exclude themselves nightly. A case that expects no
-    load names none, and is held to its forbidden set alone."""
+    not against `assistant`: `customer-onboarding-help` is a pack-level skill, and asserting it
+    against a pack the suite never ran on is what let five cases exclude themselves nightly. A case
+    that expects no load names none, and is held to its forbidden set alone."""
     for pack in SKILL_LOADING_PACKS:
         carried = set(skill_registry(load_manifests(pack)).by_name)
         for case in CASES:

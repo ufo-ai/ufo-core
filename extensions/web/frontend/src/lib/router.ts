@@ -10,6 +10,7 @@ import {
   bootRoute,
   chatHash,
   homeHash,
+  mintHomeLane,
   newChatHash,
   parseHash,
   sectionHash,
@@ -220,6 +221,14 @@ export function startRouter(): () => void {
  *  track the screen kept and writes it in the same tick. */
 export function openHome(): void {
   navigate(homeHash());
+}
+
+/** Home standing this agent's own chat lane and nothing else, which is where the first run hands the
+ *  member over. The run commits its opening line for that lane's composer, so the address states the
+ *  lane rather than leaving the arrival to answer with whatever track home was left holding: a
+ *  remembered row stands a different composer, and the words would wait on a screen nobody opens. */
+export function openHomeChat(agentId: string): void {
+  navigate(homeHash({ opens: [mintHomeLane(agentId, [])] }));
 }
 
 export function openChat(conversationId: string): void {

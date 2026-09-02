@@ -1,0 +1,69 @@
+name = "competitive-intel-first-task"
+base = "HEAD"
+suites = ["skill_loading", "object_tools_flows"]
+cases = [
+  "competitive-first-run-daily-task",
+  "competitive-one-off-notion-pricing",
+  "competitive-pause-existing-task",
+  "S08-first-task-competitive-intel",
+]
+repeats = 3
+concurrency = 2
+max_stacks = 3
+budget_usd = 80.0
+est_usd_per_case = 1.20
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "without-propose-first"
+
+[[arm.replacements]]
+path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
+old = """2. Propose competitors before asking for them: name three to five from one web search on the
+   business the opening line names, and ask the member to confirm, drop, or add. With no search
+   backend, propose from what you know and say the list is unsearched. "Who are your
+   competitors?" with nothing proposed is the trap — the member came to be told. Match the set to
+   the member's size and market; the famous names of a field are rarely who a two-person studio
+   loses work to.
+"""
+new = ""
+
+[[arm]]
+name = "narrow-description"
+
+[[arm.replacements]]
+path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
+old = '''description: "Load when a member asks for recurring competitive analysis or intelligence: what competitors changed across pricing, launches, hiring, or press, or says \"Set up my first task: a daily competitive analysis.\" Not for a single page or price watch, a change to an existing task, or a one-off competitor question."'''
+new = '''description: "Load when a member asks for recurring competitive analysis or intelligence: what competitors changed across pricing, launches, hiring, or press. Not for a single page or price watch, a change to an existing task, or a one-off competitor question."'''
+
+[[arm]]
+name = "no-run-now-line"
+
+[[arm.replacements]]
+path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
+old = """The manifest also carries `run_now: true`, so the first report runs on the spot rather than at
+tomorrow's fire: the member reads real findings in this conversation instead of a promise. The
+schedule keeps every fire after it.
+"""
+new = ""
+
+[[arm.replacements]]
+path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
+old = """  run_now: true
+"""
+new = ""
+
+[[arm.replacements]]
+path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
+old = """- Applying without `run_now: true` — the member then waits a day for the first report.
+"""
+new = ""

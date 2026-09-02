@@ -1,0 +1,81 @@
+name = "business-goal-thread"
+base = "HEAD"
+suites = ["business_goal"]
+cases = [
+  "business-goal-more-revenue",
+  "business-goal-faster-product-development",
+  "business-goal-find-product-market-fit",
+]
+repeats = 3
+concurrency = 2
+max_stacks = 3
+budget_usd = 15.0
+est_usd_per_case = 0.10
+model = "z-ai/glm-5.3-flash"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+# Each arm edits the view that says the words and the suite that measures them together, because
+# `test_every_case_says_the_words_the_first_run_actually_sends` holds the two copies identical: an
+# arm that cut a sentence from one alone would leave the other saying it.
+
+[[arm]]
+name = "no-read-first"
+
+[[arm.replacements]]
+path = "extensions/web/frontend/src/views/FirstRun.tsx"
+old = """      "Start by working out my funnel as it stands from whatever CRM, billing, analytics or " +
+      "spreadsheet access I have granted: volume at each stage, conversion between them, and " +
+      "average deal size. Name the single stage losing the most, and one experiment on it with " +
+      "a metric. """
+new = """      "Name the single stage losing the most, and one experiment on it with a metric. """
+
+[[arm.replacements]]
+path = "evals/suites/business_goal.py"
+old = """            "Start by working out my funnel as it stands from whatever CRM, billing, analytics or "
+            "spreadsheet access I have granted: volume at each stage, conversion between them, "
+            "and average deal size. Name the single stage losing the most, and one experiment on "
+            "it with a metric. """
+new = """            "Name the single stage losing the most, and one experiment on it with a metric. """
+
+[[arm]]
+name = "no-guess-trap"
+
+[[arm.replacements]]
+path = "extensions/web/frontend/src/views/FirstRun.tsx"
+old = """Do not guess a number I have not given you — say what you could not read. """
+new = """"""
+
+[[arm.replacements]]
+path = "evals/suites/business_goal.py"
+old = """Do not guess a number I have not given you — say what you could "
+            "not read. """
+new = """"""
+
+[[arm]]
+name = "no-one-question"
+
+[[arm.replacements]]
+path = "extensions/web/frontend/src/views/FirstRun.tsx"
+old = """Ask " +
+      "me at most one thing.","""
+new = """","""
+
+[[arm.replacements]]
+path = "evals/suites/business_goal.py"
+old = """ Ask me at most one thing."
+        ),
+        rubric=(
+            "The reply states a funnel baseline"""
+new = """"
+        ),
+        rubric=(
+            "The reply states a funnel baseline"""

@@ -37,7 +37,6 @@ locals {
       "enable-assistant-app"    = true
       "enable-code-app"         = false
       "enable-community-skills" = true
-      "enable-imessage-step"    = true
       "enable-installed-skills" = true
       "enable-issues-app"       = false
       "enable-lanes-shell"      = false
@@ -52,7 +51,6 @@ locals {
       "enable-assistant-app"    = false
       "enable-code-app"         = false
       "enable-community-skills" = false
-      "enable-imessage-step"    = false
       "enable-installed-skills" = false
       "enable-issues-app"       = false
       "enable-lanes-shell"      = false

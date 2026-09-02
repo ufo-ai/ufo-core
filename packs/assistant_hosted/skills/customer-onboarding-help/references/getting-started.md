@@ -4,11 +4,10 @@
 
 A new customer is invited by the UFO team, by email. The invitation opens the workspace's first-run
 page. The customer signs in with their work email, and sign-in continues to that page without
-another action: a short setup asks what they want help with, the tools their team uses, and who else
-to invite — then, where the deploy offers it, connecting iMessage — before the workspace's main agent
-answers them. An admin reaches every agent; every other member reaches the agents open to everyone in
-the workspace, the agents they created themselves, and any agent shared with them (see
-`capabilities.md`). The invitation also gives the terminal install command.
+another action: a short setup confirms their website, then asks about their business, their role,
+and what they want help with, before the workspace's main agent answers them. An admin reaches every agent; every other member reaches the
+agents open to everyone in the workspace, the agents they created themselves, and any agent shared
+with them (see `capabilities.md`). The invitation also gives the terminal install command.
 
 ## Step by step, as the customer experiences it
 

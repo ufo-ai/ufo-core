@@ -45,6 +45,7 @@ API_KEYS_PROPERTIES = frozenset(
         "metronome-bearer-token",
         "openai-api-key",
         "openrouter-api-key",
+        "people-data-labs-api-key",
         "pipedream-client-id",
         "pipedream-client-secret",
         "pipedream-gmail-oauth-app-id",
@@ -59,18 +60,20 @@ API_KEYS_PROPERTIES = frozenset(
         "turbopuffer-api-key",
     }
 )
-# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/*/ufo.tf), seeded
-# out-of-band like every other production-owned property. A document that carries none of them is
-# filled with empty strings here instead of failing the deploy: the extension builds no provider
-# unless all three are set, so every flag resolves to the closed default its call site passes, and
-# the ExternalSecret projecting them still publishes a ready version. Requiring them would stop a
-# deploy over a feature service the fleet runs perfectly well without.
+# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/*/ufo.tf) and the
+# sign-up enrichment key, seeded out-of-band like every other production-owned property. A document
+# that carries none of them is filled with empty strings here instead of failing the deploy: each
+# extension builds no provider without its keys, so every flag resolves to the closed default its
+# call site passes and enrichment registers neither its action nor its job, and the ExternalSecret
+# projecting them still publishes a ready version. Requiring them would stop a deploy over a
+# feature the fleet runs perfectly well without.
 FAIL_CLOSED_PROPERTIES = frozenset(
     {
         "cloudflare-account-id",
         "cloudflare-flagship-app-id",
         "cloudflare-flagship-token",
         "cloudflare-flagship-write-token",
+        "people-data-labs-api-key",
     }
 )
 GATEWAY_PROPERTIES = frozenset({"bot-token"})

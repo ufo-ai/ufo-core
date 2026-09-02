@@ -129,6 +129,12 @@ services:
       # raise without it while the rest of the deploy runs. `ufoctl init` names it when it is unset.
       UFO_OPENAI_API_KEY: ${UFO_OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Sign-up enrichment replays recorded People Data Labs bodies locally, so a checkout needs no
+      # key. Set `pdl` and the key to call the API; name a recordings file outside the extension
+      # package to record what it fetches, because the package's own digest pins the deploy.
+      UFO_ENRICHMENT_PROVIDER: ${UFO_ENRICHMENT_PROVIDER:-recorded}
+      UFO_ENRICHMENT_RECORDINGS: ${UFO_ENRICHMENT_RECORDINGS:-/app/extensions/enrichment/ufo_ext_enrichment/recordings.json}
+      UFO_PEOPLE_DATA_LABS_API_KEY: ${UFO_PEOPLE_DATA_LABS_API_KEY:-}
       # The broker is what makes a connector grant possible at all, so without it a first session
       # can record what a team uses and connect none of it. Read from the environment in-process,
       # never per workspace. The search backend is a per-workspace key instead
