@@ -16,6 +16,10 @@ const UNCRAWLED = ["/waitlist", "/ufo", "/fleet", "/v1/onboard/", "/login"];
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const ARTIFACT_PREFIX = "/artifacts/";
 const JOIN_PREFIX = "/join/";
+// Every door's card names the production join door. The key that opens one is that door's own
+// configuration, so a card served from any other host still hands the reader the one address
+// whose key is public.
+const JOIN_URL = `${APEX}${JOIN_PREFIX}ufo`;
 const ARTIFACT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
@@ -60,8 +64,8 @@ function card(host, total, workspaces) {
 
   ${workspaces} workspace${workspaces === 1 ? "" : "s"}. ${total} on the waitlist.
 
-  Join the waitlist:
-    curl https://${host}/waitlist -d email=email@work.com
+  Sign up:
+    ${JOIN_URL}
 
   Already invited?
     curl -fsSL https://${host}/ufo | sh

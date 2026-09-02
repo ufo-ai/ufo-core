@@ -213,8 +213,8 @@ case "$URL" in
     printf '<h1>Terms of Service</h1>\\n'
     ;;
   */)
-    [ "$BAD_ROOT_HOST" != "$HOST" ] || HOST=wrong.example
-    printf 'curl https://%s/waitlist\\n' "$HOST"
+    [ "$BAD_ROOT_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
+    printf 'Sign up:\\n    https://ufo.ai/join/ufo\\n'
     ;;
 esac
 """
@@ -4552,6 +4552,23 @@ def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
         assert harness.count(f"'\"{placeholder}\"'") == 1
 
 
+def _check_both_door_gates_grep_the_join_door_the_card_prints() -> None:
+    worker = (ROOT / "infra" / "modules" / "edge" / "worker.js").read_text()
+    apex = re.search(r'const APEX = "([^"]+)"', worker)
+    prefix = re.search(r'const JOIN_PREFIX = "([^"]+)"', worker)
+    assert apex and prefix
+    assert "const JOIN_URL = `${APEX}${JOIN_PREFIX}ufo`" in worker
+    assert re.search(r"Sign up:\n\s+\$\{JOIN_URL\}", worker)
+    join = f"{apex.group(1)}{prefix.group(1)}ufo"
+    for job, name, workflow in (
+        ("edge", "Gate testing door", "deploy.yml"),
+        ("deploy", "Gate production door", "deploy-production.yml"),
+    ):
+        script = _step(job, name, workflow)["run"]
+        assert isinstance(script, str)
+        assert f'grep -F "{join}"' in script
+
+
 def _check_the_client_target_set_is_one_set_everywhere() -> None:
     def matrix_targets(workflow: str, job: str) -> set[str]:
         jobs = _workflow(WORKFLOWS / workflow)["jobs"]
@@ -4612,6 +4629,7 @@ def _check_deploy_workflow_static_contract() -> None:
         _check_the_product_funnel_shows_count_and_relative_bar,
         _check_edge_doors_use_separate_environment_origins,
         _check_edge_worker_artifact_substitutes_every_placeholder,
+        _check_both_door_gates_grep_the_join_door_the_card_prints,
         _check_the_client_target_set_is_one_set_everywhere,
     ):
         check()

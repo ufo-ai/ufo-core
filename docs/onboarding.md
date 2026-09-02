@@ -226,11 +226,12 @@ opened to, not on what the list can know.
 
 The key is configuration rather than a secret container: `signup_key` in each environment's
 `terraform.tfvars`. Nothing rests on it being unguessable, and production's is `ufo` — the soft door
-that stands in for waitlist approval until the waitlist is removed, open to anyone who tries the
-obvious segment. What it authorizes is bounded instead: founding a workspace for a domain WorkOS
-says the member owns, and nothing else. It mails no invitation, so it is no relay; it names no
-domain, so it opens nobody else's workspace; and it moves no seat in a workspace that already
-stands. Everyone without the link is refused and pointed at the waitlist, exactly as before.
+that stands in for waitlist approval until the waitlist is removed. The curl card prints
+`https://ufo.ai/join/ufo` as its signup line, so the terminal hands every reader that door while the
+browser page still joins the waitlist. What the key authorizes is bounded instead: founding a
+workspace for a domain WorkOS says the member owns, and nothing else. It mails no invitation, so it
+is no relay; it names no domain, so it opens nobody else's workspace; and it moves no seat in a
+workspace that already stands.
 
 ## Signup Slack Connect invitation
 

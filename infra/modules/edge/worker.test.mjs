@@ -64,9 +64,16 @@ test("curl landing renders the card with live counts and https commands", async 
   assert.match(body, /◉ ◉ ◉/);
   assert.match(body, /flyingobject\.ai/);
   assert.match(body, /4 workspaces\. 0 on the waitlist\./);
-  assert.match(body, /Join the waitlist:/);
-  assert.match(body, /curl https:\/\/flyingobject\.ai\/waitlist -d email=/);
+  assert.match(body, /Sign up:\n {4}https:\/\/ufo\.ai\/join\/ufo\n/);
   assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
+});
+
+// The key that opens a join door is that door's own configuration, so the card hands every reader
+// the production address rather than the host it was fetched from.
+test("a card from another door names the production join door", async () => {
+  const body = await (await request("https://testing.flyingobject.ai/")).text();
+  assert.match(body, /testing\.flyingobject\.ai/);
+  assert.match(body, /https:\/\/ufo\.ai\/join\/ufo/);
 });
 
 test("curl landing over plain http gets the card directly", async () => {
