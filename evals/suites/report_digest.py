@@ -16,8 +16,8 @@ MAX_POINT_WORDS = 10
 
 REPLY_SHAPE = (
     "Reply with exactly these lines and nothing else: one 'Title: <line>', one "
-    "'Summary: <line>', then one 'Point: <line> | Actor: <person>' line per point, leaving the "
-    "actor empty when the report names no person for that line."
+    "'Summary: <line>', and a 'Point: <line> | Actor: <person>' line for each point your entry "
+    "carries, leaving the actor empty when the report names no person for that line."
 )
 POINT_LINE = re.compile(r"^\s*point:\s*(.*?)\s*(?:\|\s*actor:\s*(.*))?$", re.IGNORECASE)
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
