@@ -122,6 +122,33 @@ and another worker sharing the workspace dominate request time — a rebuild cha
 If startup fails, check the provider credential, ports `8710` and `5173`, and whether the pack's
 entry points are current.
 
+## Screenshots on a frontend-impacting pull request
+
+A change that alters a screen carries screenshots by default. A reviewer cannot read a layout,
+spacing or overflow change out of a diff, so a pull request that touches `frontend/` or anything a
+portal page renders posts images or says in one line why it cannot.
+
+Shoot **before and after** at both viewports: desktop 1440×900 and mobile 390×844. Take the before
+shot on the base ref and the after shot on the branch, on the same route and the same seeded
+content, so the only difference in the pair is the change. `ufoctl serve` binds one port, so bring
+one ref up at a time rather than two deploys side by side. Name each file for its route, viewport
+and ref, and post one pair per defect or screen — not one pair per route the shell chrome repeats
+on.
+
+GitHub needs a URL to draw an image. Commit the shots to the screenshot branch and link them from
+there:
+
+```bash
+git switch -c ui-sweep-shots origin/ui-sweep-shots 2>/dev/null || git switch -c ui-sweep-shots
+mkdir -p ui-sweep/pr-<number> && cp <shots> ui-sweep/pr-<number>/
+git add ui-sweep/pr-<number> && git commit -m "ui shots pr-<number>" && git push -u origin ui-sweep-shots
+```
+
+The repository is private, so an inline `![](raw.githubusercontent.com/...)` embed stays blank for a
+reader whose browser holds only a github.com session. Link the `blob/ui-sweep-shots/...` path on
+`github.com` instead, and check the comment after posting it. Screenshots are evidence,
+not source: they never join the pull request's own branch.
+
 ## Layout: the grid, the rhythm, and the four ways to divide
 
 A screen is composed out of six spacing steps and four kinds of division, and each has one job. A
