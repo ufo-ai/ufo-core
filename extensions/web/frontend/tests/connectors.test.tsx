@@ -1038,7 +1038,7 @@ test("provider marks keep their own shape", async () => {
   await screen.findByRole("heading", { name: "Available" });
   const mark = row("Slack").querySelector<HTMLElement>('[style*="--brand-slack"]');
   expect(mark).not.toBeNull();
-  expect(mark!.className).toContain("rounded-none");
+  expect(mark!.className).not.toContain("rounded-full");
 });
 
 /** The brokers reach further than the catalog names, so the pool is listed whole: a connection on a

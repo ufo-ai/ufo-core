@@ -53,12 +53,18 @@ export function AvatarStack({ people }: { people: readonly AvatarStackPerson[] }
   );
 }
 
+/** A member's face is a circle whichever way it is drawn, so a company's mark takes the round edge
+ *  here rather than from the mark itself: a provider's logo stands square everywhere else. */
 function Face({ person, overlapped }: { person: AvatarStackPerson; overlapped: boolean }) {
   const mark = person.company ? vendoredMark(person.company) : null;
   return (
     <Avatar title={person.name} className={cn(CIRCLE, overlapped && OVERLAP)}>
       <AvatarFallback aria-hidden>
-        {mark ? <BrandMark provider={mark} className="size-full" /> : initials(person.name)}
+        {mark ? (
+          <BrandMark provider={mark} className="size-full rounded-full" />
+        ) : (
+          initials(person.name)
+        )}
       </AvatarFallback>
     </Avatar>
   );

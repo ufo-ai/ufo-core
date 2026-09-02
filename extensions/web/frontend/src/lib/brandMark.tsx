@@ -107,15 +107,13 @@ export const BRAND_MARKS: ReadonlySet<string> = new Set([
  *  draws on the pane's token wherever it stands. */
 const INK_MARKS: ReadonlySet<string> = new Set(["github", "slack"]);
 
-/** A provider's mark where the portal offers it, drawn round: a provider and a member are the one
- *  shape at the one size wherever either stands, so a mark on a stack reads as the same kind of
- *  thing as the face beside it. The slug is data, so the token it names resolves through the
- *  `style` object rather than through a class, and the round edge clips the box the mark is painted
- *  in — the art itself is a square the theme hands over whole.
+/** A provider's mark where the portal offers it, drawn as the square the theme hands over: the art
+ *  is a brand's own picture and a round edge would cut it, so the mark takes no mask of its own and
+ *  whatever holds it owns the shape. The slug is data, so the token it names resolves through the
+ *  `style` object rather than through a class.
  *
- *  A provider with no vendored mark takes its glyph at the same square, unclipped: that glyph is
- *  line art whose strokes end at the box's edge, so a round edge would cut the mark instead of its
- *  ground. A grid of tiles still holds one rhythm whichever it draws.
+ *  A provider with no vendored mark takes its glyph at the same square, so a grid of tiles holds
+ *  one rhythm whichever it draws.
  *
  *  `onInk` draws the mark for a filled act instead of for the pane. That act is ink on the pane, so
  *  its ground is the scheme's other end: a mark of one ink reads on exactly one of the two, and the
@@ -137,7 +135,7 @@ export function BrandMark({
   return (
     <span
       className={cn(
-        "block size-(--size-brand-mark) shrink-0 rounded-full bg-contain bg-center bg-no-repeat",
+        "block size-(--size-brand-mark) shrink-0 bg-contain bg-center bg-no-repeat",
         className,
       )}
       style={{ backgroundImage: `var(--brand-${provider}${ground})` }}

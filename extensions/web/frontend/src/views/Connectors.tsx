@@ -809,7 +809,7 @@ function Row({
       className={cn(control?.className, open && "hover:bg-fill")}
     >
       <MarkTile>
-        <BrandMark provider={name} className="rounded-none text-ink" />
+        <BrandMark provider={name} className="text-ink" />
       </MarkTile>
       <ItemContent>
         <ItemTitle>{label}</ItemTitle>

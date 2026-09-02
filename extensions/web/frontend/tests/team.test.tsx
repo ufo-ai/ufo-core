@@ -261,6 +261,32 @@ test("the sidebar offers the workspace, which opens on the roster", async () => 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
 });
 
+test("a credential's provider mark carries no round mask", async () => {
+  wire({
+    "/workspace/credentials": () =>
+      json({
+        slots: [
+          {
+            name: "openai",
+            slot: "OPENAI_API_KEY",
+            extension: "models",
+            description: "the key",
+            filled: true,
+          },
+        ],
+        actions: [],
+      }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await goTo("Credentials");
+
+  const row = (await screen.findByText("OPENAI_API_KEY")).closest("[data-slot=item]")!;
+  const mark = row.querySelector<HTMLElement>('[style*="--brand-openai"]');
+  expect(mark).not.toBeNull();
+  expect(mark!.className).not.toContain("rounded-full");
+});
+
 test("an outcome notice does not follow the member to another view", async () => {
   wire({
     "/workspace/team": () => json(ROSTER),
