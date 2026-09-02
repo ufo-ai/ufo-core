@@ -1805,14 +1805,6 @@ class SurfaceContext:
         return self._deploy_sandbox_internet
 
     @property
-    def deploy_skills(self) -> tuple[tuple[str, str], ...]:
-        """The deploy's loadable-skill index — the floor of what any child can load. A spawn merges
-        the spawning agent's member-authored skills onto it before rendering the child's
-        `{{skill_index}}`, and a profile is deploy shape reached by every agent, so those belong to
-        `agent_skills` and this names the shared part."""
-        return self._skills.index()
-
-    @property
     def system_skill_bundle(self) -> SystemSkillBundle:
         """The immutable deploy-skill archive a terminal caches before it executes a turn."""
         return self._system_skill_bundle
