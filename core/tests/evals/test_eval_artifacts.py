@@ -10,10 +10,12 @@ from io import BytesIO
 from json import dumps, loads
 from pathlib import Path
 from shutil import copy as copy_file
+from struct import unpack
 from tarfile import TarInfo
 from tarfile import open as open_tar
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
+from zlib import decompress
 
 import pytest
 import sqlalchemy as sa
@@ -77,6 +79,7 @@ from evals.harness.scorers import (
     site_archive_scorer,
 )
 from evals.suites.site_build import CASES as SITE_BUILD_CASES
+from evals.suites.site_build import POSTER_HEIGHT, POSTER_PNG, POSTER_WIDTH
 from evals.suites.ufo_app_bench import (
     ACTION_CASES,
     ACTION_CONTRACTS,
@@ -1814,6 +1817,77 @@ async def test_static_site_case_rejects_an_archive_without_the_requested_readbac
 
     assert not verdict.passed
     assert "did not read index.html back" in verdict.reason
+
+
+def _read_readback_output(file_path: str) -> CapabilityOutput:
+    return CapabilityOutput(
+        "ANSWER: Ufo Status: Operational",
+        (
+            ToolInvocation(
+                "write", {"file_path": "/workspace/site/index.html"}, '{"created":true}', True
+            ),
+            ToolInvocation("start_server", {"project_path": "/workspace/site"}, "served", True),
+            ToolInvocation(
+                "read",
+                {"file_path": file_path},
+                "     1\t<h1>Ufo Status: Operational</h1>",
+                True,
+            ),
+            ToolInvocation(
+                "bash", {"command": "tar -czf /workspace/site.tar.gz site"}, "archived", True
+            ),
+            ToolInvocation(
+                "share_file",
+                {"files": [{"file_path": "/workspace/site.tar.gz"}]},
+                '[{"name":"site.tar.gz"}]',
+                True,
+            ),
+        ),
+        artifacts=(SharedArtifact("site.tar.gz", _site("Ufo Status: Operational")),),
+    )
+
+
+async def test_static_site_case_accepts_the_read_tool_for_the_readback() -> None:
+    verdict = await SITE_BUILD_CASES[0].grader(_read_readback_output("/workspace/site/index.html"))
+
+    assert verdict.passed
+
+
+async def test_static_site_case_rejects_a_read_of_a_file_beside_the_index() -> None:
+    verdict = await SITE_BUILD_CASES[0].grader(_read_readback_output("/workspace/site/about.html"))
+
+    assert not verdict.passed
+    assert "did not read index.html back" in verdict.reason
+
+
+def _png_chunks(data: bytes) -> dict[bytes, bytes]:
+    chunks: dict[bytes, bytes] = {}
+    offset = 8
+    while offset < len(data):
+        (length,) = unpack(">I", data[offset : offset + 4])
+        chunks[data[offset + 4 : offset + 8]] = data[offset + 8 : offset + 8 + length]
+        offset += 12 + length
+    return chunks
+
+
+def test_the_staged_poster_is_an_opaque_image_with_visible_structure() -> None:
+    assert POSTER_PNG.startswith(b"\x89PNG\r\n\x1a\n")
+    chunks = _png_chunks(POSTER_PNG)
+    width, height, depth, colour_type = unpack(">2I2B", chunks[b"IHDR"][:10])
+
+    assert (width, height) == (POSTER_WIDTH, POSTER_HEIGHT)
+    assert min(width, height) >= 600
+    assert (depth, colour_type) == (8, 2)
+
+    stride = width * 3 + 1
+    scanlines = decompress(chunks[b"IDAT"])
+    assert len(scanlines) == height * stride
+    sampled = {
+        scanlines[row * stride + 1 + column * 3 : row * stride + 4 + column * 3]
+        for row in range(0, height, 60)
+        for column in range(0, width, 60)
+    }
+    assert len(sampled) >= 3
 
 
 async def test_site_archive_rejects_an_oversized_member_before_reading_its_payload() -> None:

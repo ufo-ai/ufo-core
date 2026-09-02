@@ -5,6 +5,8 @@ artifact collection's action and then delivered. The media pair is authored here
 seeded it."""
 
 import shlex
+import struct
+import zlib
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -24,11 +26,86 @@ from evals.harness.scorers import (
 
 GENERATE_IMAGE = "action:artifact:generate_image"
 GENERATE_VIDEO = "action:artifact:generate_video"
-POSTER_PNG = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
-    b"\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00"
-    b"\x00IEND\xaeB`\x82"
-)
+POSTER_WIDTH = 900
+POSTER_HEIGHT = 1200
+POSTER_GROUND = b"\x12\x20\x36"
+POSTER_TITLE = b"\xe8\xc4\x5c"
+POSTER_PANEL = b"\xf2\xf0\xe8"
+POSTER_TITLE_ROWS = range(120, 300)
+POSTER_PANEL_ROWS = range(420, 1020)
+
+
+def _poster_row(row: int) -> bytes:
+    """One filter-byte-prefixed scanline of the staged poster: a titled band over a panel on a
+    dark ground, so the file the restraint case delivers is a picture and not a placeholder an
+    agent is right to refuse to send."""
+    runs: tuple[tuple[int, bytes], ...]
+    if row in POSTER_TITLE_ROWS:
+        runs = ((80, POSTER_GROUND), (740, POSTER_TITLE), (80, POSTER_GROUND))
+    elif row in POSTER_PANEL_ROWS:
+        runs = ((120, POSTER_GROUND), (660, POSTER_PANEL), (120, POSTER_GROUND))
+    else:
+        runs = ((POSTER_WIDTH, POSTER_GROUND),)
+    return b"\x00" + b"".join(colour * count for count, colour in runs)
+
+
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+
+def _poster_png() -> bytes:
+    scanlines = b"".join(_poster_row(row) for row in range(POSTER_HEIGHT))
+    return b"".join(
+        (
+            b"\x89PNG\r\n\x1a\n",
+            _png_chunk(b"IHDR", struct.pack(">2I5B", POSTER_WIDTH, POSTER_HEIGHT, 8, 2, 0, 0, 0)),
+            _png_chunk(b"IDAT", zlib.compress(scanlines, 9)),
+            _png_chunk(b"IEND", b""),
+        )
+    )
+
+
+POSTER_PNG = _poster_png()
+
+
+INDEX_FILE = "index.html"
+FILE_ARGUMENT_COMMANDS = frozenset({"cat", "head", "tail", "wc"})
+PATTERN_ARGUMENT_COMMANDS = frozenset({"sed", "awk", "grep"})
+
+
+def _names_index(argument: object) -> bool:
+    text = str(argument)
+    return text == INDEX_FILE or text.endswith(f"/{INDEX_FILE}")
+
+
+def _shell_reads_index(command: str) -> bool:
+    """Whether one bash command reads index.html itself, rather than printing text that matches
+    it. A pattern command takes its file after the pattern, so its first argument is not a path."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    segments: list[list[str]] = [[]]
+    for token in lexer:
+        if token and all(character in ";&|\n" for character in token):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return any(
+        segment
+        and (
+            (
+                segment[0].rsplit("/", 1)[-1] in FILE_ARGUMENT_COMMANDS
+                and any(_names_index(argument) for argument in segment[1:])
+            )
+            or (
+                segment[0].rsplit("/", 1)[-1] in PATTERN_ARGUMENT_COMMANDS
+                and any(
+                    index >= 2 and _names_index(argument) for index, argument in enumerate(segment)
+                )
+            )
+        )
+        for segment in segments
+    )
 
 
 def _site_readback_scorer(expected: str) -> Grader:
@@ -51,46 +128,18 @@ def _site_readback_scorer(expected: str) -> Grader:
         )
         if served is None or shared is None:
             return CapabilityVerdict(False, "site was not served and shared successfully")
-        readback = False
-        for call in output.calls[served + 1 : shared]:
-            if call.call != "bash" or not call.succeeded or expected not in call.result:
-                continue
-            lexer = shlex.shlex(
-                str(call.arguments.get("command", "")),
-                posix=True,
-                punctuation_chars=";&|\n",
-            )
-            lexer.whitespace = " \t\r"
-            lexer.whitespace_split = True
-            segments: list[list[str]] = [[]]
-            for token in lexer:
-                if token and all(character in ";&|\n" for character in token):
-                    segments.append([])
-                else:
-                    segments[-1].append(token)
-            readback = any(
-                segment
-                and (
-                    (
-                        segment[0].rsplit("/", 1)[-1] in {"cat", "head", "tail", "wc"}
-                        and any(
-                            argument == "index.html" or argument.endswith("/index.html")
-                            for argument in segment[1:]
-                        )
-                    )
-                    or (
-                        segment[0].rsplit("/", 1)[-1] in {"sed", "awk", "grep"}
-                        and any(
-                            index >= 2
-                            and (argument == "index.html" or argument.endswith("/index.html"))
-                            for index, argument in enumerate(segment)
-                        )
-                    )
+        readback = any(
+            call.succeeded
+            and expected in call.result
+            and (
+                (call.call == "read" and _names_index(call.arguments.get("file_path", "")))
+                or (
+                    call.call == "bash"
+                    and _shell_reads_index(str(call.arguments.get("command", "")))
                 )
-                for segment in segments
             )
-            if readback:
-                break
+            for call in output.calls[served + 1 : shared]
+        )
         return CapabilityVerdict(
             readback,
             "read index.html after serving and before sharing"
@@ -99,7 +148,7 @@ def _site_readback_scorer(expected: str) -> Grader:
         )
 
     return DescribedGrader(
-        f"a successful shell read of index.html after serving returns {expected!r} before sharing",
+        f"a successful read of index.html after serving returns {expected!r} before sharing",
         grade,
     )
 
