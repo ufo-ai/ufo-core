@@ -182,6 +182,7 @@ export function useRoute(): Route {
  *  reads. */
 export function navigate(hash: string, step: PlaceStep = "push"): void {
   if (step === "back") {
+    arrive(parseHash(hash), heldRoute(), true);
     history.back();
     return;
   }

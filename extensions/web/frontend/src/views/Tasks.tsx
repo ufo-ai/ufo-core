@@ -37,7 +37,7 @@ export function Tasks({
   const selected = place.opens?.at(-1) ?? null;
   const at = selected === null ? null : objectAt(selected);
   const close = () => {
-    onPlace({ opens: undefined });
+    onPlace({ opens: [] });
     setGeneration((count) => count + 1);
   };
   return (
