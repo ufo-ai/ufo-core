@@ -20,7 +20,7 @@ from ufo_ext_docker import DockerCarrier
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import ConversationSandbox
-from ufo.harness.sandbox.select import select_carrier
+from ufo.harness.sandbox.select import select_carriers
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.sandbox import (
@@ -64,10 +64,10 @@ def test_config_backend_docker_resolves_the_extension_contributed_carrier() -> N
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
         sandbox=SandboxConfig(backend="docker"),
     )
-    carrier, spec = select_carrier(config, (docker_ext.manifest(),))
-    assert isinstance(carrier, DockerCarrier)
-    assert spec.off_cluster is False
-    assert spec.sizes == ()
+    selected = select_carriers(config, (docker_ext.manifest(),))
+    assert isinstance(selected.carrier, DockerCarrier)
+    assert selected.spec.off_cluster is False
+    assert selected.spec.sizes == ()
 
 
 async def test_exec_carries_the_turn_env_and_run_bakes_none(

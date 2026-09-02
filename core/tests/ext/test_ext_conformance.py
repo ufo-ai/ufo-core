@@ -53,7 +53,7 @@ from ufo.harness.models.registry import model_registry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.select import select_carrier, select_carriers
+from ufo.harness.sandbox.select import select_carriers
 from ufo.harness.sandbox.session import (
     ExecResult,
     ProbeTokenCodec,
@@ -765,10 +765,10 @@ def _carrier_config(backend: str) -> Config:
 
 
 def test_config_backend_defaults_to_the_built_in_local_carrier() -> None:
-    carrier, spec = select_carrier(_carrier_config("local"), ())
-    assert isinstance(carrier, LocalCarrier)
-    assert spec.off_cluster is False
-    assert spec.sizes == ()
+    selected = select_carriers(_carrier_config("local"), ())
+    assert isinstance(selected.carrier, LocalCarrier)
+    assert selected.spec.off_cluster is False
+    assert selected.spec.sizes == ()
 
 
 def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
@@ -776,9 +776,9 @@ def test_config_backend_selects_a_manifest_contributed_carrier() -> None:
     `[sandbox] backend` naming it `serve` builds exactly that carrier — a deploy swaps the sandbox
     backend to an extension's without core naming it."""
     manifest = _sample_manifest()
-    carrier, spec = select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
-    assert isinstance(carrier, sample.SampleCarrier)
-    assert spec.off_cluster is False
+    selected = select_carriers(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    assert isinstance(selected.carrier, sample.SampleCarrier)
+    assert selected.spec.off_cluster is False
 
 
 async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> None:
@@ -787,7 +787,7 @@ async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> N
     in — never through `exec`, whose command line is what a provider rejects once a payload is
     large. The size limit itself is the real carriers' proof; this is the dispatch."""
     manifest = _sample_manifest()
-    carrier, _ = select_carrier(_carrier_config(sample.CARRIER_NAME), (manifest,))
+    carrier = select_carriers(_carrier_config(sample.CARRIER_NAME), (manifest,)).carrier
     assert isinstance(carrier, sample.SampleCarrier)
     handle = SandboxHandle(conversation_id=uuid4(), container_id="test")
 
@@ -798,7 +798,7 @@ async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> N
 
 def test_an_unregistered_backend_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="not a registered carrier"):
-        select_carrier(_carrier_config("nope"), ())
+        select_carriers(_carrier_config("nope"), ())
 
 
 def test_resume_backends_build_beside_the_default() -> None:
@@ -859,7 +859,7 @@ def test_a_carrier_colliding_with_a_built_in_fails_loud() -> None:
         carriers=(CarrierSpec(name="local", factory=sample.SampleCarrier),),
     )
     with pytest.raises(RuntimeError, match="two carriers register backend"):
-        select_carrier(_carrier_config("local"), (collide,))
+        select_carriers(_carrier_config("local"), (collide,))
 
 
 def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:

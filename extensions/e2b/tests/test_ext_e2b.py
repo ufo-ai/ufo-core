@@ -69,7 +69,7 @@ from ufo_ext_e2b import (
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.harness import o11y
 from ufo.harness.sandbox.client_binary import client_binary
-from ufo.harness.sandbox.select import select_carrier
+from ufo.harness.sandbox.select import select_carriers
 from ufo.harness.sandbox.session import (
     CA_SANDBOX_PATH,
     CA_STAGING_PATH,
@@ -1389,7 +1389,7 @@ def test_e2b_backend_without_proxy_public_url_fails_closed(
         sandbox=SandboxConfig(backend="e2b"),
     )
     with pytest.raises(RuntimeError, match="proxy_public_url"):
-        select_carrier(config, (e2b_ext.manifest(),))
+        select_carriers(config, (e2b_ext.manifest(),))
 
 
 def test_e2b_backend_with_plaintext_proxy_public_url_fails_closed(
@@ -1406,7 +1406,7 @@ def test_e2b_backend_with_plaintext_proxy_public_url_fails_closed(
     )
 
     with pytest.raises(RuntimeError, match="HTTPS"):
-        select_carrier(config, (e2b_ext.manifest(),))
+        select_carriers(config, (e2b_ext.manifest(),))
 
 
 async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> None:

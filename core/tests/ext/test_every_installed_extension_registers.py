@@ -44,7 +44,7 @@ from ufo.config import (
 from ufo.harness.models.registry import model_registry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.select import select_carrier
+from ufo.harness.sandbox.select import select_carriers
 from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.host.ext.loader import (
     CONNECTION_RECORDED,
@@ -199,7 +199,7 @@ def _check_hubs(manifest: Manifest) -> None:
 def _check_carriers(manifest: Manifest) -> None:
     for spec in manifest.carriers:
         _resolve_backend(
-            lambda spec=spec: select_carrier(_config(sandbox_backend=spec.name), (manifest,))
+            lambda spec=spec: select_carriers(_config(sandbox_backend=spec.name), (manifest,))
         )
 
 

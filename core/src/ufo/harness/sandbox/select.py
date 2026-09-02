@@ -49,12 +49,6 @@ def select_carriers(config: Config, manifests: tuple[Manifest, ...]) -> DeployCa
     return DeployCarriers(carrier=carrier, spec=spec, resume=resume)
 
 
-def select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Carrier, CarrierSpec]:
-    """The default backend alone — the carrier new sandboxes open on."""
-    selected = select_carriers(config, manifests)
-    return selected.carrier, selected.spec
-
-
 def _built(specs: dict[str, CarrierSpec], config: Config, name: str) -> tuple[Carrier, CarrierSpec]:
     selected = specs.get(name)
     if selected is None:
