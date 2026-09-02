@@ -37,7 +37,6 @@ from ufo.harness.sandbox.session import SYSTEM_CA_BUNDLE as SYSTEM_CA_BUNDLE
 from ufo.harness.sandbox.session import SYSTEM_SKILLS_ROOT as SYSTEM_SKILLS_ROOT
 from ufo.harness.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.harness.sandbox.session import Carrier as Carrier
-from ufo.harness.sandbox.session import CommandStopping as CommandStopping
 from ufo.harness.sandbox.session import DialTarget as DialTarget
 from ufo.harness.sandbox.session import ExecResult as ExecResult
 from ufo.harness.sandbox.session import ProxyEndpoint as ProxyEndpoint
