@@ -189,11 +189,14 @@ test("the radar page mounts and draws its empty feed under its own band", async 
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
 });
 
-/** The crumb over a pinned report names the page itself, so pressing it inside a lane is a place
- *  change in that lane: the feed comes back in the column the member is standing in. Reported to
- *  the portal it would land them on the page's own full screen, which is the track torn up to
- *  answer a press that never asked to leave it. */
-test("the radar crumb comes back to the feed in the lane rather than the full screen", async () => {
+const COLLEAGUE = "colleague@example.com";
+
+/** A page standing one step deeper draws the shell's trail as its crumb, and the crumb names the
+ *  page itself: the app's own address. Pressing it inside a lane is a place change in that lane, so
+ *  the workspace article comes back in the column the member is standing in. Reported to the portal
+ *  it would land them on the page's own full screen, which is the track torn up to answer a press
+ *  that never asked to leave it. */
+test("the wiki crumb comes back to the workspace article in the lane rather than the full screen", async () => {
   const moved: string[] = [];
   const watch = (event: MessageEvent) => {
     const message = event.data as { ufo?: string; to?: string } | null;
@@ -202,23 +205,25 @@ test("the radar crumb comes back to the feed in the lane rather than the full sc
   window.addEventListener("message", watch);
   try {
     await runPage(
-      "radar",
+      "wiki",
       {
-        ["/objects/report/" + TURN_ID]: () => new Response("gone", { status: 404 }),
-        "/objects/report": () => json({ objects: [] }),
-        "/actions/report$": () => json({ actions: [] }),
+        "/workspace/memory": () => json({ available: true, matches: [] }),
+        "/objects/memory": () => json({ objects: [] }),
+        "/objects/member": () =>
+          json({ objects: [{ name: COLLEAGUE, email: COLLEAGUE, admin: false, seated: true }] }),
       },
       {
         banded: true,
-        place: { opens: ["run/" + TURN_ID] },
-        crumb: { label: "Radar", at: new URL(agentHash(AGENT.id), location.origin + BASE).href },
+        place: { opens: ["member/" + COLLEAGUE] },
+        crumb: { label: "Wiki", at: new URL(agentHash(AGENT.id), location.origin + BASE).href },
       },
     );
 
-    const crumb = await screen.findByRole("link", { name: "Back to Radar" });
-    await userEvent.click(crumb);
+    expect(await screen.findByRole("heading", { level: 1, name: COLLEAGUE })).toBeTruthy();
+    await userEvent.click(screen.getByRole("link", { name: "Back to Wiki" }));
 
-    expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "People" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { level: 1, name: COLLEAGUE })).toBeNull();
     expect(moved).toEqual([]);
   } finally {
     window.removeEventListener("message", watch);
@@ -226,8 +231,8 @@ test("the radar crumb comes back to the feed in the lane rather than the full sc
 });
 
 /** Standing on its own screen the page holds the address, so the same crumb states where the member
- *  went: the feed at the app's own address, with the pin gone. */
-test("the radar crumb states the app's own address on the page's own screen", async () => {
+ *  went: the article at the app's own address, with the member's page gone. */
+test("the wiki crumb states the app's own address on the page's own screen", async () => {
   const moved: string[] = [];
   const watch = (event: MessageEvent) => {
     const message = event.data as { ufo?: string; to?: string } | null;
@@ -236,21 +241,23 @@ test("the radar crumb states the app's own address on the page's own screen", as
   window.addEventListener("message", watch);
   try {
     await runPage(
-      "radar",
+      "wiki",
       {
-        ["/objects/report/" + TURN_ID]: () => new Response("gone", { status: 404 }),
-        "/objects/report": () => json({ objects: [] }),
-        "/actions/report$": () => json({ actions: [] }),
+        "/workspace/memory": () => json({ available: true, matches: [] }),
+        "/objects/memory": () => json({ objects: [] }),
+        "/objects/member": () =>
+          json({ objects: [{ name: COLLEAGUE, email: COLLEAGUE, admin: false, seated: true }] }),
       },
       {
-        place: { opens: ["run/" + TURN_ID] },
-        crumb: { label: "Radar", at: new URL(agentHash(AGENT.id), location.origin + BASE).href },
+        place: { opens: ["member/" + COLLEAGUE] },
+        crumb: { label: "Wiki", at: new URL(agentHash(AGENT.id), location.origin + BASE).href },
       },
     );
 
-    await userEvent.click(await screen.findByRole("link", { name: "Back to Radar" }));
+    expect(await screen.findByRole("heading", { level: 1, name: COLLEAGUE })).toBeTruthy();
+    await userEvent.click(screen.getByRole("link", { name: "Back to Wiki" }));
 
-    expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "People" })).toBeTruthy();
     expect(moved).toEqual([agentHash(AGENT.id)]);
   } finally {
     window.removeEventListener("message", watch);
