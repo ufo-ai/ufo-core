@@ -608,20 +608,32 @@ test("an address the portal cannot read reports a bad link, whichever part is ma
 
 
 
-test("search and chip ride the hash by replacement, never as history entries", async () => {
+test("a search rides the hash by replacement, never as a history entry", async () => {
   location.hash = "#/agents";
   location.hash = workspaceHash("credentials");
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Filled" }));
-  await userEvent.type(screen.getByRole("searchbox"), "openai{enter}");
+  await userEvent.type(await screen.findByRole("searchbox"), "openai{enter}");
 
   await waitFor(() => expect(location.hash).toContain("q=openai"));
-  expect(location.hash).toContain("chip=Filled");
 
   history.back();
   await waitFor(() => expect(location.hash).toBe("#/agents"));
+});
+
+test("a filter chip rides the hash by replacement, never as a history entry", async () => {
+  location.hash = workspaceHash("team");
+  location.hash = workspaceHash("apps");
+  serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("tab", { name: "Archived" }));
+
+  await waitFor(() => expect(location.hash).toContain("chip=Archived"));
+
+  history.back();
+  await waitFor(() => expect(location.hash).toBe("#/workspace/team"));
 });
 
 /** One shell heads every tab and every section from one box, so the box has to belong to the view

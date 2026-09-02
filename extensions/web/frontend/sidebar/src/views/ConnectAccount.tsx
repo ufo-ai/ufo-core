@@ -1,7 +1,24 @@
 import { IconCheck, IconExternalLink } from "@tabler/icons-react";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemGroup,
+  ItemSeparator,
+  ItemTitle,
+  MarkTile,
+} from "@/components/ui/item";
 import { Input } from "@/components/ui/field";
 import {
   Dialog,
@@ -11,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { BASE } from "@/lib/api";
+import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 
 const ACCOUNTS_READ = "/workspace/accounts";
@@ -287,36 +305,50 @@ export function ConnectAccount({
           </Button>
         ),
       )
-    : (accounts ?? []).map((account) => (
-        <div key={account.provider} className="flex items-center justify-between gap-sm">
-          <span className="flex items-center gap-xs text-ink">
-            {account.label}
-            {account.connected ? (
-              <>
-                <IconCheck className="size-icon text-ink" aria-hidden />
-                <span className="text-ink-soft">connected</span>
-              </>
-            ) : null}
-          </span>
-          <span className="flex items-center gap-sm">
-            <Button
-              variant={account.connected ? "outline" : "send"}
-              size="bar"
-              onClick={() => {
-                setLanded(false);
-                setAsking(account);
-              }}
-            >
-              {account.connected ? "Replace" : "Connect"}
-            </Button>
-            {account.connected ? (
-              <Button variant="quiet" size="bar" onClick={() => disconnect(account)}>
-                Disconnect
-              </Button>
-            ) : null}
-          </span>
-        </div>
-      ));
+    : accounts?.length ? (
+        <ItemGroup>
+          {accounts.map((account, index) => (
+            <Fragment key={account.provider}>
+              {index ? <ItemSeparator /> : null}
+              <Item>
+                <MarkTile>
+                  <BrandMark provider={account.provider} className="text-ink" />
+                </MarkTile>
+                <ItemContent>
+                  <ItemTitle>{account.label}</ItemTitle>
+                </ItemContent>
+                <ItemActions>
+                  {account.connected ? (
+                    <span className="flex items-center gap-xs text-label text-ink-soft">
+                      <IconCheck
+                        role="img"
+                        aria-label={account.label + " connected"}
+                        className="size-icon"
+                      />
+                      Connected
+                    </span>
+                  ) : null}
+                  <Button
+                    variant={account.connected ? "row" : "outline"}
+                    size="bar"
+                    onClick={() => {
+                      setLanded(false);
+                      setAsking(account);
+                    }}
+                  >
+                    {account.connected ? "Replace" : "Connect"}
+                  </Button>
+                  {account.connected ? (
+                    <Button variant="row" size="bar" onClick={() => disconnect(account)}>
+                      Disconnect
+                    </Button>
+                  ) : null}
+                </ItemActions>
+              </Item>
+            </Fragment>
+          ))}
+        </ItemGroup>
+      ) : null;
 
   return (
     <div

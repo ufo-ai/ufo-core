@@ -1,7 +1,8 @@
-import { IconCheck } from "@tabler/icons-react";
+import { IconCheck, IconKey } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
+import { MarkTile } from "@/components/ui/item";
 import { ACTS } from "@/components/ui/table";
 import {
   Dialog,
@@ -12,8 +13,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Field } from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { codeSpans } from "@/kernel/cards";
-import { OutcomeNotice, type NoticeState, QUIET } from "@/kernel/panel";
+import { OutcomeNotice, type NoticeState, QUIET, Section } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
 import { ConnectAccount } from "@/views/ConnectAccount";
@@ -92,72 +100,77 @@ function extensionTitle(extension: string) {
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   note: "Credential values are shared across the workspace.",
+  /* The coding providers stand whether or not a member holds one, above the slots and under a
+     heading of their own: a slot is the workspace's, a coding account is the member's. */
   lead: (
-    <div className="flex flex-col gap-sm px-lg pt-lg">
-      <p className="m-0 text-ink-soft">
-        This account is yours alone. Each member connects their own, and it is used only for coding
-        tasks.
-      </p>
+    <Section
+      title="Coding providers"
+      note="This account is yours alone. Each member connects their own, and it is used only for coding tasks."
+    >
       <ConnectAccount />
-    </div>
+    </Section>
   ),
   group: credentialSection,
+  /* The values the workspace holds, and no row for a slot nobody has filled: an unset slot is
+     nothing to read and nothing to replace, and a member fills one by asking the agent for it. */
   rows: (payload) =>
-    [...payload.slots].sort((left, right) => {
-      const leftRank = SECTION_ORDER.indexOf(credentialSection(left));
-      const rightRank = SECTION_ORDER.indexOf(credentialSection(right));
-      const normalizedLeftRank = leftRank === -1 ? SECTION_ORDER.length : leftRank;
-      const normalizedRightRank = rightRank === -1 ? SECTION_ORDER.length : rightRank;
-      if (normalizedLeftRank !== normalizedRightRank)
-        return normalizedLeftRank - normalizedRightRank;
-      const leftSection = credentialSection(left);
-      const rightSection = credentialSection(right);
-      if (leftSection !== rightSection) return leftSection.localeCompare(rightSection);
-      if (left.filled !== right.filled) return left.filled ? -1 : 1;
-      return left.slot.localeCompare(right.slot);
-    }),
+    payload.slots
+      .filter((slot) => slot.filled)
+      .sort((left, right) => {
+        const leftRank = SECTION_ORDER.indexOf(credentialSection(left));
+        const rightRank = SECTION_ORDER.indexOf(credentialSection(right));
+        const normalizedLeftRank = leftRank === -1 ? SECTION_ORDER.length : leftRank;
+        const normalizedRightRank = rightRank === -1 ? SECTION_ORDER.length : rightRank;
+        if (normalizedLeftRank !== normalizedRightRank)
+          return normalizedLeftRank - normalizedRightRank;
+        const leftSection = credentialSection(left);
+        const rightSection = credentialSection(right);
+        if (leftSection !== rightSection) return leftSection.localeCompare(rightSection);
+        return left.slot.localeCompare(right.slot);
+      }),
   rowKey: (row) => row.name,
   search: (row) => [row.slot, row.description, row.extension].join(" "),
-  chips: [
-    { label: "Filled", has: (row) => row.filled },
-    { label: "Not set", has: (row) => !row.filled },
-  ],
-  /* A slot has no screen of its own: the row is the whole record, and the description is what says
-     which value belongs in it. */
   list: {
+    mark: () => (
+      <MarkTile>
+        <IconKey className="size-icon text-ink-soft" aria-hidden />
+      </MarkTile>
+    ),
     primary: { field: "slot" },
     meta: [{ field: "description", render: (description) => codeSpans(description) }],
-    whole: true,
   },
-  empty: "No credential slots are declared.",
+  empty: "No credential is set.",
+  /* Every slot with a value has a row, and a slot with none has none — so the act that fills one
+     stands here, for the member a surface sent to this screen to fill it. */
+  offer: (payload, { kindAct, busy }) => {
+    const unset = payload.slots.filter((slot) => !slot.filled);
+    return unset.length ? (
+      <SetCredential
+        slots={unset}
+        busy={busy}
+        onPicked={(row) => kindAct("credential", "request_credentials", credentialRequest(row))}
+      />
+    ) : null;
+  },
   actions: (row, { act, kindAct, busy }) => (
     <div className={ACTS}>
-      {row.filled ? (
-        <span
-          data-part="status"
-          className="flex items-center gap-xs text-label text-ink-soft"
-        >
-          <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
-          Filled
-        </span>
-      ) : null}
+      <span data-part="status" className="flex items-center gap-xs text-label text-ink-soft">
+        <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
+        Filled
+      </span>
       <Button
         variant="row"
         disabled={busy}
         onClick={() => kindAct("credential", "request_credentials", credentialRequest(row))}
       >
-        {row.filled ? (row.slot === MCP_SERVERS_SLOT ? "Update" : "Replace") : "Set"}
+        {row.slot === MCP_SERVERS_SLOT ? "Update" : "Replace"}
       </Button>
-      {row.filled ? (
-        <ConfirmButton
-          verb="Clear"
-          variant="row"
-          disabled={busy}
-          onClick={() =>
-            act({ verb: "delete", kind: "credential", name: row.name })
-          }
-        />
-      ) : null}
+      <ConfirmButton
+        verb="Clear"
+        variant="row"
+        disabled={busy}
+        onClick={() => act({ verb: "delete", kind: "credential", name: row.name })}
+      />
     </div>
   ),
   credentials: (request, onStored, close) => (
@@ -179,6 +192,68 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     </Dialog>
   ),
 };
+
+const PICKED_SLOT = "credential-slot";
+
+/** The act over the rows: the screen lists the values the workspace holds, so a slot with none is
+ *  reached by naming it. Picking one raises the same prompt a row's Replace raises, and the value
+ *  is typed there rather than here — the prompt is what carries the seal. */
+function SetCredential({
+  slots,
+  busy,
+  onPicked,
+}: {
+  slots: Slot[];
+  busy: boolean;
+  onPicked: (row: Slot) => void;
+}) {
+  const [asking, setAsking] = useState(false);
+  const [picked, setPicked] = useState("");
+  const row = slots.find((slot) => slot.slot === picked);
+  return (
+    <div className="flex">
+      <Button variant="outline" size="bar" onClick={() => setAsking(true)}>
+        Set a credential
+      </Button>
+      <Dialog open={asking} onOpenChange={setAsking}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Set Credential</DialogTitle>
+            <DialogDescription>
+              Name the slot to fill. Its value is stored encrypted and never shown again.
+            </DialogDescription>
+          </DialogHeader>
+          <Field label="Credential" htmlFor={PICKED_SLOT} description={row?.description}>
+            <Select value={picked} onValueChange={setPicked}>
+              <SelectTrigger id={PICKED_SLOT}>
+                <SelectValue placeholder="Choose a credential" />
+              </SelectTrigger>
+              <SelectContent>
+                {slots.map((slot) => (
+                  <SelectItem key={slot.slot} value={slot.slot}>
+                    {slot.slot}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <DialogFooter>
+            <Button
+              variant="send"
+              disabled={row === undefined || busy}
+              onClick={() => {
+                setAsking(false);
+                if (row) onPicked(row);
+              }}
+            >
+              Continue
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
 
 function CredentialPromptDialogForm({
   sealed,

@@ -1,5 +1,6 @@
 import {
   IconAddressBook,
+  IconAsterisk,
   IconBrandAirtable,
   IconBrandAsana,
   IconBrandBitbucket,
@@ -13,6 +14,7 @@ import {
   IconBrandJira,
   IconBrandMonday,
   IconBrandNotion,
+  IconBrandOpenai,
   IconBrandSentry,
   IconBrandSlack,
   IconBrandStripe,
@@ -34,6 +36,7 @@ import { cn } from "@/lib/cn";
 /** The mark a provider is drawn by, keyed by the slug every read names it with. */
 export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   airtable: IconBrandAirtable,
+  anthropic: IconAsterisk,
   apollo: IconUsersGroup,
   asana: IconBrandAsana,
   bitbucket: IconBrandBitbucket,
@@ -53,6 +56,7 @@ export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   mercury: IconBuildingBank,
   monday: IconBrandMonday,
   notion: IconBrandNotion,
+  openai: IconBrandOpenai,
   pandadoc: IconFileText,
   ramp: IconCreditCard,
   sentry: IconBrandSentry,

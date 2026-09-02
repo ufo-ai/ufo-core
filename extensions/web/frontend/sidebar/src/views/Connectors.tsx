@@ -19,6 +19,7 @@ import {
   ItemGroup,
   ItemSeparator,
   ItemTitle,
+  MarkTile,
 } from "@/components/ui/item";
 import { Facts, type Fact } from "@/components/ui/facts";
 import { Sheet } from "@/components/ui/sheet";
@@ -767,11 +768,6 @@ function RemoveConnection({
   );
 }
 
-const MARK_TILE = cn(
-  "flex size-(--size-touch) shrink-0 items-center justify-center",
-  "rounded-control bg-fill",
-);
-
 function Row({
   name,
   label,
@@ -800,9 +796,9 @@ function Row({
       }}
       className={cn(control?.className, open && "hover:bg-fill", current && "bg-fill")}
     >
-      <span className={MARK_TILE}>
+      <MarkTile>
         <BrandMark provider={name} className="text-ink" />
-      </span>
+      </MarkTile>
       <ItemContent>
         <ItemTitle>{label}</ItemTitle>
         <ItemDescription>{detail}</ItemDescription>

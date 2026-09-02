@@ -86,7 +86,7 @@ test("an approved grant closes the asking and states the account", async () => {
 
   await userEvent.click(ok);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(await screen.findByText("connected")).toBeTruthy();
+  expect(await screen.findByRole("img", { name: "ChatGPT connected" })).toBeTruthy();
 }, 10_000);
 
 test("a session that ended says so rather than blaming the network", async () => {
@@ -241,7 +241,7 @@ test("an account that landed is kept even when the member leaves by Cancel", asy
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(await screen.findByText("connected")).toBeTruthy();
+  expect(await screen.findByRole("img", { name: "ChatGPT connected" })).toBeTruthy();
   expect(settled).toHaveBeenCalled();
 }, 10_000);
 

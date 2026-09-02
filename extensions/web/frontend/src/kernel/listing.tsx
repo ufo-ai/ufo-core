@@ -48,6 +48,8 @@ export type Column<Row> = Part<Row> & { label: string };
 export type Chip<Row> = { label: string; has?: (row: Row) => boolean };
 
 export type RowLine<Row> = {
+  /** What the row leads with, for records whose class is worth a glance before its name. */
+  mark?: (row: Row) => ReactNode;
   primary: Part<Row>;
   meta: Part<Row>[];
   when?: Part<Row>;
@@ -90,6 +92,9 @@ export type ListingSpec<Payload, Row> = {
   actions?: (row: Row, context: RowContext) => ReactNode;
   /** Where the payload carries the acts the read projected for the listing's kind. */
   views?: (payload: Payload) => ActionView[];
+  /** The act the screen offers over its rows, for a record the rows do not reach. It is drawn
+   *  above them and inside the read, so what it offers is read off the payload. */
+  offer?: (payload: Payload, context: RowContext) => ReactNode;
   credentials?: (
     request: CredentialRequest,
     onStored: (slots: string[]) => void,
@@ -201,9 +206,15 @@ export function Listing<Payload, Row>({
               viewer,
               actions: spec.views?.(payload) ?? [],
             };
+            const offer = spec.offer?.(payload, context) ?? null;
             if (!rows.length)
               return (
-                <PanelBlank body={spec.serverQuery && (term || picked) ? "Nothing matches." : spec.empty} />
+                <div className={BANDS}>
+                  <PanelBlank
+                    body={spec.serverQuery && (term || picked) ? "Nothing matches." : spec.empty}
+                  />
+                  {offer}
+                </div>
               );
             const chip = spec.chips?.find((entry) => entry.label === picked);
             const unknown = picked !== null && chip === undefined;
@@ -272,6 +283,7 @@ export function Listing<Payload, Row>({
               spec.group && matched.length ? groupRows(matched, spec.group) : null;
             return (
               <div className={BANDS}>
+                {offer}
                 {families ? (
                   <div className={FAMILIES}>
                     {families.map(({ title: familyTitle, rows }) => (
@@ -348,6 +360,7 @@ function RowList<Payload, Row>({
       whole={whole}
       rows={rows}
       rowKey={spec.rowKey}
+      mark={line.mark}
       primary={(row) => part(line.primary, row, context)}
       meta={(row) => line.meta.map((entry) => part(entry, row, context))}
       when={when ? (row) => part(when, row, context) : undefined}

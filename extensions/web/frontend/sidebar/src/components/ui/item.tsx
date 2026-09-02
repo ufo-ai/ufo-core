@@ -27,6 +27,20 @@ export function ItemSeparator() {
   return <li aria-hidden className="border-t border-edge" />;
 }
 
+/** The ground a mark stands on: one square of fill at the touch measure. A brand's own picture, a
+ *  glyph standing for a whole class of records and a tile still waiting for either read as the same
+ *  slot down the column, so the names beside them start on one line. */
+export function MarkTile({ children }: { children: ReactNode }) {
+  return (
+    <span
+      data-slot="mark"
+      className="flex size-(--size-touch) shrink-0 items-center justify-center rounded-control bg-fill"
+    >
+      {children}
+    </span>
+  );
+}
+
 export function ItemContent({ children }: { children: ReactNode }) {
   return <div className="flex min-w-0 flex-1 flex-col gap-2xs">{children}</div>;
 }

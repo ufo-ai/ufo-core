@@ -26,6 +26,7 @@ import { cn } from "@/lib/cn";
 export function RowLines<Row>({
   rows,
   rowKey,
+  mark,
   primary,
   meta,
   when,
@@ -35,6 +36,7 @@ export function RowLines<Row>({
 }: {
   rows: Row[];
   rowKey: (row: Row) => string;
+  mark?: (row: Row) => ReactNode;
   primary: (row: Row) => ReactNode;
   meta: (row: Row) => ReactNode[];
   when?: (row: Row) => ReactNode;
@@ -52,6 +54,7 @@ export function RowLines<Row>({
           <Fragment key={rowKey(row)}>
             {index ? <ItemSeparator /> : null}
             <Item {...control} className={cn(control?.className, press && "hover:bg-fill")}>
+              {mark ? mark(row) : null}
               <ItemContent>
                 <ItemTitle>{primary(row)}</ItemTitle>
                 <MetaLine parts={meta(row)} whole={whole} />
