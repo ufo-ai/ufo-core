@@ -19,9 +19,12 @@ import {
   IconBrandSlack,
   IconBrandStripe,
   IconBrandZoom,
+  IconBrowser,
   IconBuildingBank,
   IconCalendar,
+  IconCpu,
   IconCreditCard,
+  IconDatabase,
   IconFileText,
   IconPlug,
   IconReportMoney,
@@ -29,6 +32,7 @@ import {
   IconTable,
   IconUsersGroup,
   IconWallet,
+  IconWorldSearch,
 } from "@tabler/icons-react";
 
 import { cn } from "@/lib/cn";
@@ -41,9 +45,13 @@ export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   asana: IconBrandAsana,
   bitbucket: IconBrandBitbucket,
   attio: IconAddressBook,
+  bedrock: IconCpu,
   brex: IconWallet,
+  browser_use: IconBrowser,
+  browserbase: IconBrowser,
   discord: IconBrandDiscord,
   docusign: IconSignature,
+  exa: IconWorldSearch,
   figma: IconBrandFigma,
   github: IconBrandGithub,
   gmail: IconBrandGmail,
@@ -62,6 +70,7 @@ export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   sentry: IconBrandSentry,
   slack: IconBrandSlack,
   stripe: IconBrandStripe,
+  turbopuffer: IconDatabase,
   xero: IconReportMoney,
   zoom: IconBrandZoom,
 };

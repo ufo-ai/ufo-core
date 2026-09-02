@@ -1,4 +1,4 @@
-import { IconCheck, IconKey } from "@tabler/icons-react";
+import { IconCheck } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
@@ -24,6 +24,7 @@ import { codeSpans } from "@/kernel/cards";
 import { OutcomeNotice, type NoticeState, QUIET, Section } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
+import { BrandMark } from "@/lib/brandMark";
 import type { ActionView, CredentialPrompt } from "@/lib/types";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import {
@@ -97,6 +98,17 @@ function extensionTitle(extension: string) {
     .join(" ");
 }
 
+/** The provider a slot's value authenticates with, off the slot's own name: the marks are keyed by
+ *  provider, so `DATADOG_API_KEY` and `DATADOG_APPLICATION_KEY` stand under one logo and a provider
+ *  nobody vendored a mark for takes its glyph. */
+const SLOT_SUFFIXES = ["_api_key", "_application_key", "_api_host", "_servers", "_key", "_token"];
+
+function slotProvider(slot: string) {
+  const name = slot.toLowerCase();
+  const suffix = SLOT_SUFFIXES.find((entry) => name.endsWith(entry));
+  return suffix ? name.slice(0, -suffix.length) : name;
+}
+
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   note: "Credential values are shared across the workspace.",
@@ -131,9 +143,9 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   rowKey: (row) => row.name,
   search: (row) => [row.slot, row.description, row.extension].join(" "),
   list: {
-    mark: () => (
+    mark: (row) => (
       <MarkTile>
-        <IconKey className="size-icon text-ink-soft" aria-hidden />
+        <BrandMark provider={slotProvider(row.slot)} className="text-ink" />
       </MarkTile>
     ),
     primary: { field: "slot" },

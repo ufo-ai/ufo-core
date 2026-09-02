@@ -466,6 +466,8 @@
    every other takes its glyph. */
 :root {
   --brand-airtable: url("./assets/brands/airtable.png");
+  --brand-anthropic: url("./assets/brands/anthropic.svg");
+  --brand-apollo: url("./assets/brands/apollo.svg");
   --brand-asana: url("./assets/brands/asana.svg");
   --brand-attio: url("./assets/brands/attio.png");
   --brand-basecamp: url("./assets/brands/basecamp.png");
@@ -478,6 +480,7 @@
   --brand-contentful: url("./assets/brands/contentful.png");
   --brand-crowdin: url("./assets/brands/crowdin.png");
   --brand-dart: url("./assets/brands/dart.png");
+  --brand-datadog: url("./assets/brands/datadog.svg");
   --brand-dialpad: url("./assets/brands/dialpad.png");
   --brand-discord: url("./assets/brands/discord.svg");
   --brand-discordbot: url("./assets/brands/discordbot.png");
@@ -511,14 +514,18 @@
   --brand-linkedin: url("./assets/brands/linkedin.svg");
   --brand-linkhut: url("./assets/brands/linkhut.png");
   --brand-mailchimp: url("./assets/brands/mailchimp.png");
+  --brand-mcp: url("./assets/brands/mcp.svg");
   --brand-microsoft_teams: url("./assets/brands/microsoft_teams.svg");
   --brand-miro: url("./assets/brands/miro.png");
   --brand-monday: url("./assets/brands/monday.png");
   --brand-moneybird: url("./assets/brands/moneybird.png");
   --brand-notion: url("./assets/brands/notion.svg");
   --brand-one_drive: url("./assets/brands/one_drive.svg");
+  --brand-openai: url("./assets/brands/openai.svg");
+  --brand-openrouter: url("./assets/brands/openrouter.svg");
   --brand-outlook: url("./assets/brands/outlook.svg");
   --brand-pagerduty: url("./assets/brands/pagerduty.png");
+  --brand-perplexity: url("./assets/brands/perplexity.svg");
   --brand-prisma: url("./assets/brands/prisma.svg");
   --brand-productboard: url("./assets/brands/productboard.png");
   --brand-pushbullet: url("./assets/brands/pushbullet.png");
@@ -555,12 +562,15 @@
   --brand-zoom: url("./assets/brands/zoom.svg");
 }
 
-/* These four draw in one ink and leave the page to supply the contrast, which the dark pane does
-   not. Every other mark carries its own colours and reads on both panes unchanged. */
+/* These draw in one ink and leave the page to supply the contrast, which the dark pane does not.
+   Every other mark carries its own colours and reads on both panes unchanged. */
 @media (prefers-color-scheme: dark) {
   :root:where(:not(.light)) {
     --brand-dub: url("./assets/brands/dub-dark.svg");
     --brand-github: url("./assets/brands/github-dark.svg");
+    --brand-mcp: url("./assets/brands/mcp-dark.svg");
+    --brand-openai: url("./assets/brands/openai-dark.svg");
+    --brand-openrouter: url("./assets/brands/openrouter-dark.svg");
     --brand-prisma: url("./assets/brands/prisma-dark.svg");
     --brand-wakatime: url("./assets/brands/wakatime-dark.svg");
   }
@@ -569,6 +579,9 @@
 :root:where(.dark) {
   --brand-dub: url("./assets/brands/dub-dark.svg");
   --brand-github: url("./assets/brands/github-dark.svg");
+  --brand-mcp: url("./assets/brands/mcp-dark.svg");
+  --brand-openai: url("./assets/brands/openai-dark.svg");
+  --brand-openrouter: url("./assets/brands/openrouter-dark.svg");
   --brand-prisma: url("./assets/brands/prisma-dark.svg");
   --brand-wakatime: url("./assets/brands/wakatime-dark.svg");
 }

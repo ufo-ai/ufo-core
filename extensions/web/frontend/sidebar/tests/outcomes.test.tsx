@@ -57,6 +57,16 @@ const HOST_SLOT = {
  *  rows it heads, and this slot is not one of them. */
 const EMPTY_SLOT = { ...HOST_SLOT, name: "apollo", slot: "APOLLO_API_KEY", filled: false };
 
+/** Two slots of one provider, and a provider with no vendored mark. */
+const DATADOG_HOST = { ...HOST_SLOT, name: "datadog-api-host", slot: "DATADOG_API_HOST" };
+const BEDROCK_SLOT = {
+  name: "bedrock-api-key",
+  slot: "BEDROCK_API_KEY",
+  extension: "models",
+  description: "the key",
+  filled: true,
+};
+
 beforeEach(() => {
   useStreamFake();
 });
@@ -158,10 +168,10 @@ test("credentials group and sort the filled slots, and render their literals", a
 
 /** Every row on this screen leads with a mark, the way a connector row does, so the names beside
  *  them start on one line whether the row is a coding account or a workspace slot. */
-test("a coding provider row and a credential row each lead with a mark", async () => {
+test("a coding provider row and a credential row each lead with their provider's mark", async () => {
   location.hash = "#/workspace/credentials";
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT] }),
+    "/workspace/credentials": () => json({ slots: [SLOT, DATADOG_HOST, BEDROCK_SLOT] }),
     "/workspace/accounts": () =>
       json({ accounts: [{ provider: "openai", label: "ChatGPT", connected: false }] }),
   });
@@ -171,8 +181,18 @@ test("a coding provider row and a credential row each lead with a mark", async (
   const slot = screen.getByText("OPENAI_API_KEY").closest("li")!;
   for (const row of [account, slot]) {
     expect(row.firstElementChild?.getAttribute("data-slot")).toBe("mark");
-    expect(row.querySelector("[data-slot=mark] svg")).toBeTruthy();
+    const mark = row.querySelector("[data-slot=mark] > *")!;
+    expect(mark.getAttribute("style")).toContain("--brand-openai");
   }
+
+  /* One provider keyed off the slot name, so both datadog slots stand under the one logo, and a
+     provider with no vendored mark takes its glyph rather than another company's picture. */
+  const host = screen.getByText("DATADOG_API_HOST").closest("li")!;
+  expect(host.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
+    "--brand-datadog",
+  );
+  const bedrock = screen.getByText("BEDROCK_API_KEY").closest("li")!;
+  expect(bedrock.querySelector("[data-slot=mark] svg")).toBeTruthy();
 });
 
 /** A family name has to bind down to the cards it heads. Stacked at the band gap it stood the same
