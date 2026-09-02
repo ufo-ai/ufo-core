@@ -16,6 +16,13 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import {
+  SIDEBAR_FOLDED,
+  SIDEBAR_PRESS,
+  SIDEBAR_ROW,
+  SidebarPress,
+  SidebarRow,
+} from "@/components/Sidebar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -188,62 +195,58 @@ function AgentRow({
   }
   const dot = statusDot(status, agent.setup_due === true);
   const row = (
-    <li className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}>
-      <button
-        type="button"
-        aria-current={open}
-        aria-label={collapsed ? agentName(agent.name) : undefined}
+    <SidebarRow current={open}>
+      <SidebarPress
+        current={open}
+        collapsed={collapsed}
+        label={agentName(agent.name)}
+        className="py-2xs"
         onClick={onOpen}
         onPointerEnter={() => setAsks((asked) => asked + 1)}
         onPointerLeave={() => setAsks(0)}
         onFocus={() => setAsks((asked) => asked + 1)}
         onBlur={() => setAsks(0)}
-        className={cn(
-          "flex min-h-(--size-row) min-w-0 flex-1 items-center gap-md border-0 bg-transparent",
-          "px-sm py-2xs text-left text-inherit",
-          collapsed && "justify-center gap-0 px-0",
-        )}
-      >
-        {/* The mark is the glyph a sidebar row draws, bare in the row's own ink, so the list reads
-            as the sidebar the pin act puts a row into. */}
-        <span className="relative shrink-0">
-          <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
-          {/* The dot is always drawn and scales away when the app has nothing to say, so a change of
-              state is a mark growing or turning rather than one appearing out of nothing. */}
-          <span
-            aria-hidden
-            className={cn(
-              "absolute -right-2xs -bottom-2xs size-sm rounded-full transition duration-200 ease-control",
-              dot ?? "scale-0",
-            )}
-          />
-        </span>
-        {collapsed ? null : (
-          <span className="flex min-w-0 flex-1 flex-col">
-            <Ticker asks={asks} className="text-label">
-              {agentName(agent.name)}
-            </Ticker>
+        glyph={
+          /* The mark is the glyph a sidebar row draws, bare in the row's own ink, so the list reads
+             as the sidebar the pin act puts a row into. */
+          <span className="relative shrink-0">
+            <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
+            {/* The dot is always drawn and scales away when the app has nothing to say, so a change
+                of state is a mark growing or turning rather than one appearing out of nothing. */}
             <span
+              aria-hidden
               className={cn(
-                "grid transition-[grid-template-rows] duration-200 ease-control",
-                said === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+                "absolute -right-2xs -bottom-2xs size-sm rounded-full transition duration-200 ease-control",
+                dot ?? "scale-0",
               )}
-              onTransitionEnd={(event) => {
-                /* The line inside this track travels on its own transition, and that one bubbles
-                   here too. Only the track's own end means the fold has shut. */
-                if (event.target !== event.currentTarget) return;
-                if (said === null) setHeld(null);
-              }}
-            >
-              <span className="min-h-0 min-w-0 overflow-hidden">
-                {held === null ? null : (
-                  <ActivityLine asks={asks} text={held.text} shimmer={held.shimmer} />
-                )}
-              </span>
+            />
+          </span>
+        }
+      >
+        <span className="flex min-w-0 flex-1 flex-col">
+          <Ticker asks={asks} className="text-label">
+            {agentName(agent.name)}
+          </Ticker>
+          <span
+            className={cn(
+              "grid transition-[grid-template-rows] duration-200 ease-control",
+              said === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+            )}
+            onTransitionEnd={(event) => {
+              /* The line inside this track travels on its own transition, and that one bubbles
+                 here too. Only the track's own end means the fold has shut. */
+              if (event.target !== event.currentTarget) return;
+              if (said === null) setHeld(null);
+            }}
+          >
+            <span className="min-h-0 min-w-0 overflow-hidden">
+              {held === null ? null : (
+                <ActivityLine asks={asks} text={held.text} shimmer={held.shimmer} />
+              )}
             </span>
           </span>
-        )}
-      </button>
+        </span>
+      </SidebarPress>
       {/* Pinning moves the app up the sidebar's order. The act rests until the pointer is on the
           row whether or not it is already done: a mark standing on every pinned row is a column of
           controls nobody is using, and where the pinned rows lead the column that is most of it.
@@ -266,7 +269,7 @@ function AgentRow({
           )}
         </button>
       )}
-    </li>
+    </SidebarRow>
   );
   if (!collapsed) return row;
   /* On the glyph rail a row is its mark, so the name it cannot draw is held at the pointer — the
@@ -453,23 +456,14 @@ export function AppsIndex({
               wizard rides the main agent's own chat, so a workspace with no main agent offers
               nothing to ride. */}
           {mainAgent ? (
-            <li>
-              <button
-                type="button"
+            <SidebarRow>
+              <SidebarPress
+                collapsed={collapsed}
+                label={NEW_APP}
+                glyph={<IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />}
                 onClick={onBuild}
-                className={cn(
-                  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0",
-                  "bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-                  collapsed && "justify-center gap-0 px-0",
-                )}
-                aria-label={collapsed ? NEW_APP : undefined}
-              >
-                <IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />
-                <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
-                  {NEW_APP}
-                </span>
-              </button>
-            </li>
+              />
+            </SidebarRow>
           ) : null}
           {/* The run in flight, named the way the wizard's own pane is until the conversation has
               a title of its own. While the pane shows it states where the member already is;
@@ -477,7 +471,7 @@ export function AppsIndex({
               an app: nothing here opens one, and the app's real row arrives from the apps read
               when it lands. */}
           {(building || running) && !collapsed ? (
-            <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
+            <SidebarRow current={building} className="gap-xs hover:bg-transparent">
               {building ? (
                 <div
                   aria-current
@@ -507,7 +501,7 @@ export function AppsIndex({
                   </span>
                 </button>
               )}
-            </li>
+            </SidebarRow>
           ) : null}
           {shown.map((agent) => (
             <AgentRow
@@ -534,9 +528,10 @@ export function AppsIndex({
           aria-label={expanded ? "Less applications" : "More applications"}
           onClick={() => onExpand(!expanded)}
           className={cn(
-            "flex h-(--size-row) w-full shrink-0 items-center gap-md rounded-full border-0",
-            "bg-transparent px-sm text-left text-label text-ink-soft hover:bg-fill",
-            collapsed && "justify-center gap-0 px-0",
+            SIDEBAR_ROW,
+            SIDEBAR_PRESS,
+            "shrink-0 text-ink-soft",
+            collapsed && SIDEBAR_FOLDED,
           )}
         >
           <IconDots className="size-(--size-glyph) shrink-0" aria-hidden />

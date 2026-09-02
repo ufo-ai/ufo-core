@@ -20,6 +20,7 @@ import {
 } from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
+import { SidebarPress, SidebarRow } from "@/components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -493,9 +494,6 @@ function AccountMenu({ member }: { member: Member }) {
 const APPS = "Apps";
 const CHATS = "Chats";
 
-const NAV_ROW =
-  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
-
 /** A sidebar section's heading — the muted band the whole line of which opens the section's menu.
  *  The glyph that states the menu is drawn only once the section is pointed at, reached by keyboard,
  *  or standing open: a column of headings each carrying a control the member is not using reads as
@@ -559,44 +557,33 @@ function SidebarToggle({ label, onClick }: { label: string; onClick: () => void 
   );
 }
 
+/** A destination the column stands on its own: drawn as every other row in the sidebar is, so the
+ *  workspace's own places and the lists between them read as one column. */
 function NavRow({
   icon,
   current,
   collapsed,
   label,
-  className,
   onClick,
-  children,
 }: {
   icon: React.ReactNode;
   current: boolean;
   collapsed: boolean;
   label: string;
-  className?: string;
   onClick: () => void;
-  children: React.ReactNode;
 }) {
-  const button = (
-    <button
-      type="button"
-      aria-label={collapsed ? label : undefined}
-      aria-current={current}
-      onClick={onClick}
-      className={cn(
-        NAV_ROW,
-        collapsed && "justify-center gap-0 px-0",
-        current && "bg-fill",
-        className,
-      )}
-    >
-      {icon}
-      <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>{children}</span>
-    </button>
-  );
   return (
-    <SidebarTooltip collapsed={collapsed} label={label}>
-      {button}
-    </SidebarTooltip>
+    <SidebarRow current={current}>
+      <SidebarTooltip collapsed={collapsed} label={label}>
+        <SidebarPress
+          current={current}
+          collapsed={collapsed}
+          label={label}
+          glyph={icon}
+          onClick={onClick}
+        />
+      </SidebarTooltip>
+    </SidebarRow>
   );
 }
 
@@ -758,21 +745,17 @@ function WorkspaceSidebar({
       </div>
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
         {mainAgent ? (
-          <li>
-            <NavRow
-              icon={<AskGlyph />}
-              current={standing(route, COMPOSING)}
-              collapsed={collapsed}
-              label="Ask assistant"
-              onClick={() =>
-                chatApp
-                  ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
-                  : openNewChat(mainAgent.id)
-              }
-            >
-              Ask assistant
-            </NavRow>
-          </li>
+          <NavRow
+            icon={<AskGlyph />}
+            current={standing(route, COMPOSING)}
+            collapsed={collapsed}
+            label="Ask assistant"
+            onClick={() =>
+              chatApp
+                ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
+                : openNewChat(mainAgent.id)
+            }
+          />
         ) : null}
       </ul>
       {/* The workspace's apps, drawn where the member works rather than behind a hover: the column
@@ -823,28 +806,20 @@ function WorkspaceSidebar({
         )}
       </div>
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
-        <li>
-          <NavRow
-            icon={SECTION_GLYPHS.connectors}
-            current={standing(route, "section:connectors")}
-            collapsed={collapsed}
-            label={CONNECTORS.label}
-            onClick={() => placeSection("connectors", {}, "push")}
-          >
-            {CONNECTORS.label}
-          </NavRow>
-        </li>
-        <li>
-          <NavRow
-            icon={<WorkspaceGlyph />}
-            current={standing(route, "workspace")}
-            collapsed={collapsed}
-            label="Workspace"
-            onClick={() => placeWorkspace(tabs[0], {}, "push")}
-          >
-            Workspace
-          </NavRow>
-        </li>
+        <NavRow
+          icon={SECTION_GLYPHS.connectors}
+          current={standing(route, "section:connectors")}
+          collapsed={collapsed}
+          label={CONNECTORS.label}
+          onClick={() => placeSection("connectors", {}, "push")}
+        />
+        <NavRow
+          icon={<WorkspaceGlyph />}
+          current={standing(route, "workspace")}
+          collapsed={collapsed}
+          label="Workspace"
+          onClick={() => placeWorkspace(tabs[0], {}, "push")}
+        />
       </ul>
       <footer
         className={cn(
@@ -1339,15 +1314,14 @@ function RailList({
           mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
         ].filter((fact): fact is string => fact !== null);
         return (
-          <li key={row.conversation_id}>
-            <RailRow
-              current={standing(route, `open:${row.conversation_id}`)}
-              facts={facts.length ? facts.join(" · ") : null}
-              title={row.title}
-              surface={row.surface}
-              onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
-            />
-          </li>
+          <RailRow
+            key={row.conversation_id}
+            current={standing(route, `open:${row.conversation_id}`)}
+            facts={facts.length ? facts.join(" · ") : null}
+            title={row.title}
+            surface={row.surface}
+            onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
+          />
         );
       })}
     </ul>
@@ -1436,31 +1410,33 @@ function RailRow({
 }) {
   const [asks, setAsks] = useState(0);
   const button = (
-    <button
-      type="button"
-      aria-current={current}
+    <SidebarPress
+      current={current}
+      label={title}
+      className="gap-xs"
       onClick={onClick}
       onPointerEnter={() => setAsks((asked) => asked + 1)}
       onPointerLeave={() => setAsks(0)}
       onFocus={() => setAsks((asked) => asked + 1)}
       onBlur={() => setAsks(0)}
-      className={cn(
-        "flex h-(--size-row) w-full items-center gap-xs rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-        current && "bg-fill",
-      )}
     >
       <Ticker asks={asks} className="flex-1">
         {title}
       </Ticker>
       <SurfaceGlyph surface={surface} />
-    </button>
+    </SidebarPress>
   );
-  if (!facts) return button;
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent>{facts}</TooltipContent>
-    </Tooltip>
+    <SidebarRow current={current}>
+      {facts ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent>{facts}</TooltipContent>
+        </Tooltip>
+      ) : (
+        button
+      )}
+    </SidebarRow>
   );
 }
 

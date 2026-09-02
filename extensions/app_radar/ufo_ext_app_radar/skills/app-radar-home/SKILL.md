@@ -1,6 +1,6 @@
 ---
 name: app-radar-home
-description: Load when building or updating the Radar app homepage — the digest of recent scheduled runs, each opening into its full story.
+description: Load when building or updating the Radar app homepage — the digest of recent scheduled runs, each opening its full story in the drawer beside the feed.
 metadata:
   depends:
   - ufo-style

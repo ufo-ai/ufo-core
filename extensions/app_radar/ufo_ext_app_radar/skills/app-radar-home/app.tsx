@@ -14,7 +14,6 @@ import {
   Panel,
   PanelBlank,
   PanelEmpty,
-  PressRow,
   Section,
   SectionApp,
   Sheet,
@@ -42,15 +41,20 @@ import {
   useState,
   useTextArtifact,
 } from "ufo/kit";
-import type { Crumb, ObjectAddress, Placement, ReactMouseEvent } from "ufo/kit";
+import type { ObjectAddress, Placement, ReactMouseEvent } from "ufo/kit";
 
 const TASK_KIND = "scheduled_task";
 const RUN_PREFIX = "run/";
 const DONE = "done";
 
-/** What the crumb says a pinned page is until the report standing on it has named itself. The
- *  read may answer no run at all, and the way back off a pin cannot wait on a name that is never
- *  coming. */
+/** Whether a slot in the place names a run of this page's own, which the drawer reads as a story
+ *  rather than as a record held at an object address. */
+function isRun(id: string): boolean {
+  return id.startsWith(RUN_PREFIX) && id !== RUN_PREFIX;
+}
+
+/** What the drawer is titled until the report standing in it has named itself. The read may answer
+ *  no run at all, and a drawer the member can shut cannot wait on a name that is never coming. */
 const REPORT = "Report";
 
 type RadarArtifact = {
@@ -132,44 +136,36 @@ const STATUS_NOTES: Record<string, string> = {
 
 function Radar({
   title,
-  crumb,
   place,
   onPlace,
 }: {
   title: string;
-  crumb?: Crumb;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
   const [named, setNamed] = useState<{ run: string; name: string } | null>(null);
   const name = useCallback((run: string, name: string) => setNamed({ run, name }), []);
   const opens = place.opens ?? [];
-  const pin = opens.find((id) => id.startsWith(RUN_PREFIX) && id !== RUN_PREFIX);
-  const page = pin === undefined ? title : named?.run === pin ? named.name : REPORT;
   const band = usePageHead(
-    pin === undefined ? (
-      <Header pinned heading={1} title={page} />
-    ) : (
-      <Header
-        pinned
-        heading={1}
-        crumb={crumb}
-        title={page}
-        closes={page}
-        onClose={() => onPlace({ opens: closed(opens, pin) })}
-      />
-    ),
+    <Header pinned heading={1} title={title} />,
   );
   return (
     <>
       {band}
       <Section>
-        <Feed place={place} pin={pin} onPlace={onPlace} onName={name} />
+        <Feed place={place} onPlace={onPlace} />
       </Section>
-      {opens
-        .filter((id) => id !== pin)
-        .slice(-1)
-        .map((id) => (
+      {opens.slice(-1).map((id) =>
+        isRun(id) ? (
+          <StorySheet
+            key={id}
+            id={id}
+            title={named?.run === id ? named.name : REPORT}
+            opens={opens}
+            onPlace={onPlace}
+            onName={name}
+          />
+        ) : (
           <RecordSlot
             key={id}
             id={id}
@@ -177,7 +173,8 @@ function Radar({
             opens={opens}
             onPlace={onPlace}
           />
-        ))}
+        ),
+      )}
     </>
   );
 }
@@ -211,60 +208,21 @@ function RecordSlot({
   );
 }
 
-/** The feed, or — when the place carries a run's own address, which is what a story's dateline
- *  links — the one story that address names, with the whole feed one press away in the crumb over
- *  it. A pinned page that answers no run says so: the run is gone or was never this reader's to
- *  read. */
+/** The feed: every run the reader may read, newest first. It stands whatever the place carries —
+ *  a story opened from it is read in the drawer beside it, so the list the member is walking is
+ *  never taken away by the report they opened out of it. */
 function Feed({
   place,
-  pin,
   onPlace,
-  onName,
 }: {
   place: Placement;
-  pin?: string;
   onPlace: (place: Placement) => void;
-  onName: (run: string, name: string) => void;
 }) {
   const opens = place.opens ?? [];
-  const agents = useAgents();
-  const pinned = pin === undefined ? null : pin.slice(RUN_PREFIX.length);
   const after = place.after ?? "";
-  const owner = agents.find((agent) => agent.app === "radar") ?? agents[0];
-  const detail = usePanelRead<ReportDetail>(
-    pinned && owner ? "/objects/report/" + pinned + "?agent=" + owner.id : null,
-  );
   const feedParams = new URLSearchParams({ order_by: "fired_at", order: "desc" });
   if (after) feedParams.set("cursor", after);
-  const state = usePanelRead<ReportsPayload>(
-    pinned ? null : "/objects/report?" + feedParams.toString(),
-  );
-  if (pinned) {
-    if (detail.phase === "failed" && detail.status === 404)
-      return <PanelBlank body="This report does not exist or is not shared with you." />;
-    return (
-      <Panel state={detail} shape="cards">
-        {(payload) => (
-          <>
-            <ol className="m-0 flex list-none flex-col p-0">
-              <Story
-                run={toRun({
-                  ...payload.status,
-                  name: payload.name,
-                  agent_id: payload.status.agent_id || (owner?.id ?? ""),
-                })}
-                opens={opens}
-                from={pin}
-                onPlace={onPlace}
-                onName={onName}
-              />
-            </ol>
-            <ReadNext pinned={pinned} />
-          </>
-        )}
-      </Panel>
-    );
-  }
+  const state = usePanelRead<ReportsPayload>("/objects/report?" + feedParams.toString());
   return (
     <Panel state={state} shape="cards">
       {(payload) => {
@@ -277,7 +235,7 @@ function Feed({
           <>
             <ol className="m-0 flex list-none flex-col p-0">
               {runs.map((run) => (
-                <Entry key={run.turn_id} run={run} opens={opens} from={pin} onPlace={onPlace} />
+                <Entry key={run.turn_id} run={run} opens={opens} onPlace={onPlace} />
               ))}
             </ol>
             {payload.next_cursor || after ? (
@@ -307,52 +265,63 @@ function Feed({
   );
 }
 
-/** How many reports stand under one, offered as what to read next. Enough that the feed is worth
- *  reaching from here, few enough that they read as a postscript to the report rather than as the
- *  feed printed twice. */
-const READ_NEXT = 3;
-
-/** What to read after this report: the reports either side of it in the feed, each named the way the
- *  feed names it. A report is the end of a page, and a member who read to the end of one is deciding
- *  what to read next, not whether to go back — the way back stands in the crumb at the top, where
- *  they came in.
+/** An opened report, read in the drawer at the pane's edge — the one every record on this page is
+ *  opened in, so a report and an object are read and put away in the same place. The feed stands
+ *  behind it: the reader keeps the list they opened the story out of, and shutting the drawer is
+ *  the whole of the way back.
  *
- *  The whole feed is read for this, not the one run the page is pinned to, so the page holds a
- *  second read of the same projection. A reader who reaches the foot of a document has waited out
- *  the document; the list under it costs them nothing they were waiting on. */
-function ReadNext({ pinned }: { pinned: string }) {
-  const state = usePanelRead<ReportsPayload>("/objects/report?order_by=fired_at&order=desc");
+ *  A file the story shared is read in this same drawer, in the story's place, and shutting it hands
+ *  the story back: the drawer slot holds one thing, so a second sheet raised here would stand over
+ *  the story and take its close control with it.
+ *
+ *  A pinned address that answers no run says so in the drawer rather than over the feed: the run is
+ *  gone or was never this reader's to read. */
+function StorySheet({
+  id,
+  title,
+  opens,
+  onPlace,
+  onName,
+}: {
+  id: string;
+  title: string;
+  opens: string[];
+  onPlace: (place: Placement) => void;
+  onName: (run: string, name: string) => void;
+}) {
   const agents = useAgents();
-  if (state.phase !== "ready") return null;
-  const rest = state.payload.objects
-    .map(toRun)
-    .filter((run) => run.turn_id !== pinned)
-    .slice(0, READ_NEXT);
-  if (!rest.length) return null;
+  const owner = agents.find((agent) => agent.app === "radar") ?? agents[0];
+  const pinned = id.slice(RUN_PREFIX.length);
+  const [file, setFile] = useState<RadarArtifact | null>(null);
+  const detail = usePanelRead<ReportDetail>(
+    owner ? "/objects/report/" + pinned + "?agent=" + owner.id : null,
+  );
+  if (file !== null) return <FileSheet file={file} onClose={() => setFile(null)} />;
   return (
-    <section className="mt-6xl flex flex-col gap-2xl">
-      <h2 className="m-0 text-subtitle font-medium">More reports</h2>
-      <div className="flex flex-col">
-        {rest.map((run) => {
-          const agent = agents.find((entry) => entry.id === run.agent_id);
-          return (
-            <PressRow
-              key={run.turn_id}
-              href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
-              glyph={
-                <Avatar>
-                  <AvatarFallback>
-                    <AgentIcon name={agent?.icon ?? "propylon"} />
-                  </AvatarFallback>
-                </Avatar>
-              }
-              line={run.entry?.title ?? run.task ?? "Scheduled run"}
-              note={run.entry?.summary || undefined}
-            />
-          );
-        })}
-      </div>
-    </section>
+    <Sheet open title={title} onClose={() => onPlace({ opens: closed(opens, id) })}>
+      {detail.phase === "failed" && detail.status === 404 ? (
+        <PanelBlank body="This report does not exist or is not shared with you." />
+      ) : (
+        <Panel state={detail} shape="cards">
+          {(payload) => (
+            <ol className="m-0 flex list-none flex-col p-0">
+              <Story
+                run={toRun({
+                  ...payload.status,
+                  name: payload.name,
+                  agent_id: payload.status.agent_id || (owner?.id ?? ""),
+                })}
+                opens={opens}
+                from={id}
+                onPlace={onPlace}
+                onName={onName}
+                onFile={setFile}
+              />
+            </ol>
+          )}
+        </Panel>
+      )}
+    </Sheet>
   );
 }
 
@@ -385,12 +354,10 @@ function isDocument(artifact: RadarArtifact): boolean {
 function Entry({
   run,
   opens,
-  from,
   onPlace,
 }: {
   run: RadarRun;
   opens: string[];
-  from?: string;
   onPlace: (place: Placement) => void;
 }) {
   const agent = useAgents().find((entry) => entry.id === run.agent_id);
@@ -421,7 +388,6 @@ function Entry({
               task={run.task}
               agentId={run.agent_id}
               opens={opens}
-              from={from}
               onPlace={onPlace}
               className="m-0 border-0 p-0 text-left font-mono text-inherit hover:underline"
             />
@@ -476,12 +442,10 @@ function Entry({
 }
 
 /** One run as a story: the report it published is the headline, so the story is titled the way the
- *  document titles itself and the page's own heading face carries it. The band over the page states
- *  that same name in its crumb, and the two stand together on purpose — the band gives a name one
- *  line and the measure the crumb leaves it, and a report titles itself in prose that will not fit
- *  there, so the body is where the member reads it whole. Only the crumb's leaf is a heading of the
- *  page, so the name is stated twice and headed once, and the document's own title line is dropped
- *  from the body so the report never says it three times.
+ *  document titles itself. The drawer's own band states that same name on one line and cuts what
+ *  will not fit, and a report titles itself in prose that often will not — so the story states it
+ *  whole under that band, and the document's own title line is dropped from the body so the report
+ *  never says it three times.
  *
  *  Under the heading stands the byline — the agent the task belongs to, reached at its page, and the
  *  task itself, pressed to open the record where the prompt and schedule are read — and under that
@@ -499,12 +463,14 @@ function Story({
   from,
   onPlace,
   onName,
+  onFile,
 }: {
   run: RadarRun;
   opens: string[];
   from?: string;
   onPlace: (place: Placement) => void;
   onName: (run: string, name: string) => void;
+  onFile: (artifact: RadarArtifact) => void;
 }) {
   const [title, setTitle] = useState<string | null>(null);
   const agent = useAgents().find((entry) => entry.id === run.agent_id);
@@ -569,7 +535,7 @@ function Story({
         <ul className="m-0 flex list-none flex-wrap gap-2xl p-0">
           {files.map((artifact) => (
             <li key={artifact.filename}>
-              <Shared artifact={artifact} />
+              <Shared artifact={artifact} onOpen={() => onFile(artifact)} />
             </li>
           ))}
         </ul>
@@ -678,10 +644,9 @@ function Report({
 }
 
 /** A file the run shared: its picture where one exists, else its name and size — pressing either
- *  opens the file full beside the feed with its download, and a file whose link is not minted is
- *  named without one. */
-function Shared({ artifact }: { artifact: RadarArtifact }) {
-  const [open, setOpen] = useState(false);
+ *  reads the file full in the drawer the story stands in, with its download, and a file whose link
+ *  is not minted is named without one. */
+function Shared({ artifact, onOpen }: { artifact: RadarArtifact; onOpen: () => void }) {
   const card = artifact.preview_url ? (
     <img
       loading="lazy"
@@ -697,16 +662,13 @@ function Shared({ artifact }: { artifact: RadarArtifact }) {
   );
   if (!artifact.url) return card;
   return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="block cursor-pointer border-0 bg-transparent p-0 text-left hover:opacity-muted-soft"
-      >
-        {card}
-      </button>
-      {open ? <FileSheet file={artifact} onClose={() => setOpen(false)} /> : null}
-    </>
+    <button
+      type="button"
+      onClick={onOpen}
+      className="block cursor-pointer border-0 bg-transparent p-0 text-left hover:opacity-muted-soft"
+    >
+      {card}
+    </button>
   );
 }
 
@@ -719,7 +681,7 @@ mountApp(document.getElementById("root")!, (init) => (
       remountOnPlace: false,
       ownsHeader: true,
       render: (place, onPlace) => (
-        <Radar title="Radar" crumb={init.crumb} place={place} onPlace={onPlace} />
+        <Radar title="Radar" place={place} onPlace={onPlace} />
       ),
     }}
   />

@@ -1238,6 +1238,23 @@ test("a folded rail holds each app's name at the pointer", async () => {
   expect((await screen.findByRole("tooltip")).textContent).toBe("Research");
 });
 
+test("an app row and a conversation row are one box, marked one way", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/agents";
+  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
+
+  const index = await agentIndex();
+  const app = within(index).getByRole("button", { name: "Research" }).closest("li");
+  const chat = (await screen.findByRole("button", { name: /Pick one thread/ })).closest("li");
+  expect(app?.className).toBe(chat?.className);
+
+  // The app the pane stands on takes the same fill the standing conversation takes, and takes it
+  // on the same box: a member reads one mark down the whole column.
+  await openAgentRow("Research");
+  const open = within(await agentIndex()).getByRole("button", { name: "Research" }).closest("li");
+  expect(open?.className).toBe(chat?.className + " bg-fill");
+});
+
 test("an app installed and not set up wears the blocked dot, and work outranks it", async () => {
   wire({
     "/api/agents/status": () => json({ statuses: [status(AGENT_ID, { turn: "running" })] }),
