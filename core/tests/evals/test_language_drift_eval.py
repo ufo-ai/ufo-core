@@ -1,3 +1,5 @@
+import re
+
 from evals.harness.capability import CapabilityOutput
 from evals.suites.language_drift import (
     CASES,
@@ -5,10 +7,13 @@ from evals.suites.language_drift import (
     english_reply,
     mandarin_content_reply,
 )
+from ufo.runtime.prompts.render import SHELL
 
 ENGLISH = english_reply()
 MANDARIN_CONTENT = mandarin_content_reply()
 ENGLISH_ANSWER = "Seven rows are still unsent, so the run stops at row 29 of 36 for now."
+HAN_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+SHARED_PHRASE_CHARS = 4
 
 
 def _output(response: str) -> CapabilityOutput:
@@ -70,3 +75,37 @@ def test_the_repetition_case_seeds_an_assistant_turn_last() -> None:
     case = next(case for case in CASES if case.name == "drift-under-repeated-fires")
     assert len(case.prior_messages) % 2 == 0
     assert case.prior_messages.count(case.message) == len(case.prior_messages) // 2
+
+
+def _han_spans(text: str, length: int) -> set[str]:
+    return {
+        run[start : start + length]
+        for run in HAN_RUN.findall(text)
+        for start in range(len(run) - length + 1)
+    }
+
+
+def _suite_text() -> str:
+    parts = [DEGENERATE_LOOP]
+    for case in CASES:
+        parts.append(case.message)
+        parts.extend(case.prior_messages)
+        parts.extend(undelivered.result for undelivered in case.undelivered)
+    return "\n".join(parts)
+
+
+def test_the_shell_prompt_shares_no_mandarin_phrase_with_the_suite() -> None:
+    """The prompt the ablation measures must not quote the cases that score it. A worked example
+    copied from a case puts the answer inside the text under test, and the arms cannot see it: the
+    control carries the quotation, every replacement arm deletes it, so the sample counts measure
+    the copy rather than the rule. `还剩几行没发` in the language line and in
+    `mandarin-member-message` was two thirds of a measured effect."""
+    shared = _han_spans(SHELL, SHARED_PHRASE_CHARS) & _han_spans(_suite_text(), SHARED_PHRASE_CHARS)
+    assert shared == set()
+    assert ENGLISH_ANSWER not in SHELL
+
+
+def test_the_shared_phrase_check_catches_the_leak_it_was_written_for() -> None:
+    leaked = f'{SHELL}\n- A member who writes "还剩几行没发？" gets "{ENGLISH_ANSWER}"'
+    assert _han_spans(leaked, SHARED_PHRASE_CHARS) & _han_spans(_suite_text(), SHARED_PHRASE_CHARS)
+    assert ENGLISH_ANSWER in leaked

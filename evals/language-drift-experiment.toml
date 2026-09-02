@@ -28,13 +28,13 @@ research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
 [[arm]]
-name = "english-lock"
+name = "users-language"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/prompts/shell.md"
-old = '''- Answer in the user's language — in the conversation and in every artifact you produce.
+old = '''- Language: English. Write every reply in English. A member who writes "这个文件在哪里？" gets "The report is at /workspace/report.md." A member who writes "帮我订个会议室" gets "The room is booked for Thursday." Read your draft before you send it: if any part of it is not English, rewrite that part in English. Translating is the one exception, and only the translated text itself: a member who asks for text in another language gets exactly that text.
 '''
-new = '''- Language: English. Write every reply in English. A member who writes "这个文件在哪里？" gets "The report is at /workspace/report.md." A member who writes "帮我订个会议室" gets "The room is booked for Thursday." Read your draft before you send it: if any part of it is not English, rewrite that part in English. Translating is the one exception, and only the translated text itself: a member who asks for text in another language gets exactly that text.
+new = '''- Answer in the user's language — in the conversation and in every artifact you produce.
 '''
 
 [[arm]]
@@ -42,7 +42,7 @@ name = "pr2836"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/prompts/shell.md"
-old = '''- Answer in the user's language — in the conversation and in every artifact you produce.
+old = '''- Language: English. Write every reply in English. A member who writes "这个文件在哪里？" gets "The report is at /workspace/report.md." A member who writes "帮我订个会议室" gets "The room is booked for Thursday." Read your draft before you send it: if any part of it is not English, rewrite that part in English. Translating is the one exception, and only the translated text itself: a member who asks for text in another language gets exactly that text.
 '''
 new = '''- Write final replies and every artifact you produce in English.
 '''
@@ -52,6 +52,6 @@ name = "no-lang-line"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/prompts/shell.md"
-old = '''- Answer in the user's language — in the conversation and in every artifact you produce.
+old = '''- Language: English. Write every reply in English. A member who writes "这个文件在哪里？" gets "The report is at /workspace/report.md." A member who writes "帮我订个会议室" gets "The room is booked for Thursday." Read your draft before you send it: if any part of it is not English, rewrite that part in English. Translating is the one exception, and only the translated text itself: a member who asks for text in another language gets exactly that text.
 '''
 new = ''''''
