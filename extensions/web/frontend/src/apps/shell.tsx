@@ -79,6 +79,10 @@ export function useAppLinks(claim: (route: Route) => boolean, portal: string): v
  *  lane it opens is drawn by the shell's own track inside the frame. Standing on its own screen the
  *  page reports every such change, because there the address is what the member holds.
  *
+ *  This page's own app address is one of its links too — the crumb the shell hands a page standing
+ *  one step deeper names it — so it is claimed the same way: pressed under a band it is the page
+ *  coming back to its own head inside the lane, not the portal standing that head full screen.
+ *
  *  A link out of this section is not a place change either way: it names an app or a section this
  *  page cannot draw, so it rides the bridge's navigate verb and the portal moves — banded too, where
  *  the lane is what the member left. */
@@ -88,7 +92,8 @@ export function SectionApp({
   init,
 }: {
   /** This page's one pane view, by name. Where the name is also a section the address codec reads,
-   *  the page claims links to it; the rest are reached as their app and claim none. */
+   *  the page claims links to it; the rest are reached as their app, which the page claims by its
+   *  own agent id. */
   tab: string;
   view: PaneView;
   init: AppInit;
@@ -113,7 +118,10 @@ export function SectionApp({
   useAppLinks(
     useCallback(
       (route) => {
-        if (route.kind !== "section" || route.section !== tab) return false;
+        const claimed =
+          (route.kind === "section" && route.section === tab) ||
+          (route.kind === "agent" && route.agentId === init.agentId);
+        if (!claimed) return false;
         setPlace(route.place);
         if (!init.banded) navigate(agentHash(init.agentId, route.place));
         return true;

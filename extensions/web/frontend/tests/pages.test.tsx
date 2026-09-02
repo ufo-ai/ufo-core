@@ -189,6 +189,74 @@ test("the radar page mounts and draws its empty feed under its own band", async 
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
 });
 
+/** The crumb over a pinned report names the page itself, so pressing it inside a lane is a place
+ *  change in that lane: the feed comes back in the column the member is standing in. Reported to
+ *  the portal it would land them on the page's own full screen, which is the track torn up to
+ *  answer a press that never asked to leave it. */
+test("the radar crumb comes back to the feed in the lane rather than the full screen", async () => {
+  const moved: string[] = [];
+  const watch = (event: MessageEvent) => {
+    const message = event.data as { ufo?: string; to?: string } | null;
+    if (message?.ufo === "navigate" && typeof message.to === "string") moved.push(message.to);
+  };
+  window.addEventListener("message", watch);
+  try {
+    await runPage(
+      "radar",
+      {
+        ["/objects/report/" + TURN_ID]: () => new Response("gone", { status: 404 }),
+        "/objects/report": () => json({ objects: [] }),
+        "/actions/report$": () => json({ actions: [] }),
+      },
+      {
+        banded: true,
+        place: { opens: ["run/" + TURN_ID] },
+        crumb: { label: "Radar", at: new URL(agentHash(AGENT.id), location.origin + BASE).href },
+      },
+    );
+
+    const crumb = await screen.findByRole("link", { name: "Back to Radar" });
+    await userEvent.click(crumb);
+
+    expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+    expect(moved).toEqual([]);
+  } finally {
+    window.removeEventListener("message", watch);
+  }
+});
+
+/** Standing on its own screen the page holds the address, so the same crumb states where the member
+ *  went: the feed at the app's own address, with the pin gone. */
+test("the radar crumb states the app's own address on the page's own screen", async () => {
+  const moved: string[] = [];
+  const watch = (event: MessageEvent) => {
+    const message = event.data as { ufo?: string; to?: string } | null;
+    if (message?.ufo === "navigate" && typeof message.to === "string") moved.push(message.to);
+  };
+  window.addEventListener("message", watch);
+  try {
+    await runPage(
+      "radar",
+      {
+        ["/objects/report/" + TURN_ID]: () => new Response("gone", { status: 404 }),
+        "/objects/report": () => json({ objects: [] }),
+        "/actions/report$": () => json({ actions: [] }),
+      },
+      {
+        place: { opens: ["run/" + TURN_ID] },
+        crumb: { label: "Radar", at: new URL(agentHash(AGENT.id), location.origin + BASE).href },
+      },
+    );
+
+    await userEvent.click(await screen.findByRole("link", { name: "Back to Radar" }));
+
+    expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+    expect(moved).toEqual([agentHash(AGENT.id)]);
+  } finally {
+    window.removeEventListener("message", watch);
+  }
+});
+
 /** A bounded wait on a signal the environment must deliver: the assertion is on the signal, and the
  *  clock is only what makes its absence observable. */
 function lapse(after: number): Promise<string> {
