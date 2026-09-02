@@ -1257,16 +1257,17 @@ async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]:
     return dict(zip(keys, answers, strict=True))
 
 
-def _setup_ready(state: SetupState) -> bool:
-    """Whether every account, credential and standing order this app's provision declared is
-    settled — the one reading of a `SetupState` that answers about the app rather than a row.
-
-    An app that declared nothing is ready: the read answers an empty declaration with empty rows,
-    and a row that does not exist cannot be outstanding."""
-    return (
-        all(connector.granted for connector in state.connectors)
-        and all(credential.filled for credential in state.credentials)
-        and all(order.armed for order in state.standing)
+def _setup_configured(state: SetupState) -> bool:
+    """Whether the app offers nothing or the member accepted one setup offer."""
+    rows = (*state.connectors, *state.credentials, *state.standing)
+    if not rows:
+        return True
+    return any(
+        (
+            *(connector.granted for connector in state.connectors),
+            *(credential.filled for credential in state.credentials),
+            *(order.armed for order in state.standing),
+        )
     )
 
 
@@ -1285,9 +1286,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     signed-in member, because the `agent` kind admits a create from any speaking member and stamps
     them the owner. `archived` contains the apps this member may restore.
 
-    `setup_due` says an app is installed and cannot work yet — an account ungranted, a credential
-    unfilled, or a standing order unarmed. It rides this read rather than the status poll beside
-    it: each answer costs a transaction, up to three selects, and an object-registry read per
+    `setup_due` says an app is installed and a required setup row is not settled. It rides this
+    read rather than the status poll beside it: each answer costs a transaction, up to three
+    selects, and an object-registry read per
     standing kind — a price a once-per-boot read pays and a four-second poll cannot. Only a
     provisioned row is asked, because the declaration is written where `provisioned_by` is: an
     agent a member built declares nothing and so owes nothing, and the asking runs
@@ -1328,7 +1329,11 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     due = frozenset(
         agent.id
         for agent, state in zip(provisioned, setup_states, strict=True)
-        if not _setup_ready(state)
+        if not (
+            all(connector.granted for connector in state.connectors if connector.required)
+            and all(credential.filled for credential in state.credentials if credential.required)
+            and all(order.armed for order in state.standing if order.required)
+        )
     )
     # An app that declared nothing has no setup screen to stand on — chat, radar, tasks, wiki and
     # artifacts stand on their page from the first moment — and an app whose page this workspace
@@ -4038,7 +4043,7 @@ class UnlockRow(BaseModel):
 class StarterApp:
     id: UUID
     extension: str
-    ready: bool
+    configured: bool
 
 
 async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) -> frozenset[str]:
@@ -4077,10 +4082,10 @@ def fill_starters(
     nothing about its accounts: the row closing the list is the one that states a price, and the
     ranking instructions already hold that an account is asked for once the work is agreed.
 
-    A catalog row that names an installed app is different. It is offered only while that app still
-    needs setup and the workspace already holds every account the row names. The account makes the
-    installed app useful now; the row opens that app's own chat so its setup gains no duplicate.
-    Two catalog rows for one app produce one offer, in rank order."""
+    A catalog row that names an installed app is different. It is offered only while the member has
+    accepted none of that app's setup offers and the workspace already holds every account the row
+    names. The account makes the installed app useful now; the row opens that app's own chat so its
+    setup gains no duplicate. Two catalog rows for one app produce one offer, in rank order."""
     apps: list[StarterRow] = []
     short: list[UnlockRow] = []
     offered_apps: set[UUID] = set()
@@ -4092,7 +4097,7 @@ def fill_starters(
         match row:
             case AppUnlock(extension=extension):
                 target = next((app for app in installed if app.extension == extension), None)
-                if target is None or target.ready or missing or target.id in offered_apps:
+                if target is None or target.configured or missing or target.id in offered_apps:
                     continue
                 offered_apps.add(target.id)
             case _:
@@ -4198,11 +4203,11 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
         *(ctx.agent_setup(agent.id, member_id) for agent, _extension in app_agents)
     )
     installed = tuple(
-        StarterApp(id=agent.id, extension=extension, ready=_setup_ready(state))
+        StarterApp(id=agent.id, extension=extension, configured=_setup_configured(state))
         for (agent, extension), state in zip(app_agents, app_states, strict=True)
         if extension is not None
     )
-    pending_extensions = frozenset(app.extension for app in installed if not app.ready)
+    pending_extensions = frozenset(app.extension for app in installed if not app.configured)
     slate = await StarterCache(
         store=web_extension().store,
         member_id=member_id,

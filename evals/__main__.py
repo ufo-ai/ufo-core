@@ -191,7 +191,6 @@ from ufo.runtime.access.credentials import (
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.kinds.agent_setup import setup_skill
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.prompts.render import render_system_prompt
@@ -1099,30 +1098,6 @@ async def _run(
                     loadable_skills |= frozenset(
                         ((await spawn_catalog_skill(subagents, WORKSPACE_AUTHORITY)).name,)
                     )
-                    async with workspace_tx() as connection:
-                        main_agent = (
-                            await connection.execute(
-                                sa.select(tables.agent.c.is_main).where(
-                                    tables.agent.c.id == agent_id
-                                )
-                            )
-                        ).scalar_one()
-                        # The skill is read for the member who would speak the case, which in an
-                        # eval stack is the one this workspace was seeded with.
-                        speaker = (
-                            (
-                                await connection.execute(
-                                    sa.select(tables.member.c.id).order_by(
-                                        tables.member.c.seated_at
-                                    )
-                                )
-                            )
-                            .scalars()
-                            .first()
-                        )
-                    waiting = await setup_skill(agent_id, main_agent, speaker)
-                    if waiting is not None:
-                        loadable_skills |= frozenset((waiting.name,))
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
                     compaction = CompactionTarget(

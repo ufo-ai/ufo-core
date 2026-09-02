@@ -81,10 +81,6 @@ const SET_UP = "Set up";
 const STEP_INSET = "pl-[calc(var(--size-glyph)+var(--spacing-sm))]";
 const ANOTHER_CADENCE = "Something else";
 
-/** What the row types on the member's behalf. It names the skill rather than the steps, so the app
- *  reads its own outstanding setup at that moment instead of following a stale sentence. */
-const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
-
 const BUILD_APP = "Build app";
 const SET_UP_APP = "Set up your";
 /** What the press types on the member's behalf, into the composer they send it from. It names the
@@ -412,8 +408,8 @@ export function AgentSetup({
   /** Hand the app's own instructions to the composer, where the member sends them and the app
    *  drives the rest. The words are the app's declaration, so what is asked for is what the app
    *  said it needs, not a second description of it written here. */
-  function ask() {
-    setPendingAsk(agent.id, SETUP_ASK, false);
+  function ask(instructions: string) {
+    setPendingAsk(agent.id, instructions, false);
     navigate(newChatHash(agent.id));
   }
 
@@ -506,7 +502,7 @@ export function AgentSetup({
               note: scheduled ? SCHEDULE_NOTE : TRIGGER_NOTE,
               required: order.required,
               done: order.armed,
-              body: standingValue(order, schedule, title),
+              body: standingValue(order, schedule, title, payload.instructions ?? ""),
             };
           }),
         ];
@@ -578,6 +574,7 @@ export function AgentSetup({
     order: NonNullable<SetupState["standing"]>[number],
     schedule: SetupSchedule | null,
     title: string,
+    instructions: string,
   ) {
     if (order.armed && (order.kind !== SCHEDULE_KIND || schedule === null)) return ARMED;
     /* A kind the app offers no cadence for is settled in chat, because settling it is more than one
@@ -585,8 +582,14 @@ export function AgentSetup({
        carries the ask rather than a control it cannot complete — a row that stated the need and
        offered nothing left the member reading a chore with no way to do it. */
     if (order.kind !== SCHEDULE_KIND || schedule === null) {
+      if (!instructions) return NOT_INSTALLED;
       return (
-        <Button variant="outline" size="bar" className="my-sm bg-surface text-ink" onClick={ask}>
+        <Button
+          variant="outline"
+          size="bar"
+          className="my-sm bg-surface text-ink"
+          onClick={() => ask(instructions)}
+        >
           {title}
         </Button>
       );

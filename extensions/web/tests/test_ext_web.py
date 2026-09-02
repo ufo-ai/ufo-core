@@ -88,7 +88,9 @@ from ufo_ext_web.panels import (
     _action_intent,
     _outcome,
 )
+from ufo_ext_web.starters import SLATE_DIGEST, RankedUnlock, Slate, starters_key
 from ufo_ext_web.surface import (
+    DEFAULT_APP_SETUP_ASK,
     LANES_SHELL_FLAG,
     MAX_INBOUND_FILES,
     NO_MEMBER_FAULT,
@@ -7385,7 +7387,7 @@ async def test_settings_projects_spec_schema_ceiling_and_admin_audience(
     assert data["agent"]["prompt"] == "be brief"
     assert len(data["agent"]["prompt_digest"]) > 8
     assert data["agent"]["updated_at"].endswith("+00:00")
-    assert data["agent"]["setup"] is None
+    assert "setup" not in data["agent"]
     assert data["deploy"]["sandbox_internet"] is False
     assert data["models"] == ["auto", "claude-opus-4-8", "claude-sonnet-5"]
     assert data["spec"] == {
@@ -7876,10 +7878,10 @@ async def test_a_private_account_is_connected_only_for_the_member_who_made_it(
         return read.json()["connectors"]
 
     assert await connectors(owner_token) == [
-        {"provider": "acme", "label": "acme", "summary": "", "granted": True, "required": True}
+        {"provider": "acme", "label": "acme", "summary": "", "granted": True, "required": False}
     ]
     assert await connectors(other_token) == [
-        {"provider": "acme", "label": "acme", "summary": "", "granted": False, "required": True}
+        {"provider": "acme", "label": "acme", "summary": "", "granted": False, "required": False}
     ]
 
     # Shared is the workspace's own: every member reads the one account, because every member's
@@ -7887,7 +7889,7 @@ async def test_a_private_account_is_connected_only_for_the_member_who_made_it(
     shared_id = await _seed_account(workspace_id, agent_id, owner_id, "acme", shared=True)
     await _grant_account(workspace_id, agent_id, shared_id)
     assert await connectors(other_token) == [
-        {"provider": "acme", "label": "acme", "summary": "", "granted": True, "required": True}
+        {"provider": "acme", "label": "acme", "summary": "", "granted": True, "required": False}
     ]
 
 
@@ -8003,34 +8005,97 @@ async def test_the_setup_read_says_whether_this_workspace_has_its_own_page(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_boot_read_says_which_app_still_owes_its_member_setup(
+async def test_only_required_setup_blocks_readiness(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The rail draws one row per app, and the row for an app that cannot work yet says so from the
-    boot read — the poll beside it re-reads every four seconds and would pay for this per agent
-    every tick.
-
-    It is a fact about the declaration, never about the column: every provision writes one, and an
-    app that needs nothing writes an empty one. A row reading `setup` as present-means-unfinished
-    would mark most of the rail unfinished for good. An agent a member built declares nothing at
-    all and owes nothing."""
+    """Optional setup is an offer. Required setup blocks readiness."""
     client, workspace_id, _agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     quiet = await _seed_app_agent(workspace_id, "radar")
     wired = await _seed_app_agent(workspace_id, "meetings")
+    optional = await _seed_app_agent(workspace_id, "issues")
+    blocked = await _seed_app_agent(workspace_id, "metrics")
     await _declare_setup(quiet, AgentSetup())
     await _declare_setup(wired, AgentSetup(connectors=("acme",), instructions="Connect ACME."))
+    await _declare_setup(
+        optional,
+        AgentSetup(credentials=(SetupCredential(label="ACME key", slots=("acme_api_key",)),)),
+    )
+    await _declare_setup(
+        blocked,
+        AgentSetup(
+            credentials=(
+                SetupCredential(label="Metrics key", slots=("metrics_api_key",), required=True),
+            )
+        ),
+    )
 
     async def due() -> dict[str, bool]:
         read = await client.get("/surface/web/api/agents", headers=cookie)
         return {agent["name"]: agent["setup_due"] for agent in read.json()["agents"]}
 
-    assert await due() == {"assistant": False, "radar": False, "meetings": True}
+    assert await due() == {
+        "assistant": False,
+        "radar": False,
+        "meetings": False,
+        "issues": False,
+        "metrics": True,
+    }
 
     account = await _seed_account(workspace_id, wired, member_id, "acme")
     await _grant_account(workspace_id, wired, account)
-    assert await due() == {"assistant": False, "radar": False, "meetings": False}
+    await _fill_slot(workspace_id, "metrics_api_key")
+    assert await due() == {
+        "assistant": False,
+        "radar": False,
+        "meetings": False,
+        "issues": False,
+        "metrics": False,
+    }
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_starters_offer_an_unconfigured_app_until_one_setup_offer_is_accepted(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    code = await _seed_app_agent(workspace_id, "code")
+    await _declare_setup(code, AgentSetup(connectors=("github",)))
+    account = await _seed_account(workspace_id, code, member_id, "github")
+    slate = Slate(
+        generated_at=datetime.now(UTC),
+        prompt=SLATE_DIGEST,
+        ranked=(
+            RankedUnlock(
+                unlock="pr-babysitter",
+                title="PR watch",
+                line="Keeps pull requests moving.",
+                ask="Watch my pull requests.",
+            ),
+        ),
+    )
+    with ws(workspace_id):
+        await web_extension().store.put(starters_key(member_id), slate.model_dump(mode="json"))
+
+    offered = await client.get("/surface/web/workspace/starters", headers=cookie)
+    assert offered.json()["starters"] == [
+        {
+            "kind": "app",
+            "mark": "gnomon",
+            "line": "Keeps pull requests moving.",
+            "ask": DEFAULT_APP_SETUP_ASK,
+            "agent_id": str(code),
+            "providers": [],
+        }
+    ]
+
+    await _grant_account(workspace_id, code, account)
+    configured = await client.get("/surface/web/workspace/starters", headers=cookie)
+    assert configured.json()["starters"] == []
 
 
 @pytest.mark.usefixtures("database_url")

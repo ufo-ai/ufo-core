@@ -232,7 +232,7 @@ def test_a_title_an_application_already_carries_is_never_offered_again() -> None
 
 def test_a_default_app_is_not_suggested_before_its_account_is_known() -> None:
     slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
-    installed = (StarterApp(id=CODE_ID, extension="app_code", ready=False),)
+    installed = (StarterApp(id=CODE_ID, extension="app_code", configured=False),)
 
     rows, unlock = fill_starters(slate, frozenset(), frozenset(), installed)
 
@@ -240,9 +240,9 @@ def test_a_default_app_is_not_suggested_before_its_account_is_known() -> None:
     assert unlock is None
 
 
-def test_a_known_account_opens_the_default_app_that_still_needs_setup() -> None:
+def test_a_known_account_opens_the_default_app_with_no_accepted_setup_offer() -> None:
     slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
-    installed = (StarterApp(id=CODE_ID, extension="app_code", ready=False),)
+    installed = (StarterApp(id=CODE_ID, extension="app_code", configured=False),)
 
     rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset(), installed)
 
@@ -252,9 +252,9 @@ def test_a_known_account_opens_the_default_app_that_still_needs_setup() -> None:
     ]
 
 
-def test_a_ready_default_app_is_not_suggested_again() -> None:
+def test_a_configured_default_app_is_not_suggested_again() -> None:
     slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
-    installed = (StarterApp(id=CODE_ID, extension="app_code", ready=True),)
+    installed = (StarterApp(id=CODE_ID, extension="app_code", configured=True),)
 
     rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset(), installed)
 
@@ -269,7 +269,7 @@ def test_two_starters_for_one_default_app_produce_one_offer() -> None:
             _ranked("meeting-to-issues", "Meeting follow-ups"),
         )
     )
-    installed = (StarterApp(id=MEETINGS_ID, extension="app_meetings", ready=False),)
+    installed = (StarterApp(id=MEETINGS_ID, extension="app_meetings", configured=False),)
 
     rows, unlock = fill_starters(slate, frozenset({"googlecalendar"}), frozenset(), installed)
 

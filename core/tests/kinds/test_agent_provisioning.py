@@ -27,12 +27,7 @@ from ufo.db import workspace_tx
 from ufo.onboard.onboarding import Onboarding
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.manifest import SETUP_TOOLS, AgentProvision, Manifest
-from ufo.runtime.kinds.agent_setup import (
-    SETUP_SKILL_NAME,
-    AgentSetup,
-    pending_setup,
-    setup_skill,
-)
+from ufo.runtime.kinds.agent_setup import AgentSetup
 from ufo.runtime.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX, AgentSpec
 from ufo.runtime.kinds.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
 from ufo.runtime.object_name import validate_object_name
@@ -532,95 +527,11 @@ def test_a_tool_bridge_intent_stays_inside_the_allowlist() -> None:
     assert [tool.name for tool in selected] == ["read"]
 
 
-async def _conversation(workspace_id: UUID, agent_id: UUID) -> UUID:
-    conversation_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="test",
-                queue_key=conversation_id.hex,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    return conversation_id
-
-
-async def _grant_connection(workspace_id: UUID, agent_id: UUID, provider: str) -> UUID:
-    connection_id = uuid4()
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id, agent_id)
-        async with workspace_tx() as connection:
-            owner = (
-                (
-                    await connection.execute(
-                        sa.select(tables.member.c.id).where(
-                            tables.member.c.workspace_id == workspace_id
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            await connection.execute(
-                sa.insert(tables.connection).values(
-                    id=connection_id,
-                    workspace_id=workspace_id,
-                    provider=provider,
-                    account_id=f"acct-{connection_id.hex[:8]}",
-                    host="api.sample.test",
-                    owner_member_id=owner,
-                    conversation_id=conversation_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await connection.execute(
-                sa.insert(tables.connector_grant).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    connection_id=connection_id,
-                    conversation_id=conversation_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    return connection_id
-
-
-async def _member(workspace_id: UUID) -> UUID:
-    """The workspace's own member — who the grants are read for, and who `_grant_connection` makes
-    them as."""
-    async with workspace_tx() as connection:
-        return (
-            (
-                await connection.execute(
-                    sa.select(tables.member.c.id).where(
-                        tables.member.c.workspace_id == workspace_id
-                    )
-                )
-            )
-            .scalars()
-            .one()
-        )
-
-
-async def _unmet(workspace_id: UUID, name: str) -> AgentSetup | None:
-    with ws(workspace_id):
-        pending = await pending_setup(await _member(workspace_id))
-    return {name: missing for _, name, missing in pending}.get(name)
-
-
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_shipped_agent_records_every_grant_it_still_needs(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A shipped agent arrives with no edges, so what it cannot do yet is the first thing a member
-    must be told. The declaration lands on the row beside the prompt, and the read reports it."""
+    """The setup declaration lands on the agent row."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
     workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
@@ -628,139 +539,6 @@ async def test_the_shipped_agent_records_every_grant_it_still_needs(
     assert created.setup == sample.manifest().agents[0].setup.model_dump(mode="json")
     assert created.setup["connectors"] == [sample.CONNECTOR_PROVIDER]
     assert created.setup["instructions"] == sample.PROVISIONED_AGENT_SETUP
-    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) == AgentSetup(
-        connectors=(sample.CONNECTOR_PROVIDER,), instructions=sample.PROVISIONED_AGENT_SETUP
-    )
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_archived_app_drops_off_the_setup_roster(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An archived app admits no turn, so it can neither be asked for the grant it wants nor use
-    one. Left on the roster it would name the internal archive token, and the act it asks for —
-    `connect_account` against a live app — raises on a name no live app answers to, so the line
-    would stand for as long as the row is archived."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert created is not None
-    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) is not None
-
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.agent)
-            .values(
-                name=f"~archived-{created.id}",
-                archived_name=tables.agent.c.name,
-                archived_at=sa.func.now(),
-            )
-            .where(tables.agent.c.id == created.id)
-        )
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        roster = await pending_setup(speaker)
-
-    assert roster == ()
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_grant_a_member_makes_settles_its_need(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The declaration names a kind of authority, so any connection of that provider answers it —
-    which account stays the member's choice."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert created is not None
-    await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
-    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) is None
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_grant_to_another_agent_settles_nothing(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Both edges are keyed on the agent, so a connection the main agent holds does not reach the
-    shipped one. Reporting otherwise would tell a member they were done while it still cannot
-    act."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
-    assert main is not None
-    await _grant_connection(workspace_id, main.id, sample.CONNECTOR_PROVIDER)
-    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) == AgentSetup(
-        connectors=(sample.CONNECTOR_PROVIDER,), instructions=sample.PROVISIONED_AGENT_SETUP
-    )
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_agent_no_extension_shipped_needs_nothing(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A member's own agent declares no needs, so the read reports none rather than an empty shape
-    every caller would have to tell apart from a satisfied one."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    assert await _unmet(workspace_id, DEFAULT_AGENT_NAME) is None
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The setup slot is how a shipped agent asks for what it needs. It reaches the one agent that
-    can act on it, carries the extension's own instructions, and names every missing grant."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert created is not None
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        skill = await setup_skill(created.id, False, speaker)
-    assert skill is not None
-    assert skill.name == SETUP_SKILL_NAME
-    assert "You are installed but not set up" in skill.instructions
-    assert f"a {sample.CONNECTOR_PROVIDER} account" in skill.instructions
-    assert sample.PROVISIONED_AGENT_SETUP in skill.instructions
-    assert PROVISIONED_AGENT_NAME not in skill.description
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_setup_slot_empties_as_the_grants_land(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """It disappears on its own, so a wired workspace carries no standing instruction naming work
-    that is already done."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert created is not None
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        assert await setup_skill(created.id, False, speaker) is not None
-    await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        assert await setup_skill(created.id, False, speaker) is None
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_agent_with_nothing_outstanding_is_told_nothing(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An agent that is not the main one is told about itself alone. Another agent's outstanding
-    grants would name work it cannot do: it may not grant an account to a different agent."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
-    shipped = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert main is not None and shipped is not None
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        assert await setup_skill(main.id, False, speaker) is None
-        assert await setup_skill(shipped.id, False, speaker) is not None
 
 
 def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() -> None:
@@ -795,42 +573,3 @@ def test_a_provision_that_declares_no_setup_keeps_a_bare_allowlist() -> None:
     )
     provision = AgentProvision(name="self-contained", spec=spec, tools=("sample_echo",))
     assert provision.tools == ("sample_echo",)
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_main_agent_is_told_which_agents_it_can_connect_an_account_for(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A member on Slack or the CLI reaches only the main agent, and the main agent is the one
-    agent that may grant an account to another. So it is told the roster and the verb, and the
-    member finishes the setup by asking rather than by opening the portal."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
-    assert main is not None
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        roster = await setup_skill(main.id, True, speaker)
-        assert await setup_skill(main.id, False, speaker) is None
-    assert roster is not None
-    assert f"- {PROVISIONED_AGENT_NAME} — still needs" in roster.instructions
-    assert "`connect_account` with `agent` set to" in roster.instructions
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_turn_nobody_speaks_on_is_not_told_to_ask(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every act the skill names is speaker-gated: `connect_account` refuses without one. A spawn, a
-    schedule, or a source arrival would be handed instructions it cannot follow and a member it
-    cannot ask, so it is told nothing and the grant waits for a member's own turn."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
-    assert created is not None and main is not None
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        assert await setup_skill(created.id, False, speaker) is not None
-        assert await setup_skill(created.id, False, None) is None
-        assert await setup_skill(main.id, True, None) is None

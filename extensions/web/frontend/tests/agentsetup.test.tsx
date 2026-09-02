@@ -333,6 +333,11 @@ test("a need the app offers no cadence for still carries an act", async () => {
   await userEvent.click(await actButton("Set up"));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
+  expect(takePendingAsk(AGENT_ID, "new:" + AGENT_ID)).toEqual({
+    text: "Connect the calendar.",
+    send: false,
+    meant: null,
+  });
 });
 
 test("Build app stands below the todos and hands the ask over unsent", async () => {

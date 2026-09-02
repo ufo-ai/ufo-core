@@ -3,10 +3,10 @@ import { expect, test } from "vitest";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 
 test("a pending ask reaches the composer for its own agent only", () => {
-  setPendingAsk("agent-1", "Load the agent-setup skill and follow its instructions.", false);
+  setPendingAsk("agent-1", "Connect the calendar.", false);
   expect(takePendingAsk("agent-2")).toBe(null);
   expect(takePendingAsk("agent-1")).toEqual({
-    text: "Load the agent-setup skill and follow its instructions.",
+    text: "Connect the calendar.",
     send: false,
   });
 });

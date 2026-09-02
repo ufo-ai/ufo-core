@@ -1,8 +1,8 @@
-"""What a shipped agent still needs from a member, and the skill that asks for it.
+"""What a shipped agent offers a member to connect, install, or arm.
 
-It lives apart from `ufo.runtime.kinds.agents` because three subsystems read it — the turn loop, the
-portal's agent projection, and the Manifest declaration — and `ufo.runtime.kinds.agents` reaches the
-extension context, which the portal surface is itself part of.
+It lives apart from `ufo.runtime.kinds.agents` because the portal and the Manifest declaration read
+it, and `ufo.runtime.kinds.agents` reaches the extension context, which the portal surface is itself
+part of.
 """
 
 from collections.abc import Awaitable, Callable
@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from ufo.db import workspace_tx
 from ufo.runtime.access.credentials import deploy_env
-from ufo.runtime.skills.runtime import RuntimeSkill
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 
@@ -163,7 +162,7 @@ class AgentSetup(BaseModel):
 
 
 class SetupConnector(BaseModel):
-    """One declared provider against an account this agent can actually work from: a connection
+    """One offered provider against an account this agent can actually work from: a connection
     granted to it that the reading member may use — the workspace's own, or theirs.
 
     A grant made privately is usable by the member who made it and by nobody else, so a read that
@@ -173,9 +172,8 @@ class SetupConnector(BaseModel):
     provider: str
     granted: bool
     required: bool
-    """Always true. An account is the one need nothing works without: an app with no connection has
-    nothing to read, so every screen marks it and no app declares otherwise. It is answered here
-    rather than assumed by the reader, so what a member must settle is stated in one place."""
+    """Always false. A connector is an offer: the app works from the accounts the member grants
+    and does not require accounts the workspace does not hold."""
 
 
 class SetupCredentialState(BaseModel):
@@ -323,7 +321,7 @@ async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> Setup
             )
         )
     connectors = tuple(
-        SetupConnector(provider=provider, granted=provider in granted, required=True)
+        SetupConnector(provider=provider, granted=provider in granted, required=False)
         for provider in wanted.connectors
     )
     # A slot the deploy supplies from its own environment is filled: `WorkspaceScope.credential`
@@ -358,131 +356,4 @@ async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> Setup
         standing=standing,
         schedule=wanted.schedule,
         instructions=wanted.instructions,
-    )
-
-
-async def pending_setup(member_id: UUID) -> tuple[tuple[UUID, str, AgentSetup], ...]:
-    """Every shipped agent this member has not finished wiring, with the grants it is still
-    missing. The agent that needs a grant is the one that must ask for it: every grant binds to the
-    agent whose conversation it is made in, so this is read to tell that agent what is outstanding.
-
-    Read for `member_id`, on the same terms `setup_state` reads accounts and the proxy forwards
-    them: a private grant works for the member who made it and for nobody else. Counting every
-    grant told the second member nothing was outstanding and left their every call refused, with
-    the one skill that would have asked for an account of their own saying there was nothing to
-    ask for.
-
-    An archived app is absent: it admits no turn, so it can neither be asked for a grant nor use
-    one, and the line would stand unmet for as long as the row is archived.
-
-    A connector is met by a grant to any connection of that provider — `connect_account` in the
-    agent's own conversation writes one, and `GrantStore.attach` binds a connection that already
-    exists, so every declared need has a member-reachable way to settle. An agent no extension
-    shipped declares nothing and is never listed."""
-    async with workspace_tx() as connection:
-        shipped = (
-            await connection.execute(
-                sa.select(tables.agent.c.id, tables.agent.c.name, tables.agent.c.setup).where(
-                    tables.agent.c.workspace_id == ws_current().workspace_id,
-                    tables.agent.c.setup.is_not(None),
-                    tables.agent.c.archived_at.is_(None),
-                )
-            )
-        ).all()
-        if not shipped:
-            return ()
-        held = {row.id: set[str]() for row in shipped}
-        for granted in await connection.execute(
-            sa.select(tables.connector_grant.c.agent_id, tables.connection.c.provider)
-            .join(
-                tables.connection,
-                tables.connector_grant.c.connection_id == tables.connection.c.id,
-            )
-            .where(
-                tables.connector_grant.c.agent_id.in_(held),
-                sa.or_(
-                    tables.connection.c.shared,
-                    tables.connection.c.owner_member_id == member_id,
-                ),
-            )
-        ):
-            held[granted.agent_id].add(granted.provider)
-    pending = []
-    for row in sorted(shipped, key=lambda row: row.name):
-        declared = AgentSetup.model_validate(row.setup)
-        providers = held[row.id]
-        missing = AgentSetup(
-            connectors=tuple(name for name in declared.connectors if name not in providers),
-            instructions=declared.instructions,
-        )
-        if missing.connectors:
-            pending.append((row.id, row.name, missing))
-    return tuple(pending)
-
-
-def _wants(missing: AgentSetup) -> str:
-    return ", ".join(f"a {provider} account" for provider in missing.connectors)
-
-
-SETUP_SKILL_NAME = "agent-setup"
-SETUP_SKILL_DESCRIPTION = (
-    "Finish setting up an agent this workspace installed: grant it the accounts it works from. "
-    "Load when a member asks to set one up, or asks why one is not working. Not for creating a "
-    "new application of their own."
-)
-SETUP_HEADER = (
-    "You are installed but not set up. Ask the member for what is missing, then call "
-    "`connect_account` for each account. A grant made in your own conversation binds to you."
-)
-ROSTER_HEADER = (
-    "These agents are installed and not set up. A member must grant each account, and you are the "
-    "only agent that may grant one to another agent: call `connect_account` with `agent` set to "
-    "that agent's name, in this conversation, with the member speaking."
-)
-
-
-async def setup_skill(
-    agent_id: UUID, is_main: bool, speaker_member_id: UUID | None
-) -> RuntimeSkill | None:
-    """The loadable skill telling an agent what it still needs, or None when it needs nothing
-    or the turn cannot act on it.
-
-    An agent with grants outstanding is told about itself. The main agent is told the roster,
-    because it is the one agent that may grant an account to another (`connect_account` takes an
-    `agent`), so a member on a surface bound only to it — Slack, the CLI — finishes the setup by
-    asking, without opening the portal.
-
-    It is a skill rather than a prompt section because it is a task, not a capability: the index
-    carries one line, and the instructions reach the model only on the turn a member actually asks.
-
-    It reaches only a turn a member is speaking on, because every act it names is speaker-gated:
-    `connect_account` refuses without one. A turn nobody speaks on — a spawn, a schedule, a source
-    arrival — would be handed instructions it cannot follow and a member it cannot ask, and would
-    keep reporting the same grant on every later turn. The speaker is also who the grants are read
-    for: they are the one who would make the missing one, and the one an account already made
-    privately by somebody else does nothing for.
-
-    Derived from the grants on every turn, so it erases itself as they land rather than needing a
-    flag that a later revoke would leave stale."""
-    if speaker_member_id is None:
-        return None
-    pending = await pending_setup(speaker_member_id)
-    mine = next((entry for entry in pending if entry[0] == agent_id), None)
-    if mine is None:
-        others = [entry for entry in pending if entry[0] != agent_id]
-        if not is_main or not others:
-            return None
-        lines = [
-            f"- {name} — still needs {_wants(missing)}. {missing.instructions}".rstrip()
-            for _agent, name, missing in others
-        ]
-        return RuntimeSkill(
-            name=SETUP_SKILL_NAME,
-            description=SETUP_SKILL_DESCRIPTION,
-            instructions="\n".join((ROSTER_HEADER, "", *lines)),
-        )
-    _, _, missing = mine
-    body = f"{SETUP_HEADER}\n\nYou still need {_wants(missing)}. {missing.instructions}"
-    return RuntimeSkill(
-        name=SETUP_SKILL_NAME, description=SETUP_SKILL_DESCRIPTION, instructions=body.rstrip()
     )

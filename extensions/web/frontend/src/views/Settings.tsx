@@ -13,21 +13,11 @@ import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { newChatHash, workspaceHash } from "@/lib/route";
-import { navigate } from "@/lib/router";
-import { setPendingAsk } from "@/lib/pendingAsk";
+import { workspaceHash } from "@/lib/route";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { Moment } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
-
-/** What an extension-shipped agent still needs granted before it can work, or null once it is
- *  wired. Derived from the grants themselves, so the offer disappears on its own. */
-type AgentSetupNeeded = { connectors: string[]; instructions: string };
-
-/** What the button types on the member's behalf. It names the skill rather than the acts, so the
- *  agent reads its own outstanding grants at that moment instead of trusting a stale button. */
-const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
 
 /** The one mark whose label is not derived from its slug. Every other label is the slug's words
  *  with a capital on the first; the product is named ufo, and its name is written as it is
@@ -96,7 +86,6 @@ type SettingsPayload = {
     updated_at: string;
     prompt: string;
     prompt_digest: string;
-    setup: AgentSetupNeeded | null;
   };
   spec: { icon: string; [field: string]: unknown };
   spec_schema: { properties?: Record<string, SchemaProperty> };
@@ -282,40 +271,10 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
           setReloads((count) => count + 1);
         }
 
-        // The setup ask goes to the composer, not to a send. Every grant binds to the agent whose
-        // conversation it is made in, and the member who presses this is the speaker the granting
-        // verbs gate on — so the member must be *in* that conversation, not merely the cause of
-        // one. Founding it here would leave an id nothing else holds: no rail row, a read-only
-        // conversation tab, and a connect link that lives only on the live tail.
-        function startSetup() {
-          setPendingAsk(agent.id, SETUP_ASK, false);
-          navigate(newChatHash(agent.id));
-        }
-
         return (
           <>
             <Toast state={toast} onDone={() => setToast(SILENT)} position="surface" />
             <OutcomeNotice state={notice} />
-            {ready.agent.setup ? (
-              <Group title="Set up">
-                <Facts
-                  rows={[
-                    {
-                      label: "Still needed",
-                      value: ready.agent.setup.connectors
-                        .map((provider) => provider + " account")
-                        .join(", "),
-                    },
-                  ]}
-                />
-                {ready.agent.setup.instructions ? (
-                  <Hint>{ready.agent.setup.instructions}</Hint>
-                ) : null}
-                <Button type="button" onClick={startSetup}>
-                  Start setup
-                </Button>
-              </Group>
-            ) : null}
             <Group
               title="Profile"
               action={

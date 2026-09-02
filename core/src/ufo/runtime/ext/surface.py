@@ -101,10 +101,8 @@ from ufo.runtime.billing.accounting import (
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.runtime.hub import Activity, LiveFrame
 from ufo.runtime.kinds.agent_setup import (
-    AgentSetup,
     ArmedOrder,
     SetupState,
-    pending_setup,
     setup_state,
 )
 from ufo.runtime.kinds.governance import prompt_digest
@@ -839,8 +837,8 @@ class InstallationSummary(BaseModel):
 
 class AgentDetail(BaseModel):
     """One agent as a portal settings read states it: the row's configuration beside its prompt
-    digest, the chat surfaces whose installations bind to it, and what it still needs from a
-    member. `icon` is the slug the settings page draws the agent with."""
+    digest and the chat surfaces whose installations bind to it. `icon` is the slug the settings
+    page draws the agent with."""
 
     name: str
     main: bool
@@ -854,10 +852,6 @@ class AgentDetail(BaseModel):
     prompt: str
     prompt_digest: str
     surfaces: tuple[str, ...]
-    setup: AgentSetup | None
-    """The grants an extension shipped this agent expecting that no grant covers yet, or None once
-    it is wired and for an agent no extension shipped. The portal offers the setup from this, and
-    stops offering it as the grants land — the offer is derived, never a flag to clear."""
     updated_at: datetime
 
     @field_validator("updated_at")
@@ -3077,9 +3071,6 @@ class SurfaceContext:
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),
-            setup=dict(
-                (agent, missing) for agent, _name, missing in await pending_setup(member_id)
-            ).get(agent_id),
             updated_at=row.updated_at,
         )
 

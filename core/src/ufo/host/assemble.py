@@ -47,7 +47,6 @@ from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
-from ufo.runtime.kinds.agent_setup import setup_skill
 from ufo.runtime.objects import ObjectVerbs
 from ufo.runtime.prompts.render import (
     WORKSPACE_FACTS_SECTION,
@@ -152,9 +151,6 @@ class HostEnvironment:
                 all_tools,
                 granted_actions,
             )
-            waiting = await setup_skill(turn.agent_id, agent.is_main, turn.speaker_member_id)
-            if waiting is not None:
-                skills = skills.merged_with((waiting,))
             skills = _skills_with_document(skills, document)
             cards = tuple(skills.member_cards.values())
             view = member_visibility(turn.inbound, cards)

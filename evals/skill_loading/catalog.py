@@ -586,18 +586,6 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-skill",),
     ),
     SkillLoadCase(
-        "setup-installed-agent",
-        "The radar agent still is not answering anyone — can you get it set up?",
-        expected="agent-setup",
-        forbidden=("create-application",),
-    ),
-    SkillLoadCase(
-        "starter-default-app-setup",
-        "Set up this app.",
-        expected="agent-setup",
-        forbidden=("create-application",),
-    ),
-    SkillLoadCase(
         "application-invoice-inbox",
         "I want a separate app that reads the invoices landing in our shared inbox and files the "
         "totals, so it stays out of this chat.",
@@ -609,7 +597,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Set the support team up with something of its own that answers the common product "
         "questions and passes anything else to a person.",
         expected="create-application",
-        forbidden=("create-skill", "agent-setup"),
+        forbidden=("create-skill",),
     ),
     SkillLoadCase(
         "application-private-recruiting",
@@ -1149,7 +1137,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Set up an assistant for the finance team that reads our weekly revenue export and "
         "answers the questions people ask about it.",
         expected="create-application",
-        forbidden=("website-building", "data-exploration", "agent-setup"),
+        forbidden=("website-building", "data-exploration"),
     ),
     SkillLoadCase(
         "application-support-bot",
@@ -1162,13 +1150,13 @@ CASES: tuple[SkillLoadCase, ...] = (
         "I want an application that researches a market, company, or person on request and "
         "cites every claim.",
         expected="create-application",
-        forbidden=("agent-setup", "website-building"),
+        forbidden=("website-building",),
     ),
     SkillLoadCase(
         "starter-writing-desk",
         "I want an application that drafts our recurring updates, announcements, and posts.",
         expected="create-application",
-        forbidden=("agent-setup", "website-building"),
+        forbidden=("website-building",),
     ),
     SkillLoadCase(
         "application-another-pr-babysitter",

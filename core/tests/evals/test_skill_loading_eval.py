@@ -27,7 +27,6 @@ from evals.skill_loading.runner import (
 )
 from ufo.host.ext.loader import load_manifests, skill_registry
 from ufo.runtime.ext.context import Trajectory
-from ufo.runtime.kinds.agent_setup import SETUP_SKILL_NAME
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
@@ -375,7 +374,7 @@ def test_every_catalog_skill_is_loadable_under_the_pack_the_suite_runs_on() -> N
     suite never ran on is what let five cases exclude themselves nightly. A case that expects no
     load names none, and is held to its forbidden set alone."""
     for pack in SKILL_LOADING_PACKS:
-        carried = set(skill_registry(load_manifests(pack)).by_name) | {SETUP_SKILL_NAME}
+        carried = set(skill_registry(load_manifests(pack)).by_name)
         for case in CASES:
             if not case.expects_no_load:
                 assert case.expected in carried, (pack, case.name, case.expected)

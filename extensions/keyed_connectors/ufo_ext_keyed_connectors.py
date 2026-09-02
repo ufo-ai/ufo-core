@@ -208,6 +208,22 @@ KEYED_PROVIDERS: tuple[KeyedProvider, ...] = (
         ),
     ),
     KeyedProvider(
+        provider="metronome",
+        label="Metronome",
+        host="api.metronome.com",
+        secrets=(
+            KeyedSecret(
+                key="api_key",
+                header="Authorization",
+                scheme="Bearer",
+                env="METRONOME_API_KEY",
+                description="Metronome API token (Settings \u2192 API tokens). It reads customers, "
+                "invoices and billable metrics; a token minted for one environment reads that "
+                "environment only, so a sandbox token answers no production invoice.",
+            ),
+        ),
+    ),
+    KeyedProvider(
         provider="apollo",
         label="Apollo",
         host="api.apollo.io",

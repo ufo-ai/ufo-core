@@ -56,8 +56,8 @@ import type { AvatarStackPerson, ChartBar, MeterPart, Placement } from "ufo/kit"
 const APP = "Metrics";
 
 const PURPOSE =
-  "Reports how delivery is going on a cadence you pick, and can report revenue and support "
-  + "beside it.";
+  "Reports delivery, revenue, runway, reliability, product and support on a cadence you pick, "
+  + "from the accounts you connect.";
 
 const STANDING = "Last report Mon 09:00 · week of 18–24 Aug · next Mon 09:00";
 
