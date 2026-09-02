@@ -1031,17 +1031,6 @@ class SpendCapLine:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentSpendReport:
-    """One agent's selected range and all-time ledger, including its subagent turns and caps."""
-
-    window_seconds: int | None
-    total_micro_usd: int
-    by_dimension: tuple[DimensionTotal, ...]
-    caps: tuple[SpendCapLine, ...]
-    usage: UsageDetails
-
-
-@dataclass(frozen=True, slots=True)
 class MemberSpendReport:
     """One member's selected range and all-time ledger, naming no other member or agent."""
 
@@ -1388,64 +1377,6 @@ class SpendRollup:
                 .group_by(conversation.c.surface, label)
                 .order_by(sa.desc("priced"))
             )
-        )
-
-    async def read_agent(
-        self, connection: AsyncConnection, agent_id: UUID, window_seconds: int | None
-    ) -> AgentSpendReport:
-        """One agent's selected and all-time usage plus its agent-scoped caps. Turn-less workspace
-        usage stays in the workspace rollup."""
-        now = datetime.now(UTC)
-        cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
-        window = (tables.ledger.c.workspace_id == self.workspace_id) & (
-            tables.turn.c.agent_id == agent_id
-        )
-        if cutoff is not None:
-            window &= tables.ledger.c.created_at >= cutoff
-        joined = tables.ledger.join(tables.turn)
-        by_dimension = tuple(
-            DimensionTotal(row.dimension, int(row.amount), int(row.priced))
-            for row in await connection.execute(
-                sa.select(
-                    tables.ledger.c.dimension,
-                    sa.func.sum(tables.ledger.c.amount).label("amount"),
-                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
-                )
-                .select_from(joined)
-                .where(window)
-                .group_by(tables.ledger.c.dimension)
-                .order_by(tables.ledger.c.dimension)
-            )
-        )
-        caps = tuple(
-            SpendCapLine(int(row.window_seconds), int(row.limit_micro_usd), row.on_breach)
-            for row in await connection.execute(
-                sa.select(
-                    tables.spend_cap.c.window_seconds,
-                    tables.spend_cap.c.limit_micro_usd,
-                    tables.spend_cap.c.on_breach,
-                )
-                .where(
-                    tables.spend_cap.c.workspace_id == self.workspace_id,
-                    tables.spend_cap.c.scope == AGENT_SCOPE,
-                    tables.spend_cap.c.subject_id == agent_id,
-                )
-                .order_by(tables.spend_cap.c.window_seconds)
-            )
-        )
-        return AgentSpendReport(
-            window_seconds,
-            sum(line.priced_micro_usd for line in by_dimension),
-            by_dimension,
-            caps,
-            await _usage_details(
-                connection,
-                joined,
-                (tables.ledger.c.workspace_id == self.workspace_id)
-                & (tables.turn.c.agent_id == agent_id),
-                cutoff,
-                now,
-            ),
         )
 
     async def read_member(

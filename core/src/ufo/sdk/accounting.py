@@ -8,9 +8,6 @@ from ufo.harness.models.pricing import (
     MICRO_USD_PER_USD as MICRO_USD_PER_USD,
 )
 from ufo.runtime.billing.accounting import (
-    AgentSpendReport as AgentSpendReport,
-)
-from ufo.runtime.billing.accounting import (
     DimensionTotal as DimensionTotal,
 )
 from ufo.runtime.billing.accounting import (

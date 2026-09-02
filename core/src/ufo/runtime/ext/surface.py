@@ -90,7 +90,6 @@ from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     PARK,
-    AgentSpendReport,
     BalanceGate,
     MemberSpendReport,
     OffTurnSpendRefused,
@@ -1713,7 +1712,7 @@ class SurfaceContext:
     hub in its own SSE route, reading `turn_owner` to gate a tail, `spend_rollup` for a workspace
     spend view and `member_spend` for the reader's own, and the per-agent projections a portal
     renders —
-    `list_member_objects`/`member_object`/`object_kind`, `agent_skills`, `agent_spend`,
+    `list_member_objects`/`member_object`/`object_kind`, `agent_skills`,
     `connector_catalog`, and `memory_available`/`search_memory` —
     and either mode renders a turn's
     shared files, the poller handing them to `attach` while a live surface reads
@@ -3199,13 +3198,6 @@ class SurfaceContext:
         if self._memory is None:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
         return self._memory.listable_kinds()
-
-    async def agent_spend(self, agent_id: UUID, window_seconds: int | None) -> AgentSpendReport:
-        """One agent's usage for a selected range or all time, plus its caps."""
-        async with workspace_tx() as connection:
-            return await SpendRollup(workspace_id=self.workspace_id).read_agent(
-                connection, agent_id, window_seconds
-            )
 
     async def member_spend(self, member_id: UUID, window_seconds: int | None) -> MemberSpendReport:
         """One member's usage for a selected range or all time, plus their caps."""

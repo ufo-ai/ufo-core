@@ -600,7 +600,7 @@ the web stop button, the terminal's Esc — cancelling it durably and publishing
 terminal so every live tail ends now; descendants are the cancel reconciler's, as for every cancel
 path), plus the reads a live view serves: `tail`/`turn_owner`, the admin-shaped
 `spend_rollup`, and the per-agent projections — `object_kind` with
-`list_member_objects`/`member_object`, `agent_skills`, `agent_spend`, and
+`list_member_objects`/`member_object`, `agent_skills`, and
 `memory_available`/`search_memory`. An extension registers a `surfaces` Manifest point; core mounts its `SurfaceRoute`s under `/surface/<name>`, each bound to the
 one context. A provider that sends events on a persistent stream declares `listen`; core starts and
 cancels it with the app because core alone owns process lifetime and the pre-workspace installation
