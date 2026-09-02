@@ -5,7 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { BRAND_MARKS } from "@/lib/brandMark";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
-import { sectionHash } from "@/lib/route";
+import { HOME_CONNECTORS_LANE, homeHash, sectionHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -172,6 +172,36 @@ test("the connectors section lists the connection pool", async () => {
 
   expect(await screen.findByText("github")).toBeTruthy();
   expect(screen.getByText(/Only you/)).toBeTruthy();
+});
+
+/** The connectors screen stands as an app entry on home: the picker lists it under the workspace's
+ *  apps, and the press stands the pool in a lane of its own, which the address carries. */
+test("the picker stands the connectors screen in a lane", async () => {
+  location.hash = homeHash({ opens: [AGENT_ID] });
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "New tab" }));
+  const picker = await screen.findByRole("region", { name: "New tab" });
+  await userEvent.click(within(picker).getByRole("button", { name: /^Connectors/ }));
+
+  expect(await screen.findByRole("region", { name: "Connectors" })).toBeTruthy();
+  expect(track()).toEqual([HOME_CONNECTORS_LANE, AGENT_ID]);
+  expect(await screen.findByText("github")).toBeTruthy();
+});
+
+/** The screen is one record, so it stands in one lane: a pick made while it stands closes the
+ *  picker on it rather than opening a second host over it. */
+test("a second pick of the connectors screen keeps the one lane", async () => {
+  location.hash = homeHash({ opens: [HOME_CONNECTORS_LANE, AGENT_ID] });
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "New tab" }));
+  const picker = await screen.findByRole("region", { name: "New tab" });
+  await userEvent.click(within(picker).getByRole("button", { name: /^Connectors/ }));
+
+  await waitFor(() => expect(track()).toEqual([HOME_CONNECTORS_LANE, AGENT_ID]));
 });
 
 test("the connectors workspace address is not valid", async () => {

@@ -478,7 +478,9 @@ test("the rail's new tab stands the picker at most once", async () => {
 });
 
 /** The picker offers the apps and, under them, the conversations the member has had — one list,
- *  one order, wherever they are read. A row takes the lane over as that conversation's lane. */
+ *  one order, wherever they are read. A row takes the lane over as that conversation's lane. The
+ *  connectors screen closes the app list: the portal draws it rather than an app, and a member
+ *  reaches it the way they reach an app. */
 test("the picker lane offers the workspace's apps and the member's history", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
@@ -491,7 +493,7 @@ test("the picker lane offers the workspace's apps and the member's history", asy
     within(apps.parentElement!)
       .getAllByRole("button")
       .map((row) => row.textContent),
-  ).toEqual(["Assistant", "Second"]);
+  ).toEqual(["Assistant", "Second", "ConnectorsConnect the accounts your apps work in."]);
 
   const history = within(picker).getByRole("heading", { name: "History", level: 3 });
   const rows = within(history.closest("section")!).getAllByRole("listitem");

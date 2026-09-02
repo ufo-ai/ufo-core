@@ -1,4 +1,10 @@
-import { IconChevronRight, IconFilter2, IconHistory, IconPlus } from "@tabler/icons-react";
+import {
+  IconChevronRight,
+  IconFilter2,
+  IconHistory,
+  IconPlug,
+  IconPlus,
+} from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PressRow } from "@/components/ui/pressrow";
+import type { Placement } from "@/kernel/pager";
 import { Empty, Waiting } from "@/kernel/panel";
 import { SlotTrack, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, origin } from "@/lib/audience";
@@ -34,6 +41,7 @@ import {
 import { seekChat, useRail } from "@/lib/railStore";
 import { heldRoute, placeHome } from "@/lib/router";
 import {
+  HOME_CONNECTORS_LANE,
   HOME_NEW_LANE,
   homeConversationLane,
   homeLaneAgent,
@@ -44,6 +52,8 @@ import {
 import { AgentSetup } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
+import { TabbedPane } from "@/views/TabbedPane";
+import { CONNECTORS } from "@/views/registry";
 import type { Agent, Member } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
 
@@ -52,7 +62,6 @@ const HISTORY = "History";
 const NO_HISTORY = "No conversations yet.";
 
 const NO_APP = "No such app";
-const NO_APPS = "This workspace has no apps to open.";
 const NO_CHATS = "No conversations to open.";
 const NO_CONVERSATION = "This conversation is not available.";
 const CONVERSATION = "Conversation";
@@ -65,6 +74,26 @@ const APPS = "Apps";
 const HISTORY_OPTIONS = "History options";
 const SORT_BY = "Sort by";
 const SHOW = "Show";
+
+/** The name the connectors view stands under in the section registry, which the pane it is drawn in
+ *  keys its one tab by. */
+const CONNECTORS_SECTION = "connectors" as const;
+
+/** What the connectors row says it is for, in the line every other row in the list carries. The
+ *  screen states no purpose of its own — it is the portal's, not an app's — so the words are here,
+ *  beside the list that draws them. */
+const CONNECTORS_PURPOSE = "Connect the accounts your apps work in.";
+
+/** One row of the picker's app list: the lane the press stands, and the marks and words the row is
+ *  read by. An app names its own; the connectors screen is named here, because the portal draws it
+ *  rather than an app the roster holds. */
+type PickApp = {
+  key: string;
+  lane: string;
+  label: string;
+  purpose: string | null;
+  mark: ReactNode;
+};
 
 /** The place the framed page inside a lane stands at. Home holds no place of its own past its
  *  track, and the frame re-sends its `init` whenever this changes — so it is one value rather
@@ -206,6 +235,9 @@ function HomeLane({
         onActivity={onActivity}
       />
     );
+  }
+  if (lane === HOME_CONNECTORS_LANE) {
+    return <ConnectorsLane lane={lane} opens={opens} onOpens={onOpens} />;
   }
   const agentId = homeLaneAgent(lane);
   if (agentId === null) {
@@ -562,6 +594,41 @@ function AppLane({
   );
 }
 
+/** The connectors lane: the screen the portal draws itself, standing in a lane the way an app's own
+ *  page does. Its place is held here rather than in the address — the track carries the lanes and
+ *  not what stands inside one, so a filter or an opened row lives as long as the lane. */
+function ConnectorsLane({
+  lane,
+  opens,
+  onOpens,
+}: {
+  lane: string;
+  opens: string[];
+  onOpens: (opens: string[]) => void;
+}) {
+  const [place, setPlace] = useState<Placement>({});
+  return (
+    <Lane
+      lane={lane}
+      opens={opens}
+      title={CONNECTORS.label}
+      glyph={<IconPlug aria-hidden />}
+      onOpens={onOpens}
+      node={
+        <TabbedPane
+          group="section"
+          tabs={[CONNECTORS_SECTION]}
+          views={{ [CONNECTORS_SECTION]: CONNECTORS }}
+          view={CONNECTORS_SECTION}
+          banded
+          place={place}
+          onPlace={(_view, next) => setPlace(next)}
+        />
+      }
+    />
+  );
+}
+
 /** The chat app's lane: a conversation with the workspace, held on the lane's own key. Two chat
  *  lanes are two conversations — the key is the lane, so neither the draft nor the transcript of
  *  one reaches the other — and the send that founds one keeps it here rather than handing the
@@ -748,9 +815,29 @@ function PickerLane({
   const rail = useRail();
   const ladder = useChatLadder();
   const hidden = useChatHidden();
-  const offered = agents.filter((agent) => !agent.hidden);
   const chats = chatRuns(rail.rows, ladder, hidden, new Date()).flatMap((run) => run.rows);
   const pick = (id: string) => onOpens(taken(opens, lane, id));
+  /* The apps this workspace draws, and under them the connectors screen — the portal draws that one
+     itself, and a member reaches it the way they reach an app, since a lane is a lane whoever draws
+     what stands in it. */
+  const offered: PickApp[] = [
+    ...agents
+      .filter((agent) => !agent.hidden)
+      .map((agent) => ({
+        key: agent.id,
+        lane: mintHomeLane(agent.id, opens),
+        label: agentName(agent.name),
+        purpose: agent.purpose ?? null,
+        mark: <AgentIcon name={agent.icon} />,
+      })),
+    {
+      key: HOME_CONNECTORS_LANE,
+      lane: HOME_CONNECTORS_LANE,
+      label: CONNECTORS.label,
+      purpose: CONNECTORS_PURPOSE,
+      mark: <IconPlug aria-hidden />,
+    },
+  ];
   return (
     <Lane
       lane={lane}
@@ -764,43 +851,37 @@ function PickerLane({
         <div className="flex min-h-0 flex-1 flex-col">
           <section className={PICK_SECTION}>
             <h3 className={PICK_LABEL}>{APPS}</h3>
-            {offered.length ? (
-              <div className={cn(PICK_ROWS, "px-lg")}>
-                <ul className="m-0 flex list-none flex-col gap-sm p-0">
-                  {offered.map((agent) => (
-                    <li key={agent.id}>
-                      <button
-                        type="button"
-                        onClick={() => pick(mintHomeLane(agent.id, opens))}
-                        className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
-                      >
-                        <span className="flex size-(--size-control) shrink-0 items-center justify-center rounded-avatar bg-fill-strong p-sm text-ink">
-                          <AgentIcon name={agent.icon} />
+            <div className={cn(PICK_ROWS, "px-lg")}>
+              <ul className="m-0 flex list-none flex-col gap-sm p-0">
+                {offered.map((app) => (
+                  <li key={app.key}>
+                    <button
+                      type="button"
+                      onClick={() => pick(app.lane)}
+                      className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
+                    >
+                      <span className="flex size-(--size-control) shrink-0 items-center justify-center rounded-avatar bg-fill-strong p-sm text-ink">
+                        {app.mark}
+                      </span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-lg">
+                        <span className="[text-box:trim-both_cap_alphabetic] truncate text-label font-medium tracking-(--tracking-ui) text-ink">
+                          {app.label}
                         </span>
-                        <span className="flex min-w-0 flex-1 flex-col gap-lg">
-                          <span className="[text-box:trim-both_cap_alphabetic] truncate text-label font-medium tracking-(--tracking-ui) text-ink">
-                            {agentName(agent.name)}
+                        {app.purpose ? (
+                          <span className="[text-box:trim-both_cap_alphabetic] truncate text-fine leading-(--leading-chrome) text-ink-soft">
+                            {app.purpose}
                           </span>
-                          {agent.purpose ? (
-                            <span className="[text-box:trim-both_cap_alphabetic] truncate text-fine leading-(--leading-chrome) text-ink-soft">
-                              {agent.purpose}
-                            </span>
-                          ) : null}
-                        </span>
-                        <IconChevronRight
-                          className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
-                          aria-hidden
-                        />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <div className={PICK_EMPTY}>
-                <Empty>{NO_APPS}</Empty>
-              </div>
-            )}
+                        ) : null}
+                      </span>
+                      <IconChevronRight
+                        className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
+                        aria-hidden
+                      />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </section>
           <section className={PICK_SECTION}>
             <div className="flex shrink-0 items-center justify-between px-lg">

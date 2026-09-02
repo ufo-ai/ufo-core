@@ -71,6 +71,11 @@ export const COMPOSE = "compose";
  *  has been picked yet, which is what tells it from every other home lane. */
 export const HOME_NEW_LANE = "new";
 
+/** The lane the connectors screen stands in, as the address spells it. The portal draws that screen
+ *  itself rather than an app holding it, so the lane names the screen; an app id is a uuid and
+ *  carries no such word, and the screen is one record, so it stands in one lane. */
+export const HOME_CONNECTORS_LANE = "connectors";
+
 /** What stands between an app and the instance of it a lane holds: an app opened twice is two lanes
  *  over one app, so the second lane names the app and the instance both. An app id is a uuid and
  *  carries none of this character, so a lane splits back into the parts it was minted from. */
@@ -103,10 +108,11 @@ export function homeLaneConversation(lane: string): string | null {
     : null;
 }
 
-/** The app a home lane stands, or nothing where the lane holds a conversation, or is the picker and
- *  stands none. */
+/** The app a home lane stands, or nothing where the lane holds a conversation, holds a screen the
+ *  portal draws itself, or is the picker and stands none. */
 export function homeLaneAgent(lane: string): string | null {
-  if (lane === HOME_NEW_LANE || lane.startsWith(HOME_LANE_CONVERSATION)) return null;
+  if (lane === HOME_NEW_LANE || lane === HOME_CONNECTORS_LANE) return null;
+  if (lane.startsWith(HOME_LANE_CONVERSATION)) return null;
   const [agentId] = lane.split(HOME_LANE_INSTANCE);
   return agentId;
 }
