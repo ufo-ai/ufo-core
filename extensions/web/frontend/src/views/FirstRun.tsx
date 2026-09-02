@@ -3,12 +3,8 @@ import {
   IconChevronLeft,
   IconLoader2,
   IconMail,
-  IconRepeat,
   IconSparkles,
   IconSquareRoundedCheckFilled,
-  IconTarget,
-  IconTerminal2,
-  IconTrendingUp,
   IconX,
 } from "@tabler/icons-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -16,10 +12,10 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
-import { ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
+import { ToggleGroup, ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Notice, Panel, PanelSkeleton, usePanelRead } from "@/kernel/panel";
-import mark from "@brand/ufo-mark.svg";
+import { Frame, Head } from "@/views/Frame";
 import { AgentIcon } from "@/lib/agentIcon";
 import { getJson, postAction, postObjectAction, type ObjectAction } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
@@ -69,7 +65,7 @@ const CONFIRM_WEBSITE_ACTION = "confirm_website";
 const BUSINESS_STEP = "business";
 const WEBSITE_STEP = "website";
 const POSITION_STEP = "position";
-const DETAILS_STEP = "details";
+const GOALS_STEP = "goals";
 const SLACK_STEP = "slack";
 
 const ROLES = [
@@ -169,14 +165,18 @@ function describes(profile: Profile): string {
  *  it and finishes the setup in chat, so the member never meets an empty dashboard. */
 const FIRST_TASK = "Set up my first task: a daily competitive analysis.";
 
-/** What the member wrote about their business, the role they picked, and whatever more they
- *  shared, as the sentence the chat opens on: the agent hears who it works for before its first
- *  turn rather than asking. */
-function opening(business: string, role: string, details: string): string {
+/** What the member wrote about their business and the role they picked, as the sentence the chat
+ *  opens on: the agent hears who it works for before its first turn rather than asking. */
+function opening(business: string, role: string): string {
   const said = (text: string) => text.trim().replace(/[.!?]+$/, "");
-  const about = "I just set up this workspace. My business: " + said(business) + ". My role: " + role + ".";
-  const told = details.trim() ? about + " " + said(details) + "." : about;
-  return told + " " + FIRST_TASK;
+  return (
+    "I just set up this workspace. My business: " +
+    said(business) +
+    ". My role: " +
+    role +
+    ". " +
+    FIRST_TASK
+  );
 }
 
 /** The connector catalog and the workspace's installs — the read behind both selectors. The first
@@ -203,21 +203,22 @@ export const CONNECT_INSTALLS: Record<string, ObjectAction> = {
   github: { kind: "credential", name: "github-app-installation", action: "connect_github" },
 };
 
-/** The goals a member most often starts with, picked rather than typed: each pick is written to
- *  memory and opens a thread of its own, so the run hands back one conversation per goal beside the
- *  first task.
+/** What is top of mind for a member as they start, picked from a grid rather than typed: each pick
+ *  is written to memory and opens a thread of its own, so the run hands back one conversation per
+ *  pick beside the first task. A member whose concern is not on the grid names it under `Other`.
  *
- *  `said` is the goal in the member's own words, which is what memory records. `asks` is the rest
+ *  `said` is the pick in the member's own words, which is what memory records. `asks` is the rest
  *  of the sentence that thread opens on — the first step to take, and the trap to avoid taking it
- *  into. It is stated here rather than held in a skill because the run already knows which goal
- *  was picked: routing a description the wizard could name outright buys a round trip and a class
+ *  into. It is stated here rather than held in a skill because the run already knows which pick
+ *  was made: routing a description the wizard could name outright buys a round trip and a class
  *  of failure, and buys nothing else. Each one is written as the member's own ask, because the
  *  member is the speaker on that thread and reads it as theirs. */
-const GOALS = [
+type Goal = { label: string; said: string; asks: string };
+
+const GOALS: Goal[] = [
   {
-    label: "More revenue",
-    said: "more revenue",
-    icon: IconTrendingUp,
+    label: "Growing revenue",
+    said: "growing revenue",
     asks:
       "Start by working out my funnel as it stands from whatever CRM, billing, analytics or " +
       "spreadsheet access I have granted: volume at each stage, conversion between them, and " +
@@ -226,9 +227,8 @@ const GOALS = [
       "me at most one thing.",
   },
   {
-    label: "Faster product dev",
-    said: "faster product development",
-    icon: IconTerminal2,
+    label: "Shipping product",
+    said: "shipping product",
     asks:
       "Start by measuring how long a change takes from opened to shipped, from whatever " +
       "repository and issue tracker I have granted, and name the stage that holds it longest. " +
@@ -236,9 +236,36 @@ const GOALS = [
       "cycle time you could not read — say what you could not read. Ask me at most one thing.",
   },
   {
-    label: "Automate ops",
-    said: "automating operations",
-    icon: IconRepeat,
+    label: "Understanding competitors",
+    said: "understanding competitors",
+    asks:
+      "Start by naming the competitors my business implies, from my website and whatever CRM, " +
+      "support or analytics access I have granted: what each one sells, to whom, and at what " +
+      "price. Say where we win and where we lose, in one line each. Do not invent a competitor " +
+      "or a price you could not read — say what you could not read. Ask me at most one thing.",
+  },
+  {
+    label: "Finding customers",
+    said: "finding customers",
+    asks:
+      "Start by describing the customers my business already has, from whatever CRM, billing or " +
+      "support access I have granted: who they are, how they found us, and what they bought. " +
+      "Name the one segment worth more of and where the next ones like them are reached. Do not " +
+      "invent a customer you could not read — say what you could not read. Ask me at most one " +
+      "thing.",
+  },
+  {
+    label: "Hiring",
+    said: "hiring",
+    asks:
+      "Start by listing the roles my business is hiring for, from whatever applicant tracking, " +
+      "calendar or email access I have granted, and where each one stands: open, interviewing, " +
+      "or offered. Name the one role holding the rest back. Contact no candidate and send " +
+      "nothing. Ask me at most one thing.",
+  },
+  {
+    label: "Improving operations",
+    said: "improving operations",
     asks:
       "Start by naming the recurring workflow that costs us the most time and mapping it as it " +
       "runs today: trigger, frequency, inputs, decisions, outputs, and owner. Split it into the " +
@@ -247,21 +274,38 @@ const GOALS = [
       "thing.",
   },
   {
-    label: "Find PMF",
-    said: "finding product-market fit",
-    icon: IconTarget,
+    label: "Fundraising",
+    said: "fundraising",
     asks:
-      "Start by stating the hypothesis my business implies — which user, which problem — and " +
-      "count the candidates I can already reach in whatever CRM, support or calendar access I " +
-      "have granted. Tell me the gap between what we claim and what has been tested. Send " +
-      "nothing and book nobody. Ask me at most one thing.",
+      "Start by working out my runway from whatever banking, billing or spreadsheet access I " +
+      "have granted: cash, monthly burn, and months left. List the investors already in my CRM " +
+      "or inbox and where each conversation stands. Do not guess a number I have not given you " +
+      "— say what you could not read. Send nothing. Ask me at most one thing.",
+  },
+  {
+    label: "User acquisition",
+    said: "user acquisition",
+    asks:
+      "Start by working out where my users come from, from whatever analytics, advertising or " +
+      "CRM access I have granted: volume, cost and conversion by channel. Name the one channel " +
+      "worth more spend and the one worth stopping, each with a metric. Do not guess a number I " +
+      "have not given you — say what you could not read. Ask me at most one thing.",
   },
 ];
+
+const OTHER_GOAL = "Other";
+
+/** The rest of the sentence an `Other` thread opens on: the run knows only the member's words for
+ *  it, so the first step is to read what is already in reach and say what is not. */
+const OTHER_ASKS =
+  "Start by saying what you can already read about it from whatever access I have granted, and " +
+  "the first step you would take. Do not guess what you could not read — say so. Ask me at most " +
+  "one thing.";
 
 /** The sentence one picked goal's thread opens on: who the member is, the goal in their words, and
  *  what taking the first step on it means. Nobody is reading this thread yet — the member is on the
  *  first task — so it asks for work done rather than for a plan. */
-function goalOpening(business: string, role: string, goal: (typeof GOALS)[number]): string {
+function goalOpening(business: string, role: string, goal: Goal): string {
   const said = (text: string) => text.trim().replace(/[.!?]+$/, "");
   return (
     "I just set up this workspace. My business: " +
@@ -307,83 +351,6 @@ const SLACK_POINTS = [
   "One install for the whole workspace.",
 ];
 
-/** The head of every screen on the run: the workspace mark, the progress wherever a step is being
- *  counted, and the screen's own acts. */
-function Head({ actions, at, steps }: { actions?: ReactNode; at?: number; steps?: number }) {
-  return (
-    <div className="grid h-8xl grid-cols-3 items-center px-7xl max-narrow:px-2xl">
-      <span
-        role="img"
-        aria-label="ufo"
-        className="block size-(--size-glyph) shrink-0 bg-current"
-        style={{ mask: `url(${mark}) center / contain no-repeat` }}
-      />
-      {at !== undefined && steps !== undefined ? (
-        <div
-          role="progressbar"
-          aria-label="Step"
-          aria-valuemin={1}
-          aria-valuemax={steps}
-          aria-valuenow={at + 1}
-          className="flex items-center gap-2xs justify-self-center"
-        >
-          {Array.from({ length: steps }, (_, index) => (
-            <span
-              key={index}
-              aria-hidden
-              className={cn(
-                "h-2xs rounded-full",
-                index === at ? "w-(--size-step-on) bg-ink" : "w-(--size-step-off) bg-edge",
-              )}
-            />
-          ))}
-        </div>
-      ) : null}
-      <div className="col-start-3 flex items-center justify-self-end gap-sm">{actions}</div>
-    </div>
-  );
-}
-
-/** The page a step is read on, with the workspace mark, progress, and the step's acts in its head.
- *  It has no navigation because an unset workspace has nowhere else to go, and offering
- *  destinations would pull the member away from finishing setup. The rest of the viewport centres
- *  the step's question and answer together, under whatever mark leads it. */
-function Frame({
-  title,
-  note,
-  lead,
-  actions,
-  at,
-  steps,
-  children,
-}: {
-  title?: ReactNode;
-  note?: ReactNode;
-  lead?: ReactNode;
-  actions?: ReactNode;
-  at?: number;
-  steps?: number;
-  children: ReactNode;
-}) {
-  return (
-    <main className="grid h-dvh grid-rows-[auto_1fr] overflow-y-auto">
-      <Head actions={actions} at={at} steps={steps} />
-      <div className="mx-auto flex min-h-0 w-full max-w-section flex-col items-center justify-center gap-6xl px-2xl py-6xl">
-        {title ? (
-          <div className="flex max-w-form flex-col items-center gap-2xl text-center">
-            {lead}
-            <div className="flex flex-col gap-sm">
-              <h1 className="m-0 text-subtitle font-medium text-ink">{title}</h1>
-              {note ? <p className="m-0 text-label text-ink-soft">{note}</p> : null}
-            </div>
-          </div>
-        ) : null}
-        {children}
-      </div>
-    </main>
-  );
-}
-
 /** The way out of the run: the chat, with nothing asked. */
 function Close({ onClick }: { onClick: () => void }) {
   return (
@@ -399,39 +366,60 @@ function Close({ onClick }: { onClick: () => void }) {
   );
 }
 
-/** The acts under a step: the way back, and the way on. */
-function Foot({
+/** The column a question and its answer stand in, read down from a left edge. */
+const STEP_COLUMN = "flex w-(--container-answer) max-w-full flex-col items-start gap-6xl";
+
+/** A question and its answer, read down one column, with the way back and the way on beneath. The
+ *  keys say Next too: Cmd+Enter or Ctrl+Enter anywhere on the screen moves on, so a member typing
+ *  an answer never reaches for the pointer, and a Next that is disabled or busy holds against the
+ *  keys the way it holds against a press. */
+function Step({
+  children,
   onBack,
   onNext,
   nextDisabled,
   busy,
 }: {
+  children: ReactNode;
   onBack: () => void;
   onNext: () => void;
   nextDisabled: boolean;
   busy?: boolean;
 }) {
+  useEffect(() => {
+    const submit = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+      if (nextDisabled || busy) return;
+      event.preventDefault();
+      onNext();
+    };
+    document.addEventListener("keydown", submit);
+    return () => document.removeEventListener("keydown", submit);
+  }, [onNext, nextDisabled, busy]);
   return (
-    <div className="flex items-center gap-2xl">
-      <Button
-        variant="quiet"
-        size="icon"
-        aria-label="Back"
-        className="size-10 bg-fill hover:bg-fill-strong"
-        onClick={onBack}
-      >
-        <IconChevronLeft stroke={1.5} aria-hidden />
-      </Button>
-      <Button
-        variant="send"
-        size="bar"
-        className="h-10 w-32"
-        disabled={nextDisabled}
-        busy={busy}
-        onClick={onNext}
-      >
-        Next
-      </Button>
+    <div className={STEP_COLUMN}>
+      {children}
+      <div className="flex items-center gap-2xl">
+        <Button
+          variant="quiet"
+          size="icon"
+          aria-label="Back"
+          className="size-10 bg-fill hover:bg-fill-strong"
+          onClick={onBack}
+        >
+          <IconChevronLeft stroke={1.5} aria-hidden />
+        </Button>
+        <Button
+          variant="send"
+          size="bar"
+          className="h-10 w-32"
+          disabled={nextDisabled}
+          busy={busy}
+          onClick={onNext}
+        >
+          Next
+        </Button>
+      </div>
     </div>
   );
 }
@@ -444,8 +432,20 @@ function Failed({ message, onToast }: { message: string; onToast: (title: string
   return null;
 }
 
-/** The column a question and its answer stand in, read down from a left edge. */
-const STEP_COLUMN = "flex w-(--container-dialog) max-w-full flex-col items-start gap-6xl";
+/** The grid the picks stand on: as many across as the column holds at one pick's width, so the
+ *  labels never wrap and a narrow window drops a column instead. */
+const CHOICES = "grid w-full grid-cols-[repeat(auto-fit,minmax(var(--container-choice),1fr))] gap-2xs";
+
+/** One option on a grid of picks: filled until it is on, then outlined in the accent with its
+ *  check drawn. The role step and the goals step share it, so a pick reads the same on both. */
+const CHOICE = cn(
+  "group flex h-10 items-center justify-between gap-sm rounded-(--radius-answer)",
+  "border border-transparent bg-fill px-2xl text-start text-label whitespace-nowrap text-ink",
+  "hover:bg-fill-strong",
+  "data-[state=on]:border-link data-[state=on]:bg-transparent data-[state=on]:text-link",
+  "data-[state=on]:hover:bg-transparent",
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
+);
 
 /** The filled card a written answer is typed into, holding the box and whatever stands under it. */
 const ANSWER_CARD = cn(
@@ -537,11 +537,6 @@ function Welcome({ onStart, onClose }: { onStart: () => void; onClose: () => voi
       </div>
     </main>
   );
-}
-
-/** One fact the run has learned about the member, set apart from the sentence around it. */
-function Fact({ children }: { children: ReactNode }) {
-  return <span className="text-link underline underline-offset-2">{children}</span>;
 }
 
 /** The screen the run ends on: the workspace filling with its shipped apps, one row at a time,
@@ -685,8 +680,8 @@ export function FirstRun({
   const [role, setRole] = useState<Role>(DEFAULT_ROLE);
   const [rolePicked, setRolePicked] = useState(false);
   const [otherRole, setOtherRole] = useState("");
-  const [details, setDetails] = useState("");
   const [goals, setGoals] = useState<string[]>([]);
+  const [otherGoal, setOtherGoal] = useState("");
   const [at, setAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -744,7 +739,7 @@ export function FirstRun({
             ...(confirm ? [WEBSITE_STEP] : []),
             BUSINESS_STEP,
             POSITION_STEP,
-            DETAILS_STEP,
+            GOALS_STEP,
             ...(slack ? [SLACK_STEP] : []),
           ];
           const step = revealed[at];
@@ -768,7 +763,13 @@ export function FirstRun({
             setBusy(true);
             const budget =
               write.input_schema.properties?.body?.maxLength ?? Number.POSITIVE_INFINITY;
-            const picked = GOALS.filter((goal) => goals.includes(goal.label));
+            const wrote = otherGoal.trim();
+            const picked: Goal[] = [
+              ...GOALS.filter((goal) => goals.includes(goal.label)),
+              ...(goals.includes(OTHER_GOAL)
+                ? [{ label: wrote, said: wrote.replace(/[.!?]+$/, ""), asks: OTHER_ASKS }]
+                : []),
+            ];
             const outcome = await postAction(agent.id, write.call, {
               body: firstRunRecorded(business, said, picked.map((goal) => goal.said), budget),
             });
@@ -783,7 +784,7 @@ export function FirstRun({
               const founded = await openConversation(speaks.id, goalOpening(business, said, goal));
               if (founded) opened.push(goal.label);
             }
-            onHandoff(opening(business, said, details));
+            onHandoff(opening(business, said));
             setThreads(opened);
             setBusy(false);
             setBuilding(true);
@@ -816,9 +817,7 @@ export function FirstRun({
             if (learned) setBusiness((held) => (held.trim() ? held : learned));
             advance();
           };
-          const article = (word: string) => (/^[aeiou]/i.test(word) ? "an" : "a");
           const company = profile?.status === "matched" ? profile.company_name : null;
-          const industry = profile?.status === "matched" ? profile.company_industry : null;
           return (
             <Frame
               title={
@@ -850,7 +849,7 @@ export function FirstRun({
               actions={<Close onClick={onClose} />}
             >
               {step === BUSINESS_STEP ? (
-                <div className={STEP_COLUMN}>
+                <Step onBack={back} onNext={advance} nextDisabled={!business.trim()}>
                   <h1 className="m-0 text-subtitle font-medium text-ink">
                     Tell us a bit about your business
                   </h1>
@@ -874,11 +873,10 @@ export function FirstRun({
                       {member.email}
                     </span>
                   </div>
-                  <Foot onBack={back} onNext={advance} nextDisabled={!business.trim()} />
-                </div>
+                </Step>
               ) : null}
               {step === WEBSITE_STEP ? (
-                <div className={STEP_COLUMN}>
+                <Step onBack={back} onNext={confirmWebsite} nextDisabled={false} busy={busy}>
                   <div className="flex flex-col gap-2xl">
                     <h1 className="m-0 text-subtitle font-medium text-ink">Confirm your website</h1>
                     <p className="m-0 text-label text-ink-soft">
@@ -909,11 +907,10 @@ export function FirstRun({
                       </Button>
                     ) : null}
                   </div>
-                  <Foot onBack={back} onNext={confirmWebsite} nextDisabled={false} busy={busy} />
-                </div>
+                </Step>
               ) : null}
               {step === POSITION_STEP ? (
-                <div className={STEP_COLUMN}>
+                <Step onBack={back} onNext={advance} nextDisabled={!said}>
                   <div className="flex flex-col gap-sm">
                     {company ? (
                       <p className="m-0 text-subtitle font-medium text-ink-quiet">{company}</p>
@@ -924,7 +921,7 @@ export function FirstRun({
                   </div>
                   <ToggleGroupOne
                     aria-label="Role"
-                    className="grid w-full grid-cols-3 gap-2xs max-narrow:grid-cols-2"
+                    className={CHOICES}
                     value={role}
                     onValueChange={(value) => {
                       if (!value) return;
@@ -937,15 +934,7 @@ export function FirstRun({
                         key={option}
                         value={option}
                         autoFocus={option === role}
-                        className={cn(
-                          "group flex h-10 items-center justify-between gap-sm rounded-(--radius-answer)",
-                          "border border-transparent bg-fill px-2xl text-start text-label text-ink",
-                          "hover:bg-fill-strong",
-                          "data-[state=on]:border-link data-[state=on]:bg-transparent data-[state=on]:text-link",
-                          "data-[state=on]:hover:bg-transparent",
-                          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
-                          option === OTHER_ROLE && "text-ink-quiet",
-                        )}
+                        className={cn(CHOICE, option === OTHER_ROLE && "text-ink-quiet")}
                       >
                         {option}
                         <IconCheck
@@ -966,75 +955,54 @@ export function FirstRun({
                       onChange={(event) => setOtherRole(event.target.value)}
                     />
                   ) : null}
-                  <Foot onBack={back} onNext={advance} nextDisabled={!said} />
-                </div>
+                </Step>
               ) : null}
-              {step === DETAILS_STEP ? (
-                <div className={STEP_COLUMN}>
-                  <div className="flex flex-col gap-2xl">
-                    <h1 className="m-0 text-subtitle font-medium text-ink">
-                      Share more details about your business
-                    </h1>
-                    {said ? (
-                      <p className="m-0 text-label font-medium tracking-(--tracking-ui) text-ink-quiet">
-                        You’re {article(said)} <Fact>{said}</Fact>
-                        {company ? (
-                          <>
-                            {" "}
-                            building <Fact>{company}</Fact>
-                            {industry ? (
-                              <>
-                                , {article(industry)} <Fact>{industry}</Fact> business
-                              </>
-                            ) : null}
-                          </>
-                        ) : (
-                          " building your business"
-                        )}
-                        .
-                      </p>
+              {step === GOALS_STEP ? (
+                <Step
+                  onBack={back}
+                  onNext={advance}
+                  nextDisabled={goals.includes(OTHER_GOAL) && !otherGoal.trim()}
+                >
+                  <div className="flex flex-col gap-sm">
+                    {company ? (
+                      <p className="m-0 text-subtitle font-medium text-ink-quiet">{company}</p>
                     ) : null}
+                    <h1 className="m-0 text-subtitle font-medium text-ink">
+                      What is top of mind right now?
+                    </h1>
                   </div>
-                  <div className={ANSWER_CARD}>
-                    <textarea
-                      rows={3}
-                      aria-label="What you want help with"
+                  <ToggleGroup
+                    aria-label="Top of mind"
+                    className={CHOICES}
+                    value={goals}
+                    onValueChange={setGoals}
+                  >
+                    {[...GOALS.map((goal) => goal.label), OTHER_GOAL].map((option) => (
+                      <ToggleGroupItem
+                        key={option}
+                        value={option}
+                        className={cn(CHOICE, option === OTHER_GOAL && "text-ink-quiet")}
+                      >
+                        {option}
+                        <IconCheck
+                          className="size-(--size-glyph) shrink-0 opacity-0 group-data-[state=on]:opacity-100"
+                          stroke={1.5}
+                          aria-hidden
+                        />
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
+                  {goals.includes(OTHER_GOAL) ? (
+                    <Input
+                      surface="answer"
+                      aria-label="What is top of mind"
                       autoFocus
-                      placeholder="What do you want help with? Finding customers, shipping faster, hiring, keeping the books…"
-                      value={details}
-                      onChange={(event) => setDetails(event.target.value)}
-                      className={ANSWER_BOX}
+                      placeholder="What is top of mind"
+                      value={otherGoal}
+                      onChange={(event) => setOtherGoal(event.target.value)}
                     />
-                    <p className="m-0 text-label font-medium tracking-(--tracking-ui) text-ink-quiet">
-                      Pick the goals you want work started on. Each one opens its own thread.
-                    </p>
-                    <div className="flex flex-wrap gap-2xs">
-                      {GOALS.map((goal) => {
-                        const picked = goals.includes(goal.label);
-                        return (
-                          <Button
-                            key={goal.label}
-                            variant={picked ? "send" : "outline"}
-                            size="bar"
-                            aria-pressed={picked}
-                            className="px-lg font-normal"
-                            onClick={() =>
-                              setGoals((held) =>
-                                held.includes(goal.label)
-                                  ? held.filter((name) => name !== goal.label)
-                                  : [...held, goal.label],
-                              )
-                            }
-                          >
-                            <goal.icon className="size-(--size-glyph)" stroke={1.5} aria-hidden />
-                            {goal.label}
-                          </Button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <Foot onBack={back} onNext={advance} nextDisabled={false} />
-                </div>
+                  ) : null}
+                </Step>
               ) : null}
               {installed ? (
                 <Button variant="send" size="bar" className="h-10 w-38" onClick={finish}>

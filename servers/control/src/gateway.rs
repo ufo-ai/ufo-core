@@ -25,8 +25,8 @@ use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
 use crate::web::{
     parse_directives, ASSET_CACHE, ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_BYTES,
-    LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, SHARE_HOME_BYTES,
-    SHARE_HOME_PATH, SHARE_SITE_BYTES, SHARE_SITE_PATH, WEB_CHANNEL,
+    LOGO_PATH, LOGO_PNG_BYTES, LOGO_PNG_PATH, MARK_BYTES, MARK_PATH, ONBOARD_SESSION_COOKIE,
+    SHARE_HOME_BYTES, SHARE_HOME_PATH, SHARE_SITE_BYTES, SHARE_SITE_PATH, WEB_CHANNEL,
 };
 use crate::workos::{
     console_signin_page, constant_time_eq, is_uuid_shaped, open_session, pack_state, seal_session,
@@ -528,6 +528,7 @@ pub fn router(state: GatewayState) -> Router {
         .route(LOGIN_PATH, get(login))
         .route(LOGOUT_PATH, get(logout))
         .route(LOGO_PATH, get(logo))
+        .route(MARK_PATH, get(mark))
         .route(LOGO_PNG_PATH, get(logo_png))
         .route(ILLUSTRATION_PATH, get(illustration))
         .route(SHARE_HOME_PATH, get(share_home))
@@ -723,6 +724,18 @@ async fn logo() -> Response {
             (header::CACHE_CONTROL, ASSET_CACHE),
         ],
         LOGO_BYTES,
+    )
+        .into_response()
+}
+
+/// The mark alone, which the sign-in page leads with.
+async fn mark() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, ASSET_CACHE),
+        ],
+        MARK_BYTES,
     )
         .into_response()
 }

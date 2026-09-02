@@ -17,7 +17,6 @@ import {
   json,
   MEMBER,
   type Route,
-  saying,
   TURN_ID,
   useStreamFake,
   wire,
@@ -50,22 +49,51 @@ const SLACK_POINTS = [
   "One install for the whole workspace.",
 ];
 
-/** The two goal threads the picks below found, as the run says them. Each one carries the goal's
- *  own instructions: no skill routes on these words, so the words are the whole brief. */
+/** The nine goals the third step offers, in the order it offers them and the order their threads
+ *  open in. */
+const GOALS = [
+  "Growing revenue",
+  "Shipping product",
+  "Understanding competitors",
+  "Finding customers",
+  "Hiring",
+  "Improving operations",
+  "Fundraising",
+  "User acquisition",
+  "Other",
+];
+
+/** The goal threads the picks below found, as the run says them. Each one carries the goal's own
+ *  instructions: no skill routes on these words, so the words are the whole brief. */
 const REVENUE_THREAD =
-  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: more " +
+  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: growing " +
   "revenue. Start by working out my funnel as it stands from whatever CRM, billing, analytics or " +
   "spreadsheet access I have granted: volume at each stage, conversion between them, and average " +
   "deal size. Name the single stage losing the most, and one experiment on it with a metric. Do " +
   "not guess a number I have not given you — say what you could not read. Ask me at most one " +
   "thing.";
 
-const PMF_THREAD =
-  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: finding " +
-  "product-market fit. Start by stating the hypothesis my business implies — which user, which " +
-  "problem — and count the candidates I can already reach in whatever CRM, support or calendar " +
-  "access I have granted. Tell me the gap between what we claim and what has been tested. Send " +
-  "nothing and book nobody. Ask me at most one thing.";
+const COMPETITORS_THREAD =
+  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: " +
+  "understanding competitors. Start by naming the competitors my business implies, from my " +
+  "website and whatever CRM, support or analytics access I have granted: what each one sells, to " +
+  "whom, and at what price. Say where we win and where we lose, in one line each. Do not invent " +
+  "a competitor or a price you could not read — say what you could not read. Ask me at most one " +
+  "thing.";
+
+const HIRING_THREAD =
+  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: hiring. " +
+  "Start by listing the roles my business is hiring for, from whatever applicant tracking, " +
+  "calendar or email access I have granted, and where each one stands: open, interviewing, or " +
+  "offered. Name the one role holding the rest back. Contact no candidate and send nothing. Ask " +
+  "me at most one thing.";
+
+/** Other's thread, in the words the member typed for it. */
+const OTHER_THREAD =
+  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: " +
+  "Launching in Japan. Start by saying what you can already read about it from whatever access I " +
+  "have granted, and the first step you would take. Do not guess what you could not read — say " +
+  "so. Ask me at most one thing.";
 
 /** The three answers as the defaults below write them, said into the chat the run opens. */
 const OPENING =
@@ -335,11 +363,12 @@ async function pickRole(role = "Founder") {
   await userEvent.click(next());
 }
 
-/** Answers, or passes, the third question and moves on. Every named goal is picked on the way. */
-async function shareDetails(details = "", goals: string[] = []) {
-  const more = await screen.findByLabelText("What you want help with");
-  if (details) await userEvent.type(more, details);
+/** Answers, or passes, the third question and moves on. Every named goal is picked on the way, and
+ *  Other's words are typed where they are given. */
+async function pickGoals(goals: string[] = [], other = "") {
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
   for (const goal of goals) await userEvent.click(screen.getByRole("button", { name: goal }));
+  if (other) await userEvent.type(screen.getByLabelText("What is top of mind"), other);
   await userEvent.click(next());
 }
 
@@ -347,7 +376,7 @@ async function shareDetails(details = "", goals: string[] = []) {
 async function answer() {
   await describeBusiness();
   await pickRole();
-  await shareDetails();
+  await pickGoals();
 }
 
 /** The member coming back from the provider's install page: the tab they left is looked at again,
@@ -441,11 +470,11 @@ test("the head counts four steps with Slack, advancing one per answer under a Cl
   expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
 
   await pickRole();
-  await screen.findByRole("heading", { name: "Share more details about your business" });
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
   expect(counted()).toEqual(["3", "4"]);
   expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
 
-  await shareDetails();
+  await pickGoals();
   await screen.findByRole("heading", { name: "Connect your messaging app" });
   expect(counted()).toEqual(["4", "4"]);
   expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
@@ -460,12 +489,31 @@ test("a deploy without Slack counts three steps, and the third's Next finishes t
 
   await describeBusiness();
   await pickRole();
-  await screen.findByRole("heading", { name: "Share more details about your business" });
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
   expect(counted()).toEqual(["3", "3"]);
   await userEvent.click(next());
 
   await built();
   expect(screen.queryByRole("heading", { name: "Connect your messaging app" })).toBeNull();
+});
+
+test("Cmd+Enter is Next on every question, and holds where Next is disabled", async () => {
+  await open();
+
+  const about = await screen.findByLabelText("About your business");
+  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+  expect(screen.queryByRole("heading", { name: "What is your role at the business?" })).toBeNull();
+
+  await userEvent.type(about, "Design studio");
+  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+  await screen.findByRole("heading", { name: "What is your role at the business?" });
+
+  await userEvent.keyboard("{Control>}{Enter}{/Control}");
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+
+  await userEvent.click(screen.getByRole("button", { name: "Other" }));
+  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+  expect(screen.getByRole("heading", { name: "What is top of mind right now?" })).toBeTruthy();
 });
 
 test("the first step gates Next on the business and names who is answering", async () => {
@@ -509,33 +557,34 @@ test("the role step offers the twelve roles, checks Founder until told otherwise
   expect(next().disabled).toBe(false);
 });
 
-test("the details step states the role picked, in the member's own words for Other", async () => {
+test("the top-of-mind step offers the nine goals with none pressed, and Other asks for words", async () => {
   await open();
   await describeBusiness();
-  await pickRole("Engineer");
+  await pickRole();
 
-  await screen.findByRole("heading", { name: "Share more details about your business" });
-  expect(screen.getByText(saying("You’re an Engineer building your business."))).toBeTruthy();
-  expect((screen.getByLabelText("What you want help with") as HTMLTextAreaElement).value).toBe("");
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  const goals = within(screen.getByRole("group", { name: "Top of mind" })).getAllByRole("button");
+  expect(goals.map((goal) => goal.textContent)).toEqual(GOALS);
+  expect(goals.map((goal) => goal.getAttribute("aria-pressed"))).toEqual(GOALS.map(() => "false"));
   expect(next().disabled).toBe(false);
+  expect(screen.queryByLabelText("What is top of mind")).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  await userEvent.click(await screen.findByRole("radio", { name: "Other" }));
-  await userEvent.type(screen.getByLabelText("Your role"), "Barista");
-  await userEvent.click(next());
-
-  await screen.findByRole("heading", { name: "Share more details about your business" });
-  expect(screen.getByText(saying("You’re a Barista building your business."))).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Other" }));
+  const own = screen.getByLabelText("What is top of mind");
+  expect(document.activeElement).toBe(own);
+  expect(next().disabled).toBe(true);
+  await userEvent.type(own, "  ");
+  expect(next().disabled).toBe(true);
+  await userEvent.type(own, "Launching in Japan");
+  expect(next().disabled).toBe(false);
 });
 
 test("back walks the answers without losing one", async () => {
   await open();
   await describeBusiness();
   await pickRole("Engineer");
-  await userEvent.type(
-    await screen.findByLabelText("What you want help with"),
-    "Two founders, one product",
-  );
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  await userEvent.click(screen.getByRole("button", { name: "Hiring" }));
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect((await screen.findByRole("radio", { checked: true })).textContent).toBe("Engineer");
@@ -558,10 +607,8 @@ test("back walks the answers without losing one", async () => {
   await screen.findByRole("radiogroup", { name: "Role" });
   await userEvent.click(next());
 
-  expect(
-    ((await screen.findByLabelText("What you want help with")) as HTMLTextAreaElement).value,
-  ).toBe("Two founders, one product");
-  expect(screen.getByText(saying("You’re an Engineer building your business."))).toBeTruthy();
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  expect(screen.getByRole("button", { name: "Hiring" }).getAttribute("aria-pressed")).toBe("true");
 });
 
 test("the Slack step states what installing does and offers the admin the act", async () => {
@@ -736,11 +783,11 @@ test("I use something different finishes the run with the answers written, as on
 
   await describeBusiness("A two-person design studio.");
   await pickRole();
-  await shareDetails("We build brand systems for startups!");
+  await pickGoals();
   await userEvent.click(await screen.findByRole("button", { name: "I use something different" }));
 
   await built(
-    "I just set up this workspace. My business: A two-person design studio. My role: Founder. We build brand systems for startups. Set up my first task: a daily competitive analysis.",
+    "I just set up this workspace. My business: A two-person design studio. My role: Founder. Set up my first task: a daily competitive analysis.",
   );
   expect(intents(posted.calls)).toEqual([
     {
@@ -862,7 +909,7 @@ test("a matched website writes the business box, and the member's own words hold
   expect(about.value).toBe("A two-person design studio");
 });
 
-test("confirming posts the website, pre-selects Founder, and the details step names the company and industry", async () => {
+test("confirming posts the website, pre-selects Founder, and the top-of-mind step names the company", async () => {
   const posted = recorder();
   await open({ ...lanes(posted), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
 
@@ -878,41 +925,8 @@ test("confirming posts the website, pre-selects Founder, and the details step na
   ]);
   await userEvent.click(next());
 
-  const details = await screen.findByRole("heading", { name: "Share more details about your business" });
-  expect(details.parentElement!.querySelector("p")!.textContent).toBe(
-    "You’re a Founder building Simplecasual, a Design Consulting business.",
-  );
-});
-
-const VOWEL_ROW = { ...PROFILE_ROW, company_industry: "internet" };
-
-test("confirming posts the website, pre-selects Founder, and the details step names the company and industry, with the article the industry takes", async () => {
-  const posted = recorder();
-  await open(
-    {
-      ...lanes(posted),
-      "/objects/enrichment_profile": () => json({ objects: [VOWEL_ROW], next_cursor: null }),
-    },
-    ADMIN,
-    WITH_WEBSITE,
-  );
-
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
-  await describeBusiness();
-
-  const founder = await screen.findByRole("radio", { name: "Founder" });
-  expect(founder.getAttribute("aria-checked")).toBe("true");
-  expect(next().disabled).toBe(false);
-  expect(intents(posted.calls)).toEqual([
-    { lane: "actions/enrichment_profile/confirm_website", body: { website: "example.com" } },
-  ]);
-  await userEvent.click(next());
-
-  const details = await screen.findByRole("heading", { name: "Share more details about your business" });
-  expect(details.parentElement!.querySelector("p")!.textContent).toBe(
-    "You’re a Founder building Simplecasual, an internet business.",
-  );
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  expect(screen.getByText("Simplecasual")).toBeTruthy();
 });
 
 test("a refused confirmation is stated as a toast and holds the website step", async () => {
@@ -936,40 +950,52 @@ test("each question opens with its own input focused", async () => {
   await describeBusiness();
   expect(document.activeElement).toBe(await screen.findByRole("radio", { name: "Founder" }));
   await userEvent.click(next());
-  expect(document.activeElement).toBe(await screen.findByLabelText("What you want help with"));
+  await userEvent.click(await screen.findByRole("button", { name: "Other" }));
+  expect(document.activeElement).toBe(screen.getByLabelText("What is top of mind"));
 });
 
-test("a goal is picked and unpicked, and picking one leaves the words the member typed alone", async () => {
+test("a goal is picked and unpicked", async () => {
   await open();
   await describeBusiness();
   await pickRole();
 
-  const help = await screen.findByLabelText("What you want help with");
-  await userEvent.type(help, "We sell to dentists.");
-  const revenue = screen.getByRole("button", { name: "More revenue" });
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  const revenue = screen.getByRole("button", { name: "Growing revenue" });
   expect(revenue.getAttribute("aria-pressed")).toBe("false");
   await userEvent.click(revenue);
   expect(revenue.getAttribute("aria-pressed")).toBe("true");
   await userEvent.click(revenue);
   expect(revenue.getAttribute("aria-pressed")).toBe("false");
-  expect((help as HTMLTextAreaElement).value).toBe("We sell to dentists.");
 });
 
 test("the run writes the business, the role and the goals to memory before it hands over", async () => {
   await open({}, ADMIN, NO_SLACK);
   await describeBusiness();
   await pickRole();
-  await shareDetails("", ["More revenue", "Find PMF"]);
+  await pickGoals(["Growing revenue", "Fundraising"]);
   await built();
 
   expect(intents(acts.calls)).toEqual([
     {
       lane: "actions/memory/record_first_run",
-      body: {
-        body:
-          "Design studio. Their role: Founder. " +
-          "Their goals: more revenue, finding product-market fit.",
-      },
+      body: { body: "Design studio. Their role: Founder. Their goals: growing revenue, fundraising." },
+    },
+  ]);
+});
+
+test("Other's words are written to memory as the member typed them, and open a thread of their own", async () => {
+  await open({}, ADMIN, NO_SLACK);
+  await describeBusiness();
+  await pickRole();
+  await pickGoals(["Hiring", "Other"], "Launching in Japan.");
+
+  await screen.findByRole("heading", { name: "Creating your business’s workspace" });
+  expect(chat.sent).toEqual([HIRING_THREAD, OTHER_THREAD]);
+  await built();
+  expect(intents(acts.calls)).toEqual([
+    {
+      lane: "actions/memory/record_first_run",
+      body: { body: "Design studio. Their role: Founder. Their goals: hiring, Launching in Japan." },
     },
   ]);
 });
@@ -988,10 +1014,10 @@ test("each picked goal opens a thread of its own, before the workspace screen", 
   await open({}, ADMIN, NO_SLACK);
   await describeBusiness();
   await pickRole();
-  await shareDetails("", ["More revenue", "Find PMF"]);
+  await pickGoals(["Growing revenue", "Understanding competitors"]);
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  expect(chat.sent).toEqual([REVENUE_THREAD, PMF_THREAD]);
+  expect(chat.sent).toEqual([REVENUE_THREAD, COMPETITORS_THREAD]);
   for (const url of chat.posted) {
     expect(url).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
   }
@@ -1005,11 +1031,11 @@ test("the workspace screen names the goals it opened a thread on", async () => {
   await open({}, ADMIN, NO_SLACK);
   await describeBusiness();
   await pickRole();
-  await shareDetails("", ["More revenue"]);
+  await pickGoals(["Growing revenue"]);
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await screen.findByText("Started work on your goals", {}, { timeout: BUILD_STEP_MS * 6 });
-  expect(screen.getByText("More revenue")).toBeTruthy();
+  expect(screen.getByText("Growing revenue")).toBeTruthy();
 });
 
 test("a refused memory write holds the last step and states the refusal", async () => {

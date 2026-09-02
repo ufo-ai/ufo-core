@@ -7,11 +7,14 @@ import { cn } from "@/lib/cn";
  *  one array rather than a flag per option, so the caller reads `value` and writes it back through
  *  `onValueChange`, and `disabled` on the group settles every option inside it at once. The group
  *  lays nothing out: the caller's `className` is the grid the options fill, and the options are its
- *  direct children, because the roving focus the group carries walks its own children. */
+ *  direct children, because the roving focus the group carries walks its own children. Radix would
+ *  read it out as a toolbar; a set of answers is a group, so the assistive layer hears one. */
 export function ToggleGroup({
   ...props
 }: Omit<ToggleGroupPrimitive.ToggleGroupMultipleProps, "type">) {
-  return <ToggleGroupPrimitive.Root data-slot="toggle-group" type="multiple" {...props} />;
+  return (
+    <ToggleGroupPrimitive.Root data-slot="toggle-group" type="multiple" role="group" {...props} />
+  );
 }
 
 /** The options a member picks exactly one of — a view switch rather than a set of independent

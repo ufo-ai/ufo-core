@@ -1014,18 +1014,24 @@ def _drawn_mark_failures() -> list[str]:
     stylesheet carries is what cuts the counters in the letters. Nothing about a rendered glyph
     fails a size assertion, so the bytes are compared — which is also what keeps the copies from
     drifting apart as the brand changes."""
-    portal = Path("extensions/web/frontend/src/assets/ufo-logo.svg")
-    if not portal.exists():
-        return [f"mark: {portal} is missing — every served copy is taken from it"]
-    drawn = portal.read_bytes()
-    return [
-        f"mark: {copy} is not {portal} byte for byte — a logo is copied, never rewritten"
-        for copy in (
+    copies = {
+        Path("extensions/web/frontend/src/assets/ufo-logo.svg"): (
             Path("servers/control/src/assets/ufo-logo.svg"),
             Path("core/src/ufo/runtime/surfaces/assets/ufo-logo.svg"),
+        ),
+        Path("assets/brand/ufo-mark.svg"): (Path("servers/control/src/assets/ufo-mark.svg"),),
+    }
+    failures: list[str] = []
+    for drawn, served in copies.items():
+        if not drawn.exists():
+            failures.append(f"mark: {drawn} is missing — every served copy is taken from it")
+            continue
+        failures.extend(
+            f"mark: {copy} is not {drawn} byte for byte — a logo is copied, never rewritten"
+            for copy in served
+            if not copy.exists() or copy.read_bytes() != drawn.read_bytes()
         )
-        if not copy.exists() or copy.read_bytes() != drawn
-    ]
+    return failures
 
 
 def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:

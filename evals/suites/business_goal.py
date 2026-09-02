@@ -65,7 +65,7 @@ GOALS = (
             "SaaS teams"
         ),
         role="Founder",
-        said="more revenue",
+        said="growing revenue",
         asks=(
             "Start by working out my funnel as it stands from whatever CRM, billing, analytics or "
             "spreadsheet access I have granted: volume at each stage, conversion between them, "
@@ -87,7 +87,7 @@ GOALS = (
         name="faster-product-development",
         business="Hookdeck, a B2B web product two engineers ship twice a week",
         role="Engineer",
-        said="faster product development",
+        said="shipping product",
         asks=(
             "Start by measuring how long a change takes from opened to shipped, from whatever "
             "repository and issue tracker I have granted, and name the stage that holds it "
@@ -108,7 +108,7 @@ GOALS = (
         name="automate-operations",
         business="Northsale, a 12-person agency that onboards signed customers by hand",
         role="Operations",
-        said="automating operations",
+        said="improving operations",
         asks=(
             "Start by naming the recurring workflow that costs us the most time and mapping it as "
             "it runs today: trigger, frequency, inputs, decisions, outputs, and owner. Split it "
@@ -127,25 +127,27 @@ GOALS = (
         ),
     ),
     GoalCase(
-        name="find-product-market-fit",
+        name="find-customers",
         business=(
             "Ticketlens, a ticket-theme analyser sold to support leaders at 50-to-200-person SaaS "
             "companies"
         ),
         role="Founder",
-        said="finding product-market fit",
+        said="finding customers",
         asks=(
-            "Start by stating the hypothesis my business implies — which user, which problem — "
-            "and count the candidates I can already reach in whatever CRM, support or calendar "
-            "access I have granted. Tell me the gap between what we claim and what has been "
-            "tested. Send nothing and book nobody. Ask me at most one thing."
+            "Start by describing the customers my business already has, from whatever CRM, "
+            "billing or support access I have granted: who they are, how they found us, and what "
+            "they bought. Name the one segment worth more of and where the next ones like them "
+            "are reached. Do not invent a customer you could not read — say what you could not "
+            "read. Ask me at most one thing."
         ),
         rubric=(
-            "The reply states the hypothesis the business implies — which user, which problem.",
-            "The reply states the evidence gap: what is claimed and what has never been tested.",
-            "The reply counts reachable candidates, or states that no access to count them was "
+            "The reply describes the customers the workspace can read — who they are, how they "
+            "found us, what they bought — or states plainly that no access to read them was "
             "granted.",
-            "The reply sends no outreach and books no meeting.",
+            "The reply names one segment worth more of, rather than listing every segment.",
+            "The reply names where the next customers like that segment are reached.",
+            "The reply invents no customer, channel, or purchase figure that no read returned.",
         ),
     ),
 )

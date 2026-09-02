@@ -670,14 +670,14 @@ CLAIMS = (
     ),
     Claim(
         claim="the first-run setup confirms the website, then asks the business, the role, and"
-        " what they want help with, in that order",
+        " what is top of mind, in that order",
         corpus="references/getting-started.md",
         phrase="a short setup confirms their website, then asks about their business, their"
-        " role,\nand what they want help with",
+        " role,\nand what is top of mind",
         source=FIRST_RUN_VIEW,
         pattern=(
             r"\.\.\.\(confirm \? \[WEBSITE_STEP\] : \[\]\),\n\s+BUSINESS_STEP,\n"
-            r"\s+POSITION_STEP,\n\s+DETAILS_STEP,"
+            r"\s+POSITION_STEP,\n\s+GOALS_STEP,"
         ),
     ),
     Claim(

@@ -4,7 +4,7 @@ suites = ["business_goal"]
 cases = [
   "business-goal-more-revenue",
   "business-goal-faster-product-development",
-  "business-goal-find-product-market-fit",
+  "business-goal-find-customers",
 ]
 repeats = 3
 concurrency = 2

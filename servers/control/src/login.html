@@ -11,54 +11,53 @@
     --fill: light-dark(#F4F3F2, #262929);
     --edge: light-dark(#EBEAE9, #323535);
     --ink: light-dark(#191A1A, #F5F5F5);
-    --ink-soft: light-dark(#919090, #A7A9A9);
+    --ink-soft: light-dark(#676767, #A7A9A9);
     --danger: #c33636;
-    --radius: 4px;
+    --radius-answer: 16px;
+    --radius-panel: 16px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100svh; display: grid; grid-template-columns: 1fr;
+  /* The page the first run is read on: a head the mark leads, and the rest of the viewport centring
+     what the member came for. Every measure here is the run's own — the head's height and inset,
+     the answer radius, the pill, the panel — so the door and the rooms behind it read as one. */
+  body { margin: 0; min-height: 100svh; display: grid; grid-template-rows: 64px 1fr;
          background: var(--surface); color: var(--ink);
-         font: 15px/1.5 system-ui, sans-serif; }
-  /* The illustration takes half the page and the form the other half. A half of a landscape screen
-     is close enough to square that the square artwork fills it off its own centre. It is the
-     panel's background rather than an element, so the narrow page that draws no panel never asks
-     for the file: a rule under a media query that does not match fetches nothing. */
-  #art { display: none; }
-  #form-side { display: flex; align-items: center; justify-content: center;
-               padding: 24px 16px; }
-  main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 60px; }
-  header { display: flex; justify-content: center; }
-  header img { display: block; width: 72px; height: 18px; }
+         font: 13px/1.5 system-ui, sans-serif; }
+  header { display: flex; align-items: center; padding: 0 40px; }
+  header img { display: block; width: 16px; height: 16px; }
   @media (prefers-color-scheme: dark) { header img { filter: invert(1); } }
+  #page { display: flex; align-items: center; justify-content: center; gap: 32px; min-height: 0;
+          padding: 22px 16px; }
+  #form-side { flex: 1 1 0; min-width: 0; display: flex; align-items: center;
+               justify-content: center; }
+  main { width: min(440px, 100%); display: flex; flex-direction: column; gap: 32px; }
+  /* The illustration takes the left half, the form the right, as the welcome does, rounded and inset
+     from the viewport. It is the panel's background rather than an element, so the narrow page that
+     draws no panel never asks for the file: a rule under a media query that does not match fetches
+     nothing. */
+  #art { display: none; }
   #board { display: flex; flex-direction: column; gap: 16px; }
-  .head { display: flex; flex-direction: column; gap: 6px; font-size: 14px;
-          color: var(--ink-soft); }
-  #prompt-say strong { font-weight: 600; color: var(--ink); }
-  #board h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1; color: var(--ink); }
-  #log { display: flex; flex-direction: column; gap: 4px; font-size: 14px;
-         color: var(--ink-soft); }
+  .head { display: flex; flex-direction: column; gap: 8px; color: var(--ink-soft); }
+  #prompt-say strong { font-weight: 500; color: var(--ink); }
+  #board h1 { margin: 0; font-size: 16px; font-weight: 500; line-height: 1.25; color: var(--ink); }
+  #log { display: flex; flex-direction: column; gap: 4px; color: var(--ink-soft); }
   #log:empty { display: none; }
   #log div { white-space: pre-wrap; word-wrap: break-word; }
   .error { color: var(--danger); }
   #alert { display: none; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-           border-radius: var(--radius); padding: 12px 16px; font-size: 14px;
-           color: var(--danger); }
+           border-radius: var(--radius-answer); padding: 12px 16px; color: var(--danger); }
   #prompt-row { display: none; }
   #prompt-say:empty { display: none; }
   .field { display: flex; flex-direction: column; gap: 8px; }
   #box { position: relative; }
   #slots { display: none; }
-  .otp #slots { display: flex; }
+  .otp #slots { display: flex; gap: 4px; }
   .otp .slot { position: relative; display: flex; flex: 1; align-items: center;
-               justify-content: center; height: 44px; font-size: 16px;
+               justify-content: center; height: 40px; font-size: 16px;
                background: var(--fill); color: var(--ink);
-               border: 1px solid var(--edge); border-left-width: 0;
-               transition: border-color 0.1s, box-shadow 0.1s; }
-  .otp .slot:first-child { border-left-width: 1px;
-                           border-radius: var(--radius) 0 0 var(--radius); }
-  .otp .slot:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
-  .otp .slot.active { z-index: 1; border-color: var(--ink);
-                      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 20%, transparent); }
+               border: 1px solid transparent; border-radius: var(--radius-answer);
+               transition: border-color 0.1s, background-color 0.1s; }
+  .otp .slot.active { z-index: 1; border-color: var(--ink); }
   .otp .slot.active.empty::after { content: ""; position: absolute; width: 1px; height: 16px;
                                    background: var(--ink);
                                    animation: caret 1s steps(1) infinite; }
@@ -66,42 +65,42 @@
   .otp #answer { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0;
                  border: 0; background: transparent; color: transparent;
                  caret-color: transparent; }
-  .otp #answer:hover { border: 0; }
+  .otp #answer:hover { border: 0; background: transparent; }
   .otp #answer:focus-visible { outline: none; }
   @media (prefers-reduced-motion: reduce) { .otp .slot.active.empty::after { animation: none; } }
-  #prompt-label { font-size: 14px; font-weight: 600; color: var(--ink); }
-  input, select { width: 100%; padding: 10px 12px; border-radius: var(--radius);
-                  background: var(--fill); color: var(--ink); font: inherit; font-size: 16px;
-                  border: 1px solid var(--edge); }
-  input:hover, select:hover { border-color: var(--ink-soft); }
+  #prompt-label { font-weight: 500; color: var(--ink); }
+  input, select { width: 100%; height: 40px; padding: 0 16px; border-radius: var(--radius-answer);
+                  background: var(--fill); color: var(--ink); font: inherit;
+                  border: 1px solid transparent; }
+  input:hover, select:hover { background: var(--edge); }
   input:focus-visible, select:focus-visible, button:focus-visible, a.button:focus-visible {
     outline: 2px solid var(--ink); outline-offset: 2px; }
-  button, a.button { display: block; width: 100%; padding: 10px 18px; border-radius: var(--radius);
+  button, a.button { display: flex; align-items: center; justify-content: center; width: 100%;
+                     height: 40px; padding: 0 16px; border-radius: 9999px;
                      border: 1px solid transparent; background: var(--ink); color: var(--surface);
-                     font: inherit; font-weight: 500; text-align: center; text-decoration: none;
-                     cursor: pointer; transition: opacity 0.1s, background-color 0.1s; }
+                     font: inherit; font-weight: 500; text-decoration: none; cursor: pointer;
+                     transition: opacity 0.1s, background-color 0.1s; }
   button:hover, a.button:hover { opacity: 0.7; }
   button:disabled { opacity: 0.4; cursor: default; }
-  a.button.secondary, button.secondary { background: transparent; color: var(--ink);
-                                         border-color: var(--edge); }
-  a.button.secondary:hover, button.secondary:hover { opacity: 1; background: var(--fill); }
+  a.button.secondary, button.secondary { background: var(--fill); color: var(--ink); }
+  a.button.secondary:hover, button.secondary:hover { opacity: 1; background: var(--edge); }
   #go { margin-top: 16px; }
   #google { display: none; }
-  #google svg { width: 16px; height: 16px; vertical-align: -3px; margin-right: 8px; }
-  @media (min-width: 768px) { #form-side { padding: 40px; } }
+  #google svg { width: 16px; height: 16px; margin-right: 8px; }
   @media (min-width: 900px) {
-    body { grid-template-columns: 1fr 1fr; }
-    #art { display: block;
+    #page { padding: 22px 0 22px 22px; }
+    #art { display: block; flex: 1 1 0; min-width: 0; align-self: stretch;
+           border-radius: var(--radius-panel);
            background: #060c08 url(/login/sign-in.webp) center / cover no-repeat; }
   }
 </style>
 </head>
 <body>
+<header><img src="/login/mark.svg" alt="ufo" width="16" height="16"></header>
+<div id="page">
 <div id="art"></div>
 <div id="form-side">
 <main>
-  <header><img src="/login/logo.svg" alt="ufo" width="72" height="18"></header>
-
   <section id="board">
     <div class="head">
       <h1 id="title">Sign in</h1>
@@ -124,6 +123,7 @@
   </section>
 
 </main>
+</div>
 </div>
 <script>
 const START = '/v1/onboard/auth/start';
@@ -285,7 +285,7 @@ function prompt(text, options) {
   answer.style.display = choosing ? 'none' : 'block';
   choice.style.display = choosing ? 'block' : 'none';
   choice.replaceChildren(...(options || []).map((option) => new Option(option, option)));
-  google.style.display = !choosing && text.includes('email') ? 'block' : 'none';
+  google.style.display = !choosing && text.includes('email') ? 'flex' : 'none';
   go.disabled = otp;
   (choosing ? choice : answer).focus();
 }

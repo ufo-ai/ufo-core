@@ -33,19 +33,22 @@ export const FAULTS: Record<
 export function SignIn({ fault = "expired" }: { fault?: SessionFault }) {
   const stated = FAULTS[fault];
   return (
-    <section className="flex w-card flex-col gap-4xl rounded-card border border-edge bg-card text-card-foreground p-4xl">
-      <div className="flex flex-col gap-xs">
-        <h1 className="m-0 text-subtitle font-strong leading-none">{stated.title}</h1>
-        <div className="text-ui text-ink-soft">{stated.cause}</div>
+    <section className="flex w-full max-w-form flex-col items-center gap-6xl text-center">
+      <div className="flex flex-col gap-sm">
+        <h1 className="m-0 text-subtitle font-medium text-ink">{stated.title}</h1>
+        <p className="m-0 text-label text-ink-soft">{stated.cause}</p>
       </div>
-      <div className="flex flex-col gap-lg">
-        <a href={stated.door} className={cn(buttonVariants({ variant: "send" }), "w-full no-underline")}>
+      <div className="flex w-full max-w-(--container-connect) flex-col items-center gap-sm px-2xl">
+        <a
+          href={stated.door}
+          className={cn(buttonVariants({ variant: "send", size: "bar" }), "h-10 w-full no-underline")}
+        >
           {stated.action}
         </a>
-        <div className="text-center text-label text-ink-soft">
+        <p className="m-0 text-label text-ink-soft">
           On a self-hosted node, run <code className="font-mono text-mono">ufoctl portal</code> on
           the host instead.
-        </div>
+        </p>
       </div>
     </section>
   );

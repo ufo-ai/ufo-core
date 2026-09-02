@@ -33,6 +33,11 @@ pub const LOGO_PATH: &str = "/login/logo.svg";
 pub const LOGO_BYTES: &[u8] = include_bytes!("assets/ufo-logo.svg");
 pub const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
 
+/// The mark alone, which the sign-in page draws in its head the way every page of the portal's
+/// first run does — the same file the portal draws, copied in for the same reason the logo is.
+pub const MARK_PATH: &str = "/login/mark.svg";
+pub const MARK_BYTES: &[u8] = include_bytes!("assets/ufo-mark.svg");
+
 /// The artwork the page draws in the half beside the form — the brand's `canon/after` illustration
 /// `restaurant-door-two`, its 2048px master resampled to 1536px and encoded as WebP so the whole
 /// panel is 83 KB. It is drawn at half a landscape page, so the square master is what the panel
@@ -198,7 +203,7 @@ mod tests {
             "the page must load nothing from another origin"
         );
         assert_eq!(LOGIN_PAGE.matches("src=").count(), 1);
-        assert!(LOGIN_PAGE.contains(&format!("<img src=\"{LOGO_PATH}\" alt=\"ufo\"")));
+        assert!(LOGIN_PAGE.contains(&format!("<img src=\"{MARK_PATH}\" alt=\"ufo\"")));
     }
 
     #[test]
@@ -220,13 +225,32 @@ mod tests {
     #[test]
     fn the_illustration_takes_half_a_landscape_page_and_none_of_a_narrow_one() {
         // The form is what a member came for, so the artwork is drawn only where there is a half to
-        // give it: the two halves appear at the one width that splits the page, and the panel is
-        // undrawn below it.
+        // give it: the panel appears at the one width that splits the page, rounded and inset the
+        // way the first run's welcome panel is, and it is undrawn below that width.
         assert!(LOGIN_PAGE.contains("#art { display: none; }"));
         assert!(LOGIN_PAGE.contains("@media (min-width: 900px) {"));
-        assert!(LOGIN_PAGE.contains("body { grid-template-columns: 1fr 1fr; }"));
-        assert!(LOGIN_PAGE.contains("#art { display: block;"));
+        assert!(LOGIN_PAGE.contains("#page { padding: 22px 0 22px 22px; }"));
+        assert!(LOGIN_PAGE.find("<div id=\"art\">") < LOGIN_PAGE.find("<div id=\"form-side\">"));
+        assert!(LOGIN_PAGE
+            .contains("#art { display: block; flex: 1 1 0; min-width: 0; align-self: stretch;"));
+        assert!(LOGIN_PAGE.contains("border-radius: var(--radius-panel);"));
         assert!(LOGIN_PAGE.contains("center / cover no-repeat; }"));
+    }
+
+    #[test]
+    fn the_page_is_headed_and_centred_like_the_first_run() {
+        // The sign-in is the screen before the first run, so it is drawn on the same page: a head
+        // the mark leads at the height and inset every step of the run uses, and the form and the
+        // panel centred in what is left of the viewport.
+        assert!(LOGIN_PAGE.contains("grid-template-rows: 64px 1fr;"));
+        assert!(
+            LOGIN_PAGE.contains("header { display: flex; align-items: center; padding: 0 40px; }")
+        );
+        assert!(LOGIN_PAGE.contains("header img { display: block; width: 16px; height: 16px; }"));
+        assert!(LOGIN_PAGE
+            .contains("#page { display: flex; align-items: center; justify-content: center;"));
+        assert!(LOGIN_PAGE.contains("--radius-answer: 16px;"));
+        assert!(LOGIN_PAGE.contains("border-radius: 9999px;"));
     }
 
     #[test]

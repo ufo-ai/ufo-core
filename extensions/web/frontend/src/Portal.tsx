@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import logo from "@/assets/ufo-logo.svg";
 import { App } from "@/App";
 import { Empty, Waiting } from "@/kernel/panel";
+import { Frame } from "@/views/Frame";
 import { FAULTS, SignIn } from "@/views/SignIn";
 import { BASE, SIGN_IN_PATH, sessionFault, type SessionFault } from "@/lib/api";
 import { parseHash } from "@/lib/route";
@@ -82,15 +82,9 @@ export function Portal() {
     );
   if (boot.phase === "signed-out" && boot.fault !== "expired")
     return (
-      <div className="flex min-h-dvh flex-col items-center justify-center gap-4xl p-2xl">
-        <span
-          role="img"
-          aria-label="ufo"
-          className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
-          style={{ mask: `url(${logo}) center / contain no-repeat` }}
-        />
+      <Frame>
         <SignIn fault={boot.fault} />
-      </div>
+      </Frame>
     );
   if (boot.phase === "signed-out")
     return (

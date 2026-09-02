@@ -92,4 +92,5 @@ def test_every_case_says_the_words_the_first_run_actually_sends() -> None:
     so this holds the suite against it and nothing else needs holding."""
     joined = re.sub(r'"\s*\+\s*"', "", FIRST_RUN_VIEW.read_text())
     for goal in GOALS:
+        assert goal.said in joined, goal.name
         assert goal.asks in joined, goal.name

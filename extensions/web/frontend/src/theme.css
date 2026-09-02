@@ -323,9 +323,13 @@
   --breakpoint-narrow: 720px;
 
   --container-sidebar: 216px;
-  /* The first-run answers are read down one narrow column, set by the longest one-line choice
-     rather than the question above it. */
-  --container-answer: 280px;
+  /* The first run's column: three one-line picks beside each other, so the longest pick sets the
+     column rather than the question above it, and the column holds on every screen of the run so
+     the left edge never moves between questions. */
+  --container-answer: min(720px, calc(100vw - 32px));
+  /* One pick on the run's grid, at the width its longest label takes on one line beside its check.
+     The grid fits as many across as the column holds, so a narrow window drops to two or one. */
+  --container-choice: 220px;
   /* The column a connect step's acts stand in, padded by a `2xl` so the act itself lands short of
      it. A connector is granted or it is not, so the column holds one act per provider and is sized
      for the longest of their names rather than for the sentence above it. */

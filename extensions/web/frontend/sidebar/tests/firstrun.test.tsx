@@ -70,7 +70,7 @@ test("the run draws on this shell, and its handoff lands in the agent's own chat
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.click(await screen.findByRole("radio", { name: "Founder" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByLabelText("What you want help with");
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
 
   // The build screen is the shared component's too, and the way out of it is this shell's.
@@ -96,12 +96,12 @@ test("a picked goal opens its own thread before the handoff, on this shell too",
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.click(await screen.findByRole("radio", { name: "Founder" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByLabelText("What you want help with");
-  await userEvent.click(screen.getByRole("button", { name: "More revenue" }));
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  await userEvent.click(screen.getByRole("button", { name: "Growing revenue" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await waitFor(() => expect(sent.length).toBe(1));
-  expect(sent[0]).toContain("My goal: more revenue.");
+  expect(sent[0]).toContain("My goal: growing revenue.");
   expect(sent[0]).toContain("Ask me at most one thing.");
 });
