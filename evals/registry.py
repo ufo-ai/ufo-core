@@ -42,6 +42,7 @@ from evals.suites import (
     first_run,
     github_connections,
     handback,
+    language_drift,
     low_stakes_default,
     member_add_notify,
     monitor_arm,
@@ -89,6 +90,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task(
         "response_formatting", response_formatting.CASES, judge_model=SEMANTIC_JUDGE_MODEL
     ),
+    capability_task("language_drift", language_drift.CASES),
     capability_task("closing_message", closing_message.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task(
         "slack_message_block", slack_message_block.CASES, judge_model=SEMANTIC_JUDGE_MODEL
