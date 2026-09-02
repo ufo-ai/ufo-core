@@ -138,7 +138,6 @@ from ufo.runtime.ext.manifest import (
 )
 from ufo.runtime.ext.surface import (
     SURFACE_MODEL_JOB_PREFIX,
-    DeployExtensionView,
     MidTurnReplyPoller,
     SurfaceAuth,
     SurfaceContext,
@@ -1147,12 +1146,6 @@ def _mount_shared_surfaces(
     listeners = []
 
     deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)
-    deploy_extensions = tuple(
-        DeployExtensionView(
-            name=manifest.name, version=manifest.version, sandbox_internet=manifest.sandbox_internet
-        )
-        for manifest in sorted(manifests, key=lambda manifest: manifest.name)
-    )
     slots = declared_slots(manifests)
     conversation_slots = tuple(
         BoundConversationSlot(
@@ -1200,7 +1193,6 @@ def _mount_shared_surfaces(
             _home_surface=home_surface(manifests),
             _ingress_public_url=ingress_public_url,
             _deploy_sandbox_internet=deploy_sandbox_internet,
-            _deploy_extensions=deploy_extensions,
             _models=models,
             _store_environment_document=store_environment_document,
             _store_environment_file=store_environment_file,

@@ -7,7 +7,6 @@ import type { Placement } from "@/kernel/pager";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import {
-  ADMIN_HASH,
   AGENTS_HASH,
   BUILDER_HASH,
   FIRST_RUN_HASH,
@@ -231,7 +230,6 @@ test("a conversation slot has a builder, and it writes the address its own read 
  *  arrived with anything after the path — a mail tracker, a copied query — opened the home
  *  composer instead of the screen the member asked for. */
 test("a screen that carries no place is read whatever the address arrived holding", () => {
-  expect(parseHash(ADMIN_HASH + "?x=1")).toEqual({ kind: "admin" });
   expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({
     kind: "workspace",
     view: "apps",

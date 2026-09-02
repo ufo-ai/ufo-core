@@ -7,8 +7,8 @@ and connections) beside the workspace-level views every member holds — sources
 memory (latest first, searched across every reachable agent), shared artifacts, and usage (their
 own window, plus the workspace rollup for an admin) — the two generic object reads every kind's
 index and detail page is built on (`objects/{kind}` and `objects/{kind}/{name}`, each answering
-through the kind's own gate in the named agent's namespace), the administration view for a
-workspace admin, and prepared intents, the panels' one mutation path.
+through the kind's own gate in the named agent's namespace), and prepared intents, the panels'
+one mutation path.
 
 The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `ufoctl init` mints
 (the `ufo.sdk.bearer` codec over `{ws, email, exp}`), landed by the one POST that opens a session
@@ -125,7 +125,6 @@ from ufo.sdk.objects import (
     ObjectRow,
 )
 from ufo.sdk.sandbox import ContainmentError, contained_relative, shipped_app_slug
-from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
     WORKSPACE_WRITE_MAX_BYTES,
@@ -1213,7 +1212,6 @@ APP_FLAGS = {
 }
 MAIN_AGENT_FLAG = "enable-assistant-app"
 PORTAL_SURFACES = {
-    "admin": "enable-admin-settings",
     "memory": "enable-memory-tab",
     "community-skills": "enable-community-skills",
     "installed-skills": "enable-installed-skills",
@@ -1277,9 +1275,10 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     `agents` is the set a member may open and message. An agent whose flag is off is marked `hidden`
     rather than dropped: the workspace holds the app either way, the portal draws it in no list, and
     a member holding its link still opens it. `surfaces` answers the same question for the portal's
-    own screens. Each flag is read at the default its own feature ships in, so a deploy whose flag
+    own screens: each flag is read at the default its own feature ships in, so a deploy whose flag
     service answers nothing draws the portal's own screens as it drew them before, and lists no
-    shipped app.
+    shipped app, and `team` is answered by this reader's admin standing rather than by a flag —
+    the roster is an admin's screen. A withheld screen keeps its address either way.
 
     The create act draws nothing from this read:
     it is a conversation the `create-application` skill runs, and the screen offers it to every
@@ -1362,7 +1361,10 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 "admin": audience.admin,
                 "workspace_id": str(ctx.workspace_id),
             },
-            "surfaces": {name: flags[key] for name, key in PORTAL_SURFACES.items()},
+            "surfaces": {
+                **{name: flags[key] for name, key in PORTAL_SURFACES.items()},
+                "team": audience.admin,
+            },
             "archived": [
                 {
                     "id": str(app.id),
@@ -3810,11 +3812,12 @@ async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Respon
 
 
 async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
-    """The workspace roster: who the members are, which of them administer the workspace, and who
-    holds a seat — the same rows the `member` kind lists to a member asking the main agent, so the
-    panel shows a non-admin exactly what chat would tell them. `can_add` reports whether this
-    member may add another, read back from the verb's own authority (the same `member.is_admin` row
-    its gate checks), never a second copy; the verb refuses regardless."""
+    """The workspace roster: who the members are, which of them administer the workspace, and whose
+    access is live — the same rows the `member` kind lists to a member asking the main agent, so the
+    panel shows a non-admin exactly what chat would tell them. Each row names the stable member id
+    the panel's acts apply to. `can_manage` reports whether this member may add another and change a
+    role or an access state, read back from the verbs' own authority (the same `member.is_admin` row
+    their gates check), never a second copy; the verbs refuse regardless."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3822,10 +3825,15 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(
         {
             "members": [
-                {"email": entry.email, "admin": entry.admin, "seated": entry.seated}
+                {
+                    "id": str(entry.id),
+                    "email": entry.email,
+                    "admin": entry.admin,
+                    "seated": entry.seated,
+                }
                 for entry in await ctx.list_members()
             ],
-            "can_add": audience.admin,
+            "can_manage": audience.admin,
             "actions": _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
         }
     )
@@ -4545,64 +4553,6 @@ async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"stored": slot})
 
 
-async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The administration read: every agent with its policy, surface installations, and
-    web-audience grants; members and seat state; every spend cap with its subject named; and the
-    deploy's shape — installed extensions and the sandbox public-internet ceiling. Recorded
-    disclosures of private transcripts are absent: that record is the operator's, read with
-    `ufoctl transcript-reads`. It answers a workspace admin only and is not-found for everyone
-    else. Reads only; every mutation stays a chat act — caps are the deploy operators' today (no
-    object kind owns them), and the plan, invoices, and payment methods are managed in chat
-    (`manage_billing`)."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    _member_id, _email, audience = resolved
-    if not audience.admin:
-        return Response("no such page", status_code=404)
-    extension = web_extension()
-    installations = await ctx.list_installations()
-    grants = await granted_emails(extension.store)
-    async with extension.transaction() as connection:
-        snapshot = await Seats(ctx.workspace_id).snapshot(connection)
-    return JSONResponse(
-        {
-            "agents": [
-                {
-                    "id": str(agent.id),
-                    "name": agent.name,
-                    "main": agent.main,
-                    "model": agent.model,
-                    "icon": agent.icon,
-                    "internet_access_allowed": agent.internet_access_allowed,
-                    "installations": [
-                        entry.surface for entry in installations if entry.agent_id == agent.id
-                    ],
-                    "web_audience": list(grants.get(agent.id, ())),
-                }
-                for agent in audience.agents
-            ],
-            "members": [
-                {
-                    "id": str(entry.id),
-                    "email": entry.email,
-                    "admin": entry.admin,
-                    "seated": entry.seated,
-                    "actions": _action_payloads(
-                        ctx.object_actions(MEMBER_KIND, "instance", name=str(entry.id))
-                    ),
-                }
-                for entry in snapshot.members
-            ],
-            "caps": [entry.model_dump(mode="json") for entry in await ctx.spend_caps()],
-            "deploy": {
-                "sandbox_internet": ctx.deploy_sandbox_internet,
-                "extensions": [entry.model_dump(mode="json") for entry in ctx.deploy_extensions],
-            },
-        }
-    )
-
-
 async def _object_gate(
     ctx: SurfaceContext, request: Request
 ) -> tuple[UUID, WebAudience, PortalKind] | Response:
@@ -5315,7 +5265,6 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/agents", handler=agents_index),
     SurfaceRoute(method="GET", path="api/agents/status", handler=agents_status),
     SurfaceRoute(method="GET", path="api/chats", handler=chats_index),
-    SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="POST", path="preview", handler=preview),
     SurfaceRoute(method="POST", path="uploads", handler=upload_start),

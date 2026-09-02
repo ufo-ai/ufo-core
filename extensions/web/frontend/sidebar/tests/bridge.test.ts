@@ -108,7 +108,7 @@ test("navigation admits conversations, apps, new chats, and sections, and refuse
   expect(framedNavigation("#/wiki?open=run%2Fabc")).toBe(true);
   expect(framedNavigation("#/workspace/artifacts")).toBe(true);
   expect(framedNavigation("#/workspace/connectors")).toBe(false);
-  expect(framedNavigation("#/admin")).toBe(false);
+  expect(framedNavigation("#/workspace/team")).toBe(false);
   expect(framedNavigation("#/workspace/team")).toBe(false);
   expect(framedNavigation("#/workspace/sources")).toBe(false);
   expect(framedNavigation("#/workspace/__proto__")).toBe(false);
@@ -574,7 +574,7 @@ test("an accepted navigation target moves the shell; a refused one does not", ()
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver({ ufo: "navigate", to: "#/c/" + CONVERSATION_ID }, iframe.contentWindow);
   expect(location.hash).toBe("#/c/" + CONVERSATION_ID);
-  deliver({ ufo: "navigate", to: "#/admin" }, iframe.contentWindow);
+  deliver({ ufo: "navigate", to: "#/workspace/team" }, iframe.contentWindow);
   expect(location.hash).toBe("#/c/" + CONVERSATION_ID);
 });
 
@@ -590,7 +590,7 @@ test("heldRoute names the conversation a frame's navigate message asked for", ()
 
   expect(heldRoute()).toEqual({ kind: "chat", conversationId: CONVERSATION_ID });
 
-  deliver({ ufo: "navigate", to: "#/admin" }, iframe.contentWindow);
+  deliver({ ufo: "navigate", to: "#/workspace/team" }, iframe.contentWindow);
 
   expect(heldRoute()).toEqual({ kind: "chat", conversationId: CONVERSATION_ID });
 });

@@ -193,7 +193,7 @@ the dispatch in `src/App.tsx` and `pageTitle` all derive from that row. Dispatch
 a `never` arm, not a chain that ends in a fallback, and the kit publishes the builders so an app
 page never spells a hash itself. That is what stops three unlinked edits from disagreeing: a route
 that parses with no builder any caller but a test can reach (`conversation-slot`), a singleton
-matched by whole-string equality so `#/admin?x=1` opens the home composer instead, `"#/admin"`
+matched by whole-string equality so `#/first-run?x=1` opens the home composer instead, `"#/first-run"`
 written as a literal in both `src/lib/route.ts` and `src/App.tsx`, and an unknown address becoming
 the composer in silence.
 
@@ -281,9 +281,9 @@ with an embedded flag — `ConversationSlotPane` is the shape — and every seco
 exported `Sheet` while its content renderer stays shared. A second implementation is how
 copy drifts where nothing catches it: one record lane says "reload the listing" where its twin says
 "reload the page", the same act reads "Unshare" in one view and "Make private" in another, a member
-row says "No seat" against "Unseated", a theme preference held twice goes visibly stale at phone
-width because both copies mount, and three hand-rolled flyouts duplicate the Radix `DropdownMenu`
-the file already imports, keyboard path and all.
+row says "Disabled" against the member object's own "unseated", a theme preference held twice goes
+visibly stale at phone width because both copies mount, and three hand-rolled flyouts duplicate the
+Radix `DropdownMenu` the file already imports, keyboard path and all.
 
 No gate reads "these two components draw the same thing", so this one is a reviewer's, and it is
 the first question to ask of a new component: which existing one does it fork?

@@ -33,7 +33,6 @@ locals {
 
   portal_flags = {
     testing = {
-      "enable-admin-settings"   = true
       "enable-assistant-app"    = true
       "enable-code-app"         = false
       "enable-community-skills" = true
@@ -47,7 +46,6 @@ locals {
       "enable-wiki-app"         = false
     }
     prod = {
-      "enable-admin-settings"   = false
       "enable-assistant-app"    = false
       "enable-code-app"         = false
       "enable-community-skills" = false

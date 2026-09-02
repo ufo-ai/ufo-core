@@ -73,9 +73,6 @@ from ufo.runtime.ext.surface import (
     CredentialSlotView as CredentialSlotView,
 )
 from ufo.runtime.ext.surface import (
-    DeployExtensionView as DeployExtensionView,
-)
-from ufo.runtime.ext.surface import (
     InstallationSummary as InstallationSummary,
 )
 from ufo.runtime.ext.surface import (
@@ -110,9 +107,6 @@ from ufo.runtime.ext.surface import (
 )
 from ufo.runtime.ext.surface import (
     SourceView as SourceView,
-)
-from ufo.runtime.ext.surface import (
-    SpendCapView as SpendCapView,
 )
 from ufo.runtime.ext.surface import (
     SurfaceAuth as SurfaceAuth,

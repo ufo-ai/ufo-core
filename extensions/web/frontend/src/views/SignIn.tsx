@@ -22,9 +22,9 @@ export const FAULTS: Record<
     door: SIGN_OUT_PATH,
   },
   "no-seat": {
-    title: "Workspace access removed",
+    title: "Workspace access disabled",
     cause:
-      "An admin removed your seat in this workspace, so signing in with this address again opens nothing. Ask an admin to seat you again, or sign in with another address on the team.",
+      "An admin disabled this address in this workspace, so signing in with it again opens nothing. Ask an admin to enable it again, or sign in with another address on the team.",
     action: "Sign in with another email",
     door: SIGN_OUT_PATH,
   },

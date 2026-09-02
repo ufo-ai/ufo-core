@@ -221,13 +221,6 @@ export const AGENT = {
   icon: "propylon",
 };
 
-export const ADMIN_AGENT = {
-  ...AGENT,
-  internet_access_allowed: true,
-  installations: [],
-  web_audience: [],
-};
-
 export const SECOND = {
   ...AGENT,
   id: SECOND_ID,

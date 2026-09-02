@@ -10,6 +10,8 @@ import {
   json,
   pick,
   refusedNotice,
+  pageFits,
+  tableFloors,
   useStreamFake,
   wire,
   AGENT,
@@ -23,29 +25,44 @@ async function openAdd() {
 
 const ADMIN = { ...MEMBER, admin: true };
 
+const LEAD_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const PLAIN_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
 const ROSTER = {
   members: [
-    { email: "lead@example.com", admin: true, seated: true },
-    { email: "member@example.com", admin: false, seated: false },
+    { id: LEAD_ID, email: "lead@example.com", admin: true, seated: true },
+    { id: PLAIN_ID, email: "member@example.com", admin: false, seated: false },
   ],
-  can_add: true,
+  can_manage: true,
 };
+
+/** The same roster once the lead's access is off — what the re-read answers, so a landed apply is
+ *  read back off the roster rather than assumed by the row that sent it. */
+const DISABLED_LEAD = {
+  ...ROSTER,
+  members: [{ ...ROSTER.members[0], seated: false }, ROSTER.members[1]],
+};
+
+/** What the roster's tracks sum to: the role and the status on fact tracks, the address and the
+ *  acts cell beside it on shared ones. */
+const FLOOR =
+  "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 0 * var(--size-act))";
 
 beforeEach(() => {
   location.hash = "#/workspace/team";
   useStreamFake();
 });
 
-test("the roster names each member, who administers, and who holds a seat", async () => {
+test("the roster names each member, who administers, and whose access is live", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const lead = await screen.findByText("lead@example.com");
   expect(lead.closest("tr")?.textContent).toContain("Admin");
-  expect(lead.closest("tr")?.textContent).toContain("Seated");
+  expect(lead.closest("tr")?.textContent).toContain("Active");
   const plain = within(screen.getByRole("main")).getByText("member@example.com");
   expect(plain.closest("tr")?.textContent).toContain("Member");
-  expect(plain.closest("tr")?.textContent).toContain("No seat");
+  expect(plain.closest("tr")?.textContent).toContain("Disabled");
 });
 
 const MEMBER_ACTIONS = {
@@ -133,7 +150,8 @@ test("a search that matches nobody says so in a row, and the table holds", async
   expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
     "Member",
     "Role",
-    "Seat",
+    "Status",
+    "",
   ]);
 });
 
@@ -286,12 +304,19 @@ test("an add already in flight is not sent twice", async () => {
   expect(document.activeElement).toBe(submit);
 });
 
-test("a member who may not add reads the roster with no form", async () => {
-  wire({ "/workspace/team": () => json({ ...ROSTER, can_add: false }) });
+test("a member who administers nothing reads the roster and every act is absent", async () => {
+  wire({ "/workspace/team": () => json({ ...ROSTER, can_manage: false }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("lead@example.com")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Disable" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Make admin" })).toBeNull();
+  expect(screen.getAllByRole("columnheader").map((head) => head.textContent)).toEqual([
+    "Member",
+    "Role",
+    "Status",
+  ]);
 });
 
 test("the form admits an address at any domain and hints a neutral one", async () => {
@@ -377,4 +402,126 @@ test("a failed roster read states the fault through the shared fence", async () 
 
   expect(await screen.findByText("Error 500 — reload to retry.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+});
+
+/** The confirm arms on the first press and fires on the second, so a disable is two presses of the
+ *  one control. */
+async function confirmed(row: HTMLElement, verb: string) {
+  const act = within(row).getByRole("button", { name: verb });
+  await userEvent.click(act);
+  await userEvent.click(within(row).getByRole("button", { name: "Confirm " + verb.toLowerCase() }));
+}
+
+function rowOf(email: string): HTMLElement {
+  return within(screen.getByRole("main")).getByText(email).closest("tr") as HTMLElement;
+}
+
+test("an admin disables a member's access, and the whole spec rides the apply", async () => {
+  const bodies: string[] = [];
+  const urls: string[] = [];
+  let reads = 0;
+  wire({
+    "/workspace/team": () => {
+      reads += 1;
+      return json(reads === 1 ? ROSTER : DISABLED_LEAD);
+    },
+    "/intents": (url, init) => {
+      urls.push(url);
+      bodies.push(String(init?.body));
+      return json({ applied: true, message: "lead@example.com is disabled." });
+    },
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("lead@example.com");
+  await confirmed(rowOf("lead@example.com"), "Disable");
+
+  await waitFor(() => expect(bodies.length).toBe(1));
+  expect(urls[0]).toContain("/agents/" + AGENT.id + "/intents");
+  expect(JSON.parse(bodies[0])).toEqual({
+    verb: "apply",
+    kind: "member",
+    name: LEAD_ID,
+    spec: { admin: true, seated: false },
+  });
+  expect(await screen.findByText("lead@example.com is disabled.")).toBeTruthy();
+  await waitFor(() => expect(rowOf("lead@example.com").textContent).toContain("Disabled"));
+});
+
+test("an admin enables a disabled member, and the role rides unchanged", async () => {
+  const bodies: string[] = [];
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/intents": (_url, init) => {
+      bodies.push(String(init?.body));
+      return json({ applied: true, message: "member@example.com is active." });
+    },
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("member@example.com");
+  await userEvent.click(within(rowOf("member@example.com")).getByRole("button", { name: "Enable" }));
+
+  await waitFor(() => expect(bodies.length).toBe(1));
+  expect(JSON.parse(bodies[0])).toEqual({
+    verb: "apply",
+    kind: "member",
+    name: PLAIN_ID,
+    spec: { admin: false, seated: true },
+  });
+});
+
+test("an admin promotes a member, and the access state rides unchanged", async () => {
+  const bodies: string[] = [];
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/intents": (_url, init) => {
+      bodies.push(String(init?.body));
+      return json({ applied: true, message: "member@example.com administers this workspace." });
+    },
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("member@example.com");
+  await userEvent.click(
+    within(rowOf("member@example.com")).getByRole("button", { name: "Make admin" }),
+  );
+
+  await waitFor(() => expect(bodies.length).toBe(1));
+  expect(JSON.parse(bodies[0])).toEqual({
+    verb: "apply",
+    kind: "member",
+    name: PLAIN_ID,
+    spec: { admin: true, seated: false },
+  });
+});
+
+/** The kind's own guards are what refuse, so the roster states the refusal rather than quietly
+ *  leaving the row as it was — the last active admin disabling themselves is the case, and a screen
+ *  that said nothing would read as a control that does nothing. */
+test("a refused apply states the refusal and leaves the row standing", async () => {
+  wire({
+    "/workspace/team": () => json(ROSTER),
+    "/intents": () =>
+      json({ applied: false, message: "The last seated admin cannot be unseated." }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("lead@example.com");
+  await confirmed(rowOf("lead@example.com"), "Disable");
+
+  await refusedNotice("The last seated admin cannot be unseated.");
+  expect(rowOf("lead@example.com").textContent).toContain("Active");
+});
+
+/** The tracks are fixed pixels, so a table declaring more of them than the desktop leaves holds its
+ *  width and the column scrolls sideways — and what falls off the right is the act the row is
+ *  pressed by. The roster is the widest shape it draws: three facts and the acts. */
+test("the roster's widest table fits the desktop page it is read on", async () => {
+  wire({ "/workspace/team": () => json(ROSTER) });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("lead@example.com");
+  expect(tableFloors()).toEqual([FLOOR]);
+  expect(pageFits(FLOOR)).toBe(true);
 });

@@ -789,21 +789,18 @@ async def summarize_conversation_title(
 
 class AgentSummary(BaseModel):
     """One workspace agent as a surface lists it — the read a surface whose member picks an agent
-    (the web portal's switcher) filters through its own audience authority.
-    `internet_access_allowed` is the agent's narrowing of the deploy's sandbox public-internet
-    capability, carried for the administration view. `owner_member_id` is the member who created
-    the row (None for the main agent and provisioned rows), so an audience can give an owner
-    their own agent without a separate grant. `visibility` is the agent's own audience floor:
-    `workspace` answers every member, `private` its owner and admins plus per-surface grants.
-    `icon` is the slug the surface draws the agent with. `provisioned_by` names the extension
-    whose provision created the row (None for member-created rows and main), so a surface can
-    tell a shipped app from an agent a member built."""
+    (the web portal's switcher) filters through its own audience authority. `owner_member_id` is
+    the member who created the row (None for the main agent and provisioned rows), so an audience
+    can give an owner their own agent without a separate grant. `visibility` is the agent's own
+    audience floor: `workspace` answers every member, `private` its owner and admins plus
+    per-surface grants. `icon` is the slug the surface draws the agent with. `provisioned_by`
+    names the extension whose provision created the row (None for member-created rows and main),
+    so a surface can tell a shipped app from an agent a member built."""
 
     id: UUID
     name: str
     main: bool
     model: str
-    internet_access_allowed: bool
     visibility: AgentVisibility
     icon: TablerIcon
     purpose: str | None = None
@@ -939,28 +936,6 @@ class GithubCoverageView(BaseModel):
     api: bool
     git_push: bool
     sources: bool
-
-
-class SpendCapView(BaseModel):
-    """One spend cap as the administration view lists it: the scope, its subject named for the
-    reader (an agent's name, a member's email, nothing for the workspace's own cap), the window,
-    the limit, and what a breach does."""
-
-    scope: str
-    subject: str | None
-    window_seconds: int
-    limit_micro_usd: int
-    on_breach: str
-
-
-class DeployExtensionView(BaseModel):
-    """One installed extension as the administration view lists it: the manifest's name and
-    version, and whether its sandbox tools require metered public egress — deploy shape only,
-    never an agent's resources or secrets."""
-
-    name: str
-    version: str
-    sandbox_internet: bool
 
 
 class CredentialSlotView(BaseModel):
@@ -1749,7 +1724,6 @@ class SurfaceContext:
     )
     _key_slot_for: Callable[[str], str | None] | None = None
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
-    _deploy_extensions: tuple[DeployExtensionView, ...] = ()
     _sandbox_sizes: tuple[str, ...] = ()
     _memory: "MemorySearch | None" = None
     _model: "SurfaceModel | None" = None
@@ -1786,12 +1760,6 @@ class SurfaceContext:
         """Run one slot summary in the authorized conversation's agent namespace."""
         with bind_agent(context.agent_id):
             return await bound.provider.summarize(context)
-
-    @property
-    def deploy_extensions(self) -> tuple[DeployExtensionView, ...]:
-        """The deploy's installed extensions — the administration view's deploy-status read,
-        fixed at boot from the manifest set the process loaded."""
-        return self._deploy_extensions
 
     @property
     def runtime(self) -> RuntimeIdentity | None:
@@ -2889,7 +2857,6 @@ class SurfaceContext:
                         tables.agent.c.name,
                         tables.agent.c.is_main,
                         tables.agent.c.model,
-                        tables.agent.c.internet_access_allowed,
                         tables.agent.c.visibility,
                         tables.agent.c.icon,
                         tables.agent.c.purpose,
@@ -2909,7 +2876,6 @@ class SurfaceContext:
                 name=row.name,
                 main=row.is_main,
                 model=row.model,
-                internet_access_allowed=row.internet_access_allowed,
                 visibility=row.visibility,
                 icon=row.icon,
                 purpose=row.purpose,
@@ -3798,57 +3764,6 @@ class SurfaceContext:
                 next_sync_at=row.next_sync_at,
                 parked_reason=row.parked_reason,
                 **_binding_fields(row.backend, row.config),
-            )
-            for row in rows
-        )
-
-    async def spend_caps(self) -> tuple[SpendCapView, ...]:
-        """Every spend cap of this workspace with its subject named for the reader — the
-        workspace-administration read behind the portal's billing view. Caps are set by the
-        deploy's operators today; no object kind owns them, so this stays a read."""
-        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.spend_cap.c.scope,
-                        tables.spend_cap.c.subject_id,
-                        tables.spend_cap.c.window_seconds,
-                        tables.spend_cap.c.limit_micro_usd,
-                        tables.spend_cap.c.on_breach,
-                        member_name.label("agent_name"),
-                        tables.member.c.email.label("member_email"),
-                    )
-                    .select_from(
-                        tables.spend_cap.outerjoin(
-                            tables.agent,
-                            sa.and_(
-                                tables.spend_cap.c.scope == "agent",
-                                tables.spend_cap.c.subject_id == tables.agent.c.id,
-                            ),
-                        ).outerjoin(
-                            tables.member,
-                            sa.and_(
-                                tables.spend_cap.c.scope == "member",
-                                tables.spend_cap.c.subject_id == tables.member.c.id,
-                            ),
-                        )
-                    )
-                    .where(tables.spend_cap.c.workspace_id == self.workspace_id)
-                    .order_by(
-                        tables.spend_cap.c.scope,
-                        tables.spend_cap.c.subject_id,
-                        tables.spend_cap.c.window_seconds,
-                    )
-                )
-            ).all()
-        return tuple(
-            SpendCapView(
-                scope=row.scope,
-                subject=row.agent_name if row.scope == "agent" else row.member_email,
-                window_seconds=row.window_seconds,
-                limit_micro_usd=row.limit_micro_usd,
-                on_breach=row.on_breach,
             )
             for row in rows
         )

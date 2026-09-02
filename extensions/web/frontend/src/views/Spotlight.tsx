@@ -28,9 +28,11 @@ import {
   sectionHash,
   workspaceHash,
   type Section,
+  type WorkspaceTab,
 } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import { searchEverywhere, type Group } from "@/lib/search";
+import { useOfferedTabs } from "@/lib/surfaces";
 import type { Agent } from "@/lib/types";
 import { SECTION_VIEWS } from "@/views/registry";
 
@@ -53,18 +55,23 @@ const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
 /** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
  *  buttons beside the search glyph — the palette adds no place the nav does not already carry —
  *  and each takes the glyph its kind is drawn with wherever a hit of that kind stands. App-shipped
- *  screens stand in the palette as the apps themselves, so only the portal's own sections list. */
-const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
-  { label: "Home", hash: HOME_HASH, icon: IconMessage },
-  { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
-  ...SECTIONS.flatMap((section) => {
-    const view = SECTION_VIEWS[section];
-    const icon = SECTION_ICONS[section];
-    if (!view || !icon) return [];
-    return [{ label: view.label, hash: sectionHash(section), icon }];
-  }),
-  { label: "Workspace", hash: workspaceHash("team"), icon: IconUsers },
-];
+ *  screens stand in the palette as the apps themselves, so only the portal's own sections list.
+ *  The workspace row opens the destination's first offered tab, the same one its nav row does — and
+ *  where that address is one already listed, the palette carries it once rather than under two
+ *  names. */
+function places(landing: WorkspaceTab): { label: string; hash: string; icon: TablerIcon }[] {
+  return [
+    { label: "Home", hash: HOME_HASH, icon: IconMessage },
+    { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
+    ...SECTIONS.flatMap((section) => {
+      const view = SECTION_VIEWS[section];
+      const icon = SECTION_ICONS[section];
+      if (!view || !icon) return [];
+      return [{ label: view.label, hash: sectionHash(section), icon }];
+    }),
+    { label: "Workspace", hash: workspaceHash(landing), icon: IconUsers },
+  ].filter((row, at, rows) => rows.findIndex((other) => other.hash === row.hash) === at);
+}
 
 /** Search over the whole workspace, opened from the bar or by `⌘K`: one box, and under it what the
  *  member can do with the term, where they can go, and what the workspace holds — grouped by the
@@ -85,6 +92,7 @@ export function Spotlight({
   className?: string;
   label?: React.ReactNode;
 }) {
+  const tabs = useOfferedTabs();
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [groups, setGroups] = useState<Group[] | null>(null);
@@ -164,7 +172,9 @@ export function Spotlight({
   const actions = [asked, !wanted || "new chat".includes(lowered) ? started : null].filter(
     (action) => action !== null,
   );
-  const places = PLACES.filter((place) => place.label.toLowerCase().includes(lowered));
+  const reachable = places(tabs[0]).filter((place) =>
+    place.label.toLowerCase().includes(lowered),
+  );
 
   const answered = groups !== null;
   const status = !wanted ? null : !answered ? WORKING : groups.length ? null : BLANK;
@@ -202,9 +212,9 @@ export function Spotlight({
                 ))}
               </CommandGroup>
             ) : null}
-            {places.length ? (
+            {reachable.length ? (
               <CommandGroup heading="Places">
-                {places.map((place) => (
+                {reachable.map((place) => (
                   <CommandItem
                     key={place.hash}
                     value={"place " + place.hash}

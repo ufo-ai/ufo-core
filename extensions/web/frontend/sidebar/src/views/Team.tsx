@@ -1,7 +1,7 @@
 import { useRef, useState, type FormEvent } from "react";
 
 import type { Placement } from "@/kernel/pager";
-import { Button } from "@/components/ui/button";
+import { Button, ConfirmButton } from "@/components/ui/button";
 import { Hint, Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import {
@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Td, TdFact } from "@/components/ui/table";
+import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
 import { Sheet } from "@/components/ui/sheet";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { PageToolbar, usePageAct, usePageSearch } from "@/kernel/pane";
@@ -21,16 +21,21 @@ import {
   Panel,
   QUIET,
   Section,
+  outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
-import { postKindAction } from "@/lib/api";
+import { postIntent, postKindAction } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { Member } from "@/lib/types";
 
-type Roster = { members: Member[]; can_add: boolean };
+type Roster = { members: Member[]; can_manage: boolean };
 
 type Draft = { email: string; admin: boolean };
+
+/** The whole of one member row as the `member` kind takes it: an apply carries the complete spec,
+ *  so a control changing one field states the other unchanged. */
+type MemberSpec = { admin: boolean; seated: boolean };
 
 const ADMINS = "admins";
 const ROLES = [
@@ -42,24 +47,69 @@ const BLANK: Draft = { email: "", admin: false };
 
 const ADD_MEMBERS_NOTE = "add-members-note";
 
-/** What a member row states, wherever the workspace lists its members: the address it is held
- *  under, whether they administer it, and whether they hold a seat. Administration stands its own
- *  acts after these, so it takes the same columns with one added. */
-export const MEMBER_COLUMNS = [
+/** What a member row states: the address it is held under, whether they administer the workspace,
+ *  and whether the workspace answers them at all. An admin's acts stand after these, so the roster
+ *  they read takes the same columns with one added. */
+const MEMBER_COLUMNS = [
   "Member",
   { label: "Role", fact: true },
-  { label: "Seat", fact: true },
+  { label: "Status", fact: true },
 ];
 
-/** The three cells of one member row. A seat is either held or it is not, and it is said the same
- *  word on every screen that states it. */
-export function MemberCells({ member }: { member: Member }) {
+const MANAGED_COLUMNS = [...MEMBER_COLUMNS, ""];
+
+/** The three cells of one member row. Access is either live or it is not, and it is said the same
+ *  word wherever it is stated. */
+function MemberCells({ member }: { member: Member }) {
   return (
     <>
       <Td>{member.email}</Td>
       <TdFact>{member.admin ? "Admin" : "Member"}</TdFact>
-      <TdFact>{member.seated ? "Seated" : "No seat"}</TdFact>
+      <TdFact>{member.seated ? "Active" : "Disabled"}</TdFact>
     </>
+  );
+}
+
+/** The acts an admin holds over one member: their role, and whether the workspace answers them.
+ *  Both are one `apply` on the member kind, riding the main agent's lane, where the kind's own
+ *  guards answer — the last admin keeps the role and the last active admin keeps the access. */
+function MemberActs({
+  member,
+  onApply,
+}: {
+  member: Member;
+  onApply: (spec: MemberSpec) => void;
+}) {
+  return (
+    <TdActs>
+      <div className={ACTS}>
+        {member.admin ? (
+          <ConfirmButton
+            verb="Remove admin"
+            variant="row"
+            onClick={() => onApply({ admin: false, seated: Boolean(member.seated) })}
+          />
+        ) : (
+          <Button
+            variant="row"
+            onClick={() => onApply({ admin: true, seated: Boolean(member.seated) })}
+          >
+            Make admin
+          </Button>
+        )}
+        {member.seated ? (
+          <ConfirmButton
+            verb="Disable"
+            variant="row"
+            onClick={() => onApply({ admin: member.admin, seated: false })}
+          />
+        ) : (
+          <Button variant="row" onClick={() => onApply({ admin: member.admin, seated: true })}>
+            Enable
+          </Button>
+        )}
+      </div>
+    </TdActs>
   );
 }
 
@@ -81,10 +131,24 @@ export function Team({
   const [adding, setAdding] = useState(false);
   const [drafts, setDrafts] = useState<Draft[]>([BLANK]);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const [applied, setApplied] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
   const landed = useRef<string[]>([]);
-  const state = usePanelRead<Roster>("/workspace/team");
+  const [reloads, setReloads] = useState(0);
+  const state = usePanelRead<Roster>("/workspace/team", reloads);
   const ready = drafts.every((row) => row.email.trim());
+
+  async function apply(member: Member, spec: MemberSpec) {
+    if (!mainAgent || !member.id) return;
+    const outcome = await postIntent(mainAgent.id, {
+      verb: "apply",
+      kind: "member",
+      name: member.id,
+      spec,
+    });
+    if (outcome.applied) setReloads((count) => count + 1);
+    setApplied(outcomeNotice(outcome));
+  }
 
   function open() {
     setDrafts([BLANK]);
@@ -184,7 +248,7 @@ export function Team({
   ) : null;
 
   const act = usePageAct(
-    state.phase === "ready" && state.payload.can_add && mainAgent ? (
+    state.phase === "ready" && state.payload.can_manage && mainAgent ? (
       <Button variant="send" size="bar" onClick={open}>
         Add member
       </Button>
@@ -198,7 +262,7 @@ export function Team({
       {act}
       {search ? <PageToolbar /> : null}
       <Panel state={state}>
-        {({ members }) => {
+        {({ members, can_manage }) => {
           const found = members.filter(
             (entry) =>
               entry.email.toLowerCase().includes(query.trim().toLowerCase()) &&
@@ -206,14 +270,22 @@ export function Team({
           );
           return (
             <Section bar={<Filter options={ROLES} value={role} onChange={setRole} />}>
+              <OutcomeNotice state={applied} />
               <DataTable
-                columns={MEMBER_COLUMNS}
+                columns={can_manage ? MANAGED_COLUMNS : MEMBER_COLUMNS}
                 rows={found}
                 rowKey={(entry) => entry.email}
                 empty="This workspace has no members yet."
                 note={query || role ? "No member matches this search." : undefined}
               >
-                {(entry) => <MemberCells member={entry} />}
+                {(entry) => (
+                  <>
+                    <MemberCells member={entry} />
+                    {can_manage ? (
+                      <MemberActs member={entry} onApply={(spec) => void apply(entry, spec)} />
+                    ) : null}
+                  </>
+                )}
               </DataTable>
             </Section>
           );

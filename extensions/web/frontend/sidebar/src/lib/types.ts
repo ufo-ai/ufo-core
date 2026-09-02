@@ -46,14 +46,6 @@ export type Agent = {
   web_audience?: string[];
 };
 
-/** The same agent as the administration read names it, carrying the deploy facts only an admin
- *  sees. The boot payload does not send these, so a member-facing view cannot reach for them. */
-export type AdminAgent = Agent & {
-  internet_access_allowed: boolean;
-  installations: string[];
-  web_audience: string[];
-};
-
 export type Member = {
   id?: string;
   email: string;
@@ -97,11 +89,13 @@ export type ArchivedApp = {
   archived_at: string;
 };
 
-/** Which of the portal's own screens this deploy offers. Each one is a feature flag the boot read
- *  answers closed, so a portal that reached no flag backend draws none of them. A screen withheld
- *  here keeps its address: the tab is undrawn, and a member holding the link still lands on it. */
+/** Which of the portal's own screens this member is offered. Most are a feature flag the boot read
+ *  answers open, so a portal that reached no flag backend keeps drawing what a member already had;
+ *  `team` is answered by their admin standing instead, because the roster is an admin's screen. A
+ *  screen withheld here keeps its address: the tab is undrawn, and a member holding the link still
+ *  lands on it. */
 export type Surfaces = {
-  admin: boolean;
+  team: boolean;
   memory: boolean;
   "community-skills": boolean;
   "installed-skills": boolean;
@@ -112,23 +106,6 @@ export type AgentsPayload = {
   archived: ArchivedApp[];
   member: Member;
   surfaces: Surfaces;
-};
-
-export type SpendCap = {
-  scope: string;
-  subject: string | null;
-  window_seconds: number;
-  limit_micro_usd: number;
-  on_breach: string;
-};
-
-export type DeployExtension = { name: string; version: string; sandbox_internet: boolean };
-
-export type AdminPayload = {
-  agents: AdminAgent[];
-  members: Member[];
-  caps: SpendCap[];
-  deploy: { sandbox_internet: boolean; extensions: DeployExtension[] };
 };
 
 /** A file a message carries — one a turn shared, or one the member attached to their own words.

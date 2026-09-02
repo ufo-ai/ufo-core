@@ -49,7 +49,6 @@ test("every page names where the member is, innermost first, then the product", 
     "Credentials · Workspace · ufo",
   );
   expect(titled({ kind: "section", section: "connectors", ...PLACE })).toBe("Connectors · ufo");
-  expect(titled({ kind: "admin" })).toBe("Administration · ufo");
   expect(titled({ kind: "first-run" })).toBe("Set up this workspace · ufo");
   expect(titled({ kind: "bad-link" })).toBe("Invalid link · ufo");
   expect(

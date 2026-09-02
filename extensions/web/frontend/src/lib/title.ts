@@ -13,7 +13,6 @@ const NEW_CONVERSATION = "New conversation";
 const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
 const APPS = "Apps";
-const ADMINISTRATION = "Administration";
 export const SETUP = "Set up";
 const INVALID_LINK = "Invalid link";
 
@@ -123,8 +122,6 @@ function where(
       return [{ label: WORKSPACE_VIEWS[route.view].label }, { label: WORKSPACE }];
     case "section":
       return [{ label: SECTION_VIEWS[route.section]?.label ?? agentName(route.section) }];
-    case "admin":
-      return [{ label: ADMINISTRATION }];
     case "bad-link":
       return [{ label: INVALID_LINK }];
   }

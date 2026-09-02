@@ -105,7 +105,7 @@ test.each([
         owned({ name: "nightly-deploy", summary: "0 9 * * * — build the nightly", paused: false }),
       ]),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/workspace/team": () => json({ members: [], can_add: false, actions: [] }),
+    "/workspace/team": () => json({ members: [], can_manage: false, actions: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/workspace/tasks";

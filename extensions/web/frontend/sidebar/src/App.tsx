@@ -13,7 +13,6 @@ import {
   IconMoon,
   IconPlug,
   IconPlus,
-  IconSettings,
   IconSun,
   IconTerminal2,
   IconUsers,
@@ -31,7 +30,6 @@ import {
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Admin } from "@/views/Admin";
 import { AgentSetup } from "@/views/AgentSetup";
 
 import { Agents, AppsIndex } from "@/views/Agents";
@@ -101,7 +99,6 @@ import {
 import {
   forwardAgents,
   heldRoute,
-  openAdmin,
   openAgent,
   openAgentPlace,
   openAgents,
@@ -119,14 +116,12 @@ import {
 import {
   COMPOSE,
   COMPOSING,
-  WORKSPACE_TABS,
   standing,
   type Route,
   type Section,
   type WorkspacePlace,
-  type WorkspaceTab,
 } from "@/lib/route";
-import { ALL_SURFACES, SurfacesProvider, useSurfaces } from "@/lib/surfaces";
+import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
 
 export type AppProps = {
@@ -455,7 +450,6 @@ function signOut(): void {
  *  had picked light. */
 function AccountMenu({ member }: { member: Member }) {
   const scheme = useScheme();
-  const surfaces = useSurfaces();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -490,9 +484,6 @@ function AccountMenu({ member }: { member: Member }) {
             </DropdownMenuRadioGroup>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        {member.admin && surfaces.admin ? (
-          <DropdownMenuItem onSelect={openAdmin}>Administration</DropdownMenuItem>
-        ) : null}
         <DropdownMenuItem onSelect={signOut}>Sign out</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -724,7 +715,7 @@ function WorkspaceSidebar({
   onBuild: () => void;
 }) {
   const rail = useRail();
-  const surfaces = useSurfaces();
+  const tabs = useOfferedTabs();
   /* A drawer is always drawn whole, so the fold a desk width holds is ignored while it stands. */
   const collapsed = rail.collapsed && !narrow;
   /* A folded section states nothing and its head is what opens it again — so on the glyph rail,
@@ -849,7 +840,7 @@ function WorkspaceSidebar({
             current={standing(route, "workspace")}
             collapsed={collapsed}
             label="Workspace"
-            onClick={() => placeWorkspace("team", {}, "push")}
+            onClick={() => placeWorkspace(tabs[0], {}, "push")}
           >
             Workspace
           </NavRow>
@@ -871,18 +862,6 @@ function WorkspaceSidebar({
           <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
         </span>
         <SchemePick collapsed={collapsed} />
-        {member.admin && surfaces.admin ? (
-          <SidebarTooltip collapsed={collapsed} label="Administration">
-            <button
-              type="button"
-              aria-label="Administration"
-              onClick={openAdmin}
-              className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
-            >
-              <IconSettings className={GLYPH} aria-hidden />
-            </button>
-          </SidebarTooltip>
-        ) : null}
         <SidebarTooltip collapsed={collapsed} label="Sign out">
           <button
             type="button"
@@ -905,19 +884,6 @@ function SectionLanding({ agentId, place }: { agentId: string; place: WorkspaceP
   return null;
 }
 
-/** The workspace tabs this deploy draws. A withheld screen loses its tab and keeps its address, so
- *  a member holding the link still lands on it; the skills tab stands while either of its two
- *  panels does, and goes when neither is offered. */
-function offeredTabs(surfaces: Surfaces): readonly WorkspaceTab[] {
-  return WORKSPACE_TABS.filter((tab) =>
-    tab === "memory"
-      ? surfaces.memory
-      : tab === "skills"
-        ? surfaces["community-skills"] || surfaces["installed-skills"]
-        : true,
-  );
-}
-
 function RoutedPane({
   route,
   agents,
@@ -938,14 +904,12 @@ function RoutedPane({
   buildWanted: boolean;
 }) {
   const rail = useRail();
-  const surfaces = useSurfaces();
+  const tabs = useOfferedTabs();
   /** Where the member came from, off the trail that makes the tab title: every band on this screen
    *  names the trail's innermost step, so they all draw this one step over it and none of them
    *  derives it a second time. */
   const crumb = pageCrumb(route, agents, rail.rows, rail.linked, mainAgent);
   switch (route.kind) {
-    case "admin":
-      return <Admin />;
     case "agent-setup": {
       const app = agents.find((entry) => entry.id === route.agentId) ?? null;
       if (!app) return <PaneNote>No such app.</PaneNote>;
@@ -966,7 +930,7 @@ function RoutedPane({
       return (
         <TabbedPane
           group="workspace"
-          tabs={offeredTabs(surfaces)}
+          tabs={tabs}
           views={WORKSPACE_VIEWS}
           view={route.view}
           crumb={crumb}

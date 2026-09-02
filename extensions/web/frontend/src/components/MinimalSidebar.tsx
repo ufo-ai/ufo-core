@@ -21,6 +21,7 @@ import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { openHome, placeWorkspace } from "@/lib/router";
 import { setMuted, useMuted } from "@/lib/sound";
+import { useOfferedTabs } from "@/lib/surfaces";
 import { Spotlight } from "@/views/Spotlight";
 import type { Agent } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
@@ -109,6 +110,7 @@ export function MinimalSidebar({
   onBuild: () => void;
 }) {
   const { statuses } = useAppStatus();
+  const tabs = useOfferedTabs();
   const muted = useMuted();
   const list = useRef<HTMLUListElement>(null);
   const [mark, setMark] = useState<number | null>(null);
@@ -233,7 +235,7 @@ export function MinimalSidebar({
         <button
           type="button"
           aria-label={WORKSPACE}
-          onClick={() => placeWorkspace("team", {}, "push")}
+          onClick={() => placeWorkspace(tabs[0], {}, "push")}
           className={TILE}
         >
           <IconSettings className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />

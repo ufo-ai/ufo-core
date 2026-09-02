@@ -21,7 +21,7 @@ test("the token post and every read reach the fleet", () => {
   expect(routed("POST", "/surface/web")).toBe("fleet");
   for (const url of [
     "/surface/web/api/agents",
-    "/surface/web/api/admin",
+    "/surface/web/workspace/team",
     "/surface/web/agents/x/transcript",
     "/surface/web/agents/x/intents",
     "/surface/web/agents/x/actions/surface/slack/slack_connect",

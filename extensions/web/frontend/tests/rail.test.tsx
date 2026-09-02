@@ -760,7 +760,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
   atPhoneWidth();
   location.hash = "#/";
   wire({
-    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
+    "/workspace/team": () => json({ members: [], can_manage: false, domain: null }),
     "/workspace/radar": () => json({ runs: [] }),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),

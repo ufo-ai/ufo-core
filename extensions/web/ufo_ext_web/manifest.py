@@ -47,7 +47,6 @@ FLAGS = (
     FlagSpec(key=APP_FLAGS["radar"], what="The Radar app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["wiki"], what="The Wiki app is listed in the portal."),
     FlagSpec(key=MAIN_AGENT_FLAG, what="The workspace's main agent is listed in the portal."),
-    FlagSpec(key=PORTAL_SURFACES["admin"], what="An admin is offered the administration screen."),
     FlagSpec(key=PORTAL_SURFACES["memory"], what="The workspace Memory tab is drawn."),
     FlagSpec(
         key=PORTAL_SURFACES["community-skills"],

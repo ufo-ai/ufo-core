@@ -1147,7 +1147,7 @@ test("an applied grant change keeps a live consent link on screen", async () => 
  *  A container that forgets it renders them flush — which is a fault no band can see, and which
  *  eight sections of Usage shipped past a green suite once already. */
 test("every container that stacks bands states the one gap between them", async () => {
-  wire({ "/workspace/team": () => json({ members: [], can_add: false }) });
+  wire({ "/workspace/team": () => json({ members: [], can_manage: false }) });
   location.hash = "#/workspace/team";
   render(
     <App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />,

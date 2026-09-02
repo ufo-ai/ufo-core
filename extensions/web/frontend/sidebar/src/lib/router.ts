@@ -1,7 +1,6 @@
 import { useSyncExternalStore } from "react";
 
 import {
-  ADMIN_HASH,
   AGENTS_HASH,
   BUILDER_HASH,
   FIRST_RUN_HASH,
@@ -213,10 +212,6 @@ export function forwardAgents(): void {
 
 export function openBuilder(): void {
   navigate(BUILDER_HASH);
-}
-
-export function openAdmin(): void {
-  navigate(ADMIN_HASH);
 }
 
 export function openAgent(agentId: string): void {

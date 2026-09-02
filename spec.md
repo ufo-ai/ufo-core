@@ -704,9 +704,8 @@ shape, not an agent — no identity, no audience, no page
 of its own: a run's work is read inline under the reply that spawned it, and the topology graph
 draws the profile roster as one tile. An out-of-audience agent is not-found on
 every portal route,
-the administration view (agents with their policy,
-installations, and web-audience grants; members and seats; spend caps with their subjects named;
-the deploy's installed extensions and public-internet ceiling) answers a workspace admin only,
+the Team tab (the roster, with each member's role and whether the workspace answers them) is drawn
+for a workspace admin and carries their acts over it,
 and the signed bearer enters as a session cookie through one POST (the gateway's signed-in
 card), never a URL. That card is the deploy's one sign-in: the portal takes no bearer from a
 member, so a request reaching it without a session — the bare host `/`, which redirects to the
@@ -940,10 +939,9 @@ member and stamps them the owner, so the screen offers the act to every member i
   page. An admin
 replaces any existing prompt or setting from the agent page's prepared intent. In chat, only the
 main agent may replace an agent prompt, including its own; a child agent may replace none. The
-agent kind writes the complete row directly, and the turn is the audit record. The
-administration view mutates through the lane as well: member role and seat changes through the
-member kind's guards, and web-audience grants riding the target agent's own lane to the same store
-the chat verbs write.
+agent kind writes the complete row directly, and the turn is the audit record. The Team tab mutates
+through the lane as well: a member's role and access change as one apply on the member kind, through
+that kind's guards.
 Agent delete archives: the app stops, its record stays, and its name is available. Nothing is
 dropped — the conversations, spend, scheduled work, grants and connected accounts stay on the row,
 which is why the act is reversible and why no cascade over them is owed. A member's message founds

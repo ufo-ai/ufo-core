@@ -54,7 +54,6 @@ export type Route =
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "first-run" }
-  | { kind: "admin" }
   | { kind: "bad-link" };
 
 export type RouteKind = Route["kind"];
@@ -243,10 +242,6 @@ export const AGENTS_HASH = "#/agents";
 /** The app-building wizard's own address, so any screen can raise it by navigation. */
 export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
-/** Administration's own address. One spelling, so the screen that opens it and the pattern that
- *  reads it cannot drift apart. */
-export const ADMIN_HASH = "#/admin";
-
 /** The first run's own address. It is a place, not a boot flag: a member can return to it, and
  *  send a teammate to it, exactly as they can to any other screen. */
 export const FIRST_RUN_HASH = "#/first-run";
@@ -278,8 +273,8 @@ const SETUP_SEGMENT = "/setup";
 const SLOT_ONLY = new RegExp("^" + SLOT_NAME + "$");
 
 /** A route with no parts to carry reads its own path, and reads it whatever query the address
- *  arrived holding: a member sent `#/admin?ref=mail` asked for administration, not for whatever a
- *  reader that turned the whole string down would land them on. */
+ *  arrived holding: a member sent `#/first-run?ref=mail` asked for the first run, not for whatever
+ *  a reader that turned the whole string down would land them on. */
 function bare(path: string): RegExp {
   return new RegExp(`^${path}(?:\\?.*)?$`);
 }
@@ -325,13 +320,6 @@ const FIRST_RUN = row(
   bare(FIRST_RUN_HASH),
   () => ({ kind: "first-run" }),
   () => FIRST_RUN_HASH,
-);
-
-const ADMIN = row(
-  "admin",
-  bare(ADMIN_HASH),
-  () => ({ kind: "admin" }),
-  () => ADMIN_HASH,
 );
 
 const APPS = row<"workspace", [WorkspacePlace?]>(
@@ -467,7 +455,6 @@ type RouteReader = { pattern: RegExp; read: (match: RegExpMatchArray) => Route |
 const ROUTES: readonly RouteReader[] = [
   HOME,
   FIRST_RUN,
-  ADMIN,
   BUILDER,
   APPS,
   CHAT,
@@ -518,7 +505,6 @@ export function routeIs<Kind extends RouteKind>(
 const FRAMED: { [Kind in RouteKind]: boolean } = {
   home: false,
   "first-run": false,
-  admin: false,
   builder: false,
   chat: true,
   "conversation-slot": false,
@@ -571,7 +557,6 @@ function stands(route: Route): Stand[] {
       return [`section:${route.section}`];
     case "builder":
     case "first-run":
-    case "admin":
     case "bad-link":
       return [];
   }

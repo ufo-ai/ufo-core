@@ -252,7 +252,6 @@ from ufo.sdk.manifest import (
     SetupSchedule,
     SubagentProfile,
 )
-from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 
 SECRET = "artifact-signing-secret"
@@ -1517,7 +1516,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             "admin": False,
             "workspace_id": str(workspace_id),
         },
-        "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True),
+        "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True) | {"team": False},
         "archived": [],
         "agents": [
             {
@@ -1721,14 +1720,15 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
     keys — which is every deploy the moment this lands, and every deploy again while Flagship is
     unreachable. Neither takes one of the portal's own screens away, and neither lists a shipped
     app: an app is offered where somebody turned its flag on, so silence draws it in no list while
-    the workspace goes on holding it."""
+    the workspace goes on holding it. The Team tab is answered by the reader's admin standing rather
+    than by a flag, so no silence reaches it either way."""
     client, workspace_id, _agent_id = web
     init_flags(InMemoryProvider({}) if bound else None)
     for slug in web_surface.APP_FLAGS:
         await _seed_shipped_app(workspace_id, slug)
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     visibility, surfaces = await _app_visibility(client, token)
-    assert surfaces == dict.fromkeys(web_surface.PORTAL_SURFACES, True)
+    assert surfaces == dict.fromkeys(web_surface.PORTAL_SURFACES, True) | {"team": True}
     assert visibility == {None: False, **dict.fromkeys(web_surface.APP_FLAGS, True)}
 
 
@@ -3793,151 +3793,6 @@ async def test_a_shared_slack_turn_streams_to_a_member_who_did_not_speak_it(
 
     assert streamed.status_code == 200
     assert "event: terminal" in streamed.text
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_admin_view_reads_the_workspace_shape(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The administration read end to end: agents carry their policy, surface installations, and
-    the exact web-audience grants written through the extension's store — the main agent carries
-    none, and its `main` flag is what the portal renders as "every member"; members and seat
-    state are `Seats.snapshot`'s answer; every spend cap arrives with its subject named for the
-    reader; and the deploy reports its installed extensions and public-internet ceiling from the
-    mounted manifest set."""
-    client, workspace_id, _agent_id = web
-    second_agent = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=second_agent,
-                workspace_id=workspace_id,
-                name="ops",
-                prompt="be operational",
-                model="claude-sonnet-5",
-                internet_access_allowed=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.surface_installation).values(
-                routes_ingress=True,
-                workspace_id=workspace_id,
-                surface="slack",
-                installation_id="team:T42",
-                agent_id=second_agent,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
-    await _grant_web_access(workspace_id, second_agent, "member@example.com")
-    async with workspace_tx() as connection:
-        for scope, subject, window in (
-            ("workspace", None, 86_400),
-            ("agent", second_agent, 3_600),
-            ("member", member_id, 86_400),
-        ):
-            await connection.execute(
-                sa.insert(tables.spend_cap).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    scope=scope,
-                    subject_id=subject,
-                    window_seconds=window,
-                    limit_micro_usd=5_000_000,
-                    on_breach="park",
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    view = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
-    )
-    assert view.status_code == 200
-    payload = view.json()
-    by_name = {agent["name"]: agent for agent in payload["agents"]}
-    assert by_name["assistant"]["main"] and by_name["assistant"]["internet_access_allowed"]
-    assert by_name["assistant"]["installations"] == []
-    assert by_name["assistant"]["web_audience"] == []
-    assert not by_name["ops"]["internet_access_allowed"]
-    assert by_name["ops"]["installations"] == ["slack"]
-    assert by_name["ops"]["web_audience"] == ["member@example.com"]
-    assert {(m["email"], m["admin"], m["seated"]) for m in payload["members"]} == {
-        ("admin@example.com", True, True),
-        ("member@example.com", False, True),
-    }
-    assert "seats" not in payload
-    assert [
-        (
-            cap["scope"],
-            cap["subject"],
-            cap["window_seconds"],
-            cap["limit_micro_usd"],
-            cap["on_breach"],
-        )
-        for cap in payload["caps"]
-    ] == [
-        ("agent", "ops", 3_600, 5_000_000, "park"),
-        ("member", "member@example.com", 86_400, 5_000_000, "park"),
-        ("workspace", None, 86_400, 5_000_000, "park"),
-    ]
-    assert payload["deploy"]["sandbox_internet"] is False
-    assert [
-        (entry["name"], entry["version"], entry["sandbox_internet"])
-        for entry in payload["deploy"]["extensions"]
-    ] == [
-        ("imessage", "0.1.0", False),
-        ("report_digest", "0.1.0", False),
-        ("scheduled_tasks", "0.1.0", False),
-        ("sites", "0.1.0", False),
-        ("sources", "0.1.0", False),
-        ("stub", "0", False),
-        ("todos", "0.1.0", False),
-        ("web", "0.1.0", False),
-    ]
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_admin_view_reports_a_member_whose_seat_an_admin_revoked(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """Unseating is the one way an admin removes a person's access, so the page that offers it has
-    to state which members currently hold a seat — a revoked seat that reads the same as a held
-    one leaves the admin with no way to see the act landed."""
-    client, workspace_id, _agent_id = web
-    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    await _seed_member(workspace_id, "member@example.com")
-    async with workspace_tx() as connection:
-        await Seats(workspace_id).revoke(connection, "member@example.com")
-    view = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
-    )
-    assert view.status_code == 200
-    payload = view.json()
-    assert {(m["email"], m["seated"]) for m in payload["members"]} == {
-        ("admin@example.com", True),
-        ("member@example.com", False),
-    }
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_non_admin_is_not_found_on_the_admin_view(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    client, workspace_id, _agent_id = web
-    await _seed_member(workspace_id, "admin@example.com", admin=True)
-    _member_id, token = await _seed_member(workspace_id, "member@example.com")
-    denied = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
-    )
-    assert denied.status_code == 404
-    assert "admin@example.com" not in denied.text
 
 
 def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
@@ -8368,9 +8223,9 @@ async def test_member_seat_and_role_ride_the_intent_lane(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """The members table's controls are member-kind applies on the main agent's lane: role and
-    seat changes land exactly, and the kind's own guards answer — the last admin cannot be
-    demoted, the last seated admin cannot be unseated, and a non-admin mutates nobody."""
+    """The roster's row acts are member-kind applies on the main agent's lane: role and access
+    changes land exactly, and the kind's own guards answer — the last admin cannot be demoted, the
+    last seated admin cannot be unseated, and a non-admin mutates nobody."""
     client, workspace_id, agent_id = web
     admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
@@ -8433,6 +8288,16 @@ async def test_member_seat_and_role_ride_the_intent_lane(
     )
     assert outsider.json()["applied"] is False
     assert "admin" in outsider.json()["message"]
+    roster = await client.get(
+        "/surface/web/workspace/team", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert {
+        (entry["email"], entry["admin"], entry["seated"]) for entry in roster.json()["members"]
+    } == {
+        ("admin@example.com", True, True),
+        ("member@example.com", True, False),
+        ("plain@example.com", False, True),
+    }
 
 
 @pytest.mark.usefixtures("database_url")
@@ -8441,9 +8306,9 @@ async def test_audience_intents_write_the_grant_store(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """The administration view's audience controls ride the target agent's own intent lane and
-    land in the same store the chat verbs write: a grant makes the agent appear in the member's
-    portal, a revoke removes it, and a non-admin changes nothing."""
+    """The member object's web-audience acts ride the target agent's own intent lane and land in
+    the same store the chat verbs write: a grant makes the agent appear in the member's portal, a
+    revoke removes it, and a non-admin changes nothing."""
     client, workspace_id, _agent_id = web
     second_agent = uuid4()
     async with workspace_tx() as connection:
@@ -8500,24 +8365,6 @@ async def test_audience_intents_write_the_grant_store(
     assert outsider.status_code == 404
     with ws(workspace_id):
         assert await web_extension().store.list(AUDIENCE_PREFIX) == ()
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_admin_payload_names_the_ids_its_controls_address(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The administration view's controls need targets: every agent row carries its id (the intent
-    lane is per-agent) and every member row carries the stable member id the member kind applies
-    to."""
-    client, workspace_id, agent_id = web
-    admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    view = await client.get(
-        "/surface/web/api/admin", headers={"cookie": f"{SESSION_COOKIE}={token}"}
-    )
-    payload = view.json()
-    assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
-    assert [entry["id"] for entry in payload["members"]] == [str(admin_id)]
 
 
 async def _seed_agent_conversation(
@@ -9713,12 +9560,13 @@ async def test_automations_slot_follows_the_conversation_audience(
 async def test_team_view_lists_the_roster_for_every_member(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The workspace team view: every member reads the whole roster with each member's role and
-    seat — the same rows the `member` kind lists to a member asking the main agent — while
-    `can_add` opens the add form for an admin alone. An unauthenticated read is refused."""
+    """The workspace team view: every member reads the whole roster with each member's role, their
+    access state, and the stable id the panel's acts apply to — the same rows the `member` kind
+    lists to a member asking the main agent — while `can_manage` opens the add and the row acts for
+    an admin alone. An unauthenticated read is refused."""
     client, workspace_id, _agent_id = web
-    _member_id, token_m = await _seed_member(workspace_id, "m@example.com")
-    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    member_id, token_m = await _seed_member(workspace_id, "m@example.com")
+    admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
     unseated_id, _unseated_token = await _seed_member(workspace_id, "gone@example.com")
     path = "/surface/web/workspace/team"
 
@@ -9733,11 +9581,15 @@ async def test_team_view_lists_the_roster_for_every_member(
         ("gone@example.com", False, False),
         ("m@example.com", False, True),
     ]
-    assert "id" not in body["members"][0]
-    assert body["can_add"] is False
+    assert [entry["id"] for entry in body["members"]] == [
+        str(admin_id),
+        str(unseated_id),
+        str(member_id),
+    ]
+    assert body["can_manage"] is False
 
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
-    assert admin_view.json()["can_add"] is True
+    assert admin_view.json()["can_manage"] is True
     assert [entry["email"] for entry in admin_view.json()["members"]] == [
         entry["email"] for entry in body["members"]
     ]
@@ -10546,7 +10398,6 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
     init_flags(
         InMemoryProvider(
             {
-                "enable-admin-settings": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-community-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-installed-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-memory-tab": InMemoryFlag(default_variant="on", variants=variants),
@@ -10560,10 +10411,10 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
         await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
     ).json()
     assert boot["surfaces"] == {
-        "admin": False,
         "memory": True,
         "community-skills": False,
         "installed-skills": False,
+        "team": True,
     }
     assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
         (None, False),
