@@ -34,6 +34,9 @@ ENGINE_CORE_FILES = (
 )
 FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
+# Retired flag keys. An entry authorises the terraform destroy and forbids re-declaring the key
+# while any environment still holds it; the doctrine sweep drops one once no app does.
+FLAG_TOMBSTONES = ROOT / "infra" / "flag_tombstones.json"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
 SESSION_COOKIE_FACTORY = CORE_SRC / "sdk" / "http.py"
@@ -1672,7 +1675,7 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
     )
     if flags_source is None:
         return ["flags: no env root declares flags.tf"]
-    tombstones = frozenset(json.loads((ROOT / "infra" / "flag_tombstones.json").read_text()))
+    tombstones = frozenset(json.loads(FLAG_TOMBSTONES.read_text()))
     failures = []
     for environment, pack in sorted(packs.items()):
         declared = {spec.key for manifest in load_manifests(pack) for spec in manifest.flags}

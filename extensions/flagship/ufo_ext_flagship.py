@@ -102,6 +102,20 @@ class FlagshipAdmin:
         carried = {name: value for name, value in held.items() if name not in ANSWERED_ONLY_FIELDS}
         self._call("PUT", f"/{key}", body={**carried, "default_variation": wanted})
 
+    def list(self) -> tuple[str, ...]:
+        """Every flag key this app holds, sorted.
+
+        Terraform states which flags should exist and the flags gate states which the code reads.
+        This is the third answer, and the only one taken from the service itself: a key terraform
+        never created, or one it destroyed in one environment and not the other, is visible from
+        here and from nowhere else."""
+        held = self._call("GET", "").get("result")
+        if not isinstance(held, list):
+            raise RuntimeError("flagship answered no readable flag list")
+        # The collection names a flag `key` alone; only the single-flag read carries `flag_key`
+        # beside it, which is the field `serve` writes back.
+        return tuple(sorted(str(flag["key"]) for flag in held))
+
     def _call(
         self, method: str, path: str, body: dict[str, object] | None = None
     ) -> dict[str, object]:

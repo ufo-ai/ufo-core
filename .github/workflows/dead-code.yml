@@ -8,7 +8,7 @@ on:
       focus:
         description: >-
           Doctrine surface to sweep (db-columns, config-fields, events-frames, enum-members,
-          sdk-exports, manifest-points); empty rotates one class per scheduled run.
+          sdk-exports, manifest-points, flag-keys); empty rotates one class per scheduled run.
         required: false
         default: ""
 
@@ -114,9 +114,65 @@ jobs:
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
+  # Which class this run sweeps, decided once: the listing job below runs for one of them, and the
+  # audit reads the same answer rather than deriving it a second time.
+  focus:
+    runs-on: ubuntu-latest
+    outputs:
+      focus: ${{ steps.pick.outputs.focus }}
+    steps:
+      - name: Pick focus
+        id: pick
+        run: |
+          focus='${{ inputs.focus }}'
+          if [ -z "$focus" ]; then
+            order='db-columns config-fields events-frames enum-members sdk-exports manifest-points flag-keys'
+            # Divide the day of year by the cron day step (3) to get the run ordinal: the index
+            # then advances one class per run, so all 7 classes come up inside every month.
+            focus=$(echo "$order" | tr ' ' '\n' | sed -n "$(( 10#$(date -u +%j) / 3 % 7 + 1 ))p")
+          fi
+          echo "focus=$focus" >> "$GITHUB_OUTPUT"
+          echo "doctrine focus: $focus"
+
+  # A flag key's far end is a record in Cloudflare's flag service, so the sweep cannot grep for it.
+  # This lists what each app holds and hands it over as a file. It stands apart from the audit
+  # because reaching the production app needs that environment's secret, and the audit runs an
+  # agent with git and `gh` write scopes: the token is named here and reaches no step of that job.
+  flagship-keys:
+    needs: focus
+    if: needs.focus.outputs.focus == 'flag-keys'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync
+
+      - name: List what each Flagship app holds
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          FLAGSHIP_TESTING_API_TOKEN: ${{ secrets.FLAGSHIP_TESTING_API_TOKEN }}
+          FLAGSHIP_PROD_API_TOKEN: ${{ secrets.FLAGSHIP_PROD_API_TOKEN }}
+        run: uv run python .github/scripts/flagship_keys.py > flagship-keys.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flagship-keys
+          path: flagship-keys.json
+
   # The "both ends or neither" audit: one declared-surface class per run, rotating; a surface
   # missing its producer or consumer is dead weight no mechanical scanner can see.
   doctrine:
+    needs: [focus, flagship-keys]
+    # The listing runs for one class and is skipped for the other six; a skip is not a reason to
+    # skip the audit, but a listing that failed leaves the flag class with nothing to read.
+    if: ${{ !cancelled() && needs.focus.result == 'success' && needs.flagship-keys.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -146,18 +202,10 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Pick focus
-        id: focus
-        run: |
-          focus='${{ inputs.focus }}'
-          if [ -z "$focus" ]; then
-            order='db-columns config-fields events-frames enum-members sdk-exports manifest-points'
-            # Divide the day of year by the cron day step (3) to get the run ordinal: the index
-            # then advances one class per run, so all 6 classes come up inside every month.
-            focus=$(echo "$order" | tr ' ' '\n' | sed -n "$(( 10#$(date -u +%j) / 3 % 6 + 1 ))p")
-          fi
-          echo "focus=$focus" >> "$GITHUB_OUTPUT"
-          echo "doctrine focus: $focus"
+      - uses: actions/download-artifact@v4
+        if: needs.focus.outputs.focus == 'flag-keys'
+        with:
+          name: flagship-keys
 
       - run: uv sync
 
@@ -183,7 +231,7 @@ jobs:
           prompt: |
             You are the doctrine sweep for CLAUDE.md's "both ends or neither": every declared
             surface ships with its producer AND its consumer. Today's focus:
-            ${{ steps.focus.outputs.focus }}.
+            ${{ needs.focus.outputs.focus }}.
 
             Enumerate the declared surfaces of the focus class and verify each has a live other
             end, grepping the whole repo including tests and migrations:
@@ -194,6 +242,22 @@ jobs:
             - sdk-exports: every public symbol under core/src/ufo/sdk — an extension or pack
               that imports it
             - manifest-points: every Manifest point — a consumer in serve/loader
+            - flag-keys: every key each Flagship app holds — a `FlagSpec` that reads it. This one
+              class cannot be grepped: `flagship-keys.json` in the working directory is the live
+              key set per environment, listed from the service itself. Read it with `jq` and
+              compare against the `portal_flags` maps in `infra/envs/edge/flags.tf` (the flags gate
+              holds those to what the code declares, so they are the declaration) and
+              `infra/flag_tombstones.json`. Two findings, and no others:
+              (a) a live key that no environment's map declares and no tombstone names — nothing in
+              the repo will ever remove it, so file an issue naming the app that holds it;
+              (b) a tombstoned key that NO app holds any more — the entry has done both its jobs,
+              so the tear-out is dropping that one line from `infra/flag_tombstones.json`. A
+              tombstoned key still live in any app is neither: that environment deletes it on its
+              next deploy, so report it and leave it alone. Dropping an entry early re-permits the
+              key while the service still holds it, which wedges the next apply — so require the
+              key to be absent from every app in the file, never from one. Removal proves this
+              class too, but the proof is not a test module: run `uv run python gates.py` and
+              `uv run pytest core/tests/test_gates.py core/tests/test_terraform_plan_guard.py`.
 
             A surface missing one end is a finding. Dedup on the surface's dotted name exactly as
             follows: skip it when

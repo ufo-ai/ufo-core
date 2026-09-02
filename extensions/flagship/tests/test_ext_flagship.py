@@ -129,6 +129,19 @@ HELD_FLAG = {
     "rules": [{"priority": 1, "serve_variation": "on"}],
 }
 ANSWERED_FLAG = {**HELD_FLAG, "updated_at": "2026-08-27T22:00:00Z", "updated_by": "someone"}
+# One entry of the app's flag collection, as Cloudflare answers it: the collection names a flag
+# `key` and carries no `flag_key`, which the single-flag read above does.
+LISTED_FLAG = {
+    "key": "enable-wiki-app",
+    "type": "string",
+    "default_variation": "on",
+    "variations": {"on": "true", "off": "false"},
+    "rules": [],
+    "description": None,
+    "enabled": True,
+    "updated_at": "2026-09-02T21:55:43.468Z",
+    "updated_by": "unknown",
+}
 
 
 def _admin(
@@ -166,3 +179,61 @@ def test_a_refusal_carries_what_cloudflare_said(monkeypatch: pytest.MonkeyPatch)
     )
     with pytest.raises(RuntimeError, match="Authentication error"):
         admin.serve("enable-wiki-app", on=True)
+
+
+def test_the_listing_reads_the_app_collection_and_sorts_what_it_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep asks the service what it holds rather than the repo what it declares, so the
+    request is the app's own flag collection and the answer is every key on it — a key nobody
+    declared included, which is the whole reason to ask."""
+    asked: list[tuple[str, str]] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append((request.method, str(request.url)))
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": [
+                    {**LISTED_FLAG, "key": "enable-wiki-app"},
+                    {**LISTED_FLAG, "key": "enable-code-app"},
+                ],
+            },
+        )
+
+    admin = _admin(monkeypatch, answer)
+
+    assert admin.list() == ("enable-code-app", "enable-wiki-app")
+    assert asked == [
+        (
+            "GET",
+            f"{flagship.API_BASE_URL}/accounts/{ACCOUNT_ID}/flagship/apps/{APP_ID}/flags",
+        )
+    ]
+
+
+def test_a_listing_the_account_refuses_is_not_read_as_an_empty_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty answer and a refused one differ by everything: read a refusal as an empty app and
+    the sweep concludes every declared flag is missing and every tombstone is finished."""
+    admin = _admin(
+        monkeypatch,
+        lambda request: httpx.Response(
+            403, json={"success": False, "errors": [{"message": "Authentication error"}]}
+        ),
+    )
+    with pytest.raises(RuntimeError, match="Authentication error"):
+        admin.list()
+
+
+def test_a_success_carrying_no_list_is_refused_rather_than_read_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin = _admin(
+        monkeypatch,
+        lambda request: httpx.Response(200, json={"success": True, "result": None}),
+    )
+    with pytest.raises(RuntimeError, match="no readable flag list"):
+        admin.list()

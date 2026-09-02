@@ -9,6 +9,8 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 GUARD = ROOT / ".github" / "scripts" / "terraform_plan_guard.py"
+# A retired key of this case's own, so nothing here depends on what the repo's list holds.
+SWEPT_KEY = "enable-swept-away"
 PERSISTENT_DELETIONS = (
     ("module.platform.module.rds.module.db_instance.aws_db_instance.this[0]", "aws_db_instance"),
     ("module.platform.aws_ecr_repository.this", "aws_ecr_repository"),
@@ -172,11 +174,16 @@ REGENERABLE_MODULE_DELETIONS = (
 )
 
 
-def _guard():
+def _guard(tombstones: tuple[str, ...] | None = (SWEPT_KEY,)):
+    """The guard, with a tombstone list of the case's own. The repo's list is swept — an entry is
+    dropped once no environment holds the key — so a case naming one of its entries goes red on the
+    day it is dropped. `None` keeps what the module read, which is what proves that wiring."""
     spec = importlib.util.spec_from_file_location("terraform_plan_guard", GUARD)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if tombstones is not None:
+        module.FLAG_TOMBSTONES = frozenset(tombstones)
     return module
 
 
@@ -221,8 +228,8 @@ def _check_allows_regenerable_deletions() -> None:
 
 def _check_allows_a_tombstoned_flag_deletion() -> None:
     for address in (
-        'cloudflare_flagship_flag.testing_portal["enable-usage-tab"]',
-        'cloudflare_flagship_flag.prod_portal["enable-usage-tab"]',
+        f'cloudflare_flagship_flag.testing_portal["{SWEPT_KEY}"]',
+        f'cloudflare_flagship_flag.prod_portal["{SWEPT_KEY}"]',
     ):
         plan = {
             "resource_changes": [
@@ -230,7 +237,7 @@ def _check_allows_a_tombstoned_flag_deletion() -> None:
                     address,
                     "cloudflare_flagship_flag",
                     ["delete"],
-                    before={"flag_key": "enable-usage-tab"},
+                    before={"flag_key": SWEPT_KEY},
                 )
             ]
         }
@@ -245,14 +252,14 @@ def _check_rejects_other_flag_deletions() -> None:
             {"flag_key": "enable-memory-tab"},
         ),
         (
-            'cloudflare_flagship_flag.testing_portal["enable-usage-tab"]',
+            f'cloudflare_flagship_flag.testing_portal["{SWEPT_KEY}"]',
             ["delete", "create"],
-            {"flag_key": "enable-usage-tab"},
+            {"flag_key": SWEPT_KEY},
         ),
         (
             'cloudflare_flagship_flag.testing_portal["enable-memory-tab"]',
             ["delete"],
-            {"flag_key": "enable-usage-tab"},
+            {"flag_key": SWEPT_KEY},
         ),
     )
     for address, actions, before in cases:
@@ -425,8 +432,14 @@ def _check_entrypoint_reports_invalid_plans_without_a_traceback() -> None:
         assert rejected.stderr == f"{error}\n"
 
 
+def _check_the_tombstone_list_is_read_from_the_repo() -> None:
+    """The flag cases swap the list out, so this is what holds the guard to the real one."""
+    held = json.loads((ROOT / "infra" / "flag_tombstones.json").read_text())
+    assert _guard(tombstones=None).FLAG_TOMBSTONES == frozenset(held)
+
+
 def test_terraform_plan_guard_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 16
+    assert len(checks) == 17
     for check in checks:
         check()

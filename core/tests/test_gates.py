@@ -5,6 +5,8 @@ and its pure AST helpers are driven with hand-built trees — no filesystem, no 
 
 import ast
 import importlib.util
+import json
+import tempfile
 from pathlib import Path
 
 from ufo.product import PRODUCT_CENSUS_SECONDS
@@ -14,6 +16,9 @@ _spec = importlib.util.spec_from_file_location("ufo_gates", _GATES_PATH)
 gates = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gates)
 
+# A retired flag key of this module's own: the repo's tombstone list is swept, so a case naming
+# one of its entries goes red the day that entry is dropped.
+SWEPT_KEY = "enable-swept-away"
 ROGUE = Path("extensions/rogue/rogue.py")
 CORE_FILE = Path("core/src/ufo/db.py")
 EXT_TEST = Path("extensions/perplexity/tests/test_ext_perplexity.py")
@@ -935,10 +940,29 @@ def _check_flag_gate_names_a_key_the_environment_declares_and_nothing_reads() ->
 
 
 def _check_flag_gate_refuses_a_tombstoned_key() -> None:
-    failures = gates._declared_flag_failures(
-        {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: _flags_tf(*_declared_keys(), "enable-usage-tab")}
+    """The property is that a retired key cannot be declared again — never that one named key is
+    retired. The tombstone list is swept, so a case reading an entry out of it goes red on the day
+    that entry is dropped, and a case naming a key that is not in it proves nothing."""
+    with tempfile.TemporaryDirectory() as held:
+        swapped = Path(held) / "flag_tombstones.json"
+        swapped.write_text(json.dumps([SWEPT_KEY]))
+        original = gates.FLAG_TOMBSTONES
+        gates.FLAG_TOMBSTONES = swapped
+        try:
+            failures = gates._declared_flag_failures(
+                {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: _flags_tf(*_declared_keys(), SWEPT_KEY)}
+            )
+        finally:
+            gates.FLAG_TOMBSTONES = original
+    assert any(f"tombstoned key {SWEPT_KEY!r}" in failure for failure in failures)
+
+
+def _check_the_flag_gate_reads_the_tombstones_the_repo_holds() -> None:
+    """The case above swaps the file out, so this is what holds the gate to the real one."""
+    assert gates.FLAG_TOMBSTONES == gates.ROOT / "infra" / "flag_tombstones.json"
+    assert json.loads(gates.FLAG_TOMBSTONES.read_text()) == sorted(
+        json.loads(gates.FLAG_TOMBSTONES.read_text())
     )
-    assert any("tombstoned key 'enable-usage-tab'" in failure for failure in failures)
 
 
 def _check_flag_gate_passes_where_the_two_lists_agree() -> None:
@@ -1085,6 +1109,7 @@ def test_repository_gates() -> None:
         _check_flag_gate_names_a_key_the_code_reads_and_the_environment_omits,
         _check_flag_gate_names_a_key_the_environment_declares_and_nothing_reads,
         _check_flag_gate_refuses_a_tombstoned_key,
+        _check_the_flag_gate_reads_the_tombstones_the_repo_holds,
         _check_flag_gate_passes_where_the_two_lists_agree,
         _check_flag_gate_names_an_environment_with_no_map_of_its_own,
         _check_census_period_gate_flags_a_board_bucketing_at_the_wrong_period,
