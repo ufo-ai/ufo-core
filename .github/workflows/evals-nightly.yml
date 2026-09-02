@@ -103,7 +103,6 @@ jobs:
     outputs:
       jobs: ${{ steps.matrix.outputs.jobs }}
       memory_ingestion_shards: ${{ steps.matrix.outputs.memory_ingestion_shards }}
-      models: ${{ steps.matrix.outputs.models }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -115,14 +114,11 @@ jobs:
         run: |
           jobs="$(uv run python .github/scripts/nightly_eval_matrix.py --jobs "$SWEEP_SMOKE" --reasoning "$EVAL_REASONING")"
           memory_ingestion_shards="$(uv run python .github/scripts/nightly_memory_ingestion.py plan "$SWEEP_SMOKE")"
-          models="$(uv run python .github/scripts/nightly_eval_matrix.py --models)"
           echo "$jobs"
           echo "$memory_ingestion_shards"
-          echo "$models"
           {
             echo "jobs=$jobs"
             echo "memory_ingestion_shards=$memory_ingestion_shards"
-            echo "models=$models"
           } >>"$GITHUB_OUTPUT"
 
   sandbox-client:
@@ -297,14 +293,13 @@ jobs:
           retention-days: 14
 
   memory-ingestion:
-    name: memory ingestion / ${{ matrix.shard.report }} (${{ matrix.model.id }})
+    name: memory ingestion / ${{ matrix.shard.report }}
     needs: [credentials, plan]
     runs-on: linux-4-core
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        model: ${{ fromJSON(needs.plan.outputs.models) }}
         shard: ${{ fromJSON(needs.plan.outputs.memory_ingestion_shards) }}
     services:
       postgres:
@@ -326,7 +321,6 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-      EVAL_MODEL: ${{ matrix.model.id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -362,41 +356,67 @@ jobs:
             { curl --fail --location --output "$ASSETS/locomo.tmp" "$LOCOMO_URL" && \
               mv "$ASSETS/locomo.tmp" "$ASSETS/locomo10.json"; }
 
-      - name: Prepare the memory-ingestion stack
+      - name: Build the memory-ingestion snapshot
         run: |
-          uv run python .github/scripts/nightly_memory_ingestion.py prepare \
+          uv run python .github/scripts/nightly_memory_ingestion.py build \
             --longmem "$ASSETS/longmemeval_s_cleaned.json" \
             --locomo "$ASSETS/locomo10.json" \
             --dir "$RUNNER_TEMP/memory-ingestion" "$SWEEP_SMOKE" \
-            --model "$EVAL_MODEL" --reasoning "$EVAL_REASONING" \
             --report "$REPORT"
-          cat "$RUNNER_TEMP/memory-ingestion/ufo.toml" \
-            "$RUNNER_TEMP/memory-ingestion/matrix.toml"
         env:
           ASSETS: ${{ runner.temp }}/memory-ingestion-assets
           REPORT: ${{ matrix.shard.report }}
 
-      - name: Run memory ingestion
-        timeout-minutes: 60
-        run: uv run python -m evals.stack "$RUNNER_TEMP/memory-ingestion/matrix.toml"
+      - name: Derive the shared memory corpus
+        env:
+          UFO_CONFIG: ${{ runner.temp }}/memory-ingestion/producer.toml
+        run: |
+          uv run ufoctl migrate
+          uv run python -m evals.memory_ingestion.materialize \
+            --snapshot "$RUNNER_TEMP/memory-ingestion/snapshot" \
+            --state "$RUNNER_TEMP/memory-ingestion/producer-state" \
+            --corpus-output "$RUNNER_TEMP/memory-ingestion/derived-corpus.json" \
+            >"$RUNNER_TEMP/memory-ingestion/producer.log" 2>&1
 
-      - name: Verify memory ingestion
+      - name: Score the corpus producer
+        run: |
+          uv run python .github/scripts/nightly_memory_ingestion.py verify-producer \
+            --snapshot "$RUNNER_TEMP/memory-ingestion/snapshot" \
+            --corpus "$RUNNER_TEMP/memory-ingestion/derived-corpus.json" \
+            --readiness "$RUNNER_TEMP/memory-ingestion/producer-state"/*/readiness.json \
+            --state-output "memory-ingestion-producer-state/$REPORT/readiness.json"
+        env:
+          REPORT: ${{ matrix.shard.report }}
+
+      - name: Prepare the paired target stacks
+        run: |
+          uv run python .github/scripts/nightly_memory_ingestion.py prepare \
+            --snapshot "$RUNNER_TEMP/memory-ingestion/snapshot" \
+            --corpus "$RUNNER_TEMP/memory-ingestion/derived-corpus.json" \
+            --dir "$RUNNER_TEMP/memory-ingestion/targets" \
+            --reasoning "$EVAL_REASONING"
+          cat "$RUNNER_TEMP/memory-ingestion/targets"/*.toml
+
+      - name: Run paired memory ingestion targets
+        timeout-minutes: 60
+        run: uv run python -m evals.stack "$RUNNER_TEMP/memory-ingestion/targets/matrix.toml"
+
+      - name: Verify paired memory ingestion targets
         if: always()
         run: |
           uv run python .github/scripts/nightly_memory_ingestion.py verify \
             --reports eval-reports --runs-root .local/evals \
-            --state-output "memory-ingestion-state/$MODEL_LABEL/$REPORT/readiness.json" \
-            "$SWEEP_SMOKE" \
-            --model "$EVAL_MODEL" --report "$REPORT"
+            --state-root memory-ingestion-state \
+            --corpus "$RUNNER_TEMP/memory-ingestion/derived-corpus.json" \
+            "$SWEEP_SMOKE" --report "$REPORT"
         env:
-          MODEL_LABEL: ${{ matrix.model.label }}
           REPORT: ${{ matrix.shard.report }}
 
       - name: Upload the run records
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-run-records-memory-ingestion-${{ matrix.model.label }}-${{ matrix.shard.artifact }}
+          name: eval-run-records-memory-ingestion-${{ matrix.shard.artifact }}
           path: eval-reports/runs/*.json
           if-no-files-found: warn
           retention-days: 90
@@ -405,8 +425,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-memory-ingestion-state-${{ matrix.model.label }}-${{ matrix.shard.artifact }}
+          name: eval-memory-ingestion-state-${{ matrix.shard.artifact }}
           path: memory-ingestion-state
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload the producer score
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-memory-ingestion-producer-${{ matrix.shard.artifact }}
+          path: memory-ingestion-producer-state
           if-no-files-found: warn
           retention-days: 90
 
@@ -414,8 +443,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-stack-logs-memory-ingestion-${{ matrix.model.label }}-${{ matrix.shard.artifact }}
-          path: .local/evals/**/*.log
+          name: eval-stack-logs-memory-ingestion-${{ matrix.shard.artifact }}
+          path: |
+            .local/evals/**/*.log
+            ${{ runner.temp }}/memory-ingestion/producer.log
           if-no-files-found: warn
           retention-days: 14
 
@@ -452,6 +483,12 @@ jobs:
           pattern: eval-memory-ingestion-state-*
           merge-multiple: true
           path: eval-reports/state
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eval-memory-ingestion-producer-*
+          merge-multiple: true
+          path: eval-reports/producer-state
 
       # The sweep's reader-facing outputs: the summary GitHub shows on the run page, the same
       # summary in the archive, and one viewer over every shard's records — a record itself is

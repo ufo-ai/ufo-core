@@ -882,6 +882,12 @@ def test_memory_100_spec_requires_postgres_and_a_collector_endpoint(
             memory_ingestion=snapshot,
             model="claude",
         )
+    with pytest.raises(ValidationError, match="derived corpus without memory_ingestion"):
+        RunSpec(
+            label="ingestion",
+            config=postgres_template,
+            memory_ingestion_corpus=tmp_path / "derived-corpus.json",
+        )
     assert (
         RunSpec(
             label="ingestion",
@@ -1543,11 +1549,13 @@ def test_memory_ingestion_seeds_and_passes_snapshot_and_readiness(
     template = tmp_path / "template.toml"
     template.write_text(POSTGRES_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
     snapshot = tmp_path / "snapshot"
+    corpus = tmp_path / "derived-corpus.json"
     stack = EvalStack.provision(
         RunSpec(
             label="ingestion",
             config=template,
             memory_ingestion=snapshot,
+            memory_ingestion_corpus=corpus,
             reasoning="medium",
         ),
         root=tmp_path / "run",
@@ -1586,6 +1594,8 @@ def test_memory_ingestion_seeds_and_passes_snapshot_and_readiness(
             "medium",
             "--snapshot",
             str(snapshot.resolve()),
+            "--corpus",
+            str(corpus.resolve()),
         )
     ]
     assert stack._child_args(readiness)[-4:] == (

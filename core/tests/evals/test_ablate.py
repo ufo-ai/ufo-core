@@ -38,10 +38,12 @@ from evals.ablate import (
 )
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.viewer import EvalRun
+from evals.memory_ingestion.materialize import DERIVATION_MODEL, DerivedCorpus, DerivedFact
 from evals.memory_ingestion.models import (
     IngestionCase,
     IngestionPage,
     content_digest,
+    load_snapshot,
     write_snapshot,
 )
 from evals.stack import Matrix
@@ -186,12 +188,29 @@ def _snapshot(root: Path) -> Path:
 
 
 def _ingestion_spec(tmp_path: Path, cases: tuple[str, ...] = ()) -> ExperimentSpec:
+    snapshot = _snapshot(tmp_path / "snapshot")
+    corpus = tmp_path / "derived-corpus.json"
+    derived = DerivedCorpus.build(
+        load_snapshot(snapshot).manifest.digest,
+        DERIVATION_MODEL,
+        (
+            DerivedFact(
+                source_ref="longmem/polaris/answer/00/00.txt",
+                body="The project codename is Polaris.",
+                memory_kind="fact",
+                confidence=8,
+                as_of=datetime(2026, 8, 17, tzinfo=UTC),
+            ),
+        ),
+    )
+    corpus.write_text(derived.model_dump_json())
     return ExperimentSpec(
         name="exp",
         base="origin/main",
         suites=(INGESTION_SUITE,),
         cases=cases,
-        memory_ingestion=_snapshot(tmp_path / "snapshot"),
+        memory_ingestion=snapshot,
+        memory_ingestion_corpus=corpus,
         budget_usd=500.0,
         template={"pack": {"name": "assistant"}},
         arm=(ArmSpec(name="knockout", files={}),),
@@ -206,17 +225,19 @@ def test_ingestion_suites_group_the_snapshot_by_corpus_and_category(tmp_path: Pa
 
 
 def test_load_experiment_resolves_the_snapshot_against_the_file(tmp_path: Path) -> None:
-    _snapshot(tmp_path / "snapshot")
+    spec = _ingestion_spec(tmp_path)
     path = _experiment(
         tmp_path,
         'name = "exp"\nbase = "origin/main"\n'
         f'suites = ["{INGESTION_SUITE}"]\n'
-        'memory_ingestion = "snapshot"\nbudget_usd = 500.0\n'
+        'memory_ingestion = "snapshot"\n'
+        'memory_ingestion_corpus = "derived-corpus.json"\nbudget_usd = 500.0\n'
         f"{TEMPLATE}\n"
         '[[arm]]\nname = "knockout"\n[arm.files]\n"packs/thing.py" = "variant.py"\n',
     )
-    spec = load_experiment(path)
-    assert spec.memory_ingestion == (tmp_path / "snapshot").resolve()
+    loaded = load_experiment(path)
+    assert loaded.memory_ingestion == spec.memory_ingestion
+    assert loaded.memory_ingestion_corpus == spec.memory_ingestion_corpus
 
 
 def test_load_experiment_rejects_a_missing_snapshot(tmp_path: Path) -> None:
@@ -224,7 +245,8 @@ def test_load_experiment_rejects_a_missing_snapshot(tmp_path: Path) -> None:
         tmp_path,
         'name = "exp"\nbase = "origin/main"\n'
         f'suites = ["{INGESTION_SUITE}"]\n'
-        'memory_ingestion = "gone"\nbudget_usd = 500.0\n'
+        'memory_ingestion = "gone"\n'
+        'memory_ingestion_corpus = "gone.json"\nbudget_usd = 500.0\n'
         f"{TEMPLATE}\n"
         '[[arm]]\nname = "knockout"\n[arm.files]\n"packs/thing.py" = "variant.py"\n',
     )
@@ -238,6 +260,19 @@ def test_an_ingestion_suite_without_a_snapshot_is_rejected() -> None:
             name="exp",
             base="origin/main",
             suites=(INGESTION_SUITE,),
+            budget_usd=5.0,
+            template={"pack": {"name": "assistant"}},
+            arm=(),
+        )
+
+
+def test_an_ingestion_suite_without_a_shared_derivation_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="need memory_ingestion_corpus"):
+        ExperimentSpec(
+            name="exp",
+            base="origin/main",
+            suites=(INGESTION_SUITE,),
+            memory_ingestion=_snapshot(tmp_path / "snapshot"),
             budget_usd=5.0,
             template={"pack": {"name": "assistant"}},
             arm=(),
@@ -293,18 +328,22 @@ def test_the_preflight_narrows_the_skill_loading_suite(tmp_path: Path) -> None:
     assert Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")._planned_cases() == 2
 
 
-def test_every_matrix_row_carries_the_ingestion_snapshot(tmp_path: Path) -> None:
-    """The stack materializes the corpus per row and passes the snapshot with the readiness state it
-    produced, so the snapshot must ride the row: `--memory-ingestion` in `args` is rejected."""
+def test_every_ablation_arm_and_repeat_carries_one_derived_corpus(tmp_path: Path) -> None:
     spec = _ingestion_spec(tmp_path, cases=("longmem/polaris",)).model_copy(update={"repeats": 2})
     ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
 
-    written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
-    matrix = Matrix.model_validate(tomllib.loads(tomli_w.dumps(written)))
+    arms = (ArmSpec.model_construct(name="control", files={}), spec.arm[0])
+    matrices = tuple(
+        Matrix.model_validate(
+            tomllib.loads(tomli_w.dumps(ablation.matrix(arm, tmp_path / "ablate-template.toml")))
+        )
+        for arm in arms
+    )
 
-    assert len(matrix.run) == 2
-    for row in matrix.run:
+    assert all(len(matrix.run) == 2 for matrix in matrices)
+    for row in (row for matrix in matrices for row in matrix.run):
         assert row.memory_ingestion == spec.memory_ingestion
+        assert row.memory_ingestion_corpus == spec.memory_ingestion_corpus
         assert row.args == (
             "--concurrency",
             "4",

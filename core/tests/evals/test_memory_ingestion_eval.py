@@ -288,6 +288,7 @@ def test_builder_matches_memory_100_and_builds_deterministic_locomo_cases(
         IngestionReadiness(
             snapshot_digest=locomo_report.manifest.digest,
             corpus_digest="sha256:" + "1" * 64,
+            derived_corpus_digest="sha256:" + "2" * 64,
             derivation_model=DERIVATION_MODEL,
             workspace_id=uuid4(),
             source_id=uuid4(),
@@ -370,7 +371,7 @@ def _registry(client: ExtractionClient) -> ModelRegistry:
     )
 
 
-async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory(
+async def test_materializer_derives_once_and_installs_the_same_corpus_for_each_target(
     memory_ingestion_db: None, tmp_path: Path
 ) -> None:
     snapshot_root = tmp_path / "snapshot"
@@ -391,7 +392,8 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
         run_budget=run_budget,
     )
 
-    readiness = await materializer.run()
+    produced = await materializer.run()
+    readiness = produced.readiness
 
     assert readiness.derivation_model == DERIVATION_MODEL
     assert readiness.page_count == 1
@@ -407,8 +409,44 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
         owners = (
             await connection.execute(sa.text("select distinct owner_kind from chunk"))
         ).scalars()
+        producer_subjects = set(
+            (
+                await connection.execute(sa.text("select distinct subject from memory_item"))
+            ).scalars()
+        )
         assert agent_reasoning == "medium"
         assert set(owners) == {"memory_item"}
+
+    await dispose_db()
+    consumer_url = f"sqlite+aiosqlite:///{tmp_path / 'consumer.db'}"
+    apply_cached_migrations(consumer_url)
+    init_db(consumer_url)
+    consumer_client = ExtractionClient()
+    consumed = await MemoryIngestionMaterializer.from_snapshot(
+        snapshot_root,
+        tmp_path / "consumer-state",
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "consumer-blobs")),
+        index=DefaultIndex(transaction=workspace_tx),
+        embed=DeterministicEmbed(),
+        manifests=(sources_manifest.manifest(), memory_manifest.manifest()),
+        registry=_registry(consumer_client),
+        background_model=DERIVATION_MODEL,
+        corpus=produced.corpus,
+    ).run()
+
+    assert not consumer_client.requests
+    assert consumed.corpus == produced.corpus
+    assert consumed.readiness.derived_corpus_digest == readiness.derived_corpus_digest
+    assert consumed.readiness.corpus_digest != readiness.corpus_digest
+    assert consumed.readiness.evidence == readiness.evidence
+    assert consumed.readiness.source_id != readiness.source_id
+    async with workspace_tx() as connection:
+        consumer_subjects = set(
+            (
+                await connection.execute(sa.text("select distinct subject from memory_item"))
+            ).scalars()
+        )
+    assert consumer_subjects == producer_subjects == {"shared"}
 
 
 async def test_runner_requires_derived_evidence_from_recall_or_search(tmp_path: Path) -> None:
@@ -419,6 +457,7 @@ async def test_runner_requires_derived_evidence_from_recall_or_search(tmp_path: 
     readiness = IngestionReadiness(
         snapshot_digest=snapshot.manifest.digest,
         corpus_digest="sha256:" + "1" * 64,
+        derived_corpus_digest="sha256:" + "2" * 64,
         derivation_model=DERIVATION_MODEL,
         workspace_id=uuid4(),
         source_id=uuid4(),

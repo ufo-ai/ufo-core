@@ -35,11 +35,11 @@ The experiment file:
     [arm.files]
     "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
 
-A `memory_ingestion` snapshot path makes the ingestion suites measurable: it rides every matrix row
-the orchestrator writes, so each arm's stack materializes the corpus itself and hands its eval child
-that snapshot together with the readiness state its own materialization produced. Those suites are
-named `memory_ingestion.<corpus>.<category>` and are built from the snapshot at run time, so the
-budget preflight counts their cases from the snapshot instead of the registry.
+`memory_ingestion` snapshot and `memory_ingestion_corpus` paths make the ingestion suites
+measurable: both ride every matrix row, so every arm and repeat installs the same Luna-derived
+facts before its target runs. Those suites are named `memory_ingestion.<corpus>.<category>` and are
+built from the snapshot at run time, so the budget preflight counts their cases from the snapshot
+instead of the registry.
 
 Credentials come from the invoking environment — the orchestrator adds nothing and strips
 nothing, so run it under the same minimal environment an `evals.stack` run takes. A remote
@@ -72,6 +72,7 @@ import evals.stack as eval_stack
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.registry import narrowed_tasks
 from evals.harness.viewer import EvalRun, write_viewer
+from evals.memory_ingestion.materialize import DerivedCorpus
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
 from evals.stack import RUNS_ROOT as STACK_RUNS_DIR
@@ -150,6 +151,7 @@ class ExperimentSpec(BaseModel):
     rather than by the deploy: an app agent's home skill is measured from that agent's own prompt.
     Empty runs the default agent."""
     memory_ingestion: Path | None = None
+    memory_ingestion_corpus: Path | None = None
     repeats: int = 1
     concurrency: int = 4
     max_stacks: int = 3
@@ -178,6 +180,13 @@ class ExperimentSpec(BaseModel):
                 f"suites {', '.join(named)} need memory_ingestion naming the snapshot they "
                 "are built from"
             )
+        if named and self.memory_ingestion_corpus is None:
+            raise ValueError(
+                f"suites {', '.join(named)} need memory_ingestion_corpus naming the shared "
+                "Luna derivation"
+            )
+        if self.memory_ingestion_corpus is not None and self.memory_ingestion is None:
+            raise ValueError("memory_ingestion_corpus needs memory_ingestion")
         return self
 
 
@@ -195,10 +204,21 @@ def ingestion_suites(snapshot_root: Path) -> dict[str, tuple[str, ...]]:
 def load_experiment(path: Path) -> ExperimentSpec:
     spec = ExperimentSpec.model_validate(tomllib.loads(path.read_text()))
     snapshot = None
+    corpus = None
     if spec.memory_ingestion is not None:
         snapshot = (path.parent / spec.memory_ingestion).resolve()
         if not (snapshot / MANIFEST_FILE).is_file():
             raise SystemExit(f"memory_ingestion snapshot missing {MANIFEST_FILE}: {snapshot}")
+    if spec.memory_ingestion_corpus is not None:
+        corpus = (path.parent / spec.memory_ingestion_corpus).resolve()
+        if not corpus.is_file():
+            raise SystemExit(f"memory_ingestion derived corpus missing: {corpus}")
+        derived = DerivedCorpus.model_validate_json(corpus.read_bytes())
+        if (
+            snapshot is not None
+            and derived.snapshot_digest != load_snapshot(snapshot).manifest.digest
+        ):
+            raise SystemExit("memory_ingestion derived corpus belongs to a different snapshot")
     resolved = tuple(
         ArmSpec(
             name=arm.name,
@@ -214,7 +234,13 @@ def load_experiment(path: Path) -> ExperimentSpec:
         for repo_path, variant in arm.files.items():
             if not variant.is_file():
                 raise SystemExit(f"arm {arm.name!r}: variant for {repo_path} missing: {variant}")
-    return spec.model_copy(update={"arm": resolved, "memory_ingestion": snapshot})
+    return spec.model_copy(
+        update={
+            "arm": resolved,
+            "memory_ingestion": snapshot,
+            "memory_ingestion_corpus": corpus,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -766,11 +792,14 @@ class Ablation:
     def matrix(self, arm: ArmSpec, config: Path) -> dict[str, list[dict[str, object]]]:
         """One arm's `evals.stack` matrix: a run block per repeat, each an isolated stack.
 
-        A memory-ingestion snapshot travels as a row key, never as an argument. The stack owns
-        `--memory-ingestion` and `--memory-ingestion-state`, because it materializes the corpus
-        itself and only then knows where the readiness state landed."""
+        A memory-ingestion snapshot and derived corpus travel as row keys, never as arguments. The
+        stack owns `--memory-ingestion` and `--memory-ingestion-state`, because it installs the
+        corpus and only then knows where the readiness state landed."""
         corpus: dict[str, object] = (
-            {"memory_ingestion": str(self.spec.memory_ingestion)}
+            {
+                "memory_ingestion": str(self.spec.memory_ingestion),
+                "memory_ingestion_corpus": str(self.spec.memory_ingestion_corpus),
+            }
             if self.spec.memory_ingestion is not None
             else {}
         )

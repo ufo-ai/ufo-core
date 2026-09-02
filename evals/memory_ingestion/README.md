@@ -15,9 +15,11 @@ The builder keeps only the annotated evidence turns. It splits long turns before
 character fact-extraction bound. The materializer does not index the raw pages. An answer must use
 a memory item that `derive_facts` made.
 
-The materializer requires `models.background_jobs_model = "gpt-5.6-luna"`. It records this model
-in readiness data and the runner checks it. If Luna makes no fact for annotated evidence, readiness
-records an empty mapping and the case fails derived-evidence coverage.
+The producer requires `models.background_jobs_model = "gpt-5.6-luna"`. It writes a normalized,
+content-attested derived corpus. Paired targets install that same corpus in separate stacks; Luna
+quality remains visible in the producer readiness, while target comparisons no longer include two
+independent derivations. If Luna makes no fact for annotated evidence, producer coverage records
+that miss and both targets still run against the corpus it produced.
 
 ## Build
 
@@ -50,10 +52,9 @@ locomo/conv-26/062
 locomo/conv-42/037
 ```
 
-## Materialize and run
+## Derive and run
 
-Use the stack runner with a Postgres template. It creates a clean database and runs materialization,
-serve, recall capture, and evaluation with one config.
+Derive once in a clean migrated database, then give the resulting corpus to every target stack.
 
 ```bash
 cat > .local/memory-ingestion/template.toml <<'EOF'
@@ -77,13 +78,25 @@ search_provider = "perplexity"
 otlp_endpoint = "http://127.0.0.1:4318"
 EOF
 
+set -a; source .env; set +a
+UFO_CONFIG=.local/memory-ingestion/template.toml uv run ufoctl migrate
+UFO_CONFIG=.local/memory-ingestion/template.toml uv run python \
+  -m evals.memory_ingestion.materialize \
+  --snapshot .local/memory-ingestion/snapshot \
+  --state .local/memory-ingestion/producer-state \
+  --corpus-output .local/memory-ingestion/derived-corpus.json
+
 cat > .local/memory-ingestion/matrix.toml <<'EOF'
 [[run]]
 label = "memory-ingestion"
 config = ".local/memory-ingestion/template.toml"
 memory_ingestion = ".local/memory-ingestion/snapshot"
+memory_ingestion_corpus = ".local/memory-ingestion/derived-corpus.json"
 EOF
 
-set -a; source .env; set +a
 uv run python -m evals.stack .local/memory-ingestion/matrix.toml
 ```
+
+An `evals.ablate` experiment over a `memory_ingestion.*` suite names both paths with
+`memory_ingestion` and `memory_ingestion_corpus`; every control and candidate repeat then consumes
+the same derivation.

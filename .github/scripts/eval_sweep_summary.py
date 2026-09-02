@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nightly_eval_matrix import NIGHTLY_MODELS, sweep_jobs
-from nightly_memory_ingestion import FULL_REPORT_CASES, SMOKE_REPORT_CASES
+from nightly_memory_ingestion import FULL_REPORT_CASES, SMOKE_REPORT_CASES, target_run_label
 
 from evals.harness.viewer import load_runs, write_viewer
 from evals.memory_ingestion.materialize import IngestionReadiness
@@ -25,6 +25,7 @@ from evals.registry import TASKS
 REASON_LIMIT = 240
 NOT_RECORDED = "Not recorded"
 MEMORY_STATE_ROOT = Path("state")
+MEMORY_PRODUCER_STATE_ROOT = Path("producer-state")
 EXPECTED_FULL_EXCLUSIONS = frozenset(
     {
         ("skill_loading_member", "bias-ach-explainer-block-off"),
@@ -44,7 +45,7 @@ def _planned_runs(smoke: bool, memory_ingestion: bool) -> tuple[PlannedRun, ...]
     if memory_ingestion:
         cases = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
         planned += tuple(
-            ("memory-ingestion", name, model.id) for model in NIGHTLY_MODELS for name in cases
+            (target_run_label(model), name, model.id) for model in NIGHTLY_MODELS for name in cases
         )
     return planned
 
@@ -60,26 +61,37 @@ def _format_run(run: PlannedRun | RecordedRun) -> str:
 
 def _memory_readiness_errors(root: Path, smoke: bool) -> tuple[str, ...]:
     reports = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
-    snapshots: dict[str, dict[str, str]] = {report: {} for report in reports}
     missing = []
-    for model in NIGHTLY_MODELS:
-        for report in reports:
+    mismatched = []
+    for report in reports:
+        producer_path = root / MEMORY_PRODUCER_STATE_ROOT / report / "readiness.json"
+        if not producer_path.is_file():
+            missing.append(f"producer/{report}")
+            continue
+        producer = IngestionReadiness.model_validate_json(producer_path.read_bytes())
+        for model in NIGHTLY_MODELS:
             path = root / MEMORY_STATE_ROOT / model.label / report / "readiness.json"
             if not path.is_file():
                 missing.append(f"{report} ({model.id})")
                 continue
             readiness = IngestionReadiness.model_validate_json(path.read_bytes())
-            snapshots[report][model.id] = readiness.snapshot_digest
-    mismatched = [
-        f"{report}: " + ", ".join(f"{model} {digest}" for model, digest in sorted(by_model.items()))
-        for report, by_model in snapshots.items()
-        if len(set(by_model.values())) > 1
-    ]
+            if (
+                readiness.snapshot_digest,
+                readiness.derived_corpus_digest,
+            ) != (
+                producer.snapshot_digest,
+                producer.derived_corpus_digest,
+            ):
+                mismatched.append(
+                    f"{report} ({model.id}) {readiness.snapshot_digest}/"
+                    f"{readiness.derived_corpus_digest} != producer {producer.snapshot_digest}/"
+                    f"{producer.derived_corpus_digest}"
+                )
     errors = []
     if missing:
         errors.append("missing memory ingestion readiness: " + ", ".join(missing))
     if mismatched:
-        errors.append("memory ingestion snapshot mismatch: " + "; ".join(mismatched))
+        errors.append("memory ingestion producer/target mismatch: " + "; ".join(mismatched))
     return tuple(errors)
 
 

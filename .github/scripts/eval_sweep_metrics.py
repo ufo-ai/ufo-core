@@ -19,8 +19,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from nightly_eval_matrix import NIGHTLY_MODELS
-
 from evals.harness.viewer import load_runs
 from evals.memory_ingestion.materialize import IngestionReadiness
 
@@ -37,7 +35,7 @@ MEMORY_FACT_METRIC = "ufo.evals.memory_ingestion.facts"
 MEMORY_CHUNK_METRIC = "ufo.evals.memory_ingestion.chunks"
 MEMORY_EVIDENCE_METRIC = "ufo.evals.memory_ingestion.evidence_refs"
 MEMORY_EMPTY_EVIDENCE_METRIC = "ufo.evals.memory_ingestion.empty_evidence_refs"
-MEMORY_STATE_ROOT = Path("state")
+MEMORY_PRODUCER_STATE_ROOT = Path("producer-state")
 
 
 def series(root: Path, mode: str, timestamp: int) -> dict:
@@ -74,35 +72,33 @@ def series(root: Path, mode: str, timestamp: int) -> dict:
                             "points": [{"timestamp": timestamp, "value": value}],
                         }
                     )
-    for model in NIGHTLY_MODELS:
-        state_root = root / MEMORY_STATE_ROOT / model.label
-        for state_path in sorted(state_root.glob("*/readiness.json")):
-            readiness = IngestionReadiness.model_validate_json(state_path.read_bytes())
-            tags = [
-                "suite:memory_ingestion",
-                "shard:memory-ingestion",
-                f"memory_report:{state_path.parent.name}",
-                f"mode:{mode}",
-                f"target_model:{model.id}",
-            ]
-            for metric, value in (
-                (MEMORY_PAGE_METRIC, readiness.page_count),
-                (MEMORY_FACT_METRIC, readiness.memory_count),
-                (MEMORY_CHUNK_METRIC, readiness.chunk_count),
-                (MEMORY_EVIDENCE_METRIC, len(readiness.evidence)),
-                (
-                    MEMORY_EMPTY_EVIDENCE_METRIC,
-                    sum(not evidence.memory_ids for evidence in readiness.evidence),
-                ),
-            ):
-                points.append(
-                    {
-                        "metric": metric,
-                        "type": GAUGE,
-                        "tags": tags,
-                        "points": [{"timestamp": timestamp, "value": value}],
-                    }
-                )
+    for state_path in sorted((root / MEMORY_PRODUCER_STATE_ROOT).glob("*/readiness.json")):
+        readiness = IngestionReadiness.model_validate_json(state_path.read_bytes())
+        tags = [
+            "suite:memory_ingestion",
+            "shard:memory-ingestion-producer",
+            f"memory_report:{state_path.parent.name}",
+            f"mode:{mode}",
+            f"derivation_model:{readiness.derivation_model}",
+        ]
+        for metric, value in (
+            (MEMORY_PAGE_METRIC, readiness.page_count),
+            (MEMORY_FACT_METRIC, readiness.memory_count),
+            (MEMORY_CHUNK_METRIC, readiness.chunk_count),
+            (MEMORY_EVIDENCE_METRIC, len(readiness.evidence)),
+            (
+                MEMORY_EMPTY_EVIDENCE_METRIC,
+                sum(not evidence.memory_ids for evidence in readiness.evidence),
+            ),
+        ):
+            points.append(
+                {
+                    "metric": metric,
+                    "type": GAUGE,
+                    "tags": tags,
+                    "points": [{"timestamp": timestamp, "value": value}],
+                }
+            )
     if not points:
         raise SystemExit(f"no run record under {root} — the sweep recorded no score to submit")
     return {"series": points}

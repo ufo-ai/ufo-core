@@ -191,6 +191,7 @@ class RunSpec(BaseModel):
     reasoning: ReasoningEffort | None = None
     memory_100: Path | None = None
     memory_ingestion: Path | None = None
+    memory_ingestion_corpus: Path | None = None
     issue_recall: bool = False
     member_model_provider: Literal["anthropic", "openai"] | None = None
 
@@ -229,6 +230,8 @@ class RunSpec(BaseModel):
                 f"run {self.label!r} sets a model with memory ingestion — "
                 "models.auto_model owns the recall model"
             )
+        if self.memory_ingestion_corpus is not None and self.memory_ingestion is None:
+            raise ValueError(f"run {self.label!r} sets a derived corpus without memory_ingestion")
         corpora = sum(
             (
                 self.memory_100 is not None,
@@ -576,11 +579,20 @@ class EvalStack:
             reasoning_args = (
                 () if self.spec.reasoning is None else ("--agent-reasoning", self.spec.reasoning)
             )
+            corpus_args = (
+                ()
+                if self.spec.memory_ingestion_corpus is None
+                else (
+                    "--corpus",
+                    str(self.spec.memory_ingestion_corpus.resolve()),
+                )
+            )
             return await self._materialize(
                 "evals.memory_ingestion.materialize",
                 *reasoning_args,
                 "--snapshot",
                 str(self.spec.memory_ingestion.resolve()),
+                *corpus_args,
             )
         await self._checked(await self._ufoctl(*self._seed_args(), log=self.seed_log), "seed")
         if not self.spec.issue_recall:

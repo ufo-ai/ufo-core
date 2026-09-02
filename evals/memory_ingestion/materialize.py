@@ -6,17 +6,19 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from importlib import import_module
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from evals.budget import EvalRunBudget
-from evals.memory_ingestion.models import IngestionSnapshot, load_snapshot
+from evals.memory_ingestion.models import IngestionSnapshot, canonical_json, load_snapshot
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -72,9 +74,52 @@ class DerivedEvidence(BaseModel):
     memory_ids: tuple[UUID, ...]
 
 
+class DerivedFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    source_ref: str = Field(min_length=1)
+    body: str = Field(min_length=1)
+    memory_kind: Literal["fact", "preference", "decision", "event", "task"]
+    confidence: int = Field(ge=1, le=10)
+    as_of: datetime
+
+
+class DerivedCorpus(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    snapshot_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    derivation_model: str
+    facts: tuple[DerivedFact, ...]
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @classmethod
+    def build(
+        cls,
+        snapshot_digest: str,
+        derivation_model: str,
+        facts: tuple[DerivedFact, ...],
+    ) -> "DerivedCorpus":
+        """Build the canonical, content-attested corpus shared by paired eval targets."""
+        ordered = tuple(sorted(facts, key=_fact_key))
+        return cls(
+            snapshot_digest=snapshot_digest,
+            derivation_model=derivation_model,
+            facts=ordered,
+            digest=_derived_corpus_digest(snapshot_digest, derivation_model, ordered),
+        )
+
+    @model_validator(mode="after")
+    def canonical_and_attested(self) -> "DerivedCorpus":
+        if self.facts != tuple(sorted(self.facts, key=_fact_key)):
+            raise ValueError("memory_ingestion derived facts are not canonical")
+        expected = _derived_corpus_digest(self.snapshot_digest, self.derivation_model, self.facts)
+        if self.digest != expected:
+            raise ValueError("memory_ingestion derived corpus digest does not match its facts")
+        return self
+
+
 class IngestionReadiness(BaseModel):
     snapshot_digest: str
     corpus_digest: str
+    derived_corpus_digest: str
     derivation_model: str
     workspace_id: UUID
     source_id: UUID
@@ -87,14 +132,70 @@ class IngestionReadiness(BaseModel):
 
 
 @dataclass(frozen=True)
+class IngestionMaterialization:
+    readiness: IngestionReadiness
+    corpus: DerivedCorpus
+
+
+def _fact_key(fact: DerivedFact) -> tuple[str, str, str, int, str]:
+    return (
+        fact.source_ref,
+        fact.body,
+        fact.memory_kind,
+        fact.confidence,
+        fact.as_of.isoformat(),
+    )
+
+
+def _derived_corpus_digest(
+    snapshot_digest: str, derivation_model: str, facts: tuple[DerivedFact, ...]
+) -> str:
+    payload = json.dumps(
+        {
+            "snapshot_digest": snapshot_digest,
+            "derivation_model": derivation_model,
+            "facts": [fact.model_dump(mode="json") for fact in facts],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _derived_corpus(
+    snapshot: IngestionSnapshot, source_id: UUID, memory_rows: list[sa.Row]
+) -> DerivedCorpus:
+    source_refs = {
+        page_id_for(source_id, page.source_ref): page.source_ref for page in snapshot.pages
+    }
+    facts = tuple(
+        sorted(
+            (
+                DerivedFact(
+                    source_ref=source_refs[row.created_from_page_id],
+                    body=row.body,
+                    memory_kind=row.memory_kind,
+                    confidence=row.confidence,
+                    as_of=row.as_of,
+                )
+                for row in memory_rows
+            ),
+            key=_fact_key,
+        )
+    )
+    return DerivedCorpus.build(snapshot.manifest.digest, DERIVATION_MODEL, facts)
+
+
+@dataclass(frozen=True)
 class IngestionAttestor:
     snapshot: IngestionSnapshot
     workspace_id: UUID
     source_id: UUID
     pages_root: Path
     blob: WorkspaceBlobStore
+    expected_corpus: DerivedCorpus | None = None
 
-    async def attest(self) -> IngestionReadiness:
+    async def attest(self) -> IngestionMaterialization:
         """Attest source ingestion, Luna-derived provenance, and memory-only indexing."""
         page_rows, memory_rows, chunk_rows, source_row, cursors = await self._rows()
         expected_source_id = source_row_id(
@@ -179,9 +280,13 @@ class IngestionAttestor:
         }
         if cursors != expected_cursors:
             raise RuntimeError("memory_ingestion page consumers are not settled")
-        return IngestionReadiness(
+        corpus = _derived_corpus(self.snapshot, self.source_id, memory_rows)
+        if self.expected_corpus is not None and corpus != self.expected_corpus:
+            raise RuntimeError("memory_ingestion installed corpus differs from its producer")
+        readiness = IngestionReadiness(
             snapshot_digest=self.snapshot.manifest.digest,
             corpus_digest=self._digest(page_rows, memory_rows, chunk_rows),
+            derived_corpus_digest=corpus.digest,
             derivation_model=DERIVATION_MODEL,
             workspace_id=self.workspace_id,
             source_id=self.source_id,
@@ -192,6 +297,7 @@ class IngestionAttestor:
             asker_email=ASKER_EMAIL,
             evidence=evidence,
         )
+        return IngestionMaterialization(readiness=readiness, corpus=corpus)
 
     async def _rows(
         self,
@@ -293,6 +399,7 @@ class MemoryIngestionMaterializer:
     agent_reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
     postgres: bool = False
     run_budget: EvalRunBudget | None = None
+    corpus: DerivedCorpus | None = None
 
     @classmethod
     def from_snapshot(
@@ -309,6 +416,7 @@ class MemoryIngestionMaterializer:
         agent_reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT,
         postgres: bool = False,
         run_budget: EvalRunBudget | None = None,
+        corpus: DerivedCorpus | None = None,
     ) -> "MemoryIngestionMaterializer":
         """Load a snapshot and locate its deterministic staging directory."""
         snapshot = load_snapshot(root)
@@ -325,10 +433,11 @@ class MemoryIngestionMaterializer:
             agent_reasoning,
             postgres,
             run_budget,
+            corpus,
         )
 
-    async def run(self) -> IngestionReadiness:
-        """Ingest pages, derive facts with Luna, and attest memory-only recall state."""
+    async def run(self) -> IngestionMaterialization:
+        """Ingest pages, install one derived corpus, and attest memory-only recall state."""
         if self.background_model != DERIVATION_MODEL:
             raise ValueError(
                 f"memory_ingestion requires background model {DERIVATION_MODEL!r}, "
@@ -339,6 +448,13 @@ class MemoryIngestionMaterializer:
         workspace_id = uuid5(
             NAMESPACE_URL, f"memory_ingestion/workspace/{self.snapshot.manifest.digest}"
         )
+        if self.corpus is not None and self.corpus.snapshot_digest != self.snapshot.manifest.digest:
+            raise ValueError("memory_ingestion derived corpus belongs to a different snapshot")
+        if self.corpus is not None and self.corpus.derivation_model != DERIVATION_MODEL:
+            raise ValueError(
+                f"memory_ingestion corpus used {self.corpus.derivation_model!r}, "
+                f"expected {DERIVATION_MODEL!r}"
+            )
         await self._create_workspace(workspace_id)
         if self.run_budget is not None:
             await self.run_budget.install(workspace_id)
@@ -356,7 +472,10 @@ class MemoryIngestionMaterializer:
                 blob=self.blob,
                 postgres=self.postgres,
             ).run()
-            await self._derive_facts()
+            if self.corpus is None:
+                await self._derive_facts()
+            else:
+                await self._install_corpus(workspace_id, source_id, self.corpus)
             await self._drain_memory_index()
             return await IngestionAttestor(
                 snapshot=self.snapshot,
@@ -364,6 +483,7 @@ class MemoryIngestionMaterializer:
                 source_id=source_id,
                 pages_root=self.pages_root,
                 blob=self.blob,
+                expected_corpus=self.corpus,
             ).attest()
 
     async def _create_workspace(self, workspace_id: UUID) -> None:
@@ -488,6 +608,60 @@ class MemoryIngestionMaterializer:
             raise RuntimeError("memory_ingestion fact derivation did not reach a cursor")
         await store.put("page_change_cursor:index_pages", high_water)
 
+    async def _install_corpus(
+        self, workspace_id: UUID, source_id: UUID, corpus: DerivedCorpus
+    ) -> None:
+        page_by_ref = {
+            page.source_ref: page_id_for(source_id, page.source_ref) for page in self.snapshot.pages
+        }
+        missing = sorted({fact.source_ref for fact in corpus.facts} - page_by_ref.keys())
+        if missing:
+            raise ValueError(f"memory_ingestion corpus names unknown pages: {', '.join(missing)}")
+        async with workspace_tx() as connection:
+            page_rows = list(
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.page.c.id,
+                            tables.page.c.revision,
+                            tables.page.c.subject,
+                        ).order_by(tables.page.c.revision, tables.page.c.id)
+                    )
+                ).all()
+            )
+        pages = {row.id: row for row in page_rows}
+        ctx = context_for(memory_manifest.NAME, frozenset())
+        store = memory_store.MemoryStore(
+            index=self.index,
+            embed=self.embed,
+            transaction=workspace_tx,
+            workspace_id=workspace_id,
+            page_states=ctx.page_states,
+        )
+        kept: dict[UUID, frozenset[UUID]] = {}
+        for fact in corpus.facts:
+            page_id = page_by_ref[fact.source_ref]
+            item_id = await store.commit(
+                memory_store.MemoryWrite(
+                    subject=pages[page_id].subject,
+                    body=fact.body,
+                    item_class="fact",
+                    memory_kind=fact.memory_kind,
+                    confidence=fact.confidence,
+                    created_from_page_id=page_id,
+                    created_from_page_revision=pages[page_id].revision,
+                    source_id=source_id,
+                    as_of=fact.as_of,
+                )
+            )
+            kept[page_id] = kept.get(page_id, frozenset()) | {item_id}
+        for page_id, item_ids in kept.items():
+            await store.supersede_page_facts(page_id, item_ids)
+        high_water = f"{page_rows[-1].revision}|{page_rows[-1].id}" if page_rows else None
+        cursor_store = ScopedStore(extension=memory_manifest.NAME)
+        await cursor_store.put("page_change_cursor:derive_facts", high_water)
+        await cursor_store.put("page_change_cursor:index_pages", high_water)
+
     async def _drain_memory_index(self) -> None:
         indexer = memory_store.MemoryIndexer(
             index=self.index,
@@ -526,7 +700,8 @@ async def _run(
     state_root: Path,
     run_budget: EvalRunBudget | None,
     agent_reasoning: ReasoningEffort,
-) -> IngestionReadiness:
+    corpus: DerivedCorpus | None,
+) -> IngestionMaterialization:
     if config.models.background_jobs_model != DERIVATION_MODEL:
         raise ValueError(
             f"memory_ingestion requires models.background_jobs_model = {DERIVATION_MODEL!r}"
@@ -552,6 +727,7 @@ async def _run(
             agent_reasoning=agent_reasoning,
             postgres=config.database.url.startswith("postgresql"),
             run_budget=run_budget,
+            corpus=corpus,
         ).run()
     finally:
         init_workspace_credentials(None)
@@ -562,6 +738,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m evals.memory_ingestion.materialize")
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--corpus", type=Path)
+    parser.add_argument("--corpus-output", type=Path)
     parser.add_argument("--run-id", type=UUID)
     parser.add_argument("--budget-micro-usd", type=int)
     parser.add_argument(
@@ -573,14 +751,21 @@ def main(argv: list[str] | None = None) -> None:
     if (args.run_id is None) != (args.budget_micro_usd is None):
         parser.error("--run-id and --budget-micro-usd must be provided together")
     run_budget = None if args.run_id is None else EvalRunBudget(args.run_id, args.budget_micro_usd)
-    readiness = asyncio.run(
-        _run(load_config(), args.snapshot, args.state, run_budget, args.agent_reasoning)
+    corpus = (
+        None if args.corpus is None else DerivedCorpus.model_validate_json(args.corpus.read_bytes())
     )
+    materialization = asyncio.run(
+        _run(load_config(), args.snapshot, args.state, run_budget, args.agent_reasoning, corpus)
+    )
+    readiness = materialization.readiness
     output = args.state / readiness.snapshot_digest.removeprefix("sha256:") / "readiness.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(readiness.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"
     )
+    if args.corpus_output is not None:
+        args.corpus_output.parent.mkdir(parents=True, exist_ok=True)
+        args.corpus_output.write_bytes(canonical_json(materialization.corpus) + b"\n")
     print(output)
 
 

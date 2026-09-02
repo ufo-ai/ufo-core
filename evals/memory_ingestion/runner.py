@@ -78,7 +78,7 @@ def load_memory_ingestion(snapshot_root: Path, readiness_path: Path) -> MemoryIn
                 message=case.question,
                 grader=MemoryIngestionGrader(expected),
                 digest_tag=(
-                    f"{snapshot.manifest.digest}:{readiness.corpus_digest}:"
+                    f"{snapshot.manifest.digest}:{readiness.derived_corpus_digest}:"
                     f"{DERIVATION_MODEL}:{MEMORY_INGESTION_GRADER_REVISION}:{case.id}:{identity}"
                 ),
                 rubric=_answer_rubric(case),
