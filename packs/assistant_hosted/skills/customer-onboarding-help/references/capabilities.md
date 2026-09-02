@@ -78,8 +78,9 @@ Web sign-in opens the web portal automatically, where a member chats with the wo
 in the browser. A workspace admin reaches every agent there. Every other member reaches the agents
 open to everyone in the workspace, any agent they created themselves, and any agent shared with
 them — sharing is said in that agent's own chat ("let alex@example.com reach this agent on the web")
-and revoked the same way. A member who asks for a new app chooses whether it is theirs alone or open
-to everyone in the workspace.
+and revoked the same way, though a shared agent's own homepage screen stays limited to its owner and
+admins. A member who asks for a new app chooses whether it is theirs alone or open to everyone in
+the workspace.
 
 ## Members and admins
 

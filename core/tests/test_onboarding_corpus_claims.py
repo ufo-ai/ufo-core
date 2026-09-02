@@ -568,6 +568,16 @@ CLAIMS = (
         ),
     ),
     Claim(
+        claim="a web-access grant reaches a private agent's chat but not its homepage screen",
+        corpus="references/capabilities.md",
+        phrase="a shared agent's own homepage screen stays limited to its owner and\nadmins",
+        source=WEB_SURFACE,
+        pattern=(
+            r'if summary\.visibility != "workspace" and member_id != summary\.owner_member_id'
+            r' and not admin:\n\s+return \{"state": "none"\}'
+        ),
+    ),
+    Claim(
         claim="the billing screen turns automatic refills on or off, no chat needed",
         corpus="references/billing-and-seats.md",
         phrase="turn\n  automatic refills on or off",
