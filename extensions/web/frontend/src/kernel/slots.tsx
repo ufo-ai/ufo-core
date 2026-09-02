@@ -112,6 +112,10 @@ export function beside(event: { metaKey: boolean; ctrlKey: boolean; button?: num
   return event.metaKey || event.ctrlKey || event.button === MIDDLE_BUTTON;
 }
 
+/** The cursor moving straight from one lane's field into another's: which lane it left, which it
+ *  landed in, and whether the landing lane stands to the right of the one left. */
+type Handoff = { from: string; to: string; rightward: boolean };
+
 type Track = {
   hosted: boolean;
   over: boolean;
@@ -122,6 +126,8 @@ type Track = {
   arrivals: MutableRefObject<Set<string>>;
   sought: MutableRefObject<Set<string>>;
   typing: string | undefined;
+  handoff: Handoff | undefined;
+  alone: boolean;
   watch: (id: string, panel: HTMLElement | null) => void;
   near: (id: string) => boolean;
   shows: (id: string) => void;
@@ -140,6 +146,8 @@ const TrackContext = createContext<Track>({
   arrivals: { current: new Set() },
   sought: { current: new Set() },
   typing: undefined,
+  handoff: undefined,
+  alone: true,
   watch: () => {},
   near: () => true,
   shows: () => {},
@@ -285,15 +293,67 @@ const SLOT = "relative flex min-h-0 flex-col bg-surface";
  *  lane is sized by what it holds instead, and pages one to a screen at the narrow width. */
 const SPREAD = "lane-share will-change-transform " + PAGED;
 
-/** What a lane wears while it holds the member's cursor: the palette's focus stroke, drawn inside
- *  the lane's own edge so the row says which lane the words are going into. The stroke is on every
- *  lane, so it reads the same arriving as leaving, and it takes nothing from the lanes beside it —
- *  each of them stands at full strength and is read, scrolled and typed into as before. The clear
- *  stroke stands back where the lane itself is focus-visible, so a lane the keyboard walks to with
- *  `[` or `]` draws the palette's stroke rather than painting it away. */
-const LIT =
-  "outline-2 -outline-offset-2 outline-transparent focus-visible:outline-ring transition-colors duration-200 ease-control";
-const LIT_ON = "outline-ring";
+/** A lane draws no outline of its own: the mark of the lane holding the member's cursor is the
+ *  `Focus` stripe along its top edge, and the stripe stands in for the page-wide focus outline where
+ *  the lane itself is focus-visible, so a lane the keyboard walks to with `[` or `]` is marked the
+ *  same way as one being typed in. */
+const LIT = "group/lane outline-none";
+
+/** The stripe a lane wears along its top edge while it holds the member's cursor: four pixels of
+ *  the palette's focus colour, so the row says which lane the words are going into. Every lane
+ *  keeps the four pixels above its header whether the stripe is drawn or not, so the headers of a
+ *  row stand at one height and nothing moves when the cursor lands. The stripe scales in from the
+ *  lane's centre when the cursor lands and back out the same way when the typing ends, so it reads
+ *  the same arriving as leaving and takes nothing from the lanes beside it — each of them stands at
+ *  full strength and is read, scrolled and typed into as before. The arrival is quick and settles
+ *  long, the departure the other way round, so the eye catches the stripe coming and never watches
+ *  it go. A lane standing alone keeps the four pixels and never draws the stripe: which lane the
+ *  words are going into is not a question, and the header holds its height for the lane that opens
+ *  beside it. */
+const FOCUS = "block h-1 shrink-0 bg-ring transition-transform";
+const FOCUS_OFF = "scale-x-0 duration-200 ease-leave";
+const FOCUS_ON = "scale-x-100 duration-200 ease-enter";
+const FOCUS_WALKED = "group-focus-visible/lane:scale-x-100";
+
+/** How the stripe moves when the cursor goes straight from one lane into another: the leaving
+ *  stripe folds toward the edge facing the lane the cursor went to, quickly and gathering speed,
+ *  and only once it is nearly gone does the arriving one unfold from the edge facing the lane it
+ *  came from, slowing as it fills — so at every moment there is one stripe's worth of colour on
+ *  the row and it is crossing the seam. A cursor arriving from nowhere or leaving for nowhere has
+ *  no side to sweep from, so those scale about the centre on the row's own enter and leave pair. */
+const FOCUS_LEAVING = "scale-x-0 duration-150 ease-in";
+const FOCUS_ARRIVING = "scale-x-100 delay-100 duration-200 ease-out";
+const FOCUS_FROM: Record<"left" | "right", string> = {
+  left: "origin-left",
+  right: "origin-right",
+};
+
+function Focus({
+  on,
+  from,
+  alone,
+}: {
+  on: boolean;
+  from: "left" | "right" | undefined;
+  alone: boolean;
+}) {
+  return (
+    <span
+      aria-hidden
+      data-slot="focus"
+      data-on={on ? "" : undefined}
+      className={cn(
+        FOCUS,
+        from === undefined
+          ? on
+            ? FOCUS_ON
+            : FOCUS_OFF
+          : [on ? FOCUS_ARRIVING : FOCUS_LEAVING, FOCUS_FROM[from]],
+        !on && !alone && FOCUS_WALKED,
+      )}
+    />
+  );
+}
 
 const BODY = "flex min-h-0 flex-col bg-surface " + WIDTHS.reading + " " + PAGED;
 
@@ -401,12 +461,12 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  its frame — which is the whole cost of the rule. A track nothing can observe, jsdom's, draws
  *  every body, and so does a row no layout has given a width.
  *
- *  The lane holding the member's cursor draws the focus stroke. A row is several open things at once
+ *  The lane holding the member's cursor draws the focus stripe. A row is several open things at once
  *  by design, so the lane the words are going into says so on its own edge; nothing is taken from the
  *  lanes beside it, which stand at full strength and are read, scrolled and typed into as before. A
- *  press into a second lane's field moves the stroke there. What ends it is what ended the typing —
+ *  press into a second lane's field moves the stripe there. What ends it is what ended the typing —
  *  Escape out of the field, or focus landing anywhere that is not one, on this row or off it. It is
- *  the cursor that is read, not the press: a lane focused at a button draws no stroke.
+ *  the cursor that is read, not the press: a lane focused at a button draws no stripe.
  *
  *  `seek` brings one lane into view: the rolling row carries that lane to its head, or as near the
  *  head as the row's own end leaves room for, and a row beside a body scrolls to it — a lane not
@@ -426,7 +486,7 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  `[` and `]` walk the row: `]` toward the next lane, `[` toward the one before, so a row wider
  *  than the screen is reachable without a pointer or a tab through everything each lane holds. What
  *  the press moves is the member, not the row: the lane it lands on takes focus and draws the
- *  stroke, and the row follows only as far as it has to for that lane to stand on the screen, which
+ *  stripe, and the row follows only as far as it has to for that lane to stand on the screen, which
  *  is not at all while it already does. A press that slid the row a lane along and left the cursor
  *  where it stood would put the member in a lane they can no longer see. Neither key comes round.
  *  The walk stops at the row's ends, and a press asking for a lane past one of them moves nothing
@@ -605,7 +665,20 @@ export function SlotTrack({
     },
     [row],
   );
-  const [typing, setTyping] = useState<string | undefined>(undefined);
+  /* The lane the member's cursor is writing in, and the lane it was writing in the moment before,
+     held together so a move straight from one field to another is read as one move and the stripes
+     sweep between the two — a cursor that stops on the way, at a button or off the row, arrives
+     from nowhere. */
+  const [cursor, setCursor] = useState<{ typing: string | undefined; from: string | undefined }>({
+    typing: undefined,
+    from: undefined,
+  });
+  const typing = cursor.typing;
+  const setTyping = useCallback(
+    (next: string | undefined) =>
+      setCursor((held) => (held.typing === next ? held : { typing: next, from: held.typing })),
+    [],
+  );
   /* The lane the member is standing in: the one the bracket walk last landed on, the one their
      cursor or their pointer last landed in, or the one a seek brought in. It is what the rail
      marks, so unlike `typing` it outlives the focus that set it — pressing a rail tile takes focus
@@ -895,6 +968,16 @@ export function SlotTrack({
   useEffect(() => {
     if (expanded !== undefined && focused === undefined) setExpanded(undefined);
   }, [expanded, focused]);
+  const from = cursor.from;
+  const rightward =
+    from !== undefined && typing !== undefined && ids.indexOf(typing) > ids.indexOf(from);
+  const handoff = useMemo(
+    () =>
+      from === undefined || typing === undefined || from === typing
+        ? undefined
+        : { from, to: typing, rightward },
+    [from, typing, rightward],
+  );
   const track = useMemo(
     () => ({
       hosted: true,
@@ -906,6 +989,8 @@ export function SlotTrack({
       arrivals,
       sought,
       typing,
+      handoff,
+      alone: ids.length === 1,
       watch,
       near,
       shows,
@@ -913,7 +998,7 @@ export function SlotTrack({
       expanded: focused,
       expand,
     }),
-    [over, hosts, place, drop, move, typing, watch, near, shows, ids.length, focused, expand],
+    [over, hosts, place, drop, move, typing, handoff, watch, near, shows, ids.length, focused, expand],
   );
   if (prior.current !== null && (prior.current.size > 0 || ids.length === 1)) {
     for (const id of ids) if (!prior.current.has(id)) arrivals.current.add(id);
@@ -1070,6 +1155,8 @@ export function useSlot(
     arrivals,
     sought,
     typing,
+    handoff,
+    alone,
     watch,
     near,
     shows,
@@ -1139,7 +1226,19 @@ export function useSlot(
   if (!hosted) return node;
   if (!host) return null;
   const Glyph = GLYPHS[kind];
-  const lit = typing === id;
+  const lit = !alone && typing === id;
+  const sweep =
+    handoff === undefined
+      ? undefined
+      : handoff.to === id
+        ? handoff.rightward
+          ? "left"
+          : "right"
+        : handoff.from === id
+          ? handoff.rightward
+            ? "right"
+            : "left"
+          : undefined;
   const hidden = expanded !== undefined && expanded !== id;
   const expandedHere = expanded === id;
   const expandAct = expandable ? (
@@ -1187,12 +1286,12 @@ export function useSlot(
             SLOT,
             over ? SPREAD : [WIDTHS[kind], PAGED],
             LIT,
-            lit && LIT_ON,
             hidden && "hidden",
             tone,
           )}
           style={{ "--pane-acts-inset": "0px" } as CSSProperties}
         >
+          <Focus on={lit} from={sweep} alone={alone} />
           <Header
             pinned
             ruled

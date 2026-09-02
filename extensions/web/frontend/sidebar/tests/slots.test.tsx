@@ -595,6 +595,7 @@ test("the hairline between two slots is the track's own background through the g
   for (const slot of screen.getAllByRole("region")) {
     expect(slot.className).toContain("bg-surface");
     expect(slot.className).not.toContain("border");
+    expect(slot.className.split(" ")).toContain("outline-none");
   }
 });
 

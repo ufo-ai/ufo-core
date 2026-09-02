@@ -127,7 +127,10 @@ const WIDTHS: Record<SlotKind, string> = {
   panel: "grow-0 shrink basis-(--container-record) min-w-(--size-slot-min)",
 };
 
-const SLOT = "relative flex min-h-0 flex-col bg-surface " + PAGED;
+/** A lane takes focus when it opens and when a member closes the one beside it, and draws nothing
+ *  for it: the page-wide focus outline would stand around the whole lane, and a lane is not a
+ *  control the member is about to press. */
+const SLOT = "relative flex min-h-0 flex-col bg-surface outline-none " + PAGED;
 const BODY = "flex min-h-0 flex-col bg-surface " + WIDTHS.reading + " " + PAGED;
 
 const FULL =

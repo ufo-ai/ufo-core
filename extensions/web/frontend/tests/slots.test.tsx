@@ -1381,25 +1381,40 @@ const lit = () =>
 const lands = (on: HTMLElement) => act(() => on.focus());
 
 /** A row is several open things at once, and the lane the words are going into says so on its own
- *  edge: the palette's focus stroke, on that lane alone. Nothing is taken from the lanes beside it. A
- *  press into a second lane's field moves the stroke rather than adding one. It is the cursor that is
- *  read and not the press, so a lane focused at a button draws no stroke, and Escape out of the field
- *  ends it along with the typing. */
-test("the lane being typed in draws the focus stroke, and clears when the typing ends", async () => {
+ *  top edge: the focus stripe, on that lane alone. Nothing is taken from the lanes beside it. A
+ *  press into a second lane's field moves the stripe rather than adding one. It is the cursor that is
+ *  read and not the press, so a lane focused at a button draws no stripe, and Escape out of the field
+ *  ends it along with the typing. The stripe is the first thing every lane stands, four pixels tall
+ *  in the flow above the header whether drawn or not, and it scales out rather than leaving the
+ *  tree — so every header stands at one height and the stripe is animated out as it was in. */
+test("the lane being typed in draws the focus stripe, and clears when the typing ends", async () => {
   render(<Fields names={["A", "B", "C"]} />);
 
   expect(lit()).toEqual([]);
 
   lands(screen.getByRole("textbox", { name: "A composer" }));
   expect(lit()).toEqual(["A"]);
-  const worn = (name: string) => slotFor(name).className.split(" ");
-  expect(worn("A")).toContain("outline-ring");
-  expect(worn("B")).not.toContain("outline-ring");
+  const stripe = (name: string) => {
+    const found = slotFor(name).querySelector('[data-slot="focus"]');
+    if (!(found instanceof HTMLElement)) throw new Error(name + " has no focus stripe");
+    return found;
+  };
+  const worn = (name: string) => stripe(name).className.split(" ");
+  expect(stripe("A").hasAttribute("data-on")).toBe(true);
+  expect(worn("A")).toEqual(
+    expect.arrayContaining(["scale-x-100", "h-1", "shrink-0", "bg-ring", "transition-transform"]),
+  );
+  expect(worn("A")).not.toContain("absolute");
+  expect(stripe("B").hasAttribute("data-on")).toBe(false);
+  expect(worn("B")).toContain("scale-x-0");
+  expect(worn("B")).toContain("h-1");
+  for (const name of ["A", "B", "C"]) expect(slotFor(name).firstElementChild).toBe(stripe(name));
   expect(slotFor("B").className).not.toContain("opacity-");
-  // The clear stroke a quiet lane wears stands back where the lane itself is focus-visible, so a
-  // lane the keyboard walks to draws the palette's stroke instead of painting it away.
-  expect(worn("B")).toContain("outline-transparent");
-  expect(worn("B")).toContain("focus-visible:outline-ring");
+  expect(slotFor("A").className.split(" ")).not.toContain("outline-ring");
+  // The stripe stands in for the page-wide focus ring where the lane itself is focus-visible, so a
+  // lane the keyboard walks to is marked the same way as one being typed in.
+  expect(slotFor("B").className.split(" ")).toContain("outline-none");
+  expect(worn("B")).toContain("group-focus-visible/lane:scale-x-100");
 
   lands(screen.getByRole("textbox", { name: "B composer" }));
   expect(lit()).toEqual(["B"]);
@@ -1410,6 +1425,79 @@ test("the lane being typed in draws the focus stroke, and clears when the typing
 
   lands(screen.getByRole("button", { name: "A act" }));
   expect(lit()).toEqual([]);
+});
+
+/** The cursor moving straight from one lane's field into another's is one move, and the stripes
+ *  say so: the leaving stripe folds toward the edge facing the lane the cursor went to, fast and
+ *  gathering speed, and the arriving one unfolds from the edge facing the lane it came from once the
+ *  leaving one is nearly gone, slowing as it fills — one stripe crossing the seam. A cursor arriving
+ *  from nowhere, or leaving for nowhere, scales about the centre — and the lane neither left nor
+ *  landed in is not moved. */
+/** One lane standing alone is where the words are going, so it draws no stripe — not for the
+ *  cursor, not for the keyboard walk — while keeping the four pixels above its header, so the header
+ *  holds its height when a second lane opens beside it. */
+test("a lane standing alone keeps the stripe's room and never draws it", () => {
+  render(<Fields names={["A"]} />);
+  const stripe = slotFor("A").querySelector('[data-slot="focus"]');
+  if (!(stripe instanceof HTMLElement)) throw new Error("A has no focus stripe");
+
+  lands(screen.getByRole("textbox", { name: "A composer" }));
+  expect(lit()).toEqual([]);
+  expect(stripe.className.split(" ")).toContain("h-1");
+  expect(stripe.className.split(" ")).toContain("scale-x-0");
+  expect(stripe.className).not.toContain("group-focus-visible");
+});
+
+/** The lane's own mark is named, so it reaches the stripe and nothing else: an unnamed `group` on
+ *  the lane would make every `group-hover:` and `group-focus-visible:` utility standing inside it —
+ *  the rows of an app history, the chevrons of a chat list — fire on the lane's hover and focus,
+ *  revealing every row's trailing stamp at once. */
+test("the lane names its group, so the mark reaches the stripe alone", () => {
+  render(<Fields names={["A", "B"]} />);
+  const worn = slotFor("A").className.split(" ");
+
+  expect(worn).toContain("group/lane");
+  expect(worn).not.toContain("group");
+});
+
+test("the stripe sweeps toward the lane the cursor moved to", async () => {
+  render(<Fields names={["A", "B", "C"]} />);
+  const stripe = (name: string) => {
+    const found = slotFor(name).querySelector('[data-slot="focus"]');
+    if (!(found instanceof HTMLElement)) throw new Error(name + " has no focus stripe");
+    return found.className.split(" ");
+  };
+  const origins = (name: string) => stripe(name).filter((worn) => worn.startsWith("origin-"));
+
+  lands(screen.getByRole("textbox", { name: "A composer" }));
+  expect(origins("A")).toEqual([]);
+  expect(stripe("A")).toEqual(expect.arrayContaining(["duration-200", "ease-enter"]));
+  expect(stripe("A")).not.toContain("delay-100");
+
+  lands(screen.getByRole("textbox", { name: "C composer" }));
+  expect(origins("A")).toEqual(["origin-right"]);
+  expect(stripe("A")).toEqual(expect.arrayContaining(["scale-x-0", "duration-150", "ease-in"]));
+  expect(stripe("A")).not.toContain("delay-100");
+  expect(origins("C")).toEqual(["origin-left"]);
+  expect(stripe("C")).toEqual(
+    expect.arrayContaining(["scale-x-100", "delay-100", "duration-200", "ease-out"]),
+  );
+  expect(origins("B")).toEqual([]);
+  expect(stripe("B")).toEqual(expect.arrayContaining(["scale-x-0", "ease-leave"]));
+
+  lands(screen.getByRole("textbox", { name: "B composer" }));
+  expect(origins("C")).toEqual(["origin-left"]);
+  expect(origins("B")).toEqual(["origin-right"]);
+  expect(origins("A")).toEqual([]);
+
+  await userEvent.keyboard("{Escape}");
+  expect(lit()).toEqual([]);
+  expect(origins("B")).toEqual([]);
+
+  lands(screen.getByRole("button", { name: "A act" }));
+  lands(screen.getByRole("textbox", { name: "A composer" }));
+  expect(lit()).toEqual(["A"]);
+  expect(origins("A")).toEqual([]);
 });
 
 /** The lanes beside the marked one are drawn at full strength: each answers a press like any other,
