@@ -793,7 +793,7 @@ def _check_containment_gate_proves_a_call_that_takes_the_guard_result_itself() -
             "        yield base, names\n"
             "\n"
             "def enumerate_hits(params, root):\n"
-            "    start, pattern = contained_glob(params['pattern'], params['path'], root)\n"
+            "    start, pattern = contained_dir(params['pattern'], root)\n"
             "    return list(start.glob(pattern))\n"
         )
     }

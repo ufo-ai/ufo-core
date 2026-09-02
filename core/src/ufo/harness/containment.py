@@ -344,18 +344,6 @@ def contained_remove(path: str | os.PathLike[str], root: str | os.PathLike[str])
         os.close(descriptor)
 
 
-def contained_regular(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> Path:
-    """The canonical path of an existing regular file under `root`, for a reader that has to hand a
-    path to something else — a subprocess, a library that only takes a filename. Every ancestor is
-    proved symlink-free and the target itself is `lstat`ed, so the name cannot be a planted link; a
-    reader that can work from an fd should use `contained_file` instead and keep the parent pinned
-    for the read itself."""
-    with contained_file(path, root) as target:
-        if target.lstat() is None:
-            raise PathNotFound(f"{target.path} not found")
-        return target.path
-
-
 def contained_pattern(pattern: str, root: Path) -> str:
     """A glob pattern rewritten to one relative to `root`, refusing any that leaves it.
 
@@ -374,21 +362,6 @@ def contained_pattern(pattern: str, root: Path) -> str:
     if relative == ".":
         raise RelativeEscape(f"pattern {pattern!r} matches a directory root")
     return relative
-
-
-def contained_glob(
-    pattern: str, path: str | os.PathLike[str] | None, root: Path
-) -> tuple[Path, str]:
-    """The directory an enumeration walks and the pattern to run there, both confined to `root`.
-
-    An absolute pattern names its own location, so it walks from the root — never from the
-    filesystem anchor `Path.glob` would take it to — and a caller's start directory does not apply
-    to it. A relative one walks from `path`, or from the root when the caller named none. Deciding
-    that here is what keeps the shape of a pattern from being a question every enumeration answers
-    itself."""
-    absolute = PurePosixPath(pattern).is_absolute()
-    start = root if absolute or path is None else path
-    return contained_dir(start, root), contained_pattern(pattern, root)
 
 
 def contained_relative(path: str, root: str) -> str:

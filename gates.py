@@ -191,8 +191,6 @@ CONTAINMENT_GUARDS = frozenset(
     {
         "contained_dir",
         "contained_file",
-        "contained_glob",
-        "contained_regular",
         "contained_root",
         "configured_root",
         "is_contained_regular",
