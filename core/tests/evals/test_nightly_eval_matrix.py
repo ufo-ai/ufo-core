@@ -40,3 +40,9 @@ def test_auto_agent_model_shards_run_for_each_nightly_model(planner) -> None:
         assert {job.expected_model for job in carried} == {
             model.id for model in planner.NIGHTLY_MODELS
         }
+
+
+def test_manual_suites_do_not_enter_the_nightly_plan(planner) -> None:
+    suites = {suite for shard in planner.plan(smoke=False) for suite in shard.suites}
+
+    assert "repeated_input_coherence" not in suites

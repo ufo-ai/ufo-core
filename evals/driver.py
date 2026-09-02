@@ -614,6 +614,7 @@ class WorkspaceDriver:
         member_key: str | None = None,
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
+        prior_transcript: tuple[Message, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
         shared: bool = False,
     ) -> UUID:
@@ -662,7 +663,18 @@ class WorkspaceDriver:
                     updated_at=sa.func.now(),
                 )
             )
+            if prior_messages and prior_transcript:
+                raise ValueError("one eval conversation cannot seed two transcript forms")
+            seeded_messages = prior_transcript
             if prior_messages:
+                seeded_messages = tuple(
+                    Message(role="user" if index % 2 == 0 else "assistant", content=content)
+                    for index, content in enumerate(prior_messages)
+                )
+            if seeded_messages:
+                inbound = seeded_messages[0].content
+                if not isinstance(inbound, str):
+                    raise ValueError("a seeded eval transcript must start with user text")
                 await connection.execute(
                     sa.insert(tables.turn).values(
                         id=uuid4(),
@@ -671,17 +683,14 @@ class WorkspaceDriver:
                         agent_id=self.agent_id,
                         seq=1,
                         status="done",
-                        inbound=prior_messages[0],
+                        inbound=inbound,
                         terminal={"status": "done", "text": "Done.", "model": self.agent_model},
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
                 )
-        if prior_messages:
-            messages = tuple(
-                Message(role="user" if index % 2 == 0 else "assistant", content=content)
-                for index, content in enumerate(prior_messages)
-            )
+        if seeded_messages:
+            messages = seeded_messages
             for index, round in enumerate(undelivered):
                 call_id = f"undelivered-{index}"
                 messages = (

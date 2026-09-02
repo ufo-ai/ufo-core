@@ -15,6 +15,24 @@ uv run python -m evals --view
 uv run python -m evals --share <current-run> <baseline-run>
 ```
 
+The repeated-input stress suite is explicit-only and targets GLM 5.3 Flash:
+
+```bash
+uv run python -m evals --remote --model z-ai/glm-5.3-flash \
+  --only repeated_input_coherence --workspace <workspace-id> --concurrency 3 \
+  --label repeated-input-glm
+```
+
+It seeds three frozen histories for `No new pull requests to review.`, `No new emails.`, and `Check
+clean.` Thirty-two older unrelated tool-rich turns precede 50 successful scheduled fires. Twenty
+more fires show the agent planning a corrected command, emitting the same known-bad command, and
+receiving the same error. Each case has 674 prior messages and 234 prior tool calls. The measured
+completion gets the correction request once more. It must not repeat the bad first action, must
+read the current safe synthetic status file, and must report its changed value. This tests escape
+from an active failed-action loop; it does not test whether stable successful repetition starts the
+loop. Run the suite again for each independent loop; do not use case samples, which select the best
+result and can hide a coherence failure.
+
 `--remote` admits each case through `ufo --remote --json` at the configured serve URL. The current
 `ufo` must be on `PATH`, and `UFO_TOKEN_SECRET` must match the running serve process. Remote cases
 use the private member audience of the terminal surface; shared-audience cases fail before admission.

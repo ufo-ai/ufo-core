@@ -659,7 +659,10 @@ def test_app_eval_uses_the_template_parent_agent_and_rejects_matrix_model_knobs(
         )
 
 
-@pytest.mark.parametrize("suite", ("ufo-app-bench", "new_application", "red_after_green"))
+@pytest.mark.parametrize(
+    "suite",
+    ("ufo-app-bench", "new_application", "red_after_green", "repeated_input_coherence"),
+)
 def test_docker_eval_pins_the_current_sandbox_image_before_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite: str
 ) -> None:

@@ -248,6 +248,7 @@ class EvalConversations(Protocol):
         member_key: str | None = None,
         workspace_files: tuple[WorkspaceFile, ...] = (),
         prior_messages: tuple[str, ...] = (),
+        prior_transcript: tuple[Message, ...] = (),
         undelivered: tuple[UndeliveredRound, ...] = (),
         shared: bool = False,
     ) -> UUID: ...
@@ -337,6 +338,7 @@ class InProcessTarget:
             case.member_key,
             case.workspace_files,
             case.prior_messages,
+            case.prior_transcript,
             case.undelivered,
             shared=case.shared_audience,
         )
@@ -361,7 +363,12 @@ class InProcessTarget:
         settled = (
             await self._settled_workflow(conversation_id, turn_id, case.message)
             if case.wait_for_background
-            else await self._settled(conversation_id, turn_id, case.message)
+            else await self._settled(
+                conversation_id,
+                turn_id,
+                case.message,
+                score_current_turn_only=bool(case.prior_transcript),
+            )
         )
         wall_ms = round((perf_counter() - started) * 1_000)
         result = await self._record_timing(settled, turn_id, wall_ms)
@@ -832,6 +839,7 @@ class InProcessTarget:
         inbound: str,
         *,
         current_turn_only: bool = False,
+        score_current_turn_only: bool = False,
         wait_for_background: bool = False,
     ) -> _Settled:
         trajectory = await self.outcome.settle(conversation_id, turn_id)
@@ -842,19 +850,24 @@ class InProcessTarget:
                 inbound,
                 wait_for_background=wait_for_background,
             )
-        messages = (
+        snapshot_messages = (
             _current_turn_messages(trajectory.messages, inbound)
             if current_turn_only
             else trajectory.messages
         )
-        output = capability_output(messages)
+        output_messages = (
+            _current_turn_messages(trajectory.messages, inbound)
+            if score_current_turn_only
+            else snapshot_messages
+        )
+        output = capability_output(output_messages)
         output = replace(
             output,
             own_tools=tuple(call.call for call in output.calls),
             own_calls=tuple(output.calls),
         )
         status = await self._turn_status(turn_id)
-        snapshot = trajectory_snapshot(conversation_id, turn_id, status, messages)
+        snapshot = trajectory_snapshot(conversation_id, turn_id, status, snapshot_messages)
         output, descendant_ids, missing_child = await self._merge_descendants(
             turn_id, output, wait_for_background
         )

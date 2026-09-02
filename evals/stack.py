@@ -57,7 +57,7 @@ APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay"})
 CREATION_SUITES = frozenset({"new_application"})
 HOMEPAGE_SUITES = frozenset({"app_home_change"})
 APP_PAGE_SUITES = APP_SUITES | CREATION_SUITES | HOMEPAGE_SUITES
-SANDBOX_IMAGE_SUITES = APP_PAGE_SUITES | {"red_after_green"}
+SANDBOX_IMAGE_SUITES = APP_PAGE_SUITES | {"red_after_green", "repeated_input_coherence"}
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 ISOLATED_EXTERNAL_BILLING_JOBS = (
     "metronome:usage_shipper",

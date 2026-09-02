@@ -53,6 +53,7 @@ from evals.suites import (
     problem_report,
     rebuild_actions,
     red_after_green,
+    repeated_input_coherence,
     report_digest,
     response_formatting,
     response_register,
@@ -140,6 +141,11 @@ TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("scope_preservation", scope_preservation.CASES),
     capability_task("completeness_inventory", completeness_inventory.CASES),
+    capability_task(
+        "repeated_input_coherence",
+        repeated_input_coherence.CASES,
+        nightly=False,
+    ),
     tool_activity.tool_activity_task(),
     capability_task(
         "code_review",

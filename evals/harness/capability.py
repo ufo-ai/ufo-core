@@ -383,6 +383,7 @@ class CapabilityCase:
     shared_audience: bool = False
     workspace_files: tuple[WorkspaceFile, ...] = ()
     prior_messages: tuple[str, ...] = ()
+    prior_transcript: tuple[Message, ...] = ()
     undelivered: tuple[UndeliveredRound, ...] = ()
     references: tuple[CapabilityReference, ...] = ()
     followup: CapabilityFollowup | None = None
@@ -399,6 +400,20 @@ class CapabilityCase:
         paths = tuple(reference.path for reference in self.references)
         if len(paths) != len(set(paths)):
             raise ValueError("capability reference paths must be unique")
+        if self.prior_transcript and (self.prior_messages or self.undelivered):
+            raise ValueError(
+                "a structured prior transcript cannot combine with prior messages or undelivered "
+                "rounds"
+            )
+        if self.prior_transcript and (
+            self.prior_transcript[0].role != "user"
+            or not isinstance(self.prior_transcript[0].content, str)
+            or self.prior_transcript[-1].role != "assistant"
+        ):
+            raise ValueError(
+                "a structured prior transcript must start with user text and end with an "
+                "assistant message"
+            )
         if self.undelivered and len(self.prior_messages) % 2 == 0:
             raise ValueError(
                 "an undelivered round answers a member message: prior_messages must end on one"
@@ -446,6 +461,11 @@ class CapabilityCase:
         if self.prior_messages:
             payload["priorMessages"] = [
                 sha256(message.encode()).hexdigest() for message in self.prior_messages
+            ]
+        if self.prior_transcript:
+            payload["priorTranscript"] = [
+                sha256(message.model_dump_json().encode()).hexdigest()
+                for message in self.prior_transcript
             ]
         if self.undelivered:
             payload["undelivered"] = [

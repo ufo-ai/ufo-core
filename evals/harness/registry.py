@@ -71,6 +71,7 @@ class EvalTask:
     default. The wait belongs to the task because a shard mixes suites: a deck build needs minutes a
     chat case does not, and a wait chosen for the shard as a whole cancelled the deck cases of every
     shard that also carried something else (measured on `document_visual`, 2026-08-21 sweep)."""
+    nightly: bool = True
     narrow: Callable[[tuple[str, ...]], EvalTask] | None = None
 
 
@@ -84,6 +85,7 @@ def capability_task(
     packs: tuple[str, ...] = (),
     agent: str | None = None,
     wait_seconds: float | None = None,
+    nightly: bool = True,
 ) -> EvalTask:
     needs_judge = any(case.rubric or case.artifact_rubric or case.visual_rubric for case in cases)
     if needs_judge and judge_model is None:
@@ -141,6 +143,7 @@ def capability_task(
             packs=packs,
             agent=agent,
             wait_seconds=wait_seconds,
+            nightly=nightly,
         )
 
     return EvalTask(
@@ -157,6 +160,7 @@ def capability_task(
         packs=packs,
         agent=agent,
         wait_seconds=wait_seconds,
+        nightly=nightly,
         narrow=narrow,
     )
 

@@ -2,8 +2,9 @@
 
 `--plan` prints shard labels, `--models` prints target models, and `--jobs` prints their valid
 combinations. `--write LABEL --dir DIR` writes that shard's template
-`ufo.toml` and its one-block `evals.stack` matrix. Both derive from `evals.registry.TASKS`, so a
-suite added, renamed, or newly bound to a pack moves through the sweep without a hand-kept list.
+`ufo.toml` and its one-block `evals.stack` matrix. Both derive from the nightly tasks in
+`evals.registry.TASKS`, so a suite added, renamed, or newly bound to a pack moves through the sweep
+without a hand-kept list.
 """
 
 from __future__ import annotations
@@ -119,8 +120,8 @@ def _label_token(value: str) -> str:
 
 
 def plan(smoke: bool) -> tuple[Shard, ...]:
-    """Every registered suite, split into shards that each fit inside one job's ceiling."""
-    tasks = TASKS
+    """Every nightly suite, split into shards that each fit inside one job's ceiling."""
+    tasks = tuple(task for task in TASKS if task.nightly)
     if smoke:
         registered = {task.name for task in TASKS}
         unknown = tuple(name for name in SMOKE_SUITES if name not in registered)
@@ -160,7 +161,7 @@ def sweep_jobs(
     smoke: bool, reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
 ) -> tuple[SweepJob, ...]:
     """Pair auto-model shards with both targets and fixed-model shards with one execution."""
-    jobs = []
+    jobs: list[SweepJob] = []
     for shard in plan(smoke):
         fixed_model = (
             not APP_SUITES.isdisjoint(shard.suites)
