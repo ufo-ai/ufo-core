@@ -922,19 +922,14 @@ def test_billing_config_names_every_missing_setting_at_once(
     for name in (
         metronome.STRIPE_SECRET_KEY_ENV,
         metronome.STRIPE_PORTAL_CONFIGURATION_ENV,
-        metronome.METRONOME_BEARER_TOKEN_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(
         RuntimeError,
-        match=(
-            "billing requires STRIPE_SECRET_KEY, STRIPE_BILLING_PORTAL_CONFIGURATION_ID, "
-            "METRONOME_BEARER_TOKEN"
-        ),
+        match="billing requires STRIPE_SECRET_KEY, STRIPE_BILLING_PORTAL_CONFIGURATION_ID",
     ):
         metronome.BillingConfig.from_env()
     monkeypatch.setenv(metronome.STRIPE_SECRET_KEY_ENV, STRIPE_KEY)
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
     with pytest.raises(
         RuntimeError,
         match="billing requires STRIPE_BILLING_PORTAL_CONFIGURATION_ID",

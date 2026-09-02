@@ -306,32 +306,29 @@ async def _ship(ctx: ExtensionContext) -> None:
 
 
 class BillingConfig(BaseModel):
-    """The three settings the billing workflow cannot run without, read and validated once at the
+    """The two settings the billing workflow cannot run without, read and validated once at the
     entry to a tool call or a tick — before any provider object exists, so a half-configured deploy
     can never leave a Stripe Customer behind and then fail on the portal configuration. Every
-    missing name is reported at once rather than one per attempt. The usage shipper reads
-    only the bearer token directly: a deploy that meters usage without selling a plan must keep
-    shipping, so they never depend on this."""
+    missing name is reported at once rather than one per attempt. The usage shipper reads the
+    bearer token directly: a deploy that meters usage without selling a plan must keep shipping, so
+    it never depends on this."""
 
     model_config = ConfigDict(frozen=True)
 
     stripe_secret_key: str
     stripe_portal_configuration_id: str
-    metronome_bearer_token: str
 
     @classmethod
     def from_env(cls) -> "BillingConfig":
         found = {
             "stripe_secret_key": os.environ.get(STRIPE_SECRET_KEY_ENV),
             "stripe_portal_configuration_id": os.environ.get(STRIPE_PORTAL_CONFIGURATION_ENV),
-            "metronome_bearer_token": os.environ.get(METRONOME_BEARER_TOKEN_ENV),
         }
         missing = [
             name
             for name, field in (
                 (STRIPE_SECRET_KEY_ENV, "stripe_secret_key"),
                 (STRIPE_PORTAL_CONFIGURATION_ENV, "stripe_portal_configuration_id"),
-                (METRONOME_BEARER_TOKEN_ENV, "metronome_bearer_token"),
             )
             if not found[field]
         ]
