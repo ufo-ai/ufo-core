@@ -417,9 +417,6 @@ function History({
   const ladder = useChatLadder();
   const hidden = useChatHidden();
   const runs = chatRuns(rail.rows, ladder, hidden, new Date());
-  const narrowed = ladder !== "recency" || hidden.length > 0;
-  const show = (surface: string, shown: boolean) =>
-    holdChatHidden(shown ? hidden.filter((name) => name !== surface) : [...hidden, surface]);
   const openAtTop = useCallback(
     (history: HTMLDivElement | null) => history?.scrollTo({ top: 0, behavior: "auto" }),
     [],
@@ -428,45 +425,7 @@ function History({
     <div className="flex min-h-0 flex-1 flex-col py-md">
       <div className="flex shrink-0 items-center justify-between px-lg">
         <h3 className={cn(PICK_LABEL, "px-0")}>{HISTORY}</h3>
-        {/* The narrowings behind one glyph, the way every other listing in the portal draws them. A
-            ladder is a pick between orders and shuts the menu; a surface is a choice turned on and
-            off and leaves it standing, so a member names both in one visit. */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="mark"
-              size="glyph"
-              aria-label={HISTORY_OPTIONS}
-              className={cn(narrowed && "text-ink")}
-            >
-              <IconFilter2 aria-hidden stroke={GLYPH_STROKE} />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel>{SORT_BY}</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={ladder}
-              onValueChange={(next) => holdChatLadder(next as ChatLadder)}
-            >
-              {CHAT_LADDERS.map((entry) => (
-                <DropdownMenuRadioItem key={entry.value} value={entry.value}>
-                  {entry.label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>{SHOW}</DropdownMenuLabel>
-            {CHAT_SHOWN_OPTIONS.map((option) => (
-              <DropdownMenuCheckboxItem
-                key={option.surface}
-                checked={!hidden.includes(option.surface)}
-                onCheckedChange={(next) => show(option.surface, next)}
-              >
-                {option.label}
-              </DropdownMenuCheckboxItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <HistoryOptions ladder={ladder} hidden={hidden} />
       </div>
       {runs.length ? (
         <div ref={openAtTop} className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
@@ -496,6 +455,56 @@ function History({
         <Empty>{NO_HISTORY}</Empty>
       )}
     </div>
+  );
+}
+
+/** The narrowings behind one glyph, the way every other listing in the portal draws them. A ladder
+ *  is a pick between orders and shuts the menu; a surface is a choice turned on and off and leaves
+ *  it standing, so a member names both in one visit.
+ *
+ *  Every list drawn off the rail offers the same menu, so the member narrows their history the same
+ *  way wherever they read it. */
+function HistoryOptions({ ladder, hidden }: { ladder: ChatLadder; hidden: string[] }) {
+  const narrowed = ladder !== "recency" || hidden.length > 0;
+  const show = (surface: string, shown: boolean) =>
+    holdChatHidden(shown ? hidden.filter((name) => name !== surface) : [...hidden, surface]);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="mark"
+          size="glyph"
+          aria-label={HISTORY_OPTIONS}
+          className={cn(narrowed && "text-ink")}
+        >
+          <IconFilter2 aria-hidden stroke={GLYPH_STROKE} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>{SORT_BY}</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={ladder}
+          onValueChange={(next) => holdChatLadder(next as ChatLadder)}
+        >
+          {CHAT_LADDERS.map((entry) => (
+            <DropdownMenuRadioItem key={entry.value} value={entry.value}>
+              {entry.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>{SHOW}</DropdownMenuLabel>
+        {CHAT_SHOWN_OPTIONS.map((option) => (
+          <DropdownMenuCheckboxItem
+            key={option.surface}
+            checked={!hidden.includes(option.surface)}
+            onCheckedChange={(next) => show(option.surface, next)}
+          >
+            {option.label}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -716,9 +725,10 @@ function ConversationLane({
  *  is for; and under them the conversations the member has had, in the order the rail holds them —
  *  one list, one order, wherever they are read.
  *
- *  The history is the chat lane's own list, drawn through `chatRuns`: the surfaces the member put
- *  away stay put away, the runs keep their ladder, and a colleague's thread reads as theirs under
- *  the run that names it, never as the member's own row.
+ *  The history is the chat lane's own list, drawn through `chatRuns` and then flattened: the
+ *  surfaces the member put away stay put away and the ladder still orders the rows, but the runs
+ *  are not drawn apart here. The picker is a place to pick from rather than a history to read, and
+ *  a heading over every few rows in a lane this narrow costs more of it than it names.
  *
  *  Picking takes this lane's place in the row rather than opening a fifth beside it, so the pick
  *  lands where the member asked for it and the cap is not reached by a lane that names nothing. A
@@ -739,7 +749,7 @@ function PickerLane({
   const ladder = useChatLadder();
   const hidden = useChatHidden();
   const offered = agents.filter((agent) => !agent.hidden);
-  const chats = chatRuns(rail.rows, ladder, hidden, new Date());
+  const chats = chatRuns(rail.rows, ladder, hidden, new Date()).flatMap((run) => run.rows);
   const pick = (id: string) => onOpens(taken(opens, lane, id));
   return (
     <Lane
@@ -793,35 +803,31 @@ function PickerLane({
             )}
           </section>
           <section className={PICK_SECTION}>
-            <h3 className={PICK_LABEL}>{HISTORY}</h3>
-            {chats.some((run) => run.rows.length) ? (
+            <div className="flex shrink-0 items-center justify-between px-lg">
+              <h3 className={cn(PICK_LABEL, "px-0")}>{HISTORY}</h3>
+              <HistoryOptions ladder={ladder} hidden={hidden} />
+            </div>
+            {chats.length ? (
               <div className={cn(PICK_ROWS, "px-lg")}>
-                {chats.map((run) =>
-                  run.rows.length ? (
-                    <section key={run.label} className="flex flex-col">
-                      <h4 className={PICK_LABEL}>{run.label}</h4>
-                      <ul className="m-0 flex list-none flex-col gap-sm p-0">
-                        {run.rows.map((row) => (
-                          <li key={row.conversation_id}>
-                            <button
-                              type="button"
-                              onClick={() => pick(homeConversationLane(row.conversation_id))}
-                              className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
-                            >
-                              <span className="[text-box:trim-both_cap_alphabetic] min-w-0 flex-1 truncate text-label font-medium tracking-(--tracking-ui) text-ink">
-                                {row.title || agentName(row.agent_name)}
-                              </span>
-                              <IconChevronRight
-                                className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
-                                aria-hidden
-                              />
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  ) : null,
-                )}
+                <ul className="m-0 flex list-none flex-col gap-sm p-0">
+                  {chats.map((row) => (
+                    <li key={row.conversation_id}>
+                      <button
+                        type="button"
+                        onClick={() => pick(homeConversationLane(row.conversation_id))}
+                        className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
+                      >
+                        <span className="[text-box:trim-both_cap_alphabetic] min-w-0 flex-1 truncate text-label font-medium tracking-(--tracking-ui) text-ink">
+                          {row.title || agentName(row.agent_name)}
+                        </span>
+                        <IconChevronRight
+                          className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
+                          aria-hidden
+                        />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               </div>
             ) : (
               <div className={PICK_EMPTY}>

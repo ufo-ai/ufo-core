@@ -14,7 +14,7 @@ import {
   type AgentStatus,
 } from "@/lib/appStatusStore";
 import { readDraft } from "@/lib/drafts";
-import { holdChatHidden } from "@/lib/rail";
+import { heldChatHidden, holdChatHidden } from "@/lib/rail";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import {
   chatHash,
@@ -494,15 +494,16 @@ test("the picker lane offers the workspace's apps and the member's history", asy
   ).toEqual(["Assistant", "Second"]);
 
   const history = within(picker).getByRole("heading", { name: "History", level: 3 });
-  const rows = within(history.parentElement!).getAllByRole("button");
+  const rows = within(history.closest("section")!).getAllByRole("listitem");
   expect(rows.map((row) => row.textContent)).toEqual([CHAT_ROW.title]);
-  await userEvent.click(rows[0]);
+  await userEvent.click(within(rows[0]).getByRole("button"));
   expect(laneNames()).toEqual([CHAT_ROW.title, "Assistant"]);
 });
 
-/** The picker's history is the chat lane's own list, drawn through `chatRuns`: a surface the member
- *  put away stays put away, and a colleague's thread draws under the run that names it. */
-test("the picker's history hides put-away surfaces and runs colleagues apart", async () => {
+/** The picker's history is the chat lane's own list, drawn through `chatRuns` and then flattened: a
+ *  surface the member put away stays put away, and every row that is left stands in one list under
+ *  the one heading, with no run drawn apart inside it. */
+test("the picker's history hides put-away surfaces and draws one flat list", async () => {
   wire(
     chatsOnWire([
       CHAT_ROW,
@@ -514,14 +515,39 @@ test("the picker's history hides put-away surfaces and runs colleagues apart", a
   drawHome([AGENT_ID]);
 
   const picker = await openPicker();
-  const history = within(picker).getByRole("heading", { name: "History", level: 3 });
+  const chats = within(picker)
+    .getByRole("heading", { name: "History", level: 3 })
+    .closest("section")!;
   // The Slack row is the surface the member put away, and a portal row is never hidden: the
   // hidden one must be the only row absent.
-  expect(within(history.parentElement!).queryByText("Hidden thread")).toBeNull();
-  expect(within(history.parentElement!).getAllByText(CHAT_ROW.title)).toHaveLength(2);
-  expect(
-    within(history.parentElement!).getByRole("heading", { name: "Other members", level: 4 }),
-  ).toBeTruthy();
+  expect(within(chats).queryByText("Hidden thread")).toBeNull();
+  expect(within(chats).getAllByText(CHAT_ROW.title)).toHaveLength(2);
+  expect(within(chats).queryByRole("heading", { level: 4 })).toBeNull();
+  expect(within(chats).getAllByRole("list")).toHaveLength(1);
+});
+
+/** The picker narrows its history the way the chat lane's own history does: the same menu, over the
+ *  same held choices, so a surface put away here is put away wherever it is read. */
+test("the picker's history offers the history menu", async () => {
+  wire(
+    chatsOnWire([
+      CHAT_ROW,
+      { ...CHAT_ROW, conversation_id: PRIVATE_CONVO_ID, surface: "slack", title: "Hidden thread" },
+    ]),
+  );
+  drawHome([AGENT_ID]);
+
+  const picker = await openPicker();
+  const chats = within(picker)
+    .getByRole("heading", { name: "History", level: 3 })
+    .closest("section")!;
+  expect(within(chats).getByText("Hidden thread")).toBeTruthy();
+
+  await userEvent.click(within(chats).getByRole("button", { name: "History options" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
+
+  await waitFor(() => expect(within(chats).queryByText("Hidden thread")).toBeNull());
+  expect(heldChatHidden()).toEqual(["slack"]);
 });
 
 /** The chat lane opens on the member's own history: the conversations stand over the entry the next
