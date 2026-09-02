@@ -150,6 +150,15 @@ def _check_production_selects_the_redis_terminal_transport() -> None:
     assert any(spec.backend == "redis" for spec in manifest.terminal_transports)
 
 
+def _check_hosted_environments_select_the_registered_glm_flash_model() -> None:
+    manifest = importlib.import_module("ufo_ext_openrouter").manifest()
+    registered = {spec.id for spec in manifest.models}
+    for environment in ("prod", "testing"):
+        auto_model = _serve_config(environment)["models"]["auto_model"]
+        assert auto_model == "z-ai/glm-5.3-flash", environment
+        assert auto_model in registered, environment
+
+
 def _check_configured_production_backends_receive_platform_credentials() -> None:
     config = _serve_config("prod")
     providers = (
@@ -522,6 +531,6 @@ def _check_a_live_credential_passes_the_mode_check() -> None:
 
 def test_production_secret_static_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 13
+    assert len(checks) == 14
     for check in checks:
         check()

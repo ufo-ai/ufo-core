@@ -180,6 +180,29 @@ def _client(
     return openrouter.OpenRouterModelClient(client=sdk, spec=spec, key=OPENROUTER_KEY)
 
 
+def test_forced_tool_choice_compels_the_named_tool() -> None:
+    request = REQUEST.model_copy(
+        update={
+            "tools": (
+                ToolSchema(
+                    name="finish",
+                    description="Return the result.",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            "tool_choice": "finish",
+        }
+    )
+
+    kwargs = _client(ScriptedCreate())._create_kwargs(request, frozenset())
+
+    assert kwargs["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "finish"},
+    }
+    assert kwargs["parallel_tool_calls"] is False
+
+
 def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
     assert openrouter.openrouter_slug("google/gemini-2.5-pro") == "google/gemini-2.5-pro"
     assert openrouter.openrouter_slug("gpt-5.4") == "openai/gpt-5.4"

@@ -41,6 +41,15 @@ def test_app_code_ships_the_one_agent_and_coding_ships_none() -> None:
     }
 
 
+def test_the_code_agent_and_its_coding_profile_use_separate_models() -> None:
+    (agent,) = app_code.manifest().agents
+    profile = coding.manifest().subagents[0]
+    assert (agent.spec.model, agent.spec.reasoning) == ("z-ai/glm-5.3", "high")
+    assert profile.model == "claude-opus-5"
+    assert profile.own_key_models["anthropic"] == "claude-opus-5"
+    assert profile.needs_own_model_key
+
+
 def test_the_page_draws_only_the_findings_the_procedure_produces() -> None:
     """A reviewer names one impact from a fixed list, and a claim it can only state as could or
     might is rejected before it is ever a finding. So the page has no lower tier to draw: one that

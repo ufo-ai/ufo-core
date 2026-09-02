@@ -703,6 +703,12 @@ class OpenRouterModelClient:
                 }
                 for tool in request.tools
             ]
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = {
+                "type": "function",
+                "function": {"name": request.tool_choice},
+            }
+            kwargs["parallel_tool_calls"] = False
         return kwargs
 
 

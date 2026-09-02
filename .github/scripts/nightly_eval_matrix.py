@@ -14,6 +14,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import tomli_w
@@ -30,6 +31,8 @@ from evals.stack import (
     HOMEPAGE_SUITES,
 )
 from ufo.config import DEFAULT_AUTO_MODEL
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.host.ext.loader import load_manifests
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 CONCURRENCY = 4
@@ -159,8 +162,10 @@ def sweep_jobs(
     """Pair auto-model shards with both targets and fixed-model shards with one execution."""
     jobs = []
     for shard in plan(smoke):
-        fixed_model = not APP_SUITES.isdisjoint(shard.suites) or (
-            shard.agent is not None and shard.agent.startswith("profile:")
+        fixed_model = (
+            not APP_SUITES.isdisjoint(shard.suites)
+            or (shard.agent is not None and shard.agent.startswith("profile:"))
+            or (shard.agent is not None and shard.agent in _fixed_agent_names(shard.pack))
         )
         models = NIGHTLY_MODELS[:1] if fixed_model else NIGHTLY_MODELS
         jobs.extend(
@@ -173,6 +178,16 @@ def sweep_jobs(
             for model in models
         )
     return tuple(jobs)
+
+
+@cache
+def _fixed_agent_names(pack: str) -> frozenset[str]:
+    return frozenset(
+        provision.name
+        for manifest in load_manifests(pack)
+        for provision in manifest.agents
+        if provision.spec.model != AUTO_MODEL
+    )
 
 
 def _arm_of(task: EvalTask) -> Arm:

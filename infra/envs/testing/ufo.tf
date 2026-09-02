@@ -113,6 +113,9 @@ locals {
     [pack]
     name = "assistant_hosted"
 
+    [models]
+    auto_model = "z-ai/glm-5.3-flash"
+
     [memory]
     index_backend = "turbopuffer"
 
