@@ -1,5 +1,7 @@
 import asyncio
+import os
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,6 +9,8 @@ from random import Random
 
 import pytest
 
+import evals.stack as eval_stack
+from evals import gepa
 from evals.gepa import (
     EGRESS_BINARY,
     STATE_FILE,
@@ -19,6 +23,7 @@ from evals.gepa import (
     RecordEvidence,
     Review,
     Rollout,
+    StackRollout,
     accept_objection,
     arms_experiment,
     collect_outcomes,
@@ -125,6 +130,10 @@ def _spec(base: str, **overrides: object) -> OptimizeSpec:
         "template": {"pack": {"name": "assistant_eval"}},
     }
     return OptimizeSpec.model_validate(fields | overrides)
+
+
+def _rollout(tmp_path: Path) -> StackRollout:
+    return StackRollout(tmp_path, _spec("base"), "base", tmp_path / "out")
 
 
 def _gepa(spec: OptimizeSpec, repo: Path, base: str, out: Path, **deps: object) -> Gepa:
@@ -311,6 +320,200 @@ def test_collect_outcomes_scores_samples_and_prices_them() -> None:
     assert cost == pytest.approx(1.25)
 
 
+@pytest.mark.parametrize(
+    "failure",
+    (
+        None,
+        "missing-record",
+        "wrong-repeat",
+        "missing-case",
+        "materialize",
+        "stack",
+        "archive",
+        "cleanup",
+        "cancel",
+    ),
+)
+def test_stack_rollout_removes_only_after_archive_and_database_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    events: list[str] = []
+
+    def materialize(self: StackRollout, arm: Arm, instances: tuple[str, ...], root: Path) -> None:
+        root.mkdir(parents=True)
+        events.append("materialize")
+        if failure == "materialize":
+            raise RuntimeError("materialize failed")
+
+    async def stack(self: StackRollout, root: Path) -> tuple[int, str]:
+        events.append("stack")
+        if failure == "stack":
+            raise RuntimeError("stack failed")
+        if failure == "cancel":
+            raise asyncio.CancelledError
+        return 1, "no report"
+
+    def archive(self: StackRollout, label: str, root: Path, stack_output: str) -> list[dict]:
+        events.append("archive")
+        if failure == "archive":
+            raise RuntimeError("archive failed")
+        if failure == "missing-record":
+            return []
+        cases = ("capital", "arithmetic", "three-bullets")
+        cases = cases[:-1] if failure == "missing-case" else cases
+        label = "other-0" if failure == "wrong-repeat" else "candidate-0"
+        return [
+            {
+                "label": label,
+                "reports": [
+                    {"cases": [_case(name, True, attempts=[{"passed": True}]) for name in cases]}
+                ],
+            }
+        ]
+
+    async def drop_databases(self: StackRollout, root: Path) -> None:
+        events.append("cleanup")
+        if failure == "cleanup":
+            raise RuntimeError("cleanup failed")
+
+    def remove_worktree(self: StackRollout, root: Path) -> None:
+        events.append("remove")
+        root.rmdir()
+
+    monkeypatch.setattr(StackRollout, "_materialize", materialize)
+    monkeypatch.setattr(StackRollout, "_stack", stack)
+    monkeypatch.setattr(StackRollout, "_archive", archive)
+    monkeypatch.setattr(StackRollout, "_drop_databases", drop_databases)
+    monkeypatch.setattr(StackRollout, "_remove_worktree", remove_worktree)
+    rollout = _rollout(tmp_path)
+
+    if failure == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(rollout._arm(Arm("candidate", {}), (), asyncio.Semaphore(1)))
+    else:
+        result = asyncio.run(rollout._arm(Arm("candidate", {}), (), asyncio.Semaphore(1)))
+        assert (result.error is None) == (failure is None)
+
+    expected = ["materialize"]
+    if failure != "materialize":
+        expected.append("stack")
+    if failure not in {"materialize", "stack", "cancel"}:
+        expected.append("archive")
+    if failure in {None, "cleanup"}:
+        expected.append("cleanup")
+    if failure is None:
+        expected.append("remove")
+    assert events == expected
+    assert (tmp_path / ".local/gepa/exp/candidate").exists() == (failure is not None)
+
+
+def test_stack_rollout_archives_the_stack_and_per_run_logs(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    records = root / gepa.RUNS_DIR
+    records.mkdir(parents=True)
+    (records / "record.json").write_text("{}")
+    logs = root / gepa.STACK_RUNS_DIR / "stamp" / "candidate-0"
+    logs.mkdir(parents=True)
+    (logs / "serve.log").write_text("served")
+    rollout = _rollout(tmp_path)
+
+    rollout._archive("candidate", root, "stack output")
+
+    archive = tmp_path / "out/runs/candidate"
+    assert (archive / gepa.STACK_LOG).read_text() == "stack output"
+    assert (archive / gepa.LOGS_DIR / "candidate-0/serve.log").read_text() == "served"
+
+
+def test_stack_rollout_materializes_beside_retained_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materialized: list[Path] = []
+
+    def materialize(self: StackRollout, arm: Arm, instances: tuple[str, ...], root: Path) -> None:
+        root.mkdir(parents=True)
+        materialized.append(root)
+
+    async def stack(self: StackRollout, root: Path) -> tuple[int, str]:
+        return 0, ""
+
+    def archive(self: StackRollout, label: str, root: Path, stack_output: str) -> list[dict]:
+        return [
+            {
+                "label": "candidate-0",
+                "reports": [{"cases": [_case("capital", True, attempts=[{"passed": True}])]}],
+            }
+        ]
+
+    async def drop_databases(self: StackRollout, root: Path) -> None:
+        return None
+
+    monkeypatch.setattr(StackRollout, "_materialize", materialize)
+    monkeypatch.setattr(StackRollout, "_stack", stack)
+    monkeypatch.setattr(StackRollout, "_archive", archive)
+    monkeypatch.setattr(StackRollout, "_drop_databases", drop_databases)
+    monkeypatch.setattr(StackRollout, "_remove_worktree", lambda self, root: root.rmdir())
+    rollout = _rollout(tmp_path)
+    kept = tmp_path / ".local/gepa/exp/candidate"
+    kept.mkdir(parents=True)
+    marker = kept / "keep"
+    marker.write_text("evidence")
+
+    result = asyncio.run(rollout._arm(Arm("candidate", {}), ("capital",), asyncio.Semaphore(1)))
+
+    assert result.error is None
+    assert materialized == [tmp_path / ".local/gepa/exp/candidate.2"]
+    assert marker.read_text() == "evidence"
+
+
+async def test_stack_rollout_cancellation_reaps_its_real_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_create = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    process: asyncio.subprocess.Process | None = None
+    sessions: list[bool] = []
+
+    async def create(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        sessions.append(bool(kwargs.get("start_new_session")))
+        process = await real_create(
+            sys.executable,
+            "-c",
+            "import signal,time; "
+            "signal.signal(signal.SIGINT, lambda *_: None); "
+            "signal.signal(signal.SIGTERM, lambda *_: None); "
+            "time.sleep(60)",
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+            start_new_session=sessions[-1],
+        )
+        spawned.set()
+        return process
+
+    monkeypatch.setattr(gepa.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(eval_stack, "STACK_CANCEL_SIGINT_WAIT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(eval_stack, "STACK_CANCEL_SIGTERM_WAIT_SECONDS", 0.01, raising=False)
+    rollout = _rollout(tmp_path)
+    running = asyncio.create_task(rollout._stack(tmp_path))
+    await spawned.wait()
+    await asyncio.sleep(0.05)
+    running.cancel()
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert process is not None and process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+        assert sessions == [True]
+    finally:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
 def test_an_infra_tool_error_reads_as_a_rig_fault_not_a_capability_failure() -> None:
     notes = RecordEvidence().notes(
         _case("capital", False, attempts=[{"passed": False, "toolErrors": ["search: 429 limit"]}])
@@ -412,7 +615,7 @@ def test_a_win_is_paired_gated_and_reaches_the_ablation_as_an_arm(tmp_path: Path
         for labels, instances in rollout.batches
         if any("accept" in label for label in labels)
     )
-    assert "arithmetic" in accept_batch
+    assert accept_batch.count("arithmetic") == 1
     assert all(
         len(labels) >= 2
         for labels, _ in rollout.batches
@@ -425,6 +628,53 @@ def test_a_win_is_paired_gated_and_reaches_the_ablation_as_an_arm(tmp_path: Path
     assert 'name = "gepa-c1"' in experiment
     assert f'"{MODULE}" = "arms/prompts-register-md.c1.md"' in experiment
     assert (repo / MODULE).read_text() == BASE_TEXT
+
+
+def test_a_sampled_control_is_once_in_the_batch_and_seeded_resume(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    spec = _spec(
+        base,
+        controls=("arithmetic",),
+        modules=(MODULE, OTHER_MODULE),
+        iterations=2,
+    )
+    uninterrupted = FakeRollout()
+    _run(tmp_path / "uninterrupted", spec, repo, base, rollout=uninterrupted)
+    resume_root = tmp_path / "resumed"
+    _run(
+        resume_root,
+        spec.model_copy(update={"iterations": 1}),
+        repo,
+        base,
+        rollout=FakeRollout(),
+    )
+    resumed = FakeRollout()
+    asyncio.run(_gepa(spec, repo, base, resume_root / "out", rollout=resumed).run())
+
+    uninterrupted_batches = [
+        instances
+        for labels, instances in uninterrupted.batches
+        if any("accept" in label for label in labels)
+    ]
+    resumed_batches = [
+        instances
+        for labels, instances in resumed.batches
+        if any("accept" in label for label in labels)
+    ]
+    assert len(uninterrupted_batches) == 2
+    assert all(batch.count("arithmetic") == 1 for batch in uninterrupted_batches)
+    assert resumed_batches == uninterrupted_batches[1:]
+
+    batch = uninterrupted_batches[0]
+    record = {
+        "label": "accept-0",
+        "reports": [
+            {"cases": [{"name": name} for name in dict.fromkeys(batch)]},
+        ],
+    }
+    assert StackRollout(repo, spec, base, tmp_path / "records")._records_complete(
+        "accept", batch, [record]
+    )
 
 
 @pytest.mark.parametrize(("est_usd_per_case", "cases"), [(0.9, 13), (1.1, 3), (0.4, 3)])
@@ -610,5 +860,6 @@ def test_dry_run_prints_the_plan_and_reaches_no_rollout(
     assert exit_info.value.code == 0
     printed = capsys.readouterr().out
     assert "D_pareto" in printed
+    assert printed.count("arithmetic") == 1
     assert "full-suite ship gate" in printed
     assert "estimated $" in printed

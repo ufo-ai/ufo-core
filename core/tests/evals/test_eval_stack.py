@@ -31,6 +31,7 @@ from evals.stack import (
     _database_name,
     _docker,
     derived_config,
+    drop_eval_database_pairs,
     materialize_readiness,
     template_config,
 )
@@ -105,6 +106,36 @@ url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 backend = "filesystem"
 root = "./blobs"
 """
+
+
+def _postgres_stack(tmp_path: Path, name: str, template_text: str = POSTGRES_TEMPLATE) -> EvalStack:
+    template = tmp_path / f"{name}.toml"
+    template.write_text(template_text)
+    stack = EvalStack.provision(
+        RunSpec(label=name, config=template),
+        root=tmp_path / name,
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    _close(stack)
+    return stack
+
+
+def _authority(port: int = 5541) -> eval_stack.DatabaseAuthority:
+    return eval_stack.DatabaseAuthority(
+        username="ufo", host="127.0.0.1", port=port, database="ufo", options=()
+    )
+
+
+def _ownership(root: Path, suffix: str = "") -> eval_stack.DatabaseOwnership:
+    application = f"{_database_name(root.resolve())}{suffix}"
+    return eval_stack.DatabaseOwnership(
+        id=UUID("11111111-1111-1111-1111-111111111111"),
+        run_root=root.resolve(),
+        authority=_authority(),
+        application=application,
+        system=f"{application}_dbos",
+    )
 
 
 async def test_isolated_stack_keeps_local_billing_and_omits_external_billing_workflows(
@@ -224,6 +255,47 @@ def test_derived_config_names_a_per_run_postgres_database(tmp_path: Path) -> Non
         "postgresql+psycopg://ufo:ufo@127.0.0.1:5541/eval_20260717_smoke_dbos"
     )
     assert derived.database.owner_url == derived.database.url
+
+
+def test_provision_records_the_exact_postgres_database_ownership(tmp_path: Path) -> None:
+    arm = tmp_path / "arm"
+    stack_parent = arm / eval_stack.RUNS_ROOT / "stamp"
+    stack_parent.mkdir(parents=True)
+    stack = _postgres_stack(stack_parent, "run")
+    root = stack.root
+    ownership = eval_stack.DatabaseOwnership.model_validate_json(
+        (root / eval_stack.DATABASE_OWNERSHIP_FILE).read_text()
+    )
+
+    assert stack.database_ownership == ownership
+    assert ownership.run_root == root.resolve()
+    assert ownership.authority == _authority()
+    assert "password" not in (root / eval_stack.DATABASE_OWNERSHIP_FILE).read_text()
+    assert ownership.application == stack.config.database.url.rpartition("/")[2]
+    assert ownership.system == stack.config.database.system_url.rpartition("/")[2]
+    assert eval_stack.database_cleanup_plan(arm, template_config(POSTGRES_TEMPLATE)) == (
+        stack.admin_database_url,
+        (ownership,),
+    )
+
+
+def test_database_cleanup_plans_nothing_for_a_base_that_records_no_ownership(
+    tmp_path: Path,
+) -> None:
+    """An arm worktree runs the `evals.stack` of the base its experiment pins. A base older than the
+    ownership record writes none and marks no database, so the arm owns nothing to drop and is not a
+    failed arm."""
+    arm = tmp_path / "arm"
+    for label in ("ablate-control-0", "ablate-control-1"):
+        run = arm / eval_stack.RUNS_ROOT / "20260821-224424" / label
+        run.mkdir(parents=True)
+        (run / "ufo.toml").write_text(POSTGRES_TEMPLATE)
+
+    assert eval_stack.database_cleanup_plan(arm, template_config(POSTGRES_TEMPLATE)) == (
+        "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo",
+        (),
+    )
+    assert eval_stack.database_cleanup_plan(arm, template_config(SQLITE_TEMPLATE)) == (None, ())
 
 
 def test_derived_config_reports_a_private_otlp_endpoint_only_when_the_template_sets_one(
@@ -637,7 +709,7 @@ def test_provision_strips_an_ambient_owner_dsn(
     assert stack.config.database.owner_url == stack.config.database.url
 
 
-async def test_create_databases_creates_the_app_and_dbos_pair_once(
+async def test_create_and_drop_databases_owns_the_app_and_dbos_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if not postgres_reachable():
@@ -645,35 +717,134 @@ async def test_create_databases_creates_the_app_and_dbos_pair_once(
     monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
     url = make_url(POSTGRES_TEST_URL)
     admin_url = f"postgresql+asyncpg://{url.username}:{url.password}@{url.host}:{url.port}/ufo"
-    template = tmp_path / "template.toml"
-    template.write_text(
-        f'[database]\nurl = "{admin_url}"\n\n[blob]\nbackend = "filesystem"\nroot = "./blobs"\n'
+    stack = _postgres_stack(
+        tmp_path,
+        "dbpair",
+        f'[database]\nurl = "{admin_url}"\n\n[blob]\nbackend = "filesystem"\nroot = "./blobs"\n',
     )
-    stack = EvalStack.provision(
-        RunSpec(label="dbpair", config=template),
-        root=tmp_path / "dbpair",
-        out=tmp_path / "archive",
-        repo_root=tmp_path,
-    )
-    _close(stack)
     app_name = stack.config.database.url.rpartition("/")[2]
+    ownership = stack.database_ownership
+    assert ownership is not None
 
-    await stack._create_databases()
-    await stack._create_databases()
+    real_connect = asyncpg.connect
+    mode = "create"
+    interrupted = False
+    created = asyncio.Event()
+    resume = asyncio.Event()
+    late_blocker: asyncpg.Connection | None = None
 
-    admin = await asyncpg.connect(
-        host=url.host, port=url.port, user=url.username, password=url.password, database="ufo"
-    )
+    class InterruptingConnection:
+        def __init__(self, connection: asyncpg.Connection) -> None:
+            self.connection = connection
+
+        async def fetch(self, query: str, *args: object) -> list[asyncpg.Record]:
+            return await self.connection.fetch(query, *args)
+
+        async def execute(self, query: str, *args: object) -> str:
+            nonlocal interrupted, late_blocker
+            result = await self.connection.execute(query, *args)
+            if mode == "create" and query.startswith("create database") and not created.is_set():
+                created.set()
+                await resume.wait()
+            if mode in {"cancel", "late-blocker"} and query.startswith("drop") and not interrupted:
+                interrupted = True
+                if mode == "cancel":
+                    raise asyncio.CancelledError
+                late_blocker = await real_connect(stack.config.database.url.replace("+asyncpg", ""))
+            return result
+
+        async def close(self) -> None:
+            await self.connection.close()
+
+    async def connect(*args: object, **kwargs: object) -> InterruptingConnection:
+        return InterruptingConnection(await real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(eval_stack.asyncpg, "connect", connect)
+    admin = await real_connect(admin_url.replace("+asyncpg", ""))
+    running = asyncio.create_task(stack._create_databases())
+    await created.wait()
+    running.cancel()
+    resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    mode = ""
+    with pytest.raises(RuntimeError, match="already exist"):
+        await stack._create_databases()
+    blocker = await real_connect(stack.config.database.url.replace("+asyncpg", ""))
+
     try:
         rows = await admin.fetch(
-            "select datname from pg_database where datname = any($1::name[])",
+            "select datname, shobj_description(oid, 'pg_database') as ownership "
+            "from pg_database where datname = any($1::name[])",
             [app_name, f"{app_name}_dbos"],
         )
         assert sorted(row["datname"] for row in rows) == [app_name, f"{app_name}_dbos"]
+        assert {row["ownership"] for row in rows} == {ownership.marker}
+        await admin.execute(f"comment on database \"{ownership.application}\" is 'foreign'")
+        with pytest.raises(RuntimeError, match="ownership"):
+            await drop_eval_database_pairs(stack.admin_database_url, (ownership,))
+        await admin.execute(
+            f"comment on database \"{ownership.application}\" is '{ownership.marker}'"
+        )
+        with pytest.raises(RuntimeError, match="still connected"):
+            await drop_eval_database_pairs(stack.admin_database_url, (ownership,))
+        await blocker.close()
+        await admin.execute(f'drop database "{ownership.system}"')
+        await drop_eval_database_pairs(stack.admin_database_url, (ownership,))
+        await drop_eval_database_pairs(stack.admin_database_url, (ownership,))
+        assert not await admin.fetch(
+            "select datname from pg_database where datname = any($1::name[])",
+            [app_name, f"{app_name}_dbos"],
+        )
+        for mode in ("cancel", "late-blocker"):
+            await stack._create_databases()
+            interrupted = False
+            expected = asyncio.CancelledError if mode == "cancel" else asyncpg.ObjectInUseError
+            with pytest.raises(expected):
+                await drop_eval_database_pairs(admin_url, (ownership,))
+            assert {
+                row["datname"]
+                for row in await admin.fetch(
+                    "select datname from pg_database where datname = any($1::name[])",
+                    [ownership.application, ownership.system],
+                )
+            } == {ownership.application}
+            if late_blocker is not None:
+                await late_blocker.close()
+            await drop_eval_database_pairs(admin_url, (ownership,))
+            assert not await admin.fetch(
+                "select 1 from pg_database where datname = any($1::name[])",
+                [ownership.application, ownership.system],
+            )
     finally:
+        if late_blocker is not None and not late_blocker.is_closed():
+            await late_blocker.close()
+        if not blocker.is_closed():
+            await blocker.close()
         for name in (app_name, f"{app_name}_dbos"):
             await admin.execute(f'drop database if exists "{name}"')
         await admin.close()
+
+
+async def test_database_cleanup_refuses_a_different_identity_or_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ownership = _ownership(tmp_path / "owned")
+
+    with pytest.raises(ValueError, match="authority"):
+        await drop_eval_database_pairs(
+            "postgresql+asyncpg://ufo:ufo@127.0.0.1:5542/ufo", (ownership,)
+        )
+
+    async def connect(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid ownership must fail before connecting")
+
+    monkeypatch.setattr(eval_stack.asyncpg, "connect", connect)
+    with pytest.raises(ValueError, match="run identity"):
+        await drop_eval_database_pairs(
+            "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo",
+            (_ownership(tmp_path / "owned", "x"),),
+        )
 
 
 def test_memory_100_spec_requires_postgres_and_a_collector_endpoint(
@@ -1496,8 +1667,15 @@ def test_database_name_is_postgres_safe() -> None:
     root = Path(".local/evals/20260717-141530/An-Odd.Label")
     name = _database_name(root)
 
-    assert name == "eval_20260717_141530_an_odd_label"
-    assert len(_database_name(Path("x" * 80) / ("y" * 80))) == 63
+    assert name.startswith("eval_20260717_141530_an_odd_label_")
+    assert len(f"{_database_name(Path('x' * 80) / ('y' * 80))}_dbos") == 63
+
+
+def test_database_name_owns_the_absolute_run_root(tmp_path: Path) -> None:
+    first = _database_name(tmp_path / "first" / "same-stamp" / "same-label")
+    second = _database_name(tmp_path / "second" / "same-stamp" / "same-label")
+
+    assert first != second
 
 
 def test_run_names_the_missing_egress_binary_before_any_seed_subprocess(tmp_path: Path) -> None:

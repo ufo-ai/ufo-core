@@ -76,6 +76,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
@@ -86,10 +87,17 @@ from typing import Protocol
 import tomli_w
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+import evals.stack as eval_stack
 from evals.harness.harness import WAIT_EXPIRED, Json, JsonObject, infra_error
 from evals.harness.judge import fenced_payload
 from evals.harness.registry import narrowed_tasks
 from evals.registry import TASKS
+from evals.stack import RUNS_ROOT as STACK_RUNS_DIR
+from evals.stack import (
+    cancel_stack_process,
+    drop_eval_database_pairs,
+    template_config,
+)
 from ufo.config import Config
 from ufo.harness.models.interface import ModelClient, ModelRequest, TextDelta
 from ufo.harness.models.pricing import Pricing
@@ -111,10 +119,13 @@ EGRESS_BINARY = Path("servers/egress/target/debug/ufo-egress")
 RUNS_DIR = Path("eval-reports/runs")
 EXPERIMENTS_DIR = Path("eval-reports/experiments")
 WORKTREES_DIR = Path(".local/gepa")
+STACK_LOG = "stack.log"
+LOGS_DIR = "logs"
 RIG_NOTE = "rig fault, not a capability failure"
 MAX_NOTE_CHARS = 400
 MAX_NOTES_PER_CASE = 24
 MAX_RESULT_CHARS = 240
+STACK_OUTPUT_TAIL_CHARS = 1_500
 MAX_MODULE_CHARS = 24_000
 REFLECTOR_MAX_TOKENS = 16_000
 CLAIMS_MAX_TOKENS = 4_000
@@ -710,7 +721,9 @@ class StackRollout:
     egress binary, and one `evals.stack` `[[run]]` block per repeat narrowed with `--only` and
     `--case` (the whole suites when no instance is named). A stack exits nonzero as soon as one case
     fails, and that is data: the records are archived first and scored whatever the exit code was.
-    Only a stack that wrote no record at all is an error."""
+    An arm is complete only when every repeat wrote its exact requested cases; any gap retains its
+    worktree and databases. A retained worktree keeps its path, so a later attempt at the same arm
+    materializes beside it and a resumed run makes progress."""
 
     repo: Path
     spec: OptimizeSpec
@@ -725,25 +738,80 @@ class StackRollout:
 
     async def _arm(self, arm: Arm, instances: tuple[str, ...], slots: asyncio.Semaphore) -> Rollout:
         async with slots:
-            root = self.repo / WORKTREES_DIR / self.spec.name / arm.label
+            root = self._root(arm.label)
+            keep = True
             try:
-                print(f"[{arm.label}] materializing", flush=True)
+                print(f"[{arm.label}] materializing at {root}", flush=True)
                 await asyncio.to_thread(self._materialize, arm, instances, root)
-                exit_code, tail = await self._stack(root)
-                archived = await asyncio.to_thread(self._archive, arm.label, root)
+                exit_code, output = await self._stack(root)
+                archived = await asyncio.to_thread(self._archive, arm.label, root, output)
                 if not archived:
-                    return Rollout({}, 0.0, error=f"stack exited {exit_code}, no record: {tail}")
+                    return Rollout(
+                        {},
+                        0.0,
+                        error=(
+                            f"stack exited {exit_code}, no record: "
+                            f"{output[-STACK_OUTPUT_TAIL_CHARS:]}"
+                        ),
+                    )
+                if not self._records_complete(arm.label, instances, archived):
+                    return Rollout(
+                        {}, 0.0, error="stack records do not match expected repeats and cases"
+                    )
                 outcomes, cost = collect_outcomes(archived, self.evidence)
+                await self._drop_databases(root)
+                keep = False
                 print(f"[{arm.label}] scored {len(outcomes)} case(s) (${cost:.2f})", flush=True)
                 return Rollout(outcomes, cost)
             except Exception as error:
+                keep = root.exists()
                 return Rollout({}, 0.0, error=f"{type(error).__name__}: {error}")
             finally:
-                await asyncio.to_thread(self._remove_worktree, root)
+                if keep and root.exists():
+                    print(f"[{arm.label}] worktree kept at {root}", flush=True)
+                elif not keep:
+                    await asyncio.to_thread(self._remove_worktree, root)
+
+    def _root(self, label: str) -> Path:
+        """The worktree path for this attempt at the arm. A retained worktree keeps the path it was
+        kept at, so a resumed run that replays the same iteration materializes beside it."""
+        arm_root = self.repo / WORKTREES_DIR / self.spec.name / label
+        root = arm_root
+        attempt = 1
+        while root.exists():
+            attempt += 1
+            root = arm_root.with_name(f"{label}.{attempt}")
+        return root
+
+    def _records_complete(
+        self, label: str, instances: tuple[str, ...], records: list[dict]
+    ) -> bool:
+        expected_labels = Counter(f"{label}-{index}" for index in range(self.spec.repeats))
+        expected_cases = Counter(
+            instances
+            or tuple(case for task in TASKS if task.name in self.spec.suites for case in task.cases)
+        )
+        return Counter(record.get("label") for record in records) == expected_labels and all(
+            Counter(
+                case.get("name")
+                for report in record.get("reports", ())
+                for case in report.get("cases", ())
+            )
+            == expected_cases
+            for record in records
+        )
+
+    async def _drop_databases(self, root: Path) -> None:
+        admin_url, ownerships = await asyncio.to_thread(
+            eval_stack.database_cleanup_plan,
+            root,
+            template_config(tomli_w.dumps(self.spec.template)),
+        )
+        await drop_eval_database_pairs(admin_url, ownerships)
 
     def _materialize(self, arm: Arm, instances: tuple[str, ...], root: Path) -> None:
         if root.exists():
-            self._remove_worktree(root)
+            raise RuntimeError(f"worktree already exists: {root}")
         root.parent.mkdir(parents=True, exist_ok=True)
         self._git("worktree", "add", "--detach", str(root), self.base)
         for module, text in arm.texts.items():
@@ -782,18 +850,31 @@ class StackRollout:
             cwd=root,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
-        output, _ = await process.communicate()
-        return process.returncode or 0, output.decode(errors="replace")[-1500:]
+        communication = asyncio.create_task(process.communicate())
+        try:
+            output, _ = await asyncio.shield(communication)
+        except asyncio.CancelledError:
+            await cancel_stack_process(process, communication)
+            raise
+        return process.returncode or 0, output.decode(errors="replace")
 
-    def _archive(self, label: str, root: Path) -> list[dict]:
+    def _archive(self, label: str, root: Path, stack_output: str) -> list[dict]:
         archive = self.out / "runs" / label
+        shutil.rmtree(archive, ignore_errors=True)
         archive.mkdir(parents=True, exist_ok=True)
-        records = []
-        for path in sorted((root / RUNS_DIR).glob("*.json")):
+        (archive / STACK_LOG).write_text(stack_output)
+        record_paths = sorted((root / RUNS_DIR).glob("*.json"))
+        for path in record_paths:
             shutil.copy(path, archive / path.name)
-            records.append(json.loads(path.read_text()))
-        return records
+        for path in sorted((root / STACK_RUNS_DIR).glob("*/*/*.log")):
+            destination = archive / LOGS_DIR / path.parent.name / path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                raise RuntimeError(f"two stack logs archive to {destination}")
+            shutil.copy(path, destination)
+        return [json.loads(path.read_text()) for path in record_paths]
 
     def _git(self, *args: str) -> str:
         return subprocess.run(
@@ -961,7 +1042,8 @@ class Gepa:
 
     async def run(self) -> int:
         instances = planned_instances(self.spec)
-        self._preflight(split_instances(instances, self.spec.pareto_fraction, self.spec.seed)[1])
+        targets = tuple(name for name in instances if name not in self.spec.controls)
+        self._preflight(split_instances(targets, self.spec.pareto_fraction, self.spec.seed)[1])
         texts = self._base_texts()
         log = self.out / STATE_FILE
         history = list(load_state(log))
@@ -974,7 +1056,10 @@ class Gepa:
         if unscorable:
             print(f"unscorable in this environment, dropped: {', '.join(unscorable)}", flush=True)
         scorable = tuple(name for name in instances if name in scored)
-        feedback, pareto = split_instances(scorable, self.spec.pareto_fraction, self.spec.seed)
+        scorable_targets = tuple(name for name in targets if name in scored)
+        feedback, pareto = split_instances(
+            scorable_targets, self.spec.pareto_fraction, self.spec.seed
+        )
         for iteration in range(
             max(record.iteration for record in history) + 1, self.spec.iterations + 1
         ):
@@ -1260,7 +1345,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     spec = load_optimization(args.optimization, repo)
     instances = planned_instances(spec)
-    feedback, pareto = split_instances(instances, spec.pareto_fraction, spec.seed)
+    targets = tuple(name for name in instances if name not in spec.controls)
+    feedback, pareto = split_instances(targets, spec.pareto_fraction, spec.seed)
     if args.dry_run:
         estimate = estimated_usd(spec, pareto)
         print(

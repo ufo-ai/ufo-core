@@ -56,7 +56,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tomllib
@@ -69,11 +68,18 @@ from uuid import NAMESPACE_URL, uuid5
 import tomli_w
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+import evals.stack as eval_stack
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.registry import narrowed_tasks
 from evals.harness.viewer import EvalRun, write_viewer
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
+from evals.stack import RUNS_ROOT as STACK_RUNS_DIR
+from evals.stack import (
+    cancel_stack_process,
+    drop_eval_database_pairs,
+    template_config,
+)
 from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.sandbox.client_binary import CLIENT_BINARY_ENV, CLIENT_BINARY_NAME
 from ufo.schema.records import ReasoningEffort
@@ -90,14 +96,11 @@ BUILT_TREES = (
 RUNS_DIR = Path("eval-reports/runs")
 EXPERIMENTS_DIR = Path("eval-reports/experiments")
 WORKTREES_DIR = Path(".local/ablate")
-STACK_RUNS_DIR = Path(".local/evals")
 STACK_LOG = "stack.log"
 LOGS_DIR = "logs"
 TAIL_CHARS = 1500
 SIGNAL_GAP = 2
 SIGNAL_FLOOR = 3
-STACK_CANCEL_SIGINT_WAIT_SECONDS = 5.0
-STACK_CANCEL_SIGTERM_WAIT_SECONDS = 5.0
 
 
 class ArmReplacement(BaseModel):
@@ -212,39 +215,6 @@ def load_experiment(path: Path) -> ExperimentSpec:
             if not variant.is_file():
                 raise SystemExit(f"arm {arm.name!r}: variant for {repo_path} missing: {variant}")
     return spec.model_copy(update={"arm": resolved, "memory_ingestion": snapshot})
-
-
-async def _stack_exited(
-    communication: asyncio.Task[tuple[bytes, bytes]], timeout_seconds: float
-) -> bool:
-    try:
-        await asyncio.wait_for(asyncio.shield(communication), timeout_seconds)
-    except TimeoutError:
-        return False
-    return True
-
-
-async def _cancel_stack_process(
-    process: asyncio.subprocess.Process,
-    communication: asyncio.Task[tuple[bytes, bytes]],
-) -> None:
-    for sent, timeout_seconds in (
-        (signal.SIGINT, STACK_CANCEL_SIGINT_WAIT_SECONDS),
-        (signal.SIGTERM, STACK_CANCEL_SIGTERM_WAIT_SECONDS),
-    ):
-        if process.returncode is None:
-            try:
-                os.killpg(process.pid, sent)
-            except ProcessLookupError:
-                pass
-        if await _stack_exited(communication, timeout_seconds):
-            return
-    if process.returncode is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    await asyncio.shield(communication)
 
 
 @dataclass(frozen=True)
@@ -597,6 +567,15 @@ class Ablation:
             ("git", "-C", str(self.repo), *args), check=True, capture_output=True, text=True
         ).stdout
 
+    def _root(self, name: str) -> Path:
+        arm_root = self.repo / WORKTREES_DIR / self.spec.name / name
+        root = arm_root
+        attempt = 1
+        while root.exists():
+            attempt += 1
+            root = arm_root.with_name(f"{name}.{attempt}")
+        return root
+
     async def _arm(
         self,
         arm: ArmSpec,
@@ -609,13 +588,12 @@ class Ablation:
         stack logs and databases are the only evidence of what the money bought, and the run that
         threw them away could not be diagnosed at all. A materialization that never reached a
         stack spent nothing and keeps no worktree."""
-        root = self.repo / WORKTREES_DIR / self.spec.name / arm.name
+        root = self._root(arm.name)
         archive = self.out / "runs" / arm.name
-        keep = False
+        keep = True
         print(f"[{arm.name}] materializing", flush=True)
         try:
             await asyncio.to_thread(self._materialize, arm, base, root, remote_client)
-            keep = True
             print(f"[{arm.name}] stacks running", flush=True)
             runs = await self._run_arm_stacks(arm, root, slots)
             await asyncio.to_thread(self._archive, root, archive, runs)
@@ -624,8 +602,6 @@ class Ablation:
             ]
             gaps = record_gaps(self.spec, arm.name, records)
             failures = tuple(run.error for run in runs if run.error is not None)
-            keep = bool(gaps or failures)
-            kept = root if keep else None
             if not records:
                 last = runs[-1]
                 tail = (last.output or last.error or "")[-TAIL_CHARS:]
@@ -635,9 +611,13 @@ class Ablation:
                     0.0,
                     error=f"stack exited {last.exit_code}, no record: {tail}",
                     gaps=gaps,
-                    kept_worktree=kept,
+                    kept_worktree=root,
                 )
             counts, cost = collect_counts(records)
+            if not gaps and not failures:
+                await self._drop_databases(root)
+                keep = False
+            kept = root if keep else None
             print(f"[{arm.name}] done (${cost:.2f})", flush=True)
             return ArmResult(
                 arm.name,
@@ -648,19 +628,28 @@ class Ablation:
                 kept_worktree=kept,
             )
         except Exception as error:
+            keep = root.exists()
             print(f"[{arm.name}] FAILED: {type(error).__name__}: {error}", flush=True)
             return ArmResult(
                 arm.name,
                 {},
                 0.0,
                 error=f"{type(error).__name__}: {error}",
-                kept_worktree=root if keep else None,
+                kept_worktree=root if root.exists() else None,
             )
         finally:
-            if keep:
+            if keep and root.exists():
                 print(f"[{arm.name}] worktree kept at {root}", flush=True)
-            else:
+            elif not keep:
                 await asyncio.to_thread(self._remove_worktree, root)
+
+    async def _drop_databases(self, root: Path) -> None:
+        admin_url, ownerships = await asyncio.to_thread(
+            eval_stack.database_cleanup_plan,
+            root,
+            template_config(tomli_w.dumps(self.spec.template)),
+        )
+        await drop_eval_database_pairs(admin_url, ownerships)
 
     async def _run_arm_stacks(
         self, arm: ArmSpec, root: Path, slots: asyncio.Semaphore
@@ -701,7 +690,7 @@ class Ablation:
 
     def _materialize(self, arm: ArmSpec, base: str, root: Path, remote_client: Path | None) -> None:
         if root.exists():
-            self._remove_worktree(root)
+            raise RuntimeError(f"worktree already exists: {root}")
         root.parent.mkdir(parents=True, exist_ok=True)
         self._git("worktree", "add", "--detach", str(root), base)
         self._carry_build_output(root)
@@ -853,7 +842,7 @@ class Ablation:
         try:
             output, _ = await asyncio.shield(communication)
         except asyncio.CancelledError:
-            await _cancel_stack_process(process, communication)
+            await cancel_stack_process(process, communication)
             raise
         return process.returncode or 0, output.decode(errors="replace")
 

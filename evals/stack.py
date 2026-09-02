@@ -9,6 +9,7 @@ summary prints each stack's run dir and database URL."""
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from sqlalchemy.engine import make_url
 
 from evals.budget import EvalRunBudget
 from evals.harness.viewer import load_runs, write_viewer
@@ -66,9 +68,15 @@ APPLICATION_BUILD_PRODUCTS = (
     Path("extensions/sites/ufo_ext_sites/page/kit/kit.css"),
 )
 POSTGRES_NAME_LIMIT = 63
+POSTGRES_SYSTEM_SUFFIX = "_dbos"
+DATABASE_NAME_DIGEST_CHARS = 12
+DATABASE_OWNERSHIP_FILE = "database-ownership.json"
+DATABASE_OWNERSHIP_MARKER_PREFIX = "ufo-eval:"
 READY_DEADLINE_SECONDS = 180.0
 READY_POLL_SECONDS = 0.5
 SHUTDOWN_GRACE_SECONDS = 30.0
+STACK_CANCEL_SIGINT_WAIT_SECONDS = 5.0
+STACK_CANCEL_SIGTERM_WAIT_SECONDS = 5.0
 DOCKER_BACKEND = "docker"
 SANDBOX_CONTAINER_PREFIX = "ufo-sbx-"
 SANDBOX_NETWORK_PREFIX = "ufo-sandbox-"
@@ -96,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="shared run archive")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     matrix = Matrix.model_validate(tomllib.loads(args.matrix.read_text()))
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    stamp = f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex}"
     stacks = tuple(
         EvalStack.provision(
             spec,
@@ -133,6 +141,40 @@ async def _run_stacks(stacks: tuple["EvalStack", ...]) -> tuple["StackResult", .
             )
 
     return tuple(await asyncio.gather(*(guarded(stack) for stack in stacks)))
+
+
+async def _stack_exited(
+    communication: asyncio.Task[tuple[bytes, bytes | None]], timeout_seconds: float
+) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.shield(communication), timeout_seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+async def cancel_stack_process(
+    process: asyncio.subprocess.Process,
+    communication: asyncio.Task[tuple[bytes, bytes | None]],
+) -> None:
+    """Terminate and reap a stack subprocess group after its orchestrator is cancelled."""
+    for sent, timeout_seconds in (
+        (signal.SIGINT, STACK_CANCEL_SIGINT_WAIT_SECONDS),
+        (signal.SIGTERM, STACK_CANCEL_SIGTERM_WAIT_SECONDS),
+    ):
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, sent)
+            except ProcessLookupError:
+                pass
+        if await _stack_exited(communication, timeout_seconds):
+            return
+    if process.returncode is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    await asyncio.shield(communication)
 
 
 class RunSpec(BaseModel):
@@ -226,6 +268,32 @@ class StackResult:
     error: str | None = None
 
 
+class DatabaseAuthority(BaseModel):
+    """Password-free identity of the Postgres server allowed to own an eval database pair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    username: str | None
+    host: str | None
+    port: int | None
+    database: str | None
+    options: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+class DatabaseOwnership(BaseModel):
+    """Provision-time authority for one exact eval application and DBOS database pair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: UUID
+    run_root: Path
+    authority: DatabaseAuthority
+    application: str
+    system: str
+
+    @property
+    def marker(self) -> str:
+        return f"{DATABASE_OWNERSHIP_MARKER_PREFIX}{self.id}"
+
+
 @dataclass(frozen=True)
 class EvalStack:
     """One isolated stack: seed a fresh workspace, boot its own serve, drive the eval child
@@ -240,6 +308,7 @@ class EvalStack:
     config_file: Path
     serve_binary: Path
     admin_database_url: str | None
+    database_ownership: DatabaseOwnership | None
     env: dict[str, str]
     serve_probe: socket.socket
     proxy_probe: socket.socket
@@ -313,6 +382,22 @@ class EvalStack:
         config = config.model_copy(
             update={"serve": config.serve.model_copy(update={"disabled_jobs": disabled_jobs})}
         )
+        admin_database_url = (
+            template.database.url if template.database.url.startswith("postgresql") else None
+        )
+        database_ownership = None
+        if admin_database_url is not None:
+            application = _database_name(root.resolve())
+            database_ownership = DatabaseOwnership(
+                id=uuid4(),
+                run_root=root.resolve(),
+                authority=_database_authority(admin_database_url),
+                application=application,
+                system=f"{application}{POSTGRES_SYSTEM_SUFFIX}",
+            )
+            (root / DATABASE_OWNERSHIP_FILE).write_text(
+                database_ownership.model_dump_json(indent=2)
+            )
         sandbox_image = None
         if (
             not SANDBOX_IMAGE_SUITES.isdisjoint(selected_suites)
@@ -357,9 +442,8 @@ class EvalStack:
             config=config,
             config_file=config_file,
             serve_binary=serve_binary,
-            admin_database_url=(
-                template.database.url if template.database.url.startswith("postgresql") else None
-            ),
+            admin_database_url=admin_database_url,
+            database_ownership=database_ownership,
             env=env,
             serve_probe=serve_probe,
             proxy_probe=proxy_probe,
@@ -450,21 +534,37 @@ class EvalStack:
             )
 
     async def _create_databases(self) -> None:
-        if self.admin_database_url is None:
+        admin_database_url = self.admin_database_url
+        if admin_database_url is None:
             return
-        admin_dsn = self.admin_database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-        app_name = self.config.database.url.rpartition("/")[2]
-        system_name = self.config.database.system_url.rpartition("/")[2]
-        connection = await asyncpg.connect(admin_dsn)
-        try:
-            for name in (app_name, system_name):
-                exists = await connection.fetchrow(
-                    "select 1 from pg_database where datname = $1", name
+        ownership = self.database_ownership
+        if ownership is None:
+            raise RuntimeError("Postgres eval stack has no database ownership record")
+
+        async def create_and_mark() -> None:
+            connection = await asyncpg.connect(_asyncpg_dsn(admin_database_url))
+            try:
+                names = (ownership.application, ownership.system)
+                existing = await connection.fetch(
+                    "select datname from pg_database where datname = any($1::name[])", list(names)
                 )
-                if exists is None:
+                if existing:
+                    found = ", ".join(sorted(row["datname"] for row in existing))
+                    raise RuntimeError(f"eval stack databases already exist: {found}")
+                for name in names:
                     await connection.execute(f'create database "{name}"')
-        finally:
-            await connection.close()
+                    await connection.execute(
+                        f"comment on database \"{name}\" is '{ownership.marker}'"
+                    )
+            finally:
+                await connection.close()
+
+        creation = asyncio.create_task(create_and_mark())
+        try:
+            await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            await creation
+            raise
 
     async def _seed(self) -> Path | None:
         if self.spec.memory_100 is not None:
@@ -962,9 +1062,125 @@ def derived_config(
     )
 
 
+async def drop_eval_database_pairs(
+    admin_database_url: str | None, ownerships: tuple[DatabaseOwnership, ...]
+) -> None:
+    """Drop generated eval database pairs after their owning run artifacts are archived."""
+    if admin_database_url is None:
+        if ownerships:
+            raise ValueError("owned Postgres eval databases require an admin database URL")
+        return
+    authority = _database_authority(admin_database_url)
+    for ownership in ownerships:
+        _validate_database_ownership(ownership)
+        if ownership.authority != authority:
+            raise ValueError("eval stack database ownership has a different admin authority")
+    pairs = tuple((ownership.application, ownership.system) for ownership in ownerships)
+    names = tuple(name for pair in pairs for name in reversed(pair))
+    if len(names) != len(set(names)):
+        raise ValueError("eval stack database pairs are not uniquely owned")
+    if not names:
+        return
+    markers = {
+        name: ownership.marker
+        for ownership in ownerships
+        for name in (ownership.application, ownership.system)
+    }
+    connection = await asyncpg.connect(_asyncpg_dsn(admin_database_url))
+    try:
+        rows = await connection.fetch(
+            "select datname, shobj_description(oid, 'pg_database') as ownership "
+            "from pg_database where datname = any($1::name[])",
+            list(names),
+        )
+        mismatched = sorted(
+            row["datname"] for row in rows if row["ownership"] != markers[row["datname"]]
+        )
+        if mismatched:
+            raise RuntimeError(f"eval stack database ownership mismatch: {', '.join(mismatched)}")
+        existing = {row["datname"] for row in rows}
+        connected = sorted(
+            row["datname"]
+            for row in await connection.fetch(
+                "select datname from pg_stat_activity where datname = any($1::name[])",
+                list(existing),
+            )
+        )
+        if connected:
+            raise RuntimeError(
+                f"eval stack databases still connected during cleanup: {', '.join(connected)}"
+            )
+        for name in names:
+            if name in existing:
+                await connection.execute(f'drop database if exists "{name}"')
+    finally:
+        await connection.close()
+
+
+def database_cleanup_plan(
+    root: Path, template: Config
+) -> tuple[str | None, tuple[DatabaseOwnership, ...]]:
+    """Load the exact database ownership records an ablation arm may clean up.
+
+    The record is what grants the drop, so the plan asks the arm what it recorded and never how many
+    records it owes. An arm worktree runs the `evals.stack` of the base its experiment pins, and a
+    base older than these records writes none and marks no database: those databases stay where that
+    run left them, exactly as they did before the records existed, rather than being dropped on a
+    name alone or failing an arm that ran to the end."""
+    paths = tuple(sorted((root / RUNS_ROOT).glob(f"*/*/{DATABASE_OWNERSHIP_FILE}")))
+    admin_url = template.database.url if template.database.url.startswith("postgresql") else None
+    if admin_url is None:
+        if paths:
+            raise RuntimeError("SQLite arm has Postgres database ownership records")
+        return None, ()
+    return admin_url, tuple(load_database_ownership(path) for path in paths)
+
+
+def load_database_ownership(path: Path) -> DatabaseOwnership:
+    """Load and verify the provision-time ownership record beside one eval stack config."""
+    if path.name != DATABASE_OWNERSHIP_FILE:
+        raise ValueError(f"database ownership record must be named {DATABASE_OWNERSHIP_FILE}")
+    ownership = DatabaseOwnership.model_validate_json(path.read_text())
+    if ownership.run_root != path.parent.resolve():
+        raise ValueError("database ownership record belongs to a different run root")
+    _validate_database_ownership(ownership)
+    return ownership
+
+
+def _validate_database_ownership(ownership: DatabaseOwnership) -> None:
+    root = ownership.run_root.resolve()
+    if ownership.run_root != root:
+        raise ValueError("database ownership run root must be absolute and resolved")
+    application = _database_name(root)
+    system = f"{application}{POSTGRES_SYSTEM_SUFFIX}"
+    if (ownership.application, ownership.system) != (application, system):
+        raise ValueError("database ownership names do not match their provision-time run identity")
+
+
+def _database_authority(database_url: str) -> DatabaseAuthority:
+    url = make_url(database_url)
+    if not url.drivername.startswith("postgresql"):
+        raise ValueError("database ownership authority must be Postgres")
+    return DatabaseAuthority(
+        username=url.username,
+        host=url.host,
+        port=url.port,
+        database=url.database,
+        options=tuple(
+            (name, tuple(values)) for name, values in sorted(url.normalized_query.items())
+        ),
+    )
+
+
+def _asyncpg_dsn(database_url: str) -> str:
+    return make_url(database_url).set(drivername="postgresql").render_as_string(hide_password=False)
+
+
 def _database_name(root: Path) -> str:
     name = re.sub(r"[^a-z0-9_]", "_", f"eval_{root.parent.name}_{root.name}".lower())
-    return name[:POSTGRES_NAME_LIMIT]
+    digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:DATABASE_NAME_DIGEST_CHARS]
+    prefix_length = POSTGRES_NAME_LIMIT - len(POSTGRES_SYSTEM_SUFFIX) - len(digest) - 1
+    return f"{name[:prefix_length].rstrip('_')}_{digest}"
 
 
 def _port_probe() -> tuple[socket.socket, int]:

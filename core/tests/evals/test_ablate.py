@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 import tomli_w
 
+import evals.stack as eval_stack
 from evals import ablate
 from evals.ablate import (
     BUILT_TREES,
@@ -568,7 +569,7 @@ def test_render_report_names_the_moved_cases(tmp_path: Path) -> None:
     assert "did not load" in report
 
 
-def test_an_arm_missing_its_repo_path_is_recorded_as_a_failed_arm(tmp_path: Path) -> None:
+def test_an_arm_keeps_a_worktree_when_materialization_fails_late(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "kept.py").write_text("x = 1\n")
@@ -588,10 +589,52 @@ def test_an_arm_missing_its_repo_path_is_recorded_as_a_failed_arm(tmp_path: Path
     )
     ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
     result = asyncio.run(ablation._arm(spec.arm[0], base, asyncio.Semaphore(1), None))
+    root = repo / WORKTREES_DIR / "exp" / "knockout"
     assert result.error is not None
     assert "gone.py" in result.error
+    assert result.kept_worktree == root
+    assert root.exists()
+
+
+def test_an_arm_materializes_beside_retained_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _spec(repeats=1)
+    materialized: list[Path] = []
+
+    def materialize(
+        self: Ablation,
+        arm: ArmSpec,
+        base: str,
+        root: Path,
+        remote_client: Path | None,
+    ) -> None:
+        assert remote_client is None
+        (root / RUNS_DIR).mkdir(parents=True)
+        (root / RUNS_DIR / "0.json").write_text(json.dumps(_stack_record(0, spec.suites)))
+        materialized.append(root)
+
+    async def stack(self: Ablation, arm: ArmSpec, root: Path, index: int = 0) -> tuple[int, str]:
+        return 0, ""
+
+    async def drop_databases(self: Ablation, root: Path) -> None:
+        return None
+
+    monkeypatch.setattr(Ablation, "_materialize", materialize)
+    monkeypatch.setattr(Ablation, "_stack", stack)
+    monkeypatch.setattr(Ablation, "_drop_databases", drop_databases)
+    kept = tmp_path / WORKTREES_DIR / spec.name / spec.arm[0].name
+    kept.mkdir(parents=True)
+    marker = kept / "keep"
+    marker.write_text("evidence")
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    result = asyncio.run(ablation._arm(spec.arm[0], "base", asyncio.Semaphore(1), None))
+
+    assert result.error is None
     assert result.kept_worktree is None
-    assert not (repo / WORKTREES_DIR / "exp" / "knockout").exists()
+    assert materialized == [kept.with_name(f"{kept.name}.2")]
+    assert marker.read_text() == "evidence"
 
 
 def _spec(**updates: object) -> ExperimentSpec:
@@ -851,9 +894,9 @@ async def test_cancelled_stack_escalates_and_reaps_before_releasing_permit(
             signalled.set()
 
     monkeypatch.setattr(ablate.asyncio, "create_subprocess_exec", create)
-    monkeypatch.setattr(ablate.os, "killpg", kill_group)
-    monkeypatch.setattr(ablate, "STACK_CANCEL_SIGINT_WAIT_SECONDS", 0.01)
-    monkeypatch.setattr(ablate, "STACK_CANCEL_SIGTERM_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(eval_stack.os, "killpg", kill_group)
+    monkeypatch.setattr(eval_stack, "STACK_CANCEL_SIGINT_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(eval_stack, "STACK_CANCEL_SIGTERM_WAIT_SECONDS", 0.01)
     ablation = Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")
     permit = asyncio.Semaphore(1)
 
@@ -1075,11 +1118,14 @@ def test_the_report_names_every_record_gap_and_the_worktree_kept_for_it(tmp_path
 
 
 def _archived_arm(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, records: list[dict]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    records: list[dict],
+    spec: ExperimentSpec | None = None,
 ) -> tuple[ArmResult, Path]:
     """One arm over a worktree the fake materialization fills, so the archive and the retention
     rule are exercised without a stack."""
-    spec = _spec()
+    spec = spec or _spec()
     root = tmp_path / WORKTREES_DIR / spec.name / spec.arm[0].name
 
     def materialize(
@@ -1135,6 +1181,12 @@ def test_a_complete_arm_archives_its_logs_and_gives_the_worktree_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = _spec()
+    released: list[Path] = []
+
+    async def release_databases(self: Ablation, root: Path) -> None:
+        released.append(root)
+
+    monkeypatch.setattr(Ablation, "_drop_databases", release_databases)
     result, root = _archived_arm(
         tmp_path, monkeypatch, [_stack_record(0, spec.suites), _stack_record(1, spec.suites)]
     )
@@ -1142,6 +1194,7 @@ def test_a_complete_arm_archives_its_logs_and_gives_the_worktree_back(
 
     assert result.gaps == ()
     assert result.kept_worktree is None
+    assert released == [root]
     assert not root.exists()
     assert (archive / STACK_LOG).read_text() == (
         "[repeat 0]\none case failed\n[repeat 1]\none case failed"
@@ -1173,15 +1226,71 @@ def test_an_arm_that_lost_a_suite_keeps_its_worktree_and_says_which(
 ) -> None:
     """The stack had already paid for the cases, so its logs and its database are the only account
     of what the money bought."""
+    released: list[Path] = []
+
+    async def release_databases(self: Ablation, root: Path) -> None:
+        released.append(root)
+
+    monkeypatch.setattr(Ablation, "_drop_databases", release_databases)
     result, root = _archived_arm(tmp_path, monkeypatch, [_stack_record(0, ("closing_message",))])
 
     assert result.gaps == (
         "ablate-knockout-0: no report for response_register",
         "ablate-knockout-1: no record",
     )
+    assert released == []
     assert result.kept_worktree == root
     assert (root / RUNS_DIR / "0.json").is_file()
     assert (tmp_path / "out" / "runs" / "knockout" / STACK_LOG).is_file()
+
+
+def test_an_arm_keeps_its_worktree_when_database_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail_cleanup(self: Ablation, root: Path) -> None:
+        raise RuntimeError("database still connected")
+
+    monkeypatch.setattr(Ablation, "_drop_databases", fail_cleanup)
+    result, root = _archived_arm(
+        tmp_path, monkeypatch, [_stack_record(0, _spec().suites), _stack_record(1, _spec().suites)]
+    )
+
+    assert result.error == "RuntimeError: database still connected"
+    assert result.kept_worktree == root
+    assert root.is_dir()
+    assert (tmp_path / "out" / "runs" / "knockout" / STACK_LOG).is_file()
+
+
+def test_an_arm_completes_on_a_base_that_records_no_database_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An arm worktree runs the `evals.stack` of the base its experiment pins, and a base older than
+    the ownership record writes none. The arm ran every repeat to the end, so it reports its counts
+    and gives its worktree back; the cleanup owns no database, drops none and connects to nothing.
+    """
+
+    async def connect(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an arm that owns no database must not reach Postgres")
+
+    monkeypatch.setattr(eval_stack.asyncpg, "connect", connect)
+    spec = _spec(
+        template={
+            "pack": {"name": "assistant_eval"},
+            "database": {"url": "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"},
+            "blob": {"backend": "filesystem", "root": "./blobs"},
+        }
+    )
+    result, root = _archived_arm(
+        tmp_path,
+        monkeypatch,
+        [_stack_record(0, spec.suites), _stack_record(1, spec.suites)],
+        spec=spec,
+    )
+
+    assert result.error is None
+    assert result.gaps == ()
+    assert result.kept_worktree is None
+    assert not root.exists()
 
 
 def test_every_committed_experiment_on_head_still_applies_to_the_tree() -> None:
