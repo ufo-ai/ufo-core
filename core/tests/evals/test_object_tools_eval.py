@@ -4,16 +4,23 @@ and flips the verdict with the order the cases finish."""
 
 import ast
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 
 from evals.suites.object_tools import (
     CASES,
     ROW_TERMS,
+    SHARED_ARCHIVE_APP,
     SINGLE_RUN_FIRES,
     _graded_run_count,
     _graded_run_once_reply,
 )
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE_ROOTS = ("core", "extensions", "packs", "evals")
@@ -107,6 +114,108 @@ def test_run_once_reply_rejects_a_scheduled_claim(claim: str) -> None:
 
     assert not verdict.passed
     assert "already set up" in verdict.reason
+
+
+async def test_shared_conversation_cleanup_preserves_completed_turn_agent(
+    db: None, tmp_path: Path
+) -> None:
+    case = next(case for case in CASES if case.name == "O11-archive-in-a-shared-conversation")
+    assert case.seed is not None and case.cleanup is not None
+    workspace_id, main_agent_id, member_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id}@eval.test",
+                is_admin=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=main_agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                is_main=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    with ws(workspace_id):
+        await case.seed(workspace_id, main_agent_id, blob)
+        async with workspace_tx() as connection:
+            fixture_agent_id = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == SHARED_ARCHIVE_APP,
+                    )
+                )
+            ).scalar_one()
+            conversation_id = uuid4()
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=fixture_agent_id,
+                    surface="eval",
+                    queue_key=f"eval:{conversation_id}",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=fixture_agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="archive the stale app",
+                    terminal={"status": "done", "text": "Archived."},
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.id == fixture_agent_id)
+                .values(
+                    name=f"archived-{fixture_agent_id}",
+                    archived_name=SHARED_ARCHIVE_APP,
+                    archived_at=sa.func.now(),
+                )
+            )
+
+        await case.cleanup(workspace_id, main_agent_id, blob)
+
+    async with workspace_tx() as connection:
+        restored = (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.id,
+                    tables.agent.c.name,
+                    tables.agent.c.archived_name,
+                    tables.agent.c.archived_at,
+                ).where(tables.agent.c.id == fixture_agent_id)
+            )
+        ).one()
+    assert restored.id == fixture_agent_id
+    assert restored.name == SHARED_ARCHIVE_APP
+    assert restored.archived_name is None
+    assert restored.archived_at is None
 
 
 def _case_arguments() -> list[tuple[str, str]]:

@@ -1264,7 +1264,7 @@ class SampleCdpProvider:
     async def lease(self, sandbox: Sandbox | None = None) -> CdpLease:
         return SampleCdpLease()
 
-    async def reattach(self, token: str) -> CdpLease:
+    async def reattach(self, token: str, sandbox: Sandbox | None = None) -> CdpLease:
         return SampleCdpLease()
 
 

@@ -886,6 +886,13 @@ class Sandbox:
         raise NotImplementedError
 
     @property
+    def turn_id(self) -> UUID | None:
+        """The durable turn whose authority this sandbox reference carries, when it is turn-bound.
+        Recovery rebuilds a reference with the same id, so a sandbox-local resource can use it as
+        stable ownership without conflating sibling turns sharing the conversation container."""
+        raise NotImplementedError
+
+    @property
     def created(self) -> bool:
         """Whether a sandbox exists to run an operation against."""
         raise NotImplementedError
@@ -1215,6 +1222,10 @@ class SandboxSession(Sandbox):
         return self.handle.conversation_id
 
     @property
+    def turn_id(self) -> UUID | None:
+        return self.handle.turn_id
+
+    @property
     def created(self) -> bool:
         return True
 
@@ -1272,6 +1283,10 @@ class _LateSandbox(Sandbox):
         return self._conversation_id
 
     @property
+    def turn_id(self) -> UUID:
+        return self._turn_id
+
+    @property
     def created(self) -> bool:
         return self._session is not None
 
@@ -1306,6 +1321,10 @@ class _AuthorizedSandbox(Sandbox):
     @property
     def conversation_id(self) -> UUID:
         return self.late.conversation_id
+
+    @property
+    def turn_id(self) -> UUID:
+        return self.late.turn_id
 
     @property
     def created(self) -> bool:

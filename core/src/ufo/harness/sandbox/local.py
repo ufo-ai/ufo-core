@@ -292,6 +292,7 @@ class LocalCarrier:
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            turn_id=spec.turn_id,
             runtime_root=str(runtime_root),
             egress_env={
                 **self._base_env(),
@@ -352,6 +353,7 @@ class LocalCarrier:
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            turn_id=spec.turn_id,
             runtime_root=str(self.ufo_home / RUNTIME_DIRNAME / spec.conversation_id.hex),
             egress_env=self._base_env(),
         )

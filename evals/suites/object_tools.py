@@ -502,15 +502,6 @@ SHARED_ARCHIVE_APP = "stale-standup-digest"
 def _shared_conversation_seed() -> CapabilitySeed:
     async def seed(workspace_id: UUID, agent_id: UUID, blob: BlobStore) -> None:
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.agent).where(
-                    tables.agent.c.workspace_id == workspace_id,
-                    sa.or_(
-                        tables.agent.c.name == SHARED_ARCHIVE_APP,
-                        tables.agent.c.archived_name == SHARED_ARCHIVE_APP,
-                    ),
-                )
-            )
             owner = (
                 await connection.execute(
                     sa.select(tables.member.c.id)
@@ -522,20 +513,48 @@ def _shared_conversation_seed() -> CapabilitySeed:
                     .limit(1)
                 )
             ).scalar_one()
-            await connection.execute(
-                sa.insert(tables.agent).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    name=SHARED_ARCHIVE_APP,
-                    prompt="You post yesterday's standup notes every morning.",
-                    purpose="Posts the standup digest.",
-                    model=AUTO_MODEL,
-                    visibility="workspace",
-                    owner_member_id=owner,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+
+            existing = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id)
+                    .where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        sa.or_(
+                            tables.agent.c.name == SHARED_ARCHIVE_APP,
+                            tables.agent.c.archived_name == SHARED_ARCHIVE_APP,
+                        ),
+                    )
+                    .order_by(
+                        (tables.agent.c.name == SHARED_ARCHIVE_APP).desc(),
+                        tables.agent.c.updated_at.desc(),
+                    )
+                    .limit(1)
                 )
+            ).scalar_one_or_none()
+            values = dict(
+                name=SHARED_ARCHIVE_APP,
+                archived_name=None,
+                archived_at=None,
+                prompt="You post yesterday's standup notes every morning.",
+                purpose="Posts the standup digest.",
+                model=AUTO_MODEL,
+                visibility="workspace",
+                owner_member_id=owner,
+                updated_at=sa.func.now(),
             )
+            if existing is not None:
+                await connection.execute(
+                    sa.update(tables.agent).where(tables.agent.c.id == existing).values(**values)
+                )
+            else:
+                await connection.execute(
+                    sa.insert(tables.agent).values(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        created_at=sa.func.now(),
+                        **values,
+                    )
+                )
 
     return seed
 

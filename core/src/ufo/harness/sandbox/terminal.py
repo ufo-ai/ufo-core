@@ -630,6 +630,7 @@ class TerminalCarrier:
             container_id=spec.workspace_host_path,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            turn_id=spec.turn_id,
             runtime_root=f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{bound.runtime_id}",
             egress_env={
                 "HTTP_PROXY": proxy_url,
@@ -656,6 +657,7 @@ class TerminalCarrier:
             container_id=bound.cwd,
             workspace_host_path=bound.cwd,
             run_token=spec.run_token,
+            turn_id=spec.turn_id,
             runtime_root=f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{bound.runtime_id}",
         )
 

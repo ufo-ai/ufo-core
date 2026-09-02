@@ -20,11 +20,15 @@ import sqlalchemy as sa
 
 from evals.harness.capability import (
     ArtifactProbeResult,
+    CapabilityOutput,
     CapabilityVerdict,
     DescribedGrader,
+    EvalTrajectory,
     ProbeCommandResult,
     SharedArtifact,
+    ToolInvocation,
 )
+from evals.harness.harness import WAIT_EXPIRED
 from evals.harness.registry import scenario_task
 from evals.harness.scenario import (
     MAX_SIMULATOR_REPLY_CHARS,
@@ -35,9 +39,10 @@ from evals.harness.scenario import (
     ScenarioTurn,
     ScenarioUser,
     UserSimulator,
+    _infra_owned_result,
     run_scenario_case,
 )
-from evals.harness.target import CapabilityTarget, InProcessTarget
+from evals.harness.target import CapabilityTarget, InProcessTarget, TargetResult
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority, MemberAuthority
@@ -1078,6 +1083,29 @@ async def test_nontransient_turn_failure_counts_as_a_real_failure(db: None, tmp_
     assert not result.passed
     assert not result.excluded
     assert result.evidence["excludedTrials"] == 0
+
+
+def test_scenario_wait_expiry_after_an_own_tool_call_is_scored() -> None:
+    call = ToolInvocation("ask_user", {"question": "Which inbox?"}, "awaiting", True)
+    trajectory = EvalTrajectory(
+        conversation_id=uuid4(),
+        turn_id=uuid4(),
+        status="cancelled",
+        messages=(),
+    )
+    untouched = TargetResult(
+        CapabilityOutput("", ()),
+        clean=False,
+        failure_reason=WAIT_EXPIRED,
+        trajectory=trajectory,
+    )
+    looping = replace(
+        untouched,
+        output=CapabilityOutput("", (call,), own_calls=(call,)),
+    )
+
+    assert _infra_owned_result(untouched)
+    assert not _infra_owned_result(looping)
 
 
 @dataclass

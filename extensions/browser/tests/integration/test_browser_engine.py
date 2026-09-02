@@ -133,7 +133,7 @@ class _EnvCdpProvider:
     async def lease(self, sandbox: object | None = None) -> CdpLease:
         return _StaticLease(CdpEndpoint(url=os.environ["BROWSER_CDP_URL"]))
 
-    async def reattach(self, token: str) -> CdpLease:
+    async def reattach(self, token: str, sandbox: object | None = None) -> CdpLease:
         return _StaticLease(CdpEndpoint(url=os.environ["BROWSER_CDP_URL"]))
 
 

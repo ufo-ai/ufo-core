@@ -21,6 +21,7 @@ from evals.harness.capability import (
 )
 from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import (
+    WAIT_EXPIRED,
     EvalCaseResult,
     Json,
     JsonObject,
@@ -235,6 +236,24 @@ async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> Eva
     return await run.result()
 
 
+def _infra_owned_result(result: TargetResult) -> bool:
+    """A wait is infrastructure only until the evaluated model starts answering it.
+
+    Scenario turns used to pass a cancelled wait straight to ``infra_owned_fault``, unlike the
+    capability harness. A model could therefore spend the whole deadline calling a tool in a loop
+    and disappear from the fixed cohort as an infra exclusion. Once the turn has produced prose or
+    one of its own tool calls, expiry is scored as incomplete model behavior.
+    """
+    expired_after_model_output = result.failure_reason == WAIT_EXPIRED and bool(
+        result.output.response or result.output.own_calls
+    )
+    return not expired_after_model_output and infra_owned_fault(
+        result.error_class,
+        result.failure_reason,
+        result.trajectory.status if result.trajectory is not None else None,
+    )
+
+
 @dataclass(frozen=True)
 class _ScenarioRun:
     """One case's execution against a target: every trial in order — each a freshly seeded
@@ -372,11 +391,7 @@ class _ScenarioRun:
                     result.failure_reason,
                     tokens,
                     cost_micro_usd,
-                    infra=infra_owned_fault(
-                        result.error_class,
-                        result.failure_reason,
-                        result.trajectory.status if result.trajectory is not None else None,
-                    ),
+                    infra=_infra_owned_result(result),
                 )
         if last is None:
             return _Trial(
@@ -439,15 +454,7 @@ class _ScenarioRun:
                         followup.failure_reason,
                         tokens,
                         cost_micro_usd,
-                        infra=infra_owned_fault(
-                            followup.error_class,
-                            followup.failure_reason,
-                            (
-                                followup.trajectory.status
-                                if followup.trajectory is not None
-                                else None
-                            ),
-                        ),
+                        infra=_infra_owned_result(followup),
                         followups=followups[: index + 1],
                     )
             last = await self._capture_artifacts(last, followups[-1])

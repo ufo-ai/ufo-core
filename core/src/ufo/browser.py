@@ -73,12 +73,13 @@ class CdpProvider(Protocol):
     """Where a turn's Chrome comes from: `lease` mints one `CdpLease` per turn, optionally given the
     turn's `Sandbox` so a per-conversation-sandbox provider resolves its endpoint against the
     Chrome running inside that sandbox (a static or remote provider ignores it); `reattach`
-    reconnects to the session a prior run's `token` names — returning a fresh lease over the live
-    session, or raising `SessionGone` when it can no longer resolve so the caller mints instead.
+    reconnects to the session a prior run's `token` names, with the recovered turn's sandbox when
+    the transport lives there — returning a fresh lease over the live session, or raising
+    `SessionGone` when it can no longer resolve so the caller mints instead.
     Process-wide (built once at boot), so a remote provider mints and releases a fresh hosted
-    session each turn (reattachable within its TTL) while a sandbox provider wraps a static
-    environment endpoint that outlives every turn."""
+    session each turn (reattachable within its TTL) while a sandbox provider can rediscover the
+    lease-scoped processes a recovered worker inherited."""
 
     async def lease(self, sandbox: Sandbox | None = None) -> CdpLease: ...
 
-    async def reattach(self, token: str) -> CdpLease: ...
+    async def reattach(self, token: str, sandbox: Sandbox | None = None) -> CdpLease: ...

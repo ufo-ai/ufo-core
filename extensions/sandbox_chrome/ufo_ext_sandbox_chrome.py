@@ -1,32 +1,33 @@
-"""The sandbox_chrome cdp provider: Chrome driven inside each conversation's own sandbox.
+"""The sandbox_chrome cdp provider: Chrome driven inside each turn's conversation sandbox.
 
-A hosted deploy runs one headless Chrome per conversation, inside that conversation's sandbox, and
-the serve process reaches its DevTools endpoint over the carrier's public per-port host. Selected by
-`[browser] cdp_provider = "sandbox_chrome"`, this provider's per-turn `lease` receives the turn's
-`Sandbox` and runs one bring-up command against it: launch Chrome on port 9222 if nothing answers
-there, launch an in-sandbox TCP proxy on 9223 that rewrites each request's `Host:` header to
-`127.0.0.1:9222` (Chrome's DevTools rejects a non-localhost Host, and `--remote-allow-origins=*`
-does not fix that — the proxy is load-bearing: it carries the WebSocket upgrade and frames through),
-and read Chrome's `webSocketDebuggerUrl` back *through* that proxy. A lease therefore returns only
-once the whole in-sandbox chain answers, and `lease` builds its endpoint from the carrier's own dial
-of port 9223 — address, scheme and the headers that port needs to answer are the carrier's to state,
-so nothing here guesses a scheme or names a provider's traffic header.
+A hosted turn owns one isolated stack inside the sandbox: an authenticated egress bridge, a
+headless Chrome, its profile and downloads, and a Host-rewriting DevTools proxy. Its durable turn
+id names the stack before any sandbox side effect, so a worker crash during launch is recoverable.
+Sibling turns can share one conversation container, so no port, process journal, browser profile,
+credential, or cleanup target is sandbox-wide. An atomic slot directory assigns three ports to
+each lease and the lease releases only that slot and stack when it closes.
 
-Readiness is a port that answers, never a pid that exists: a browser recorded but not serving is
-ended and relaunched, so one bad start cannot poison every later lease of the same sandbox. A
-browser that exits during bring-up reports its own log at once instead of spending the wait, and the
-wait itself stays strictly inside the carrier's command deadline, so a failure surfaces the
-browser's log rather than the carrier's timeout. A deadline that fires regardless — a sandbox too
-slow to start the program at all — reads that log back out of the sandbox, since the kill takes the
-program's own report with it.
+Chrome's DevTools rejects a non-localhost `Host` header, so the CDP proxy is load-bearing: it
+rewrites the HTTP upgrade and then carries WebSocket frames unchanged. `lease` reads the browser's
+resolved WebSocket path through that proxy before dialing the carrier's public host for the same
+per-lease port. Address, TLS and traffic headers remain the carrier's facts.
 
-Chrome and the proxy persist across turns with the per-conversation sandbox, so a lease's `aclose`
-is a no-op and a fresh lease reuses the running Chrome. The BUA engine (the browser extension)
-connects whatever endpoint the lease yields — only the transport is this provider's concern, never
-the engine."""
+A browser that exits during bring-up reports its log at once instead of spending the readiness
+budget. The enclosed waits end strictly before the carrier command deadline; if the carrier still
+times out, the provider reads the per-lease logs back from the sandbox. The BUA engine connects the
+endpoint the lease yields — only the transport is this provider's concern.
+
+Chromium does not authenticate from credentials embedded in the standard proxy environment, while
+the egress proxy intentionally accepts only authenticated CONNECT requests. A loopback bridge
+therefore converts Chromium's HTTP proxy requests into CONNECT tunnels and adds the current turn's
+proxy authorization. Its detached `ufo run` supervisor stays alive with the lease, which keeps the
+turn's TLS loopback proxy and authorization alive. Plain HTTP is one request per bridge connection:
+the origin receives `Connection: close`, and a later request for another host must open its own
+authenticated tunnel instead of entering the first host's tunnel."""
 
 import asyncio
 import base64
+import json
 import shlex
 from dataclasses import dataclass
 
@@ -37,17 +38,20 @@ from ufo.sdk.sandbox import ExecResult, Sandbox
 NAME = "sandbox_chrome"
 VERSION = "0.1.0"
 CDP_BACKEND = "sandbox_chrome"
-BROWSER_CDP_PORT = 9222
-BROWSER_CDP_PROXY_PORT = 9223
+TOKEN_VERSION = 1
+STACK_PORT_START = 10000
+STACK_PORT_SLOTS = 7000
+STACK_PORTS_PER_SLOT = 3
+CHROME_PORT_OFFSET = 0
+CDP_PROXY_PORT_OFFSET = 1
+EGRESS_BRIDGE_PORT_OFFSET = 2
 CHROME_READY_BUDGET_SECONDS = 45
 """The wait for a cold chromium to bind its DevTools port."""
 PROXY_READY_BUDGET_SECONDS = 10
 PROCESS_END_BUDGET_SECONDS = 5
 """Each stage waits on its own budget, so a slow chromium cannot spend the proxy's and leave it
 reporting a budget it never had — one shared clock across stages starves whichever runs last."""
-IN_SANDBOX_WAIT_SECONDS = (
-    CHROME_READY_BUDGET_SECONDS + PROXY_READY_BUDGET_SECONDS + 2 * PROCESS_END_BUDGET_SECONDS
-)
+IN_SANDBOX_WAIT_SECONDS = CHROME_READY_BUDGET_SECONDS + 2 * PROXY_READY_BUDGET_SECONDS
 COMMAND_REPORT_MARGIN_SECONDS = 15
 BROWSER_START_TIMEOUT_SECONDS = IN_SANDBOX_WAIT_SECONDS + COMMAND_REPORT_MARGIN_SECONDS
 """The carrier's deadline for the bring-up command, held above every wait it can enclose: a command
@@ -55,14 +59,13 @@ the carrier kills reports only its own timeout, losing the browser log that says
 BROWSER_PROBE_TIMEOUT_SECONDS = 0.2
 BROWSER_POLL_SLEEP_SECONDS = 0.1
 BROWSER_DIR = "/tmp/ufo-browser"
-CHROME_LOG_PATH = f"{BROWSER_DIR}/chromium.log"
-CHROME_PROFILE_DIR = f"{BROWSER_DIR}/profile"
-DOWNLOAD_DIR = f"{BROWSER_DIR}/downloads"
+STACK_LOCK_DIR = f"{BROWSER_DIR}/slots"
+STACK_ROOT_DIR = f"{BROWSER_DIR}/leases"
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
-CHROME_PID_PATH = "/tmp/ufo-browser.pid"
-PROXY_LOG_PATH = f"{BROWSER_DIR}/proxy.log"
-PROXY_PID_PATH = "/tmp/ufo-browser-proxy.pid"
-PROXY_SCRIPT_PATH = "/tmp/ufo-browser-proxy.py"
+STACK_ALLOCATE_TIMEOUT_SECONDS = 15
+STACK_ALLOCATION_RECOVERY_TIMEOUT_SECONDS = 15
+STACK_TASK_START_TIMEOUT_SECONDS = 15
+STACK_CLEANUP_TIMEOUT_SECONDS = 3 * PROCESS_END_BUDGET_SECONDS + 5
 LOG_TAIL_LINES = 20
 LOG_TAIL_BUDGET_SECONDS = 15
 """Reading the tail of two files inside the sandbox, on the failure path of a command the carrier
@@ -73,13 +76,76 @@ DOWNLOAD_READ_BUDGET_SECONDS = 600
 while encoding a file up to `MAX_DOWNLOAD_BYTES` hands about 27 MiB back on one command's stdout.
 Neither is a browser launch, so neither borrows the bring-up's deadline."""
 
-PROXY_SOURCE = (
-    f"""CHROME_HOST = "127.0.0.1"
-CHROME_PORT = {BROWSER_CDP_PORT}
-PROXY_HOST = "0.0.0.0"
-PROXY_PORT = {BROWSER_CDP_PROXY_PORT}
-"""
-    + """
+
+@dataclass(frozen=True)
+class BrowserStack:
+    lease_id: str
+    slot: int
+    chrome_port: int
+    cdp_proxy_port: int
+    egress_bridge_port: int
+
+    @property
+    def root(self) -> str:
+        return f"{STACK_ROOT_DIR}/{self.lease_id}"
+
+    @property
+    def chrome_log(self) -> str:
+        return f"{self.root}/chromium.log"
+
+    @property
+    def chrome_pid(self) -> str:
+        return f"{self.root}/chromium.pid"
+
+    @property
+    def chrome_profile(self) -> str:
+        return f"{self.root}/profile"
+
+    @property
+    def download_dir(self) -> str:
+        return f"{self.root}/downloads"
+
+    @property
+    def proxy_log(self) -> str:
+        return f"{self.root}/cdp-proxy.log"
+
+    @property
+    def proxy_pid(self) -> str:
+        return f"{self.root}/cdp-proxy.pid"
+
+    @property
+    def proxy_script(self) -> str:
+        return f"{self.root}/cdp-proxy.py"
+
+    @property
+    def bridge_script(self) -> str:
+        return f"{self.root}/egress-bridge.py"
+
+    @property
+    def task_base(self) -> str:
+        return f"{self.root}/egress-bridge-task"
+
+    @property
+    def lock_path(self) -> str:
+        return f"{STACK_LOCK_DIR}/{self.slot}"
+
+
+def _stack(lease_id: str, slot: int) -> BrowserStack:
+    if len(lease_id) != 32 or any(character not in "0123456789abcdef" for character in lease_id):
+        raise RuntimeError("sandbox_chrome returned an invalid browser lease id")
+    if not 0 <= slot < STACK_PORT_SLOTS:
+        raise RuntimeError(f"sandbox_chrome returned invalid browser slot {slot}")
+    base = STACK_PORT_START + slot * STACK_PORTS_PER_SLOT
+    return BrowserStack(
+        lease_id=lease_id,
+        slot=slot,
+        chrome_port=base + CHROME_PORT_OFFSET,
+        cdp_proxy_port=base + CDP_PROXY_PORT_OFFSET,
+        egress_bridge_port=base + EGRESS_BRIDGE_PORT_OFFSET,
+    )
+
+
+PROXY_PROGRAM = """
 import asyncio
 import contextlib
 
@@ -134,41 +200,371 @@ async def main() -> None:
 
 asyncio.run(main())
 """
-)
 
-BRING_UP_SOURCE = (
-    f"""BROWSER_DIR = "{BROWSER_DIR}"
-DOWNLOAD_DIR = "{DOWNLOAD_DIR}"
-CONTAINED_ARGV = ["--no-sandbox", "--disable-dev-shm-usage"]
-CHROME_URL = "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version"
-CHROME_ARGV_TAIL = [
-    "--headless=new",
-    "--disable-gpu",
-    "--use-mock-keychain",
-    "--password-store=basic",
-    "--remote-debugging-address=0.0.0.0",
-    "--remote-debugging-port={BROWSER_CDP_PORT}",
-    "--remote-allow-origins=*",
-    "--user-data-dir={CHROME_PROFILE_DIR}",
-    "about:blank",
-]
-CHROME_LOG = "{CHROME_LOG_PATH}"
-CHROME_PID = "{CHROME_PID_PATH}"
-PROXIED_URL = "http://127.0.0.1:{BROWSER_CDP_PROXY_PORT}/json/version"
-PROXY_ARGV = ["python3", "{PROXY_SCRIPT_PATH}"]
-PROXY_LOG = "{PROXY_LOG_PATH}"
-PROXY_PID = "{PROXY_PID_PATH}"
-PROBE_TIMEOUT_SECONDS = {BROWSER_PROBE_TIMEOUT_SECONDS}
-POLL_SLEEP_SECONDS = {BROWSER_POLL_SLEEP_SECONDS}
-CHROME_READY_BUDGET_SECONDS = {CHROME_READY_BUDGET_SECONDS}
-PROXY_READY_BUDGET_SECONDS = {PROXY_READY_BUDGET_SECONDS}
-PROCESS_END_BUDGET_SECONDS = {PROCESS_END_BUDGET_SECONDS}
-LOG_TAIL_LINES = {LOG_TAIL_LINES}
+EGRESS_BRIDGE_PROGRAM = r"""
+import asyncio
+import base64
+import contextlib
+import os
+import ssl
+from urllib.parse import unquote, urlsplit
+
+BUFFER_BYTES = 65536
+MAX_HEADER_BYTES = 65536
+UPSTREAM_TIMEOUT_SECONDS = 30
+
+
+async def read_head(reader: asyncio.StreamReader) -> bytes:
+    head = await reader.readuntil(b"\r\n\r\n")
+    if len(head) > MAX_HEADER_BYTES:
+        raise ValueError("proxy request headers exceed the bridge limit")
+    return head
+
+
+def proxy_config() -> tuple[str, int, ssl.SSLContext | None, str]:
+    raw = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if not raw:
+        raise ValueError("the browser needs the sandbox egress proxy URL")
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        raise ValueError("the sandbox proxy URL is invalid")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    username = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
+    context = ssl.create_default_context() if parsed.scheme == "https" else None
+    return parsed.hostname, port, context, f"Basic {encoded}"
+
+
+async def open_tunnel(
+    authority: str,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, bytes, bool]:
+    host, port, context, authorization = proxy_config()
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(
+            host,
+            port,
+            ssl=context,
+            server_hostname=host if context is not None else None,
+        ),
+        timeout=UPSTREAM_TIMEOUT_SECONDS,
+    )
+    writer.write(
+        (
+            f"CONNECT {authority} HTTP/1.1\r\n"
+            f"Host: {authority}\r\n"
+            f"Proxy-Authorization: {authorization}\r\n"
+            "Proxy-Connection: keep-alive\r\n\r\n"
+        ).encode()
+    )
+    await writer.drain()
+    reply = await read_head(reader)
+    status = reply.split(b"\r\n", 1)[0].split()
+    accepted = len(status) >= 2 and status[1] == b"200"
+    return reader, writer, reply, accepted
+
+
+def request_target(target: str, headers: list[str]) -> tuple[str, str]:
+    parsed = urlsplit(target)
+    if parsed.hostname is not None:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        authority = f"{host}:{port}"
+        path = parsed.path or "/"
+        if parsed.query:
+            path += f"?{parsed.query}"
+        return authority, path
+    host_header = next(
+        (line.split(":", 1)[1].strip() for line in headers if line.lower().startswith("host:")),
+        "",
+    )
+    if not host_header:
+        raise ValueError("an HTTP proxy request has no absolute target or Host header")
+    authority = host_header if ":" in host_header else f"{host_header}:80"
+    return authority, target or "/"
+
+
+def origin_request(method: str, target: str, version: str, headers: list[str]) -> bytes:
+    kept = [
+        line
+        for line in headers
+        if not line.lower().startswith(
+            ("proxy-authorization:", "proxy-connection:", "connection:")
+        )
+    ]
+    return (
+        "\r\n".join((f"{method} {target} {version}", *kept, "Connection: close", "", ""))
+    ).encode("iso-8859-1")
+
+
+def header_value(headers: list[str], name: str) -> str | None:
+    prefix = f"{name.lower()}:"
+    return next(
+        (line.split(":", 1)[1].strip() for line in headers if line.lower().startswith(prefix)),
+        None,
+    )
+
+
+async def forward_request_body(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    headers: list[str],
+) -> None:
+    transfer_encoding = header_value(headers, "transfer-encoding")
+    if transfer_encoding and "chunked" in {
+        item.strip().lower() for item in transfer_encoding.split(",")
+    }:
+        while True:
+            line = await reader.readuntil(b"\r\n")
+            size = int(line.split(b";", 1)[0].strip(), 16)
+            writer.write(line)
+            if size:
+                writer.write(await reader.readexactly(size + 2))
+            else:
+                while True:
+                    trailer = await reader.readuntil(b"\r\n")
+                    writer.write(trailer)
+                    if trailer == b"\r\n":
+                        break
+                await writer.drain()
+                return
+            await writer.drain()
+    content_length = header_value(headers, "content-length")
+    if content_length is not None:
+        remaining = int(content_length)
+        while remaining:
+            data = await reader.readexactly(min(remaining, BUFFER_BYTES))
+            writer.write(data)
+            await writer.drain()
+            remaining -= len(data)
+
+
+async def relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    while data := await reader.read(BUFFER_BYTES):
+        writer.write(data)
+        await writer.drain()
+
+
+async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        while data := await reader.read(BUFFER_BYTES):
+            writer.write(data)
+            await writer.drain()
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def handle(
+    client_reader: asyncio.StreamReader,
+    client_writer: asyncio.StreamWriter,
+) -> None:
+    upstream_writer: asyncio.StreamWriter | None = None
+    try:
+        head = await read_head(client_reader)
+        lines = head[:-4].decode("iso-8859-1").split("\r\n")
+        request = lines[0].split()
+        if len(request) != 3:
+            raise ValueError("malformed proxy request line")
+        method, target, version = request
+        if method.upper() == "CONNECT":
+            authority, inner = target, b""
+        else:
+            authority, path = request_target(target, lines[1:])
+            inner = origin_request(method, path, version, lines[1:])
+        upstream_reader, upstream_writer, reply, accepted = await open_tunnel(authority)
+        if not accepted:
+            client_writer.write(reply)
+            await client_writer.drain()
+            return
+        if method.upper() == "CONNECT":
+            client_writer.write(reply)
+            await client_writer.drain()
+        else:
+            upstream_writer.write(inner)
+            await upstream_writer.drain()
+        if method.upper() == "CONNECT":
+            await asyncio.gather(
+                pipe(client_reader, upstream_writer),
+                pipe(upstream_reader, client_writer),
+            )
+        else:
+            await forward_request_body(client_reader, upstream_writer, lines[1:])
+            await relay(upstream_reader, client_writer)
+    except Exception:
+        with contextlib.suppress(Exception):
+            client_writer.write(
+                b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+            )
+            await client_writer.drain()
+    finally:
+        client_writer.close()
+        with contextlib.suppress(Exception):
+            await client_writer.wait_closed()
+        if upstream_writer is not None:
+            upstream_writer.close()
+            with contextlib.suppress(Exception):
+                await upstream_writer.wait_closed()
+
+
+async def main() -> None:
+    proxy_config()
+    server = await asyncio.start_server(handle, LISTEN_HOST, LISTEN_PORT)
+    async with server:
+        await server.serve_forever()
+
+
+asyncio.run(main())
 """
-    + '''
-import json
+
+
+STACK_CLEANUP_PROGRAM = r"""
+import os
+import shutil
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def signal_process(pid, sig):
+    try:
+        os.killpg(pid, sig)
+    except OSError:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def process_command(pid):
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+            errors="replace"
+        )
+    except OSError:
+        return subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        ).stdout
+
+
+def end_recorded(path, marker):
+    try:
+        pid = int(Path(path).read_text())
+    except (OSError, ValueError):
+        return
+    if marker not in process_command(pid):
+        return
+    signal_process(pid, signal.SIGTERM)
+    deadline = time.monotonic() + PROCESS_END_BUDGET_SECONDS
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(POLL_SLEEP_SECONDS)
+    if alive(pid):
+        signal_process(pid, signal.SIGKILL)
+
+
+lock = Path(LOCK_PATH)
+try:
+    owns_slot = lock.is_symlink() and os.readlink(lock) == LEASE_ID
+except OSError:
+    owns_slot = False
+if owns_slot:
+    end_recorded(f"{TASK_BASE}.pid", TASK_BASE)
+    end_recorded(CHROME_PID, ROOT)
+    end_recorded(PROXY_PID, ROOT)
+for suffix in ("pid", "exit", "lock", "log"):
+    try:
+        Path(f"{TASK_BASE}.{suffix}").unlink()
+    except OSError:
+        pass
+shutil.rmtree(ROOT, ignore_errors=True)
+try:
+    if owns_slot:
+        lock.unlink()
+except OSError:
+    pass
+"""
+
+
+BRIDGE_CLEANUP_PROGRAM = r"""
 import os
 import signal
+import subprocess
+import time
+from pathlib import Path
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def signal_process(pid, sig):
+    try:
+        os.killpg(pid, sig)
+    except OSError:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+lock = Path(LOCK_PATH)
+try:
+    owns_slot = lock.is_symlink() and os.readlink(lock) == LEASE_ID
+except OSError:
+    owns_slot = False
+try:
+    pid = int(Path(f"{TASK_BASE}.pid").read_text()) if owns_slot else None
+except (OSError, ValueError):
+    pid = None
+if pid is not None:
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+            errors="replace"
+        )
+    except OSError:
+        command = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        ).stdout
+if owns_slot and pid is not None and TASK_BASE in command:
+    signal_process(pid, signal.SIGTERM)
+    deadline = time.monotonic() + PROCESS_END_BUDGET_SECONDS
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(POLL_SLEEP_SECONDS)
+    if alive(pid):
+        signal_process(pid, signal.SIGKILL)
+for suffix in ("pid", "exit", "lock", "log"):
+    try:
+        Path(f"{TASK_BASE}.{suffix}").unlink()
+    except OSError:
+        pass
+"""
+
+
+BRING_UP_PROGRAM = '''
+import json
+import socket
 import subprocess
 import sys
 import time
@@ -196,31 +592,6 @@ def tail(log_path):
     return "\\n".join(lines[-LOG_TAIL_LINES:])
 
 
-def end_recorded(pid_path):
-    """End what a prior bring-up recorded. It is not serving, so it is wedged, and leaving it alive
-    holds the port and the profile lock a fresh launch needs. Each launch is its own session leader,
-    so the recorded pid names the whole tree — a browser's renderers hold that lock too, and killing
-    the leader alone would leave them. Then wait for the pid to go, or the port stays taken."""
-    try:
-        pid = int(Path(pid_path).read_text())
-    except (OSError, ValueError):
-        return
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            return
-    deadline = time.monotonic() + PROCESS_END_BUDGET_SECONDS
-    while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return
-        time.sleep(POLL_SLEEP_SECONDS)
-
-
 def launch(argv, log_path, pid_path):
     log = open(log_path, "wb", buffering=0)
     child = subprocess.Popen(
@@ -234,14 +605,32 @@ def launch(argv, log_path, pid_path):
     return child
 
 
+def port_open(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT_SECONDS):
+            return True
+    except OSError:
+        return False
+
+
+def await_port(port, exit_path, log_path, budget, what):
+    deadline = time.monotonic() + budget
+    while True:
+        if port_open(port):
+            return
+        if Path(exit_path).exists():
+            raise SystemExit(
+                f"{what} exited without serving port {port}\\n{tail(log_path)}"
+            )
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"{what} did not serve port {port} within {budget}s\\n{tail(log_path)}"
+            )
+        time.sleep(POLL_SLEEP_SECONDS)
+
+
 def serving(url, argv, log_path, pid_path, budget, what):
-    """The version document `url` answers, launching `argv` first when nothing does. The budget is
-    this stage's own, so the wait it reports is the wait it had. A child that exits is reported the
-    moment it does, so a browser that cannot run never spends the budget at all."""
-    served = answer(url)
-    if served is not None:
-        return served
-    end_recorded(pid_path)
+    """Launch one member of this lease's private stack and wait for its version endpoint."""
     child = launch(argv, log_path, pid_path)
     deadline = time.monotonic() + budget
     while True:
@@ -257,12 +646,18 @@ def serving(url, argv, log_path, pid_path, budget, what):
         time.sleep(POLL_SLEEP_SECONDS)
 
 
-Path(BROWSER_DIR).mkdir(parents=True, exist_ok=True)
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 browser = next((found for found in map(which, BROWSER_COMMANDS) if found), None)
 if browser is None:
     raise SystemExit("Chromium is required in the sandbox image")
 contained = CONTAINED_ARGV if sys.platform.startswith("linux") else []
+await_port(
+    EGRESS_BRIDGE_PORT,
+    EGRESS_BRIDGE_TASK_EXIT,
+    EGRESS_BRIDGE_TASK_LOG,
+    PROXY_READY_BUDGET_SECONDS,
+    "the browser egress bridge",
+)
 serving(
     CHROME_URL,
     [browser] + contained + CHROME_ARGV_TAIL,
@@ -281,34 +676,282 @@ proxied = serving(
 )
 print(proxied["webSocketDebuggerUrl"])
 '''
-)
 
-BROWSER_UP_COMMAND = f"""
-cat >{PROXY_SCRIPT_PATH} <<'PROXY'
-{PROXY_SOURCE}
-PROXY
-python3 - <<'BRINGUP'
-{BRING_UP_SOURCE}
-BRINGUP
-""".strip()
+
+def _assignments(values: dict[str, object]) -> str:
+    return "\n".join(f"{name} = {value!r}" for name, value in values.items())
+
+
+def _allocate_command(lease_id: str) -> str:
+    config = _assignments(
+        {
+            "LEASE_ID": lease_id,
+            "LOCK_DIR": STACK_LOCK_DIR,
+            "ROOT_DIR": STACK_ROOT_DIR,
+            "PORT_START": STACK_PORT_START,
+            "PORT_SLOTS": STACK_PORT_SLOTS,
+            "PORTS_PER_SLOT": STACK_PORTS_PER_SLOT,
+        }
+    )
+    return f"""python3 - <<'ALLOCATE_BROWSER_STACK'
+# sandbox_chrome allocate
+{config}
+import socket
+from pathlib import Path
+
+Path(LOCK_DIR).mkdir(parents=True, exist_ok=True)
+Path(ROOT_DIR).mkdir(parents=True, exist_ok=True)
+root = Path(ROOT_DIR) / LEASE_ID
+root.mkdir()
+for slot in range(PORT_SLOTS):
+    lock = Path(LOCK_DIR) / str(slot)
+    probes = []
+    try:
+        first_port = PORT_START + slot * PORTS_PER_SLOT
+        for port in range(first_port, first_port + PORTS_PER_SLOT):
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", port))
+            probes.append(probe)
+        (root / "slot").write_text(str(slot))
+        lock.symlink_to(LEASE_ID)
+    except FileExistsError:
+        continue
+    except OSError:
+        continue
+    finally:
+        for probe in probes:
+            probe.close()
+    (root / "ready").touch()
+    print(slot)
+    break
+else:
+    import shutil
+    shutil.rmtree(root, ignore_errors=True)
+    raise SystemExit("sandbox_chrome has no free browser stack slots")
+ALLOCATE_BROWSER_STACK"""
+
+
+def _find_allocation_command(lease_id: str) -> str:
+    config = _assignments(
+        {
+            "LEASE_ID": lease_id,
+            "LOCK_DIR": STACK_LOCK_DIR,
+            "ROOT_DIR": STACK_ROOT_DIR,
+            "WAIT_SECONDS": STACK_ALLOCATION_RECOVERY_TIMEOUT_SECONDS,
+            "POLL_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
+        }
+    )
+    return f"""python3 - <<'FIND_BROWSER_STACK'
+# sandbox_chrome find allocation
+{config}
+import os
+import time
+from pathlib import Path
+
+root = Path(ROOT_DIR) / LEASE_ID
+deadline = time.monotonic() + WAIT_SECONDS
+while True:
+    try:
+        slot = int((root / "slot").read_text())
+        lock = Path(LOCK_DIR) / str(slot)
+        if (
+            (root / "ready").is_file()
+            and lock.is_symlink()
+            and os.readlink(lock) == LEASE_ID
+        ):
+            print(slot)
+            break
+    except (OSError, ValueError):
+        pass
+    if time.monotonic() >= deadline:
+        raise SystemExit(f"no browser stack allocation is owned by {{LEASE_ID}}")
+    time.sleep(POLL_SECONDS)
+FIND_BROWSER_STACK"""
+
+
+def _abandon_allocation_command(lease_id: str) -> str:
+    config = _assignments(
+        {"LEASE_ID": lease_id, "LOCK_DIR": STACK_LOCK_DIR, "ROOT_DIR": STACK_ROOT_DIR}
+    )
+    return f"""python3 - <<'ABANDON_BROWSER_STACK'
+# sandbox_chrome abandon allocation
+{config}
+import os
+import shutil
+from pathlib import Path
+
+locks = Path(LOCK_DIR)
+if locks.is_dir():
+    for lock in locks.iterdir():
+        try:
+            if lock.is_symlink() and os.readlink(lock) == LEASE_ID:
+                lock.unlink()
+        except OSError:
+            pass
+shutil.rmtree(Path(ROOT_DIR) / LEASE_ID, ignore_errors=True)
+ABANDON_BROWSER_STACK"""
+
+
+def _egress_bridge_up_command(stack: BrowserStack) -> str:
+    config = _assignments({"LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": stack.egress_bridge_port})
+    return f"""cat >{stack.bridge_script} <<'EGRESS_BRIDGE'
+{config}
+{EGRESS_BRIDGE_PROGRAM}
+EGRESS_BRIDGE
+exec python3 {stack.bridge_script}"""
+
+
+def _browser_up_command(stack: BrowserStack) -> str:
+    proxy_config = _assignments(
+        {
+            "CHROME_HOST": "127.0.0.1",
+            "CHROME_PORT": stack.chrome_port,
+            "PROXY_HOST": "0.0.0.0",
+            "PROXY_PORT": stack.cdp_proxy_port,
+        }
+    )
+    browser_config = _assignments(
+        {
+            "DOWNLOAD_DIR": stack.download_dir,
+            "CONTAINED_ARGV": ["--no-sandbox", "--disable-dev-shm-usage"],
+            "CHROME_URL": f"http://127.0.0.1:{stack.chrome_port}/json/version",
+            "CHROME_ARGV_TAIL": [
+                "--headless=new",
+                "--disable-gpu",
+                "--use-mock-keychain",
+                "--password-store=basic",
+                "--remote-debugging-address=0.0.0.0",
+                f"--remote-debugging-port={stack.chrome_port}",
+                "--remote-allow-origins=*",
+                f"--proxy-server=http://127.0.0.1:{stack.egress_bridge_port}",
+                f"--user-data-dir={stack.chrome_profile}",
+                "about:blank",
+            ],
+            "CHROME_LOG": stack.chrome_log,
+            "CHROME_PID": stack.chrome_pid,
+            "PROXIED_URL": f"http://127.0.0.1:{stack.cdp_proxy_port}/json/version",
+            "PROXY_ARGV": ["python3", stack.proxy_script],
+            "PROXY_LOG": stack.proxy_log,
+            "PROXY_PID": stack.proxy_pid,
+            "EGRESS_BRIDGE_PORT": stack.egress_bridge_port,
+            "EGRESS_BRIDGE_TASK_EXIT": f"{stack.task_base}.exit",
+            "EGRESS_BRIDGE_TASK_LOG": f"{stack.task_base}.log",
+            "PROBE_TIMEOUT_SECONDS": BROWSER_PROBE_TIMEOUT_SECONDS,
+            "POLL_SLEEP_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
+            "CHROME_READY_BUDGET_SECONDS": CHROME_READY_BUDGET_SECONDS,
+            "PROXY_READY_BUDGET_SECONDS": PROXY_READY_BUDGET_SECONDS,
+            "LOG_TAIL_LINES": LOG_TAIL_LINES,
+        }
+    )
+    return f"""cat >{stack.proxy_script} <<'CDP_PROXY'
+{proxy_config}
+{PROXY_PROGRAM}
+CDP_PROXY
+python3 - <<'BRING_UP_BROWSER_STACK'
+# sandbox_chrome bring up
+{browser_config}
+{BRING_UP_PROGRAM}
+BRING_UP_BROWSER_STACK"""
+
+
+def _stack_down_command(stack: BrowserStack) -> str:
+    config = _assignments(
+        {
+            "ROOT": stack.root,
+            "LEASE_ID": stack.lease_id,
+            "LOCK_PATH": stack.lock_path,
+            "TASK_BASE": stack.task_base,
+            "CHROME_PID": stack.chrome_pid,
+            "PROXY_PID": stack.proxy_pid,
+            "PROCESS_END_BUDGET_SECONDS": PROCESS_END_BUDGET_SECONDS,
+            "POLL_SLEEP_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
+        }
+    )
+    return f"""python3 - <<'CLEAN_UP_BROWSER_STACK'
+# sandbox_chrome clean up
+{config}
+{STACK_CLEANUP_PROGRAM}
+CLEAN_UP_BROWSER_STACK"""
+
+
+def _bridge_down_command(stack: BrowserStack) -> str:
+    config = _assignments(
+        {
+            "LEASE_ID": stack.lease_id,
+            "LOCK_PATH": stack.lock_path,
+            "TASK_BASE": stack.task_base,
+            "PROCESS_END_BUDGET_SECONDS": PROCESS_END_BUDGET_SECONDS,
+            "POLL_SLEEP_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
+        }
+    )
+    return f"""python3 - <<'REPLACE_BROWSER_BRIDGE'
+# sandbox_chrome stop bridge
+{config}
+{BRIDGE_CLEANUP_PROGRAM}
+REPLACE_BROWSER_BRIDGE"""
+
+
+def _resolve_command(stack: BrowserStack) -> str:
+    config = _assignments(
+        {
+            "PROXIED_URL": f"http://127.0.0.1:{stack.cdp_proxy_port}/json/version",
+            "BRIDGE_PORT": stack.egress_bridge_port,
+            "TASK_EXIT": f"{stack.task_base}.exit",
+            "TASK_LOG": f"{stack.task_base}.log",
+            "PROBE_TIMEOUT_SECONDS": BROWSER_PROBE_TIMEOUT_SECONDS,
+            "WAIT_SECONDS": PROXY_READY_BUDGET_SECONDS,
+            "POLL_SECONDS": BROWSER_POLL_SLEEP_SECONDS,
+            "LOG_TAIL_LINES": LOG_TAIL_LINES,
+        }
+    )
+    return f"""python3 - <<'RESOLVE_BROWSER_STACK'
+# sandbox_chrome resolve
+{config}
+import json
+import socket
+import time
+import urllib.request
+from pathlib import Path
+
+deadline = time.monotonic() + WAIT_SECONDS
+while True:
+    try:
+        with socket.create_connection(("127.0.0.1", BRIDGE_PORT), timeout=PROBE_TIMEOUT_SECONDS):
+            break
+    except OSError:
+        if Path(TASK_EXIT).exists():
+            try:
+                lines = Path(TASK_LOG).read_text(errors="replace").splitlines()
+                detail = "\\n".join(lines[-LOG_TAIL_LINES:])
+            except OSError:
+                detail = "the bridge wrote no log"
+            raise SystemExit(f"the browser egress bridge exited before reattach\\n{{detail}}")
+        if time.monotonic() >= deadline:
+            raise SystemExit("the browser egress bridge did not restart before reattach")
+        time.sleep(POLL_SECONDS)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+try:
+    with opener.open(PROXIED_URL, timeout=PROBE_TIMEOUT_SECONDS) as reply:
+        version = json.load(reply)
+except Exception as error:
+    raise SystemExit(f"the browser stack no longer answers: {{error}}") from error
+print(version["webSocketDebuggerUrl"])
+RESOLVE_BROWSER_STACK"""
 
 
 @dataclass(frozen=True)
 class SandboxChromeCdpLease:
-    """The per-turn lease over the sandbox's Chrome: `endpoint` returns the resolved wss endpoint,
-    `token` the durable reattach handle (that endpoint's url), `aclose` a no-op because Chrome and
-    its proxy persist inside the per-conversation sandbox and outlive the turn. Files move by path,
-    not by wire: this Chrome opens the workspace directly, and a download it takes lands in the
-    sandbox — so the lease holds the sandbox to read those bytes back out of it."""
+    """One isolated Chrome stack owned for exactly the lifetime of this lease."""
 
     endpoint_: CdpEndpoint
     sandbox: Sandbox
+    stack: BrowserStack
 
     async def endpoint(self) -> CdpEndpoint:
         return self.endpoint_
 
     async def token(self) -> str:
-        return self.endpoint_.url
+        return _stack_token(self.stack)
 
     async def place_file(self, path: str, read: FileBytes) -> str:
         """This Chrome runs inside the turn's own sandbox and opens the workspace directly, so the
@@ -319,7 +962,7 @@ class SandboxChromeCdpLease:
     async def download_dir(self) -> str:
         """A path inside the sandbox: this Chrome runs there, so that is the only filesystem it can
         write to and the only one the bytes can be read back from."""
-        return DOWNLOAD_DIR
+        return self.stack.download_dir
 
     async def fetch_download(self, guid: str) -> bytes:
         """The download's bytes, read out of the sandbox Chrome wrote them to. `allowAndName` stores
@@ -330,7 +973,7 @@ class SandboxChromeCdpLease:
         download. Decoding drops the line wrapping, and runs in a thread: a whole file's worth of it
         is CPU work every other turn on this one loop would wait through. The file is sized first —
         it crosses whole into this process, and what a page downloads is not ours to trust."""
-        stored = f"{DOWNLOAD_DIR}/{shlex.quote(guid)}"
+        stored = f"{self.stack.download_dir}/{shlex.quote(guid)}"
         sized = await self.sandbox.bash(f"wc -c < {stored}", timeout_s=DOWNLOAD_SIZE_BUDGET_SECONDS)
         if sized.exit_code != 0:
             raise RuntimeError(f"sandbox_chrome could not read download {guid}: {sized.stderr}")
@@ -352,42 +995,194 @@ class SandboxChromeCdpLease:
         return await asyncio.to_thread(base64.b64decode, result.stdout)
 
     async def aclose(self) -> None:
-        return None
+        await _stop_stack(self.sandbox, self.stack)
 
 
 @dataclass(frozen=True)
 class SandboxChromeCdpProvider:
-    """Core's `cdp_providers` seam backed by Chrome inside the turn's sandbox. `lease` runs the
-    idempotent bring-up against the sandbox — which yields the DevTools websocket path read through
-    the in-sandbox proxy, so the whole chain is proven live before the endpoint is handed back — and
-    builds the wss endpoint over the sandbox's public per-port host. `reattach` reports the session
-    gone so a recovered turn re-grounds through a fresh `lease` — the endpoint resolves only from
-    the live sandbox, which the caller supplies at lease time, never from the token alone."""
+    """Core's CDP seam backed by a private Chrome stack in the turn's sandbox."""
 
     async def lease(self, sandbox: Sandbox | None = None) -> CdpLease:
         if sandbox is None:
             raise RuntimeError(
                 "the sandbox_chrome cdp provider needs the turn's sandbox to reach its Chrome"
             )
-        result = await sandbox.bash(BROWSER_UP_COMMAND, timeout_s=BROWSER_START_TIMEOUT_SECONDS)
-        if result.exit_code != 0:
+        if sandbox.turn_id is None:
             raise RuntimeError(
-                "sandbox_chrome failed to bring up the browser: "
-                f"{await _bring_up_failure(sandbox, result)}"
+                "the sandbox_chrome cdp provider needs a durable turn id to own its Chrome"
             )
-        target = await sandbox.dial(BROWSER_CDP_PROXY_PORT)
-        scheme = "wss" if target.tls else "ws"
-        endpoint = CdpEndpoint(
-            url=f"{scheme}://{target.host}{_ws_path(result.stdout)}",
-            headers=dict(target.headers),
+        return await self._lease(sandbox, retry_recovered_stack=True)
+
+    async def _lease(self, sandbox: Sandbox, retry_recovered_stack: bool) -> CdpLease:
+        assert sandbox.turn_id is not None
+        lease_id = sandbox.turn_id.hex
+        allocated = await sandbox.bash(
+            _allocate_command(lease_id), timeout_s=STACK_ALLOCATE_TIMEOUT_SECONDS
         )
-        return SandboxChromeCdpLease(endpoint, sandbox)
+        found = await sandbox.bash(
+            _find_allocation_command(lease_id),
+            timeout_s=STACK_ALLOCATION_RECOVERY_TIMEOUT_SECONDS + COMMAND_REPORT_MARGIN_SECONDS,
+        )
+        try:
+            if found.exit_code != 0:
+                raise ValueError(found.stderr.strip() or found.stdout.strip())
+            stack = _stack(lease_id, int(found.stdout.strip()))
+        except (RuntimeError, ValueError) as error:
+            await _abandon_allocation(sandbox, lease_id)
+            allocation_error = allocated.stderr.strip() or allocated.stdout.strip()
+            if allocated.exit_code != 0 and retry_recovered_stack:
+                return await self._lease(sandbox, retry_recovered_stack=False)
+            raise RuntimeError(
+                "sandbox_chrome failed to allocate a recoverable browser stack: "
+                f"{allocation_error or error}"
+            ) from error
+        if allocated.exit_code != 0:
+            try:
+                return await self.reattach(_stack_token(stack), sandbox)
+            except SessionGone as error:
+                if not retry_recovered_stack:
+                    raise RuntimeError(
+                        "sandbox_chrome could not reclaim the turn's interrupted browser stack"
+                    ) from error
+                return await self._lease(sandbox, retry_recovered_stack=False)
+        try:
+            await _start_bridge(sandbox, stack)
+            result = await sandbox.bash(
+                _browser_up_command(stack), timeout_s=BROWSER_START_TIMEOUT_SECONDS
+            )
+            if result.exit_code != 0:
+                raise RuntimeError(
+                    "sandbox_chrome failed to bring up the browser: "
+                    f"{await _bring_up_failure(sandbox, stack, result)}"
+                )
+            endpoint = await _endpoint(sandbox, stack, result.stdout)
+        except BaseException:
+            try:
+                await asyncio.shield(_stop_stack(sandbox, stack))
+            except Exception:
+                pass
+            raise
+        return SandboxChromeCdpLease(endpoint, sandbox, stack)
 
-    async def reattach(self, token: str) -> CdpLease:
-        raise SessionGone(token)
+    async def reattach(self, token: str, sandbox: Sandbox | None = None) -> CdpLease:
+        if sandbox is None or sandbox.turn_id is None:
+            raise RuntimeError(
+                "sandbox_chrome needs the recovered turn's sandbox to reconcile its Chrome"
+            )
+        stack = _stack_from_token(token)
+        if stack.lease_id != sandbox.turn_id.hex:
+            await _stop_stack(sandbox, stack)
+            raise SessionGone(token)
+        try:
+            owned = await sandbox.bash(
+                _find_allocation_command(stack.lease_id),
+                timeout_s=STACK_ALLOCATION_RECOVERY_TIMEOUT_SECONDS + COMMAND_REPORT_MARGIN_SECONDS,
+            )
+            if owned.exit_code != 0 or owned.stdout.strip() != str(stack.slot):
+                raise RuntimeError("the browser stack token no longer owns its slot")
+            await _stop_bridge(sandbox, stack)
+            await _start_bridge(sandbox, stack)
+            resolved = await sandbox.bash(
+                _resolve_command(stack),
+                timeout_s=PROXY_READY_BUDGET_SECONDS + COMMAND_REPORT_MARGIN_SECONDS,
+            )
+            if resolved.exit_code != 0:
+                raise RuntimeError(resolved.stderr.strip() or resolved.stdout.strip())
+            endpoint = await _endpoint(sandbox, stack, resolved.stdout)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(_stop_stack(sandbox, stack))
+            except Exception:
+                pass
+            raise
+        except Exception:
+            try:
+                await asyncio.shield(_stop_stack(sandbox, stack))
+            except Exception:
+                pass
+            raise SessionGone(token) from None
+        return SandboxChromeCdpLease(endpoint, sandbox, stack)
 
 
-async def _bring_up_failure(sandbox: Sandbox, result: ExecResult) -> str:
+async def _endpoint(sandbox: Sandbox, stack: BrowserStack, local_url: str) -> CdpEndpoint:
+    target = await sandbox.dial(stack.cdp_proxy_port)
+    scheme = "wss" if target.tls else "ws"
+    return CdpEndpoint(
+        url=f"{scheme}://{target.host}{_ws_path(local_url, stack.chrome_port)}",
+        headers=dict(target.headers),
+    )
+
+
+async def _start_bridge(sandbox: Sandbox, stack: BrowserStack) -> None:
+    started = await sandbox.bash_task(
+        _egress_bridge_up_command(stack),
+        stack.task_base,
+        detach=True,
+        timeout_s=STACK_TASK_START_TIMEOUT_SECONDS,
+    )
+    if started.exit_code != 0:
+        raise RuntimeError(
+            "sandbox_chrome failed to start the browser egress bridge: "
+            f"{started.stderr.strip() or started.stdout.strip()}"
+        )
+
+
+async def _stop_bridge(sandbox: Sandbox, stack: BrowserStack) -> None:
+    stopped = await sandbox.bash(
+        _bridge_down_command(stack),
+        timeout_s=PROCESS_END_BUDGET_SECONDS + COMMAND_REPORT_MARGIN_SECONDS,
+    )
+    if stopped.exit_code != 0:
+        raise RuntimeError(
+            "sandbox_chrome failed to replace the browser egress bridge: "
+            f"{stopped.stderr.strip() or stopped.stdout.strip()}"
+        )
+
+
+async def _abandon_allocation(sandbox: Sandbox, lease_id: str) -> None:
+    try:
+        await sandbox.bash(
+            _abandon_allocation_command(lease_id), timeout_s=STACK_ALLOCATE_TIMEOUT_SECONDS
+        )
+    except Exception:
+        pass
+
+
+async def _stop_stack(sandbox: Sandbox, stack: BrowserStack) -> None:
+    stopped = await sandbox.bash(
+        _stack_down_command(stack),
+        timeout_s=STACK_CLEANUP_TIMEOUT_SECONDS,
+    )
+    if stopped.exit_code != 0:
+        raise RuntimeError(
+            "sandbox_chrome failed to stop the browser stack: "
+            f"{stopped.stderr.strip() or stopped.stdout.strip()}"
+        )
+
+
+def _stack_from_token(token: str) -> BrowserStack:
+    try:
+        value = json.loads(token)
+        if not isinstance(value, dict) or value.get("version") != TOKEN_VERSION:
+            raise ValueError
+        lease_id = value["lease_id"]
+        slot = value["slot"]
+        if not isinstance(lease_id, str) or not isinstance(slot, int) or isinstance(slot, bool):
+            raise ValueError
+        return _stack(lease_id, slot)
+    except (KeyError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
+        raise SessionGone(token) from None
+
+
+def _stack_token(stack: BrowserStack) -> str:
+    return json.dumps(
+        {"version": TOKEN_VERSION, "lease_id": stack.lease_id, "slot": stack.slot},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+async def _bring_up_failure(sandbox: Sandbox, stack: BrowserStack, result: ExecResult) -> str:
     """What the failed bring-up says, read from the logs inside the sandbox when the carrier's
     deadline ended the command: the kill takes the program's own report with it, and what remains is
     a carrier timeout that names nothing about the browser. The logs hold the reason, so they are
@@ -396,7 +1191,8 @@ async def _bring_up_failure(sandbox: Sandbox, result: ExecResult) -> str:
     if result.timed_out_after_s is None:
         return reported
     logs = await sandbox.bash(
-        f"tail -n {LOG_TAIL_LINES} {CHROME_LOG_PATH} {PROXY_LOG_PATH} 2>&1 || true",
+        f"tail -n {LOG_TAIL_LINES} {stack.chrome_log} {stack.proxy_log} "
+        f"{stack.task_base}.log 2>&1 || true",
         timeout_s=LOG_TAIL_BUDGET_SECONDS,
     )
     stopped = f"the sandbox stopped the bring-up after {result.timed_out_after_s}s"
@@ -404,9 +1200,9 @@ async def _bring_up_failure(sandbox: Sandbox, result: ExecResult) -> str:
     return f"{stopped}\n{tail}" if tail else f"{stopped}: {reported}"
 
 
-def _ws_path(url: str) -> str:
+def _ws_path(url: str, chrome_port: int) -> str:
     stripped = url.strip()
-    for prefix in (f"ws://127.0.0.1:{BROWSER_CDP_PORT}", f"ws://localhost:{BROWSER_CDP_PORT}"):
+    for prefix in (f"ws://127.0.0.1:{chrome_port}", f"ws://localhost:{chrome_port}"):
         if stripped.startswith(prefix):
             return stripped.removeprefix(prefix)
     raise RuntimeError(f"browser websocket url must be local: {stripped!r}")

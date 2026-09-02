@@ -305,7 +305,7 @@ class BrowserbaseCdpProvider:
         await store.put(key, context_id)
         return context_id
 
-    async def reattach(self, token: str) -> CdpLease:
+    async def reattach(self, token: str, sandbox: Sandbox | None = None) -> CdpLease:
         conversation_id, session_id, context_id = _parse_token(token)
         api = BrowserbaseApi(credentials=self.credentials, transport=self.transport)
         connect_url = await api.live_session(session_id)

@@ -85,7 +85,7 @@ class BuaSurface:
         token = await self._stored_token()
         if token is not None:
             try:
-                return await self.cdp_provider.reattach(token)
+                return await self.cdp_provider.reattach(token, self.sandbox)
             except SessionGone:
                 await self._store_token(None)
         lease = await self.cdp_provider.lease(self.sandbox)

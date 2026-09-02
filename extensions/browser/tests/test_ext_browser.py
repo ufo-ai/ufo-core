@@ -157,6 +157,7 @@ class FakeCdpProvider:
 
     leases: list[FakeCdpLease] = field(default_factory=list)
     reattached: list[str] = field(default_factory=list)
+    reattached_sandboxes: list[SandboxSession | None] = field(default_factory=list)
     leased_sandboxes: list[SandboxSession | None] = field(default_factory=list)
     gone: bool = False
     _minted: int = 0
@@ -168,8 +169,9 @@ class FakeCdpProvider:
         self.leases.append(lease)
         return lease
 
-    async def reattach(self, token: str) -> CdpLease:
+    async def reattach(self, token: str, sandbox: SandboxSession | None = None) -> CdpLease:
         self.reattached.append(token)
+        self.reattached_sandboxes.append(sandbox)
         if self.gone:
             raise SessionGone(token)
         return FakeCdpLease(session_id=token)
@@ -709,11 +711,17 @@ async def _token_store(workspace_id: UUID) -> ScopedStore:
     return ScopedStore(extension="browser")
 
 
-def _surface(provider: FakeCdpProvider, store: ScopedStore, conversation_id: UUID) -> BuaSurface:
+def _surface(
+    provider: FakeCdpProvider,
+    store: ScopedStore,
+    conversation_id: UUID,
+    sandbox: SandboxSession | None = None,
+) -> BuaSurface:
     return BuaSurface(
         cdp_provider=provider,
         find_completer=None,
         model=None,
+        sandbox=sandbox,
         store=store,
         conversation_id=conversation_id,
     )
@@ -730,18 +738,23 @@ async def test_a_recovered_turn_reattaches_to_the_live_cdp_session_via_the_durab
     workspace_id, conversation_id = uuid4(), uuid4()
     store = await _token_store(workspace_id)
     provider = FakeCdpProvider()
+    sandbox = SandboxSession(
+        carrier=WritesCarrier(),  # type: ignore[arg-type]
+        handle=SandboxHandle(conversation_id=conversation_id, container_id="test"),
+    )
 
     with ws(workspace_id):
         with pytest.raises(_StopAtConnect):
-            await _surface(provider, store, conversation_id)._open()
+            await _surface(provider, store, conversation_id, sandbox)._open()
         assert len(provider.leases) == 1
         assert provider.reattached == []
         token = provider.leases[0].session_id
         assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == token
 
         with pytest.raises(_StopAtConnect):
-            await _surface(provider, store, conversation_id)._open()
+            await _surface(provider, store, conversation_id, sandbox)._open()
         assert provider.reattached == [token]
+        assert provider.reattached_sandboxes == [sandbox]
         assert len(provider.leases) == 1
 
 
