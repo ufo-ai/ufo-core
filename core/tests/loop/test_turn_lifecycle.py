@@ -117,6 +117,7 @@ STREAM_GATE = StreamGate()
 SEEN_SYSTEM_PROMPTS: list[str] = []
 SEEN_TOOLS: list[tuple[str, ...]] = []
 SEEN_TOOL_DESCRIPTIONS: list[dict[str, str]] = []
+SEEN_SPAWN_PAYLOAD: list[str] = []
 SEEN_REASONING: list[ReasoningEffort] = []
 
 
@@ -242,6 +243,11 @@ class StandInModel:
         SEEN_SYSTEM_PROMPTS.append(request.system)
         SEEN_TOOLS.append(tuple(tool.name for tool in request.tools))
         SEEN_TOOL_DESCRIPTIONS.append({tool.name: tool.description for tool in request.tools})
+        SEEN_SPAWN_PAYLOAD.extend(
+            str(tool.input_schema["properties"]["payload"]["description"])
+            for tool in request.tools
+            if tool.name == "spawn"
+        )
         SEEN_REASONING.append(request.reasoning)
         if "ROUNDTRIP" in request.system:
             if request.messages[-1].content == FOLLOWUP_INBOUND:
@@ -1822,6 +1828,22 @@ async def test_concurrent_admissions_land_every_message_once(surface: Turns) -> 
     assert sorted([*foundings, *queued]) == sorted(f"burst {n}" for n in range(10))
     results = await asyncio.gather(*(surface.consume(seed, turn_id) for turn_id in turn_ids))
     assert all(terminal["status"] == "done" for _, terminal in results)
+
+
+async def test_the_spawn_offer_shows_the_turns_targets_and_their_keys(surface: Turns) -> None:
+    """The keys reach the model, not only the catalog document. A caller cannot read a schema it
+    was never handed, and an agent whose prompt forbids loading a skill has no second place to
+    look — which is how a review app sent twelve spawns with no payload at all."""
+    SEEN_SPAWN_PAYLOAD.clear()
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent)
+
+    assert terminal["status"] == "done"
+    assert SEEN_SPAWN_PAYLOAD
+    for described in SEEN_SPAWN_PAYLOAD:
+        assert described.startswith("Arguments matching the target's input schema")
+        assert "roundtrip takes `value`" in described
 
 
 async def test_typed_subagent_round_trips_schema(surface: Turns) -> None:

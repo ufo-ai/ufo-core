@@ -181,7 +181,7 @@ from ufo.host.ext.loader import (
     skill_registry,
     turn_subagents,
 )
-from ufo.host.spawn_catalog import spawn_catalog_skill
+from ufo.host.spawn_catalog import spawn_catalog_skill, spawn_targets
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV
 from ufo.runtime.access.credentials import (
     CredentialRequests,
@@ -1096,7 +1096,11 @@ async def _run(
                         (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
                     )
                     loadable_skills |= frozenset(
-                        ((await spawn_catalog_skill(subagents, WORKSPACE_AUTHORITY)).name,)
+                        (
+                            spawn_catalog_skill(
+                                await spawn_targets(subagents, WORKSPACE_AUTHORITY)
+                            ).name,
+                        )
                     )
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):

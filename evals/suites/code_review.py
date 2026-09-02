@@ -42,6 +42,8 @@ STRICT_RESULT_PAGE_ID = UUID("20000000-0000-0000-0000-000000000005")
 REAL_REVIEW_PAGE_ID = UUID("20000000-0000-0000-0000-000000000006")
 LARGE_REVIEW_PAGE_ID = UUID("20000000-0000-0000-0000-000000000007")
 STALE_OBJECTIVE_PAGE_ID = UUID("20000000-0000-0000-0000-000000000008")
+LAUNCH_PAGE_ID = UUID("20000000-0000-0000-0000-000000000009")
+RECOVERY_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000a")
 SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
 PREEMPT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000002")
 INSTRUCTION_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000003")
@@ -50,6 +52,8 @@ STRICT_RESULT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000005")
 REAL_REVIEW_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000006")
 LARGE_REVIEW_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000007")
 STALE_OBJECTIVE_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000008")
+LAUNCH_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000009")
+RECOVERY_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000a")
 OLD_SPAWNS = (
     "40000000-0000-0000-0000-000000000001",
     "40000000-0000-0000-0000-000000000002",
@@ -482,6 +486,14 @@ async def _seed_instruction_read(
     )
 
 
+async def _seed_launch(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    await _seed_page(workspace_id, agent_id, blob, LAUNCH_PAGE_ID, LAUNCH_SOURCE_ID, HEAD_SHA)
+
+
+async def _seed_recovery(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    await _seed_page(workspace_id, agent_id, blob, RECOVERY_PAGE_ID, RECOVERY_SOURCE_ID, HEAD_SHA)
+
+
 async def _seed_no_plan(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
     await _seed_page(
         workspace_id,
@@ -703,12 +715,28 @@ def _review_failures(output: CapabilityOutput) -> tuple[str, ...]:
     return tuple(text for text in texts if any(failure in text for failure in REVIEW_FAILURES))
 
 
-def _spawn_objective_chars(call: ToolInvocation) -> int:
+def _spawn_payload(call: ToolInvocation) -> dict[str, Json]:
     payload = call.input.get("payload")
-    if not isinstance(payload, dict):
-        return 0
-    objective = payload.get("objective")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _spawn_objective_chars(call: ToolInvocation) -> int:
+    objective = _spawn_payload(call).get("objective")
     return len(objective) if isinstance(objective, str) else 0
+
+
+def _launch_shape(spawns: tuple[ToolInvocation, ...]) -> list[Json]:
+    """What each reviewer launch actually carried: the payload keys and the objective length.
+
+    Recorded before a count check can end a grader, because the launch fails two ways that read
+    the same in a count alone. A parent that names the target and omits the whole payload sends a
+    call the child's contract rejects, and repeats it; one that reissues a complete launch sends
+    many. `payload_keys: []` separates them in the record."""
+    shapes: list[Json] = []
+    for call in spawns:
+        keys: list[Json] = [*sorted(_spawn_payload(call))]
+        shapes.append({"payload_keys": keys, "objective_chars": _spawn_objective_chars(call)})
+    return shapes
 
 
 def _tool_groups(turn: TurnTiming) -> tuple[int, ...]:
@@ -762,7 +790,10 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
         )
     if skill_loads:
         return CapabilityVerdict(False, "the parent loaded a skill before review spawn", evidence)
-    if any(chars == 0 or chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objective_chars):
+    if not all(objective_chars):
+        evidence["launches"] = _launch_shape(spawns)
+        return CapabilityVerdict(False, "a reviewer spawn carried no objective", evidence)
+    if any(chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objective_chars):
         return CapabilityVerdict(False, "a reviewer objective exceeded the spawn budget", evidence)
     if output.timing is None:
         return CapabilityVerdict(False, "the run recorded no timing", evidence)
@@ -860,7 +891,10 @@ async def _grade_real_review_efficiency(output: CapabilityOutput) -> CapabilityV
         return CapabilityVerdict(False, "the parent split the reviewer spawns", evidence)
     if skill_loads:
         return CapabilityVerdict(False, "the parent loaded a skill before review spawn", evidence)
-    if any(chars == 0 or chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objective_chars):
+    if not all(objective_chars):
+        evidence["launches"] = _launch_shape(spawns)
+        return CapabilityVerdict(False, "a reviewer spawn carried no objective", evidence)
+    if any(chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objective_chars):
         return CapabilityVerdict(False, "a reviewer objective exceeded the spawn budget", evidence)
     if output.timing is None:
         return CapabilityVerdict(False, "the run recorded no timing", evidence)
@@ -928,7 +962,10 @@ async def _grade_large_review_efficiency(output: CapabilityOutput) -> Capability
         return CapabilityVerdict(False, "the parent split the reviewer spawns", evidence)
     if any(call.name == "load_skill" for call in output.own_calls):
         return CapabilityVerdict(False, "the parent loaded a skill before review spawn", evidence)
-    if any(chars == 0 or chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objective_chars):
+    if not all(objective_chars):
+        evidence["launches"] = _launch_shape(spawns)
+        return CapabilityVerdict(False, "a reviewer spawn carried no objective", evidence)
+    if any(chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objective_chars):
         return CapabilityVerdict(False, "a reviewer objective exceeded the spawn budget", evidence)
     if output.timing is None:
         return CapabilityVerdict(False, "the run recorded no timing", evidence)
@@ -987,7 +1024,7 @@ async def _grade_current_objective(output: CapabilityOutput) -> CapabilityVerdic
         and target.removeprefix("profile:") == "coding"
         and call.input.get("background") is True
     )
-    evidence: JsonObject = {"spawn_count": len(spawns)}
+    evidence: JsonObject = {"spawn_count": len(spawns), "launches": _launch_shape(spawns)}
     if len(spawns) != 2:
         return CapabilityVerdict(False, "the parent did not start two reviewers", evidence)
     spawn_steps = _call_evidence(output, frozenset(call.call_id for call in spawns))
@@ -1034,6 +1071,94 @@ async def _grade_current_objective(output: CapabilityOutput) -> CapabilityVerdic
         True,
         "both reviewers used the current objective and rejected the stale transcript objective",
         evidence,
+    )
+
+
+async def _grade_launch(output: CapabilityOutput) -> CapabilityVerdict:
+    """The launch act alone: two reviewers, one response, each carrying its whole objective.
+
+    Every other case in this suite grades what the reviewers then do, so it needs their results
+    and reports nothing about the launch when the parent afterwards loops or never settles. This
+    one ends with the parent's first response and names which half of the act failed — the two
+    calls, or what they carried. A model that emits the target and drops the ~3 KB objective is
+    the failure it exists for: the child's contract refuses that call, the parent reads the refusal
+    as a fault in the deploy, and no review runs at all."""
+    spawns = tuple(
+        call
+        for call in output.own_calls
+        if call.name == "spawn"
+        and isinstance(target := call.input.get("target"), str)
+        and target.removeprefix("profile:") == "coding"
+    )
+    launches = _launch_shape(spawns)
+    evidence: JsonObject = {"spawn_count": len(spawns), "launches": launches}
+    if not spawns:
+        return CapabilityVerdict(False, "the parent started no reviewer", evidence)
+    payloadless = tuple(call for call in spawns if not _spawn_payload(call))
+    if payloadless:
+        return CapabilityVerdict(
+            False, f"{len(payloadless)} of {len(spawns)} launches carried no payload", evidence
+        )
+    objectives = tuple(_spawn_objective_chars(call) for call in spawns)
+    if not all(objectives):
+        return CapabilityVerdict(False, "a launch payload carried no objective", evidence)
+    if len(spawns) != 2:
+        return CapabilityVerdict(False, f"started {len(spawns)} reviewers, expected 2", evidence)
+    spawn_messages = {
+        item["message"]
+        for item in _call_evidence(output, frozenset(call.call_id for call in spawns))
+        if isinstance(item, dict) and isinstance(item.get("message"), int)
+    }
+    if len(spawn_messages) != 1:
+        return CapabilityVerdict(False, "the parent split the reviewer launches", evidence)
+    missing = tuple(
+        marker
+        for call in spawns
+        for marker in CURRENT_OBJECTIVE_MARKERS
+        if marker not in str(_spawn_payload(call).get("objective"))
+    )
+    if missing:
+        return CapabilityVerdict(False, "a launch omitted objective instructions", evidence)
+    if any(chars > MAX_REVIEW_OBJECTIVE_CHARS for chars in objectives):
+        return CapabilityVerdict(False, "a launch objective exceeded the spawn budget", evidence)
+    return CapabilityVerdict(
+        True, "both reviewers launched in one response with a complete objective", evidence
+    )
+
+
+async def _grade_recovered_launch(output: CapabilityOutput) -> CapabilityVerdict:
+    """Did the reviewers ever start, however many calls it took?
+
+    The launch case above grades the act done right the first time. This one grades the weaker
+    property that decides whether a review happens at all: a refused launch has to be repairable
+    from the refusal. A model that cannot read what was wrong with its own call reissues it
+    unchanged — twelve times in the incident this case exists for, and sixty-four in one live turn
+    afterwards — so the wasted attempts ride in the evidence and only a launch that never lands
+    fails."""
+    spawns = tuple(
+        call
+        for call in output.own_calls
+        if call.name == "spawn"
+        and isinstance(target := call.input.get("target"), str)
+        and target.removeprefix("profile:") == "coding"
+    )
+    valid = tuple(call for call in spawns if _spawn_objective_chars(call))
+    refused = tuple(call for call in spawns if not _spawn_objective_chars(call))
+    evidence: JsonObject = {
+        "spawn_count": len(spawns),
+        "valid_launches": len(valid),
+        "refused_launches": len(refused),
+        "launches": _launch_shape(spawns),
+    }
+    if len(valid) < 2:
+        return CapabilityVerdict(
+            False,
+            f"{len(refused)} refused launches and {len(valid)} that carried an objective, "
+            "so the reviewers never both started",
+            evidence,
+        )
+    return CapabilityVerdict(
+        True, f"both reviewers started after {len(refused)} refused launches", evidence
     )
 
 
@@ -1153,6 +1278,31 @@ def _source_change(page_id: UUID) -> str:
 
 
 CASES = (
+    CapabilityCase(
+        name="code-review-launch-carries-objective",
+        message=_source_change(LAUNCH_PAGE_ID),
+        grader=DescribedGrader(
+            "the parent launches exactly two coding reviewers in one response and each launch "
+            "carries the complete review objective in its payload",
+            _grade_launch,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_launch,
+        prepare=_prepare_review,
+        digest_tag="code-review:launch-payload:v1",
+    ),
+    CapabilityCase(
+        name="code-review-launch-recovers-from-a-refusal",
+        message=_source_change(RECOVERY_PAGE_ID),
+        grader=DescribedGrader(
+            "both reviewers start, whatever a refused launch cost first",
+            _grade_recovered_launch,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_recovery,
+        prepare=_prepare_review,
+        digest_tag="code-review:launch-recovery:v1",
+    ),
     CapabilityCase(
         name="code-review-two-parallel-reviewers",
         message=_source_change(PAGE_ID),

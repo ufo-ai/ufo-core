@@ -54,6 +54,7 @@ from ufo.runtime.skills.runtime import CORE_SKILLS, LoadedSkill, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     SpawnNeedsOwnModelKey,
+    SpawnPayloadRejected,
     SpawnResult,
     SubagentStatus,
     UnknownSpawnTarget,
@@ -66,6 +67,7 @@ from ufo.runtime.turns.contracts import (
     Contract,
     input_contract,
     output_contract,
+    payload_keys,
 )
 from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.workspace import ws_current
@@ -322,11 +324,7 @@ class Subagents:
                 ).encode()
             ).hexdigest()
         )
-        inbound = (
-            replay[1]
-            if replay is not None
-            else input_model.model_validate(payload).model_dump_json()
-        )
+        inbound = replay[1] if replay is not None else self._validated(target, input_model, payload)
         if await self._admit(
             conversation_id,
             turn_id,
@@ -619,6 +617,21 @@ class Subagents:
         if agent is not None:
             return agent
         raise UnknownSpawnTarget(target, self._profile_names(), await self._agent_names())
+
+    def _validated(self, target: str, contract: Contract, payload: dict[str, Any]) -> str:
+        """The child's inbound, or a refusal the caller can repair. The contract's own error names
+        a type the caller never sees and a value the tool may have defaulted for it, so a caller
+        that sent the wrong shape — or no payload at all — reads its own mistake as a platform
+        fault and repeats the call. `SpawnPayloadRejected` answers with the target and the keys
+        that target takes, the way an unknown target answers with what is spawnable."""
+        try:
+            return contract.model_validate(payload).model_dump_json()
+        except ValidationError as error:
+            faults = "; ".join(
+                f"{'.'.join(str(part) for part in fault['loc']) or 'payload'}: {fault['msg']}"
+                for fault in error.errors()
+            )
+            raise SpawnPayloadRejected(target, payload_keys(contract), faults) from error
 
     async def _existing_agent_spawn(
         self, turn_id: UUID, target: str

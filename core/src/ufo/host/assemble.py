@@ -38,7 +38,13 @@ from ufo.host.ext.loader import (
     turn_tools,
     turn_workspace_facts,
 )
-from ufo.host.spawn_catalog import spawn_catalog_skill
+from ufo.host.spawn_catalog import (
+    SpawnTarget,
+    spawn_catalog_skill,
+    spawn_payload_description,
+    spawn_targets,
+)
+from ufo.host.tools.builtins import SPAWN_TOOL
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
@@ -127,9 +133,10 @@ class HostEnvironment:
         materialize_member: SkillMaterializer = _without_workspace_skills
         if agent.use_workspace_skills:
             member_cards, materialize_member = await self.member_skills(agent_name=agent.name)
-        skills = request.skills.merged_with(
-            (await spawn_catalog_skill(request.subagents, turn.authority),)
-        ).with_member(member_cards, materialize_member)
+        targets = await spawn_targets(request.subagents, turn.authority)
+        skills = request.skills.merged_with((spawn_catalog_skill(targets),)).with_member(
+            member_cards, materialize_member
+        )
         sections = tuple(
             (section.name, section.body)
             for manifest in self.manifests
@@ -182,7 +189,7 @@ class HostEnvironment:
                 all_tools,
                 granted_actions,
             )
-        tools = ToolRegistry(selected)
+        tools = ToolRegistry(_with_spawn_payload(selected, targets))
         prompt_replaced = False
         files: tuple[EnvironmentFile, ...] = ()
         if document is not None:
@@ -375,6 +382,26 @@ def _edited(content: str, edits: tuple[TextEdit, ...], subject: str) -> str:
             )
         content = content.replace(edit.old, edit.new)
     return content
+
+
+def _with_spawn_payload(
+    selected: tuple[ToolDef, ...], targets: tuple[SpawnTarget, ...]
+) -> tuple[ToolDef, ...]:
+    """`spawn` with this turn's targets and their payload keys in the field that takes them. The
+    keys are workspace state, so they cannot be written into a static schema; they are read for
+    the catalog skill anyway, and the description is where a caller writing the call is already
+    looking."""
+    return tuple(
+        replace(
+            tool,
+            input_model=_described_model(
+                tool.input_model, tool.name, {"payload": spawn_payload_description(targets)}
+            ),
+        )
+        if tool.name == SPAWN_TOOL
+        else tool
+        for tool in selected
+    )
 
 
 def _described_model(

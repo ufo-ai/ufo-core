@@ -34,6 +34,7 @@ from ufo.host.tools.builtins import (
     FILE_TOOL_RESULT_MAX_CHARS,
     REQUEST_CREDENTIALS_TOOL_DEF,
     SHARE_PREFLIGHT_CMD,
+    SpawnInput,
     _file_tool_result,
 )
 from ufo.runtime.ext.manifest import SubagentProfile
@@ -972,6 +973,46 @@ async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
     assert "research" in text
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spawn_wrong_payload_is_an_error_naming_the_targets_keys(
+    tmp_path: Path, db: None
+) -> None:
+    """A payload the target refuses is the same class of recoverable mistake as a bad target name,
+    and answers with the same two facts: what refused it, and what that target takes. The child
+    contract's own error names a type the caller never sees (`_SpawnTask`) and cannot say which
+    field of the caller's own call to fix, so a model that sent the wrong key repeats the call
+    unchanged."""
+    parent = Turn(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=0,
+        status="running",
+        inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    subagents = Subagents(
+        client=_IdleSpawnClient(),
+        registry=SubagentRegistry((_spawn_profile("coding"),)),
+        parent=parent,
+        authority=parent.authority,
+        audience=conversation_audience(None),
+    )
+    ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
+
+    wrong_key = await run("spawn", ctx, target="coding", payload={"objective": "review it"})
+    empty = await run("spawn", ctx, target="coding", payload={})
+
+    for result in (wrong_key, empty):
+        text = result.content[0].text
+        assert result.is_error
+        assert "coding" in text
+        assert "`task`" in text
+        assert "task: Field required" in text
+        assert "_SpawnTask" not in text
+
+
 async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
     recorded: list[tuple[str | None, bool]] = []
 
@@ -1009,6 +1050,23 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         payload={"task": "x"},
     )
     assert recorded[1] == ("turn-1/spawn/call-1", False)
+
+
+def test_spawn_without_a_payload_is_refused_by_this_tools_own_field() -> None:
+    """A call that names a target and no payload is invalid at this boundary, and the refusal
+    carries the word the caller has to fix. It used to be accepted here and rejected by the
+    child's contract, which answers with the name of a type the caller never sees — a model that
+    dropped the payload read `CodingInput objective Field required` as a fault in the deploy and
+    repeated the same call. The schema also declares it, so the omission is refused before it is
+    made."""
+    spawn = next(schema for schema in REGISTRY.schemas() if schema.name == "spawn")
+    assert "payload" in spawn.input_schema["required"]
+
+    with pytest.raises(ValidationError) as refusal:
+        SpawnInput.model_validate({"target": "profile:coding", "background": True, "name": "one"})
+
+    assert [error["loc"] for error in refusal.value.errors()] == [("payload",)]
+    assert SpawnInput.model_validate({"target": "profile:coding", "payload": {}}).payload == {}
 
 
 SEAL_MEMBER = UUID("11111111-1111-1111-1111-111111111111")

@@ -1,0 +1,44 @@
+name = "spawn-refusal"
+base = "HEAD"
+suites = ["code_review"]
+cases = [
+  "code-review-launch-recovers-from-a-refusal",
+  "code-review-launch-carries-objective",
+]
+agent = "code"
+repeats = 3
+concurrency = 2
+max_stacks = 1
+budget_usd = 18.0
+est_usd_per_case = 0.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "bare-detail"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/tools/context.py"
+old = '''        super().__init__(f"spawn payload refused by {target!r}, which takes {keys}: {detail}")
+'''
+new = '''        super().__init__(detail)
+'''
+
+[[arm]]
+name = "no-keys"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/tools/context.py"
+old = '''        super().__init__(f"spawn payload refused by {target!r}, which takes {keys}: {detail}")
+'''
+new = '''        super().__init__(f"spawn payload refused by {target!r}: {detail}")
+'''

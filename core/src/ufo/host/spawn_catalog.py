@@ -1,20 +1,23 @@
-"""The spawn-catalog skill, assembled per turn from the live subagent registry and the workspace's
-agent rows — so the targets a spawn can name, and the payload each takes, cannot drift from what
-`spawn` actually dispatches against. Profiles are deploy-fixed; agents are workspace state, which
-is why the catalog is built per turn rather than at boot. It carries its own index entry, so an
-agent reaching for how to delegate loads it by name and has the targets before its first spawn."""
+"""What `spawn` can dispatch this turn, read once from the live subagent registry and the
+workspace's agent rows — so the targets a spawn can name, and the payload each takes, cannot drift
+from what `spawn` actually dispatches against. Profiles are deploy-fixed; agents are workspace
+state, which is why this is read per turn rather than at boot.
 
-from collections.abc import Mapping
+The same read serves two surfaces, because a caller that has to load a document before it can name
+a required argument does not always load it: `spawn`'s own `payload` description carries the keys,
+where no instruction can forbid reading them, and the catalog skill carries the table for a caller
+picking a target it has not used before."""
+
+from dataclasses import dataclass
 
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.runtime.authority import ExecutionAuthority, authority_member_id
-from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import RuntimeSkill
 from ufo.runtime.subagents import SubagentRegistry
-from ufo.runtime.turns.contracts import TaskInput
+from ufo.runtime.turns.contracts import input_contract, payload_keys
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 
@@ -26,38 +29,23 @@ SPAWN_CATALOG_DESCRIPTION = (
 )
 
 
-def _profile_payload(profile: SubagentProfile) -> str:
-    fields = profile.input_model.model_fields
-    if not fields:
-        return "(no fields)"
-    return ", ".join(
-        f"`{name}`" if field.is_required() else f"`{name}` (optional)"
-        for name, field in sorted(fields.items())
-    )
+@dataclass(frozen=True)
+class SpawnTarget:
+    """One dispatchable target: the name a spawn takes, which namespace it came from, and the
+    payload keys its contract requires."""
+
+    name: str
+    kind: str
+    keys: str
 
 
-def _schema_payload(schema: Mapping[str, object] | None) -> str:
-    if schema is None:
-        return ", ".join(f"`{name}`" for name in sorted(TaskInput.model_fields))
-    properties = schema.get("properties")
-    if not isinstance(properties, Mapping) or not properties:
-        return "(no fields)"
-    required = schema.get("required")
-    names = frozenset(required) if isinstance(required, list) else frozenset()
-    return ", ".join(
-        f"`{name}`" if name in names else f"`{name}` (optional)" for name in sorted(properties)
-    )
-
-
-async def spawn_catalog_skill(
+async def spawn_targets(
     registry: SubagentRegistry, authority: ExecutionAuthority
-) -> RuntimeSkill:
-    """One `RuntimeSkill` listing every profile and every spawnable workspace agent with the
-    payload keys each requires, built beside the dispatch so the catalog and the spawn read the
-    same records. Agents are the set the spawn gate admits: the turn's member's own rows, and for
-    a workspace admin every row — an ownerless row (main, provisioned) is the admins'. An agent
-    whose name a profile shadows is listed under its qualified form, which is the only form a
-    spawn of it accepts.
+) -> tuple[SpawnTarget, ...]:
+    """Every target this turn can spawn, with the payload keys each takes. Agents are the set the
+    spawn gate admits: the turn's member's own rows, and for a workspace admin every row — an
+    ownerless row (main, provisioned) is the admins'. An agent whose name a profile shadows is
+    listed under its qualified form, which is the only form a spawn of it accepts.
 
     A profile that runs on the member's own provider account is listed whether or not they
     connected one. Withholding it hides the capability from the member who has not met it yet: the
@@ -83,19 +71,38 @@ async def spawn_catalog_skill(
                 .order_by(tables.agent.c.name)
             )
         ).all()
-    rows = "\n".join(
-        (
-            *(
-                f"| `{profile.name}` | profile | {_profile_payload(profile)} |"
-                for profile in sorted(profiles, key=lambda profile: profile.name)
-            ),
-            *(
-                f"| `{'agent:' if agent.name in profile_names else ''}{agent.name}` | agent "
-                f"| {_schema_payload(agent.input_schema)} |"
-                for agent in agents
-            ),
-        )
+    return (
+        *(
+            SpawnTarget(profile.name, "profile", payload_keys(profile.input_model))
+            for profile in sorted(profiles, key=lambda profile: profile.name)
+        ),
+        *(
+            SpawnTarget(
+                f"{'agent:' if agent.name in profile_names else ''}{agent.name}",
+                "agent",
+                payload_keys(input_contract(agent.input_schema)),
+            )
+            for agent in agents
+        ),
     )
+
+
+def spawn_payload_description(targets: tuple[SpawnTarget, ...]) -> str:
+    """The `payload` field's description for this turn: the keys each target takes, at the one
+    place every spawn is written. The generic sentence it replaces named the contract without
+    showing it, so a caller learned the keys only from a refusal — measured at nine wrong-payload
+    calls in eighteen failures before the catalog skill existed, and unchanged by it for a caller
+    whose own instructions tell it not to load a skill."""
+    if not targets:
+        return "Arguments matching the target's input schema."
+    shapes = "; ".join(f"{target.name} takes {target.keys}" for target in targets)
+    return f"Arguments matching the target's input schema — {shapes}."
+
+
+def spawn_catalog_skill(targets: tuple[SpawnTarget, ...]) -> RuntimeSkill:
+    """One `RuntimeSkill` listing every target with the payload keys it requires, rendered from
+    the read the dispatch itself resolves against, so the table cannot drift from behaviour."""
+    rows = "\n".join(f"| `{target.name}` | {target.kind} | {target.keys} |" for target in targets)
     body = (
         "The targets `spawn` can dispatch, generated from the live registry and the workspace's "
         "agents — the same records a spawn resolves against, so this table cannot drift from "

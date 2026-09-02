@@ -8,6 +8,7 @@ from ufo.host.assemble import (
     _run_command,
     _run_tool,
     _skills_with_document,
+    _with_spawn_payload,
 )
 from ufo.host.environment import (
     EnvironmentDocument,
@@ -16,6 +17,8 @@ from ufo.host.environment import (
     ToolInput,
     ToolOverride,
 )
+from ufo.host.spawn_catalog import SpawnTarget
+from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_TOOL
 from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.skills.runtime import SkillCard, SkillRegistry, parse_skill_content
 from ufo.runtime.tools.context import ToolContext, ToolResult
@@ -30,6 +33,11 @@ class _BashInput(BaseModel):
 
 async def _never(context: ToolContext, payload: _BashInput) -> ToolResult:
     raise AssertionError("environment tests never dispatch")
+
+
+_SPAWN = next(tool for tool in BUILTIN_TOOLS if tool.name == SPAWN_TOOL)
+_BASH = ToolDef(name="bash", description="run a command", input_model=_BashInput, handler=_never)
+_SPAWN_TARGET_DESCRIPTION = _SPAWN.input_model.model_fields["target"].description
 
 
 def _registry() -> ToolRegistry:
@@ -322,3 +330,26 @@ def test_a_member_skill_is_never_a_documents_to_change() -> None:
     )
     with pytest.raises(ValueError, match="member skill"):
         _skills_with_document(registry, document)
+
+
+def test_the_spawn_offer_carries_this_turns_targets_and_their_keys() -> None:
+    """The rewrite runs on the tool set every turn assembles, not only on the catalog document:
+    `payload` is the field a spawn is written into, and a caller told not to load a skill has
+    nowhere else to read the contract."""
+    targets = (
+        SpawnTarget("coding", "profile", "`objective`"),
+        SpawnTarget("agent:support", "agent", "`ticket`, `notes` (optional)"),
+    )
+    offered = _with_spawn_payload((_SPAWN, _BASH), targets)
+    spawn, bash = offered
+
+    described = spawn.input_model.model_fields["payload"].description
+    assert described is not None
+    assert "coding takes `objective`" in described
+    assert "agent:support takes `ticket`, `notes` (optional)" in described
+    assert spawn.input_model.model_fields["target"].description == _SPAWN_TARGET_DESCRIPTION
+    assert spawn.handler is _SPAWN.handler
+    assert bash is _BASH
+    assert _SPAWN.input_model.model_fields["payload"].description == (
+        "Arguments matching the target's input schema."
+    )

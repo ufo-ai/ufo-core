@@ -1,6 +1,7 @@
-"""The per-turn spawn-catalog skill reads the same registry and agent rows a spawn dispatches
-against — both-ends for docs: every registered profile and every workspace agent appears with its
-payload keys, so an agent that loads the catalog has the target names before its first call."""
+"""The per-turn spawn read serves both its surfaces from the same registry and agent rows a spawn
+dispatches against — both-ends for docs: every registered profile and every workspace agent
+appears with its payload keys in the catalog skill, and in `spawn`'s own `payload` description, so
+a caller has the keys whether or not it loads anything."""
 
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -20,6 +21,8 @@ from ufo.host.spawn_catalog import (
     SPAWN_CATALOG_DESCRIPTION,
     SPAWN_CATALOG_SKILL_NAME,
     spawn_catalog_skill,
+    spawn_payload_description,
+    spawn_targets,
 )
 from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
@@ -106,7 +109,7 @@ async def test_catalog_lists_profiles_and_agents_with_payload_keys(db: None) -> 
     registry = SubagentRegistry((_profile("scout"), *CORE_SUBAGENT_PROFILES))
     with ws(workspace_id):
         admin = await _catalog_member(workspace_id, admin=True)
-        skill = await spawn_catalog_skill(registry, MemberAuthority(admin))
+        skill = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(admin)))
 
     assert skill.name == SPAWN_CATALOG_SKILL_NAME
     for profile in registry.profiles:
@@ -125,7 +128,7 @@ async def test_an_agent_shadowed_by_a_profile_is_listed_qualified(db: None) -> N
     registry = SubagentRegistry((_profile("scout"),))
     with ws(workspace_id):
         admin = await _catalog_member(workspace_id, admin=True)
-        skill = await spawn_catalog_skill(registry, MemberAuthority(admin))
+        skill = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(admin)))
 
     assert "| `scout` | profile |" in skill.instructions
     assert "| `agent:scout` | agent |" in skill.instructions
@@ -142,7 +145,7 @@ async def test_a_profile_on_the_members_own_key_shadows_their_agent(db: None) ->
 
     with ws(workspace_id):
         keyless = await _catalog_member(workspace_id, admin=True)
-        listed = await spawn_catalog_skill(registry, MemberAuthority(keyless))
+        listed = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(keyless)))
         assert "| `coding` | profile |" in listed.instructions
         assert "| `agent:coding` | agent |" in listed.instructions
         assert "| `coding` | agent |" not in listed.instructions
@@ -181,8 +184,8 @@ async def test_the_catalog_gives_a_member_their_own_agents_and_an_admin_all(db: 
         )
     registry = SubagentRegistry(CORE_SUBAGENT_PROFILES)
     with ws(workspace_id):
-        member_view = await spawn_catalog_skill(registry, MemberAuthority(mine))
-        admin_view = await spawn_catalog_skill(registry, MemberAuthority(admin))
+        member_view = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(mine)))
+        admin_view = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(admin)))
 
     assert "`mine`" in member_view.instructions
     assert "theirs" not in member_view.instructions
@@ -199,8 +202,8 @@ async def test_the_catalog_stands_on_its_own_in_the_index(db: None) -> None:
     nothing, which is what makes it reachable by name."""
     workspace_id = await _workspace_with_agents({})
     with ws(workspace_id):
-        catalog = await spawn_catalog_skill(
-            SubagentRegistry(CORE_SUBAGENT_PROFILES), WORKSPACE_AUTHORITY
+        catalog = spawn_catalog_skill(
+            await spawn_targets(SubagentRegistry(CORE_SUBAGENT_PROFILES), WORKSPACE_AUTHORITY)
         )
     registry = skill_registry((), (catalog,))
     assert [ref.card.name for ref in registry.closure(SPAWN_CATALOG_SKILL_NAME)] == [
@@ -229,14 +232,14 @@ async def test_a_profile_on_the_members_own_key_is_listed_whether_or_not_they_co
     )
 
     with ws(workspace_id):
-        skipped = await spawn_catalog_skill(registry, MemberAuthority(member_id))
+        skipped = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(member_id)))
         assert "`research`" in skipped.instructions
         assert "`coding`" in skipped.instructions
 
         await store.put(
             workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
         )
-        connected = await spawn_catalog_skill(registry, MemberAuthority(member_id))
+        connected = spawn_catalog_skill(await spawn_targets(registry, MemberAuthority(member_id)))
         assert "`research`" in connected.instructions
         assert "`coding`" in connected.instructions
 
@@ -328,3 +331,28 @@ def test_the_refusal_hands_over_the_address_that_satisfies_it() -> None:
     unconfigured = str(SpawnNeedsOwnModelKey("coding"))
     assert "the portal" in unconfigured
     assert "surface/web" not in unconfigured
+
+
+async def test_the_payload_description_names_every_targets_keys(db: None) -> None:
+    """The keys reach the field that takes them, not only the document a caller may skip. The
+    Code app's own prompt forbids loading the catalog, so for that agent the description is the
+    only place the contract appears — and a caller that cannot see `objective` sends a spawn
+    without it."""
+    workspace_id = await _workspace_with_agents(
+        {
+            "support": {
+                "type": "object",
+                "properties": {"ticket": {"type": "string"}, "notes": {"type": "string"}},
+                "required": ["ticket"],
+            }
+        }
+    )
+    registry = SubagentRegistry((CODING_PROFILE, *CORE_SUBAGENT_PROFILES))
+    with ws(workspace_id):
+        admin = await _catalog_member(workspace_id, admin=True)
+        described = spawn_payload_description(await spawn_targets(registry, MemberAuthority(admin)))
+
+    assert "coding takes `objective`, `extended_context` (optional)" in described
+    assert "support takes `ticket`, `notes` (optional)" in described
+    assert described.startswith("Arguments matching the target's input schema")
+    assert spawn_payload_description(()) == "Arguments matching the target's input schema."

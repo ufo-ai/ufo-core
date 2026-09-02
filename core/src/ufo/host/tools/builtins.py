@@ -83,6 +83,7 @@ from ufo.runtime.skills.runtime import load_skills, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     ImageContent,
+    SpawnPayloadRejected,
     SpeakerRequired,
     TextContent,
     ToolContext,
@@ -144,6 +145,7 @@ link's target."""
 
 
 MAX_REQUESTED_SLOTS = 4
+SPAWN_TOOL = "spawn"
 
 
 class BashInput(BaseModel):
@@ -282,9 +284,13 @@ class SpawnInput(BaseModel):
         "every target and its payload. A name both kinds hold needs its qualified form "
         "('profile:research' or 'agent:research')."
     )
-    payload: dict[str, Any] = Field(
-        default_factory=dict, description="Arguments matching the target's input schema."
-    )
+    payload: dict[str, Any] = Field(description="Arguments matching the target's input schema.")
+    """Required, so a call that leaves it out is refused here, by this field's name.
+
+    A default made the omission legal at this boundary and moved the failure to the child's own
+    contract, which answers with the name of a type the caller never sees — so a model that drops
+    the payload reads its own slip as a fault in the deploy and repeats the call unchanged. A
+    target that takes no arguments passes `{}`."""
     background: bool = Field(
         default=False,
         description="Run in the background and return the child turn id immediately instead of "
@@ -1016,7 +1022,7 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
             name=args.name,
             detach_on_arrival=True,
         )
-    except (AmbiguousSpawnTarget, UnknownSpawnTarget) as error:
+    except (AmbiguousSpawnTarget, SpawnPayloadRejected, UnknownSpawnTarget) as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
     if result.terminal is not None and result.terminal.question is not None:
         return ToolResult(
@@ -1294,7 +1300,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         side_effecting=True,
     ),
     ToolDef(
-        name="spawn",
+        name=SPAWN_TOOL,
         description=(
             "Delegate a subtask to a named target — a subagent profile or a workspace agent. "
             "`payload` must match the target's input schema; foreground (default) returns the "

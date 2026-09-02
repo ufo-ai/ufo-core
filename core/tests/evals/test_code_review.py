@@ -219,6 +219,126 @@ async def test_current_objective_grader_rejects_stale_transcript_instructions() 
     assert "omitted current" in missing_verdict.reason
 
 
+async def test_launch_grader_separates_a_payloadless_launch_from_a_repeated_one() -> None:
+    """The two ways the launch act fails on a weaker model, told apart by what each call carried.
+
+    A parent that names the target and drops the whole payload sends a call the reviewer contract
+    refuses, reads that refusal as a fault in the deploy, and repeats it — production sent twelve.
+    A parent that reissues a complete launch sends many valid ones. Both are 'not two spawns' in a
+    count, so the verdict and the evidence name the payload first."""
+
+    def output(*payloads: JsonObject) -> CapabilityOutput:
+        calls = tuple(
+            _call("spawn", f"spawn-{index}", {"target": "profile:coding", **payload})
+            for index, payload in enumerate(payloads, start=1)
+        )
+        return CapabilityOutput(
+            "",
+            calls,
+            own_calls=calls,
+            timing=CaseTiming(
+                wall_ms=1,
+                turns=(_turn("evaluated", *(_step(call, 2) for call in calls)),),
+            ),
+        )
+
+    complete = {"payload": {"objective": "\n".join(code_review.CURRENT_OBJECTIVE_MARKERS)}}
+    named_only: JsonObject = {"background": True, "name": "correctness reviewer"}
+
+    dropped = await code_review._grade_launch(output(named_only, named_only))
+    repeated = await code_review._grade_launch(output(*([complete] * 11)))
+    passed = await code_review._grade_launch(output(complete, complete))
+
+    assert not dropped.passed
+    assert "carried no payload" in dropped.reason
+    assert dropped.evidence["launches"] == [
+        {"payload_keys": [], "objective_chars": 0},
+        {"payload_keys": [], "objective_chars": 0},
+    ]
+    assert not repeated.passed
+    assert "started 11 reviewers" in repeated.reason
+    assert passed.passed, passed.reason
+
+
+async def test_launch_grader_rejects_an_incomplete_objective() -> None:
+    def output(objective: str) -> CapabilityOutput:
+        calls = tuple(
+            _call(
+                "spawn",
+                f"spawn-{index}",
+                {"target": "coding", "background": True, "payload": {"objective": objective}},
+            )
+            for index in (1, 2)
+        )
+        return CapabilityOutput(
+            "",
+            calls,
+            own_calls=calls,
+            timing=CaseTiming(
+                wall_ms=1,
+                turns=(_turn("evaluated", *(_step(call, 2) for call in calls)),),
+            ),
+        )
+
+    empty = await code_review._grade_launch(output(""))
+    partial = await code_review._grade_launch(
+        output("\n".join(code_review.CURRENT_OBJECTIVE_MARKERS[:-1]))
+    )
+    oversized = await code_review._grade_launch(
+        output(
+            "\n".join(code_review.CURRENT_OBJECTIVE_MARKERS)
+            + "x" * code_review.MAX_REVIEW_OBJECTIVE_CHARS
+        )
+    )
+
+    assert not empty.passed
+    assert "carried no objective" in empty.reason
+    assert not partial.passed
+    assert "omitted objective instructions" in partial.reason
+    assert not oversized.passed
+    assert "exceeded the spawn budget" in oversized.reason
+
+
+async def test_recovery_grader_passes_a_repaired_launch_and_fails_one_that_never_lands() -> None:
+    """The two cases divide the act: the launch case fails any refused call, this one fails only a
+    turn where the reviewers never both started. Without that split an arm that repairs its call
+    on the second try scores the same as one that repeats it forever, and the refusal's wording
+    can move neither."""
+
+    def output(*objectives: str) -> CapabilityOutput:
+        calls = tuple(
+            _call(
+                "spawn",
+                f"spawn-{index}",
+                {"target": "coding", "background": True, "payload": {"objective": objective}}
+                if objective
+                else {"target": "coding", "background": True},
+            )
+            for index, objective in enumerate(objectives, start=1)
+        )
+        return CapabilityOutput("", calls, own_calls=calls)
+
+    complete = "\n".join(code_review.CURRENT_OBJECTIVE_MARKERS)
+    repaired = await code_review._grade_recovered_launch(output("", "", complete, complete))
+    never = await code_review._grade_recovered_launch(output("", "", "", ""))
+    one_only = await code_review._grade_recovered_launch(output("", complete))
+
+    assert repaired.passed, repaired.reason
+    assert repaired.evidence["refused_launches"] == 2
+    assert not never.passed
+    assert "never both started" in never.reason
+    assert not one_only.passed
+
+
+def test_launch_case_grades_the_parents_own_response() -> None:
+    """It must not wait for the reviewers: the launch is graded when a parent that later loops or
+    never settles would otherwise leave the case with no verdict about the launch at all."""
+    case = next(case for case in code_review.CASES if "launch-carries-objective" in case.name)
+
+    assert case.wait_for_background is False
+    assert str(code_review.LAUNCH_PAGE_ID) in case.message
+
+
 def test_stale_objective_case_contains_the_known_old_rules() -> None:
     case = next(case for case in code_review.CASES if "stale-reviewer-objective" in case.name)
 

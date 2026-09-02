@@ -131,6 +131,21 @@ class UnknownSubagentProfile(Exception):
         self.registered = registered
 
 
+class SpawnPayloadRejected(Exception):
+    """A spawn named a valid target and a payload its contract refuses. Its message names the
+    target, the keys that target takes, and what was wrong, so the model repairs the call it made
+    instead of reading the child contract's own error — which names a type the caller never sees,
+    reports the value the tool defaulted to rather than the one the caller sent, and so reads as a
+    fault in the deploy. This is the payload half of the decision `UnknownSpawnTarget` already
+    makes for the target: a shape mistake is recoverable, and the refusal carries what to fix."""
+
+    def __init__(self, target: str, keys: str, detail: str) -> None:
+        super().__init__(f"spawn payload refused by {target!r}, which takes {keys}: {detail}")
+        self.target = target
+        self.keys = keys
+        self.detail = detail
+
+
 class UnknownSpawnTarget(Exception):
     """A spawn named a target neither namespace holds. Its message lists what is spawnable — the
     registered profiles and the workspace's agents — so the model retries against a valid name."""

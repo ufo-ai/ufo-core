@@ -45,6 +45,7 @@ from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     SpawnNeedsOwnModelKey,
+    SpawnPayloadRejected,
     UnknownSpawnTarget,
     UnknownSubagentProfile,
     UntrustedContentError,
@@ -2402,8 +2403,11 @@ async def test_agent_child_payload_validates_against_the_declared_input_schema(
     )
     spawner = _spawner(workspace_id, parent, "research")
 
-    with pytest.raises(ValidationError, match="required"):
+    with pytest.raises(SpawnPayloadRejected) as refusal:
         await spawner.spawn("support", {"task": "acme"}, background=True)
+    assert "'support'" in str(refusal.value)
+    assert "takes `ticket`" in str(refusal.value)
+    assert "required" in str(refusal.value)
     spawned = await spawner.spawn(
         "support", {"ticket": "INC-42"}, background=True, dedup_key="ticket"
     )
@@ -2422,8 +2426,9 @@ async def test_default_agent_contract_is_task_in_result_out(
     )
     spawner = _spawner(workspace_id, parent, "research")
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(SpawnPayloadRejected) as refusal:
         await spawner.spawn("support", {"objective": "acme"}, background=True)
+    assert "takes `task`" in str(refusal.value)
     spawned = await spawner.spawn(
         "support", {"task": "triage the outage"}, background=True, dedup_key="default"
     )

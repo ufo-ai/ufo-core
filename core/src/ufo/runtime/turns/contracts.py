@@ -137,6 +137,25 @@ def freeform_result_contract(contract: Contract) -> bool:
             return False
 
 
+def payload_keys(contract: Contract) -> str:
+    """The keys a payload for this contract takes: required ones first and bare, the rest marked.
+
+    Read from `model_json_schema` so a profile's model class and an agent's declared schema render
+    the same, and so this is the only place that decides how a contract's shape is spelled to a
+    model: the spawn catalog lists it per target, and a refused spawn quotes it for the one target
+    that refused."""
+    schema = contract.model_json_schema()
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping) or not properties:
+        return "(no keys)"
+    required = schema.get("required")
+    names = frozenset(required) if isinstance(required, list) else frozenset()
+    return ", ".join(
+        f"`{name}`" if name in names else f"`{name}` (optional)"
+        for name in sorted(properties, key=lambda name: (name not in names, name))
+    )
+
+
 def input_contract(schema: Mapping[str, object] | None) -> Contract:
     return TaskInput if schema is None else JsonContract(schema)
 

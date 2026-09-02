@@ -1,0 +1,53 @@
+name = "spawn-keys"
+base = "HEAD"
+suites = ["code_review"]
+cases = [
+  "code-review-launch-carries-objective",
+  "code-review-launch-recovers-from-a-refusal",
+]
+agent = "code"
+repeats = 10
+concurrency = 2
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 0.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "generic-payload"
+
+[[arm.replacements]]
+path = "core/src/ufo/host/spawn_catalog.py"
+old = '''    shapes = "; ".join(f"{target.name} takes {target.keys}" for target in targets)
+    return f"Arguments matching the target's input schema — {shapes}."
+'''
+new = '''    return "Arguments matching the target's input schema."
+'''
+
+[[arm]]
+name = "generic-and-bare"
+
+[[arm.replacements]]
+path = "core/src/ufo/host/spawn_catalog.py"
+old = '''    shapes = "; ".join(f"{target.name} takes {target.keys}" for target in targets)
+    return f"Arguments matching the target's input schema — {shapes}."
+'''
+new = '''    return "Arguments matching the target's input schema."
+'''
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/tools/context.py"
+old = '''        super().__init__(f"spawn payload refused by {target!r}, which takes {keys}: {detail}")
+'''
+new = '''        super().__init__(detail)
+'''
