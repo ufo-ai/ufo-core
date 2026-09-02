@@ -942,15 +942,6 @@ class Sandbox:
         )
         return result.exit_code == 0
 
-    def read_runtime_file(self, relative: str) -> AsyncIterator[bytes]:
-        """Stream one runtime-owned file."""
-        return self._read_runtime_file(relative)
-
-    async def _read_runtime_file(self, relative: str) -> AsyncIterator[bytes]:
-        bound = await self._bound()
-        async for chunk in bound.carrier.read(bound.handle, _runtime_path(bound.handle, relative)):
-            yield chunk
-
     def _commands(self, bound: "SandboxSession") -> SandboxCommands[ExecResult]:
         return SandboxCommands(
             execute=lambda argv, timeout_s: bound.carrier.exec(bound.handle, argv, timeout_s),
