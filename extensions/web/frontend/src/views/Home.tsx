@@ -53,6 +53,7 @@ const NO_HISTORY = "No conversations yet.";
 
 const NO_APP = "No such app";
 const NO_APPS = "This workspace has no apps to open.";
+const NO_CHATS = "No conversations to open.";
 const NO_CONVERSATION = "This conversation is not available.";
 const CONVERSATION = "Conversation";
 
@@ -710,10 +711,14 @@ function ConversationLane({
   );
 }
 
-/** The lane a member opened to pick what stands here, standing where the pick will. It holds the one
- *  list a workspace is opened from: every app it draws, each by its mark, its name and what it is
- *  for. The conversations the member has had are read where they are written — the chat app's own
- *  lane — rather than a second time here.
+/** The lane a member opened to pick what stands here, standing where the pick will. It holds the
+ *  two lists a workspace is opened from: every app it draws, each by its mark, its name and what it
+ *  is for; and under them the conversations the member has had, in the order the rail holds them —
+ *  one list, one order, wherever they are read.
+ *
+ *  The history is the chat lane's own list, drawn through `chatRuns`: the surfaces the member put
+ *  away stay put away, the runs keep their ladder, and a colleague's thread reads as theirs under
+ *  the run that names it, never as the member's own row.
  *
  *  Picking takes this lane's place in the row rather than opening a fifth beside it, so the pick
  *  lands where the member asked for it and the cap is not reached by a lane that names nothing. A
@@ -730,7 +735,11 @@ function PickerLane({
   agents: Agent[];
   onOpens: (opens: string[]) => void;
 }) {
+  const rail = useRail();
+  const ladder = useChatLadder();
+  const hidden = useChatHidden();
   const offered = agents.filter((agent) => !agent.hidden);
+  const chats = chatRuns(rail.rows, ladder, hidden, new Date());
   const pick = (id: string) => onOpens(taken(opens, lane, id));
   return (
     <Lane
@@ -780,6 +789,43 @@ function PickerLane({
             ) : (
               <div className={PICK_EMPTY}>
                 <Empty>{NO_APPS}</Empty>
+              </div>
+            )}
+          </section>
+          <section className={PICK_SECTION}>
+            <h3 className={PICK_LABEL}>{HISTORY}</h3>
+            {chats.some((run) => run.rows.length) ? (
+              <div className={cn(PICK_ROWS, "px-lg")}>
+                {chats.map((run) =>
+                  run.rows.length ? (
+                    <section key={run.label} className="flex flex-col">
+                      <h4 className={PICK_LABEL}>{run.label}</h4>
+                      <ul className="m-0 flex list-none flex-col gap-sm p-0">
+                        {run.rows.map((row) => (
+                          <li key={row.conversation_id}>
+                            <button
+                              type="button"
+                              onClick={() => pick(homeConversationLane(row.conversation_id))}
+                              className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
+                            >
+                              <span className="[text-box:trim-both_cap_alphabetic] min-w-0 flex-1 truncate text-label font-medium tracking-(--tracking-ui) text-ink">
+                                {row.title || agentName(row.agent_name)}
+                              </span>
+                              <IconChevronRight
+                                className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
+                                aria-hidden
+                              />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null,
+                )}
+              </div>
+            ) : (
+              <div className={PICK_EMPTY}>
+                <Empty>{rail.phase === "loading" ? <Waiting /> : NO_CHATS}</Empty>
               </div>
             )}
           </section>

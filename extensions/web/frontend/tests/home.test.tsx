@@ -14,6 +14,7 @@ import {
   type AgentStatus,
 } from "@/lib/appStatusStore";
 import { readDraft } from "@/lib/drafts";
+import { holdChatHidden } from "@/lib/rail";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import {
   chatHash,
@@ -476,9 +477,9 @@ test("the rail's new tab stands the picker at most once", async () => {
   expect(laneNames()).toEqual(["New tab", "Assistant"]);
 });
 
-/** The picker offers the apps and nothing else. The member's history is read in the chat lane, where
- *  it stands over the entry the next conversation starts in, so the picker never lists it twice. */
-test("the picker lane offers the workspace's apps under one head", async () => {
+/** The picker offers the apps and, under them, the conversations the member has had — one list,
+ *  one order, wherever they are read. A row takes the lane over as that conversation's lane. */
+test("the picker lane offers the workspace's apps and the member's history", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
 
@@ -491,8 +492,36 @@ test("the picker lane offers the workspace's apps under one head", async () => {
       .getAllByRole("button")
       .map((row) => row.textContent),
   ).toEqual(["Assistant", "Second"]);
-  expect(within(picker).queryByRole("heading", { name: "History" })).toBeNull();
-  expect(within(picker).queryByText(CHAT_ROW.title)).toBeNull();
+
+  const history = within(picker).getByRole("heading", { name: "History", level: 3 });
+  const rows = within(history.parentElement!).getAllByRole("button");
+  expect(rows.map((row) => row.textContent)).toEqual([CHAT_ROW.title]);
+  await userEvent.click(rows[0]);
+  expect(laneNames()).toEqual([CHAT_ROW.title, "Assistant"]);
+});
+
+/** The picker's history is the chat lane's own list, drawn through `chatRuns`: a surface the member
+ *  put away stays put away, and a colleague's thread draws under the run that names it. */
+test("the picker's history hides put-away surfaces and runs colleagues apart", async () => {
+  wire(
+    chatsOnWire([
+      CHAT_ROW,
+      { ...CHAT_ROW, conversation_id: OTHER_CONVO_ID, mine: false, surface: "ufo" },
+      { ...CHAT_ROW, conversation_id: PRIVATE_CONVO_ID, surface: "slack", title: "Hidden thread" },
+    ]),
+  );
+  holdChatHidden(["slack"]);
+  drawHome([AGENT_ID]);
+
+  const picker = await openPicker();
+  const history = within(picker).getByRole("heading", { name: "History", level: 3 });
+  // The Slack row is the surface the member put away, and a portal row is never hidden: the
+  // hidden one must be the only row absent.
+  expect(within(history.parentElement!).queryByText("Hidden thread")).toBeNull();
+  expect(within(history.parentElement!).getAllByText(CHAT_ROW.title)).toHaveLength(2);
+  expect(
+    within(history.parentElement!).getByRole("heading", { name: "Other members", level: 4 }),
+  ).toBeTruthy();
 });
 
 /** The chat lane opens on the member's own history: the conversations stand over the entry the next
