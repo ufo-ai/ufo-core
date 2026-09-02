@@ -133,7 +133,6 @@ spec:
             # The signup Slack Connect inviter: UFO's own operator-workspace app, reached only from
             # this pod. Enabled, the gateway refuses to start without both the token and the team it
             # must belong to.
-            - {name: UFO_INVITE_REQUIRED, value: "false"}
             - {name: UFO_SIGNUP_KEY, value: "${signup_key}"}
             - {name: UFO_CONTROL_SLACK_CONNECT_ENABLED, value: "${slack_connect_enabled}"}
             - {name: UFO_CONTROL_SLACK_CONNECT_TEAM_ID, value: "${slack_connect_team_id}"}

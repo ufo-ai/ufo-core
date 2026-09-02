@@ -214,7 +214,7 @@ case "$URL" in
     ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || HOST=wrong.example
-    printf 'curl -fsSL https://%s/ufo | sh\\n' "$HOST"
+    printf 'curl https://%s/waitlist\\n' "$HOST"
     ;;
 esac
 """
@@ -2041,11 +2041,6 @@ def _check_hosted_runtime_receives_the_selected_sandbox_template() -> None:
         variables = (root / "variables.tf").read_text()
         assert 'variable "e2b_templates"' in variables
         assert 'condition     = var.e2b_templates != ""' in variables
-
-
-def test_hosted_signup_needs_no_invite() -> None:
-    template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
-    assert '- {name: UFO_INVITE_REQUIRED, value: "false"}' in template
 
 
 def _check_hosted_serve_attests_the_deployed_bundle() -> None:
@@ -4548,6 +4543,7 @@ def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
         "__LANDING_HTML__": "local.landing_html",
         "__PRIVACY_HTML__": "local.privacy_html",
         "__TERMS_HTML__": "local.terms_html",
+        "__WAITLIST_SENDER__": "local.waitlist_sender",
     }
     assert set(re.findall(r'"(__[A-Z_]+__)"', worker)) == set(substituted)
     for placeholder, value in substituted.items():

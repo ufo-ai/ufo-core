@@ -4,7 +4,7 @@ import test, { after, before } from "node:test";
 
 import { chromium } from "playwright";
 
-import { importWorker } from "./harness.mjs";
+import { d1, importWorker } from "./harness.mjs";
 
 const APEX = "https://flyingobject.ai";
 
@@ -15,7 +15,10 @@ let origin;
 before(async () => {
   const worker = await importWorker("page");
   const env = {
+    DB: d1(),
     ORIGIN_BASE: APEX,
+    WAITLIST_EMAILS: { async send() {} },
+    WAITLIST_DEAD_LETTER_QUEUE: "dead-letters",
   };
   // The page's render asks the worker for nothing, so a call out of the worker is a call the
   // suite must see.
@@ -101,6 +104,11 @@ test("the page inlines no font face its render never reaches", async () => {
   await page.close();
 });
 
+// Sign In is the worker's own route to the app host. Join leads out to the waitlist form, which is
+// another origin, so it opens in its own tab and hands that tab no opener.
+const JOIN_FORM =
+  "https://docs.google.com/forms/d/e/1FAIpQLSeXdDbu8pE64Q2zIf4OYQLz0Gu_ETM7P--4_DjtwRQmKS1FIQ/viewform";
+
 test("the bar carries the mark and the two account controls, and nothing else", async () => {
   const page = await open();
   const brand = await page.locator("header.topbar a.brand").getAttribute("href");
@@ -115,7 +123,7 @@ test("the bar carries the mark and the two account controls, and nothing else", 
   );
   assert.deepEqual(actions, [
     { text: "Sign In", href: "/login", target: null, rel: null },
-    { text: "Sign up", href: "/login", target: null, rel: null },
+    { text: "Join Waitlist", href: JOIN_FORM, target: "_blank", rel: "noopener" },
   ]);
   await page.close();
 });

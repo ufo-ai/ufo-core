@@ -83,7 +83,7 @@
 /* --- tokens -------------------------------------------------------------
    The ramp steps the page lands on, and the shadcn slots that resolve through
    them. --primary is the one to read twice: stock UFO dark puts signal-400
-   there, which turns "Sign up" into a blue button. The design wants the
+   there, which turns "Join Waitlist" into a blue button. The design wants the
    near-white pill, so it resolves to sand-25 — do not move it back without
    re-reading the artboard. --background is the illustration's own ground,
    sampled from the asset, so the page meets the artwork with no seam. */
@@ -221,7 +221,7 @@ body {
 
 /* The node colours this text with --secondary-foreground, which in this palette
    is signal-100 — a pale blue that would tint "Sign In" against a near-white
-   "Sign up". The house pattern (ufo-components.html) uses --foreground for an
+   "Join Waitlist". The house pattern (ufo-components.html) uses --foreground for an
    outline button, which is both correct here and what the artboard shows. */
 .btn-outline { background: transparent; color: var(--foreground); border-color: var(--border); }
 .btn-outline:hover { background: var(--state-hover); }
@@ -412,8 +412,10 @@ body {
     </a>
     <nav class="actions" aria-label="Account">
       <a class="btn btn-outline" href="/login">Sign In</a>
-      <a class="btn btn-primary" href="/login">
-        Sign up
+      <a class="btn btn-primary"
+         href="https://docs.google.com/forms/d/e/1FAIpQLSeXdDbu8pE64Q2zIf4OYQLz0Gu_ETM7P--4_DjtwRQmKS1FIQ/viewform"
+         target="_blank" rel="noopener">
+        Join Waitlist
         <!-- lucide chevron-right, exported from the node. -->
         <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
           <path transform="translate(5.33333 3.33333)" fill-rule="evenodd" clip-rule="evenodd" d="M0.195262 0.195262C0.455612 -0.0650874 0.877722 -0.0650874 1.13807 0.195262L5.13807 4.19526C5.39842 4.45561 5.39842 4.87772 5.13807 5.13807L1.13807 9.13807C0.877722 9.39842 0.455612 9.39842 0.195262 9.13807C-0.0650874 8.87772 -0.0650874 8.45561 0.195262 8.19526L3.72386 4.66667L0.195262 1.13807C-0.0650874 0.877722 -0.0650874 0.455612 0.195262 0.195262Z"/>

@@ -78,7 +78,11 @@ Onboarding.advance(channel, session, body, install)
   |
   +-- membership plus live grant --------> choose membership or new workspace
   |
-  +-- no candidate ----------------------> create workspace
+  +-- no candidate, live domain grant ---> burn it, then create workspace
+  |
+  +-- no candidate, no grant, join door --> mint this domain's grant, burn it, create
+  |
+  +-- no candidate or grant -------------> say why, name the waitlist, exit
   |
   +-- workspace ready -------------------> mint bearer token
                                             emit token + workspace directives
@@ -189,11 +193,13 @@ names none, and the page never reads one. A key that does not match is answered 
 is, and so is every request where the deploy configures none, because a refusal of its own would
 tell a caller the door is there.
 
-The hosted gate admits a verified subject with no workspace. The marked session is load-bearing
-when the member can join an existing workspace: it adds the create option, mints that subject's
-grant, and spends it. The row, the burn, the `invite_id` stamped on the claim, and the Slack Connect
-delivery are identical to a grant `ufo-control invite` wrote. It carries no `business` or `goals`.
-A subject that already holds a grant mints no second one.
+The invite gate stays required. What the marked session changes is one branch inside it: where a
+verified domain has no grant, the flow mints that domain's grant itself and the ordinary redemption
+spends it. The row, the burn, the `invite_id` stamped on the claim, the Slack Connect delivery that
+keys on it — all identical to a grant `ufo-control invite` wrote, so nothing downstream learns a new
+shape. It carries no `business` or `goals`, which the agent prompt already reads as absent. A domain
+that already holds a grant mints no second one: live or already spent, the redemption that follows
+answers for it, so two racing turns and a member who opens the link twice land on one grant.
 
 The authority is a mark inside the sealed session value the cookie carries, not beside it: `key~`,
 the configured key under a signature, and an expiry. No caller can add it to a session of their own,
@@ -210,24 +216,33 @@ marks already out and rotating it does the same — which is what "empty serves 
 The expiry bounds a captured mark to the sign-in it was minted for
 (`SIGNUP_MARK_TTL_MINUTES`, thirty). Neither bound rests on the key being unguessable.
 
-The work-email denylist keeps a shared mailbox provider from becoming one workspace. It names the
-consumer and disposable providers by country as well as by brand, and a test refuses a duplicate,
-an uppercase entry, or a value the address pattern could never produce. It does not solve a domain
-many unrelated people share legitimately — a university or ISP — which bounds the signup policy.
+The work-email denylist is what stands between the door and a shared mailbox provider becoming one
+workspace. An operator grant used to be the last check before any domain could be founded, so the
+list was never load-bearing; behind the door it is. It names the consumer and disposable providers
+by country as well as by brand, and a test refuses a duplicate, an uppercase entry, or a value the
+address pattern could never produce. It does not solve a domain many unrelated people share
+legitimately — a university, an ISP still selling mailboxes — which is a bound on who the door is
+opened to, not on what the list can know.
 
 The key is configuration rather than a secret container: `signup_key` in each environment's
-`terraform.tfvars`. Nothing rests on it being unguessable, and production's is `ufo`. It authorizes
-founding the workspace WorkOS says the member owns when that member could join an existing
-workspace instead. It mails no invitation, names no subject, and moves no existing seat. A subject
-with no workspace signs up without this link.
+`terraform.tfvars`. Nothing rests on it being unguessable, and production's is `ufo` — the soft door
+that stands in for waitlist approval until the waitlist is removed, open to anyone who tries the
+obvious segment. What it authorizes is bounded instead: founding a workspace for a domain WorkOS
+says the member owns, and nothing else. It mails no invitation, so it is no relay; it names no
+domain, so it opens nobody else's workspace; and it moves no seat in a workspace that already
+stands. Everyone without the link is refused and pointed at the waitlist, exactly as before.
 
 ## Signup Slack Connect invitation
 
 A customer earns one public channel in UFO's *own* Slack workspace and one Slack-generated Slack
 Connect invitation, from either of two durable facts: a granted email domain, or a signup that
-created a workspace. The created-workspace fact covers signup with `UFO_INVITE_REQUIRED=false`,
-where no grant exists. Creating is the whole test: joining a workspace the member's domain does not
-name opens no channel.
+created a workspace. The grant fires while signup is invite-gated, at approval — before that
+customer signs up — so the channel is open by the time they read the invitation email. The signup that
+*created* a workspace fires once the gate comes off and no grant exists to key on, so
+`UFO_INVITE_REQUIRED=false` costs this feature nothing. Creating is the whole test, not merely
+completing — a contractor, an advisor, or operator staff joining a workspace their own domain does
+not name is no customer, and counting them would open a channel for a domain the invite gate would
+then refuse.
 
 The domain is the key, and neither fact is: a granted customer who then signs up satisfies both and
 still lands on one row, so nobody is invited twice. Re-granting a domain whose first grant lapsed
