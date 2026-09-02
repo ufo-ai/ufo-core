@@ -10,8 +10,8 @@
 #
 # Postgres keeps the ufo:ufo credentials the test/eval matrix expects; init creates the ufo_owner
 # and (via rls-bootstrap) ufo_serve roles the hosted topology uses. WorkOS emails the sign-in
-# code to the address you type; invites log to the console (UFO_CONTROL_EMAIL_MODE=console) —
-# read those from `docker compose logs gateway`.
+# code to the address you type; teammate invitation emails log to the console
+# (UFO_CONTROL_EMAIL_MODE=console) — read them from `docker compose logs gateway`.
 
 x-dev-env: &dev-env
   UFO_CONTROL_POSTGRES_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
@@ -95,7 +95,7 @@ services:
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       WORKOS_REDIRECT_URI: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}/v1/onboard/auth/callback
-      # Local signup opens without an invite; the hosted gateway leaves this unset (required).
+      # Signup needs no grant here, as in the hosted stack; unset means required.
       UFO_INVITE_REQUIRED: "false"
       UFO_GATEWAY_PORT: "8080"
     ports:

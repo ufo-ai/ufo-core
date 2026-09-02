@@ -35,9 +35,7 @@ PERSISTENT_DELETIONS = (
     ("module.platform.aws_s3_bucket_versioning.blob", "aws_s3_bucket_versioning"),
     ("module.platform.aws_secretsmanager_secret.postgres", "aws_secretsmanager_secret"),
     ("module.platform.aws_sesv2_email_identity.onboard", "aws_sesv2_email_identity"),
-    ("module.prod.cloudflare_d1_database.waitlist", "cloudflare_d1_database"),
     ("cloudflare_dns_record.ses_dkim", "cloudflare_dns_record"),
-    ("module.prod.cloudflare_queue.waitlist_email", "cloudflare_queue"),
     ("datadog_integration_aws_account.ufo", "datadog_integration_aws_account"),
     ("datadog_integration_aws_external_id.ufo", "datadog_integration_aws_external_id"),
     ("module.platform.random_id.serve_credential_key", "random_id"),
@@ -65,7 +63,6 @@ REGENERABLE_TYPE_DELETIONS = (
     ),
     ("module.platform.aws_security_group.rds", "aws_security_group"),
     ("module.platform.aws_security_group_rule.rds_from_nodes", "aws_security_group_rule"),
-    ("module.prod.cloudflare_queue_consumer.waitlist_email", "cloudflare_queue_consumer"),
     ("cloudflare_ruleset.flyingobject_redirect", "cloudflare_ruleset"),
     ("cloudflare_ruleset.shipped_app_cache", "cloudflare_ruleset"),
     ("module.prod.cloudflare_workers_route.edge", "cloudflare_workers_route"),
@@ -320,7 +317,7 @@ def _check_local_cases_name_declared_resources() -> None:
 
 
 def _check_allows_non_deletions() -> None:
-    for actions in (["create"], ["update"], ["no-op"], ["read"]):
+    for actions in (["create"], ["update"], ["no-op"], ["read"], ["forget"]):
         plan = {"resource_changes": [_change("example.resource", "future_resource", actions)]}
         assert _guard().rejected_deletions(plan) == []
 

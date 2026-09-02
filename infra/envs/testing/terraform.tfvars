@@ -7,6 +7,5 @@ image_tag = "latest"
 slack_connect_team_id = "T0BCDQWSPU2"
 slack_connect_enabled = true
 
-# The join door. Testing runs the same path production does, under a value nobody types by accident,
-# so a member of this environment is somebody who was given the link rather than anybody at all.
+# The join door tests the explicit create path under a value nobody types by accident.
 signup_key = "61fcacb5-c6a2-4f2e-bf03-22fdbb6ef25d"

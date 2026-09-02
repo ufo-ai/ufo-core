@@ -190,6 +190,11 @@ def _check_db_keeps_the_test_and_eval_postgres_port() -> None:
     assert result.stdout.strip() == "docker compose up -d postgres"
 
 
+def _check_stack_signup_needs_no_grant() -> None:
+    compose = yaml.safe_load((REPO / "compose.yaml").read_text())
+    assert compose["services"]["gateway"]["environment"]["UFO_INVITE_REQUIRED"] == "false"
+
+
 def test_dev_stack_sync_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
     assert len(checks) == 8

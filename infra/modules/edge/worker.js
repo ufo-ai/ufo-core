@@ -1,7 +1,4 @@
 const CLI_UA = /^(curl|wget|httpie)\b/i;
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MAX_EMAIL = 254;
-const COUNT_TTL_MS = 3_600_000;
 const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const PAGE_CACHE = "public, max-age=600";
@@ -12,74 +9,29 @@ const APEX = "https://ufo.ai";
 const INDEXED = ["/", "/privacy", "/terms"];
 // Everything else the worker answers is an endpoint rather than a page: a form post, a shell
 // script, a counter, the onboarding API, and the hop to the authenticated host.
-const UNCRAWLED = ["/waitlist", "/ufo", "/fleet", "/v1/onboard/", "/login"];
+const UNCRAWLED = ["/ufo", "/fleet", "/v1/onboard/", "/login"];
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const ARTIFACT_PREFIX = "/artifacts/";
 const JOIN_PREFIX = "/join/";
 const ARTIFACT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
-const WAITLIST_SENDER = "__WAITLIST_SENDER__";
-
 const LANDING_HTML = "__LANDING_HTML__";
 const FAVICON_SVG = "__FAVICON_SVG__";
 const FAVICON_DARK_SVG = "__FAVICON_DARK_SVG__";
 const PRIVACY_HTML = "__PRIVACY_HTML__";
 const TERMS_HTML = "__TERMS_HTML__";
 
-const SCHEMA =
-  "create table if not exists waitlist (" +
-  "  n integer primary key autoincrement," +
-  "  email text not null unique," +
-  "  created_at text not null default (datetime('now')))";
-const NUMBERED =
-  "select count(*) as numbered from sqlite_master" +
-  " where name = 'waitlist' and sql like '%autoincrement%'";
-const RENUMBER = [
-  "create table waitlist_numbered (" +
-  "  n integer primary key autoincrement," +
-  "  email text not null unique," +
-  "  created_at text not null default (datetime('now')))",
-  "insert into waitlist_numbered (email, created_at)" +
-  " select email, created_at from waitlist order by rowid",
-  "drop table waitlist",
-  "alter table waitlist_numbered rename to waitlist",
-];
-const EMAIL_SCHEMA =
-  "create table if not exists waitlist_email (" +
-  "  email text primary key," +
-  "  queued_at text," +
-  "  sent_at text)";
-
-let counted = { count: null, at: 0 };
 let fleet = { count: null, at: 0 };
 
-function card(host, total, workspaces) {
+function card(host, workspaces) {
   return `
       ╭─◠◠◠─╮
   ╾══╡ ◉ ◉ ◉ ╞══╼   ${host}
      ╰┄┄┄┄┄┄┄╯
 
-  ${workspaces} workspace${workspaces === 1 ? "" : "s"}. ${total} on the waitlist.
+  ${workspaces} workspace${workspaces === 1 ? "" : "s"}.
 
-  Join the waitlist:
-    curl https://${host}/waitlist -d email=email@work.com
-
-  Already invited?
+  Install:
     curl -fsSL https://${host}/ufo | sh
-
-`;
-}
-
-function usage(host) {
-  return `
-  Join the waitlist:
-    curl https://${host}/waitlist -d email=email@work.com
-
-`;
-}
-
-function ack(position) {
-  return `
-  #${position} on the waitlist. We will email you when access opens.
 
 `;
 }
@@ -123,23 +75,6 @@ function robots() {
     `Sitemap: ${APEX}/sitemap.xml`,
     "",
   ].join("\n");
-}
-
-async function ensureWaitlist(db) {
-  await db.prepare(SCHEMA).run();
-  const { numbered } = await db.prepare(NUMBERED).first();
-  if (numbered === 0) {
-    await db.batch(RENUMBER.map((statement) => db.prepare(statement)));
-  }
-}
-
-async function waitlistCount(db) {
-  if (counted.count === null || Date.now() - counted.at > COUNT_TTL_MS) {
-    await ensureWaitlist(db);
-    const row = await db.prepare("select count(*) as n from waitlist").first();
-    counted = { count: row.n, at: Date.now() };
-  }
-  return counted.count;
 }
 
 async function fleetCount(originBase) {
@@ -187,44 +122,7 @@ async function landing(request, env, url) {
     if (bounce) return bounce;
     return page(LANDING_HTML);
   }
-  const [total, workspaces] = await Promise.all([
-    waitlistCount(env.DB),
-    fleetCount(env.ORIGIN_BASE),
-  ]);
-  return text(card(url.hostname, total, workspaces));
-}
-
-async function join(request, env, url) {
-  const form = new URLSearchParams(await request.text());
-  const email = (form.get("email") ?? "").trim().toLowerCase();
-  if (!EMAIL.test(email) || email.length > MAX_EMAIL) {
-    return text(usage(url.hostname), 400);
-  }
-  await ensureWaitlist(env.DB);
-  await env.DB.prepare(
-    "insert into waitlist (email)" +
-    " select ?1 where not exists (select 1 from waitlist where email = ?1)",
-  )
-    .bind(email)
-    .run();
-  const row = await env.DB.prepare("select n from waitlist where email = ?1").bind(email).first();
-  await env.DB.prepare(EMAIL_SCHEMA).run();
-  await env.DB.prepare("insert into waitlist_email (email) values (?1) on conflict do nothing")
-    .bind(email)
-    .run();
-  const delivery = await env.DB.prepare(
-    "select queued_at, sent_at from waitlist_email where email = ?1",
-  )
-    .bind(email)
-    .first();
-  if (delivery.queued_at === null && delivery.sent_at === null) {
-    await env.WAITLIST_EMAILS.send({ email }, { contentType: "json" });
-    await env.DB.prepare("update waitlist_email set queued_at = datetime('now') where email = ?1")
-      .bind(email)
-      .run();
-  }
-  counted = { count: null, at: 0 };
-  return text(ack(row.n));
+  return text(card(url.hostname, await fleetCount(env.ORIGIN_BASE)));
 }
 
 export default {
@@ -258,8 +156,6 @@ export default {
         return new Response(FAVICON_DARK_SVG, {
           headers: { "cache-control": "no-cache", "content-type": "image/svg+xml" },
         });
-      case "/waitlist":
-        return request.method === "POST" ? join(request, env, url) : text(usage(url.hostname));
       case "/robots.txt":
         return secure(url) ?? page(robots(), "text/plain; charset=utf-8");
       case "/sitemap.xml":
@@ -281,47 +177,5 @@ export default {
       default:
         return fetch(request);
     }
-  },
-  async queue(batch, env) {
-    if (batch.queue === env.WAITLIST_DEAD_LETTER_QUEUE) {
-      await Promise.all(
-        batch.messages.map(async (message) => {
-          await env.DB.prepare("update waitlist_email set queued_at = null where email = ?1")
-            .bind(message.body.email)
-            .run();
-          console.error(`waitlist confirmation failed for ${message.body.email}`);
-          message.ack();
-        }),
-      );
-      return;
-    }
-    await ensureWaitlist(env.DB);
-    await Promise.all(
-      batch.messages.map(async (message) => {
-        const { email } = message.body;
-        const delivery = await env.DB.prepare(
-          "select queued_at, sent_at from waitlist_email where email = ?1",
-        )
-          .bind(email)
-          .first();
-        if (delivery.sent_at !== null) {
-          message.ack();
-          return;
-        }
-        const entry = await env.DB.prepare("select n from waitlist where email = ?1")
-          .bind(email)
-          .first();
-        await env.EMAIL.send({
-          to: email,
-          from: WAITLIST_SENDER,
-          subject: `#${entry.n} on the ufo waitlist`,
-          text: `${email} is #${entry.n} on the waitlist. We will email you when access opens.\n`,
-        });
-        await env.DB.prepare("update waitlist_email set sent_at = datetime('now') where email = ?1")
-          .bind(email)
-          .run();
-        message.ack();
-      }),
-    );
   },
 };

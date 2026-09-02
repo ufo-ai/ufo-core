@@ -21,7 +21,6 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
         "aws_secretsmanager_secret_version",
         "aws_security_group",
         "aws_security_group_rule",
-        "cloudflare_queue_consumer",
         "cloudflare_ruleset",
         "cloudflare_workers_route",
         "cloudflare_workers_script",

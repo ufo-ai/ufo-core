@@ -78,8 +78,8 @@ and WorkOS delivers the sign-in code. `UFO_CONTROL_EMAIL_MODE=console` logs a me
 local stack with no SES account.
 
 `UFO_INVITE_REQUIRED` defaults to `true`: creating a new workspace demands a live grant for the
-member's verified signup subject. The local hosted stack (root README) sets it `false` so signup needs
-no grant; unset means required, so a deploy never opens signup by forgetting the knob.
+member's verified signup subject. The hosted and local stacks set it `false`, so a subject with no
+workspace can sign up without a grant. Unset means required.
 
 `UFO_SIGNUP_KEY` is the path segment that opens the join door, `GET /join/<key>`. A member who holds
 that link founds their subject's workspace with nobody to approve them: the door binds a session
@@ -91,7 +91,8 @@ door for the marks already out, and a captured one stops counting after
 and nothing else — it mails no invitation and names no subject of its own. Empty or unset serves no
 door, and a key that does not match is answered as an
 unrouted path, so a caller learns nothing about whether one is configured. Everyone without the
-link is refused exactly as before, which is why the gate stays required.
+link can sign up when their subject has no workspace. The link still authorizes the create option
+when the member could join an existing workspace instead.
 
 ## Validation
 

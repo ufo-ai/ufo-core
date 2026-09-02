@@ -681,7 +681,7 @@ jobs:
         shell: bash
         run: |
           HOST=testing.ufo.ai
-          curl -fsS "https://$HOST/" | grep -F "curl https://$HOST/waitlist"
+          curl -fsS "https://$HOST/" | grep -F "curl -fsSL https://$HOST/ufo | sh"
           test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
           curl -fsS -X POST "https://$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."
           # shellcheck disable=SC2016  # literal ${UFO_URL:-...} text from the curl card, not an expansion
