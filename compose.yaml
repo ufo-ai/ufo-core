@@ -5,6 +5,9 @@
 #   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap + egress CA (one-shot)
 #   gateway ──┤  ufo-control gateway   :8080   onboarding/login (WorkOS sign-in)
 #   serve ────┤  ufoctl serve          :8710   surfaces + DBOS workers + the egress-control RPC
+#   front ────┤  nginx                 :8080   the one browser origin: /login, /logout, /join,
+#             │                                /v1/onboard and /ufo to the gateway, the rest to
+#             │                                serve — the split the hosted ingress makes
 #   ingress ──┤  ufoctl ingress        :8100   hosted sites, in serve's netns
 #   egress ───┘  ufo-egress            :8888   the Rust egress data plane, in serve's netns
 #
@@ -60,7 +63,7 @@ services:
     command: ["init"]
     environment:
       <<: *dev-env
-      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
     volumes:
       - ./dev:/app/dev:ro
@@ -82,8 +85,8 @@ services:
       # in `public`. Either way core's tables are reached over the onboarding RPC below.
       UFO_CONTROL_GATEWAY_DSN: postgresql://ufo:ufo@postgres:5432/ufo
       UFO_CONTROL_SERVE_INTERNAL_URL: http://serve:8710
-      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
-      UFO_WORKSPACE_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
+      UFO_WORKSPACE_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
       # `make stack` needs no WorkOS secret. Browser and terminal both collect the email on the
       # gateway's own pages; in console mode the Continue-with-Google hop lands on a local form
@@ -94,12 +97,10 @@ services:
       WORKOS_MODE: ${WORKOS_MODE:-console}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
-      WORKOS_REDIRECT_URI: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}/v1/onboard/auth/callback
+      WORKOS_REDIRECT_URI: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}/v1/onboard/auth/callback
       # Local signup opens without an invite; the hosted gateway leaves this unset (required).
       UFO_INVITE_REQUIRED: "false"
       UFO_GATEWAY_PORT: "8080"
-    ports:
-      - "127.0.0.1:${UFO_GATEWAY_PORT_HOST:-8080}:8080"
     volumes:
       - ./dev:/app/dev:ro
     depends_on:
@@ -117,7 +118,7 @@ services:
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
       UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
       UFO_ARTIFACT_TOKEN_SECRET: ufo-local-dev-artifact-secret
-      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
       AWS_REGION: us-east-1
       # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
@@ -164,6 +165,17 @@ services:
       init: {condition: service_completed_successfully}
     restart: unless-stopped
 
+  front:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:${UFO_STACK_PORT_HOST:-8080}:8080"
+    volumes:
+      - ./dev/front.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      gateway: {condition: service_started}
+      serve: {condition: service_started}
+    restart: unless-stopped
+
   ingress:
     image: ${UFO_DEV_IMAGE:-ufo-dev}
     command: ["ingress"]
@@ -171,7 +183,7 @@ services:
     environment:
       <<: *dev-env
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
-      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
     volumes:

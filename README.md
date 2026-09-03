@@ -67,20 +67,29 @@ Use this mode to run the full hosted topology on your machine. One command start
 - Postgres
 - the Rust `ufo-control` onboarding gateway (`/login`)
 - the serve fleet: surfaces, DBOS workers, and the egress-control RPC
+- the front: one nginx origin per slot, split as the hosted ingress splits the app host. `/login`,
+  `/logout`, `/join`, `/v1/onboard`, and `/ufo` go to the gateway; every other path goes to serve.
 - the sandbox ingress for hosted sites
 - the ufo-egress data plane: the Rust egress proxy, in the network namespace of serve
 
 ```bash
 make stack STACK=1             # http://ufo-1.localhost:18080/login
 make stack STACK=2             # http://ufo-2.localhost:18180/login
+make signin STACK=1            # seats UFO_DEV_EMAIL with the console code and opens the portal in Chrome
 ```
+
+`make signin` walks the gateway's onboarding wire with the address `UFO_DEV_EMAIL` in `.env` names
+(`make stack` requires the key, like every key in `.env.template`),
+and the dev code `000000`. The first walk founds the workspace; each later walk joins it. It then
+opens the portal signed in through the same browser handoff `ufoctl portal` uses. Set `BROWSER` to
+open another browser.
 
 One image (`dev/Dockerfile`) holds the whole workspace, through uv. It runs as four roles
 (`dev/entrypoint.sh`):
 
 - `init` runs the migrations. It shapes the `ufo_control` gateway ledgers (`ufo-control migrate`).
   It runs `rls-bootstrap`, which creates the `ufo_serve` role and the RLS policies.
-- `gateway` serves `/login` on the host port of the slot. The sign-in code goes to the log
+- `gateway` serves `/login` behind the front. The sign-in code goes to the log
   (`UFO_CONTROL_EMAIL_MODE=console`).
 - `serve` runs the shared fleet on :8710. It uses the `assistant` pack and local backends:
   filesystem blobs, the in-process hub, and the built-in `local` sandbox carrier.
@@ -92,10 +101,10 @@ One image (`dev/Dockerfile`) holds the whole workspace, through uv. It runs as f
 volumes, and ports. Each slot keeps its workspaces in `.local/ufo-N/workspaces`. Each slot has its
 own browser origin, `ufo-N.localhost`, so the session cookies of the slots stay separate.
 
-Slot 1 uses gateway :18080, serve :18710, ingress :18100, Postgres :15541, and Redis :15543. Each
-slot after slot 1 adds 100 to each port. To change the host ports, set `UFO_PG_PORT`,
-`UFO_GATEWAY_PORT_HOST`, `UFO_SERVE_PORT_HOST`, `UFO_INGRESS_PORT_HOST`, `UFO_REDIS_PORT`, and
-`UFO_WEB_PORT_HOST`.
+Slot 1 uses the front :18080, serve :18710, ingress :18100, Postgres :15541, and Redis :15543. Each
+slot after slot 1 adds 100 to each port. The browser uses the front only. To change the host ports,
+set `UFO_PG_PORT`, `UFO_STACK_PORT_HOST`, `UFO_SERVE_PORT_HOST`, `UFO_INGRESS_PORT_HOST`,
+`UFO_REDIS_PORT`, and `UFO_WEB_PORT_HOST`.
 
 ### Commands
 

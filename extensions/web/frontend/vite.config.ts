@@ -36,8 +36,8 @@ export default defineConfig({
       // Host: rewritten, the sign-in lands on the backend, which serves the gitignored built tree
       // this server exists to bypass. `tests/viteconfig.test.ts` holds that and the rest of this
       // rule; `dev-routing.ts` owns which requests stay here.
-      "^/(surface/web|ext/)": {
-        target: process.env.UFO_SERVE_ORIGIN ?? "http://localhost:8710",
+      "^/(surface/web|ext/|login|logout|join|v1/onboard)": {
+        target: process.env.UFO_STACK_ORIGIN ?? "http://localhost:8080",
         changeOrigin: false,
         bypass: (req) => devLocalPath(req.method ?? "GET", req.url ?? ""),
       },

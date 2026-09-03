@@ -119,6 +119,7 @@ from ufo.runtime.seats import (
     create_member,
     email_domain,
     member_is_admin,
+    signup_workspace_id,
     workspace_domain,
 )
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
@@ -3720,6 +3721,16 @@ class SurfaceContext:
         shared provider domain grants nobody access."""
         async with workspace_tx() as connection:
             return await workspace_domain(connection, self.workspace_id)
+
+    async def founding_domain(self) -> str | None:
+        """The domain the hosted sign-up policy founded this workspace under, or None where it
+        made no such verdict: a personal-mail workspace, keyed by its founder's exact address, and
+        a workspace founded off-policy (`ufoctl init`), whose founder's mail provider may be
+        personal for all this deploy knows. The first run offers a website only on the verdict."""
+        domain = await self.workspace_domain()
+        if domain is None or signup_workspace_id(domain) != self.workspace_id:
+            return None
+        return domain
 
     async def list_members(self) -> tuple[SeatEntry, ...]:
         """The workspace roster a portal session reads, ordered by email so the panel's rows are

@@ -27,14 +27,13 @@ const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
   label: "Continue",
 };
 
-/** A deploy with no Slack install and no enrichment, whose one connector no founder's suggestions
- *  name: the run is the three questions, which is the shortest path to the handoff this file is
- *  about. */
+/** A deploy with no Slack install and no enrichment: the run is the five questions, which is the
+ *  shortest path to the handoff this file is about. */
 const FIRST_RUN = {
-  providers: [{ name: "linear", label: "Linear" }],
+  providers: [{ name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" }],
   connectors: [],
-  imessage: false,
   model_key_held: true,
+  workspace_domain: null,
   actions: { member: [], memory: [RECORD_VIEW], enrichment_profile: [] },
 };
 
@@ -67,8 +66,10 @@ function mount(routes: Record<string, Route> = {}) {
 test("the run draws on this shell, and its thread is the chat the member lands on", async () => {
   mount();
 
-  // The shared component's own first screen, drawn through this shell's panel kernel.
+  // The shared component's own first screens, drawn through this shell's panel kernel.
   await userEvent.click(await screen.findByRole("button", { name: "Get started" }));
+  await screen.findByRole("heading", { name: "What’s the website for your business?" });
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.type(await screen.findByLabelText("About your business"), "Design studio");
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   // The first task is said off the business step, before every step after it.
@@ -78,7 +79,10 @@ test("the run draws on this shell, and its thread is the chat the member lands o
         "Set up my first task: a daily competitive analysis.",
     ]),
   );
-  await userEvent.click(await screen.findByRole("radio", { name: "Founder" }));
+  const founder = await screen.findByRole("button", { name: "Founder" });
+  expect(founder.getAttribute("aria-pressed")).toBe("true");
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
@@ -91,20 +95,25 @@ test("the run draws on this shell, and its thread is the chat the member lands o
   await waitFor(() => expect(location.hash).toBe(chatHash(CONVO_ID)));
 });
 
-test("a picked goal opens its own thread after the first task's, on this shell too", async () => {
+test("the pressed goal and a picked one each open a thread after the first task's, on this shell too", async () => {
   mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "Get started" }));
+  await screen.findByRole("heading", { name: "What’s the website for your business?" });
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.type(await screen.findByLabelText("About your business"), "Design studio");
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await userEvent.click(await screen.findByRole("radio", { name: "Founder" }));
+  await screen.findByRole("button", { name: "Founder" });
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  await userEvent.click(screen.getByRole("button", { name: "Growing revenue" }));
+  await userEvent.click(screen.getByRole("button", { name: "Hiring" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  await waitFor(() => expect(sent.length).toBe(2));
-  expect(sent[1]).toContain("My goal: growing revenue.");
-  expect(sent[1]).toContain("Ask me at most one thing.");
+  await waitFor(() => expect(sent.length).toBe(3));
+  expect(sent[1]).toContain("My role: Founder. My goal: growing revenue.");
+  expect(sent[2]).toContain("My role: Founder. My goal: hiring.");
+  expect(sent[2]).toContain("Ask me at most one thing.");
 });

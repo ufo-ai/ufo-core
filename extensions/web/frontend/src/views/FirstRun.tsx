@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
-import { ToggleGroup, ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Notice, Panel, PanelSkeleton, usePanelRead } from "@/kernel/panel";
 import { Frame, Head } from "@/views/Frame";
@@ -39,6 +39,11 @@ export type FirstRunPayload = {
   connectors: Connector[];
   actions: { member: ActionView[]; memory: ActionView[]; enrichment_profile: ActionView[] };
   model_key_held: boolean;
+  /* The domain a work address founded the workspace under, which the website step opens on; null
+     for a personal-mail workspace, whose founder is offered no website. The gateway's sign-up
+     policy holds the one list of personal-mail providers, so this is its verdict rather than a
+     second list here. */
+  workspace_domain: string | null;
 };
 
 /** One member's row of the profile kind, as the object index projects it: what the enrichment
@@ -63,10 +68,11 @@ type Profile = {
 const PROFILE_READ = "/objects/enrichment_profile";
 const CONFIRM_WEBSITE_ACTION = "confirm_website";
 
-const BUSINESS_STEP = "business";
-/** The step the welcome leads to. It is the first the run can stand, and a deploy that cannot act
- *  on the answer lands the address on the first step it does stand instead. */
+/** The step the welcome leads to: the website, first on every deploy. Where the deploy runs the
+ *  enrichment, Next confirms it and the business is read back from it; where it does not, the
+ *  address is written to memory with the rest and nothing is looked up. */
 const WEBSITE_STEP = "website";
+const BUSINESS_STEP = "business";
 const POSITION_STEP = "position";
 const TOOLS_STEP = "tools";
 const GOALS_STEP = "goals";
@@ -110,37 +116,13 @@ const FOUNDER_LEVELS = new Set(["owner", "cxo"]);
 
 const DEFAULT_ROLE: Role = "Founder";
 
-/** The domains a member signs up from that are their mail provider and never their company, the
- *  same list the enrichment holds. A box prefilled with one of them is confirmed in a press, and
- *  the mail provider stands as the workspace's company, so the box opens empty instead. */
-const FREE_MAIL_DOMAINS = new Set([
-  "aol.com",
-  "fastmail.com",
-  "gmail.com",
-  "googlemail.com",
-  "gmx.com",
-  "gmx.net",
-  "hey.com",
-  "hotmail.com",
-  "icloud.com",
-  "live.com",
-  "mac.com",
-  "mail.com",
-  "me.com",
-  "msn.com",
-  "outlook.com",
-  "pm.me",
-  "proton.me",
-  "protonmail.com",
-  "yahoo.com",
-  "yandex.com",
-  "ymail.com",
-  "zoho.com",
-]);
+const ROLE_JOIN = " / ";
 
-function signupWebsite(email: string): string {
-  const domain = (email.split("@")[1] ?? "").toLowerCase();
-  return FREE_MAIL_DOMAINS.has(domain) ? "" : domain;
+/** The roles the member picked, said as one: `Founder / Designer`, with Other standing for the
+ *  words the member typed for it. Empty where Other is picked and still unnamed. */
+function saidRoles(roles: Role[], otherRole: string): string {
+  const named = roles.map((role) => (role === OTHER_ROLE ? otherRole.trim() : role));
+  return named.every(Boolean) ? named.join(ROLE_JOIN) : "";
 }
 
 function suggestedRole(profile: Profile): Role {
@@ -222,13 +204,25 @@ const TOOLS_BY_ROLE: Record<Role, string[]> = {
   Other: ["gmail", "googlecalendar", "googledrive", "notion"],
 };
 
-/** What the tools step offers this member: the role's own tools, drawn from the catalog so each
- *  one carries the label and the sentence the connectors screen gives it. A deploy whose catalog
- *  carries none of them offers nothing, and the step stands down. */
-function suggested(role: Role, providers: ProviderTile[]): ProviderTile[] {
-  return TOOLS_BY_ROLE[role]
-    .map((name) => providers.find((tile) => tile.name === name))
-    .filter((tile): tile is ProviderTile => tile !== undefined);
+/** What the tools step offers this member, in the order it offers them: the tools the picked roles
+ *  name, the ones more roles name first and ties in the grid's own role order, then the rest of
+ *  the catalog. Each one is drawn from the catalog so it carries the label and
+ *  the sentence the connectors screen gives it, and Slack is left out because the run gives it a
+ *  step of its own. A deploy whose catalog carries nothing offers nothing, and the step stands
+ *  down. */
+function offered(roles: Role[], providers: ProviderTile[]): ProviderTile[] {
+  const votes = new Map<string, number>();
+  for (const role of roles) {
+    for (const name of TOOLS_BY_ROLE[role]) votes.set(name, (votes.get(name) ?? 0) + 1);
+  }
+  const named = [...votes.keys()].sort((a, b) => (votes.get(b) ?? 0) - (votes.get(a) ?? 0));
+  const rest = providers.filter((tile) => tile.name !== SLACK_STEP && !votes.has(tile.name));
+  return [
+    ...named
+      .map((name) => providers.find((tile) => tile.name === name))
+      .filter((tile): tile is ProviderTile => tile !== undefined),
+    ...rest,
+  ];
 }
 
 /** What is top of mind for a member as they start, picked from a grid rather than typed: each pick
@@ -323,6 +317,9 @@ const GOALS: Goal[] = [
 
 const OTHER_GOAL = "Other";
 
+/** The goal the step opens with picked, until the member says otherwise. */
+const DEFAULT_GOAL = GOALS[0].label;
+
 /** The rest of the sentence an `Other` thread opens on: the run knows only the member's words for
  *  it, so the first step is to read what is already in reach and say what is not. */
 const OTHER_ASKS =
@@ -347,18 +344,20 @@ function goalOpening(business: string, role: string, goal: Goal): string {
   );
 }
 
-/** The one memory the run writes, before any thread opens: who the workspace is for, and what they
- *  came for. Every thread recalls it, so none of them asks what the business does. The action bounds
- *  a body, so the goals fall away before the business does — a member with no goals still has a
- *  workspace that knows them. */
+/** The one memory the run writes, before any thread opens: who the workspace is for, their website
+ *  where they gave one, and what they came for. Every thread recalls it, so none of them asks what
+ *  the business does. The action bounds a body, so the goals fall away before the business does — a
+ *  member with no goals still has a workspace that knows them. */
 export function firstRunRecorded(
   business: string,
+  website: string,
   role: string,
   goals: string[],
   budget: number,
 ): string {
   const said = (text: string) => text.trim().replace(/[.!?]+$/, "");
-  const who = said(business) + ". Their role: " + role + ".";
+  const site = website.trim() ? " Their website: " + website.trim() + "." : "";
+  const who = said(business) + "." + site + " Their role: " + role + ".";
   for (let named = goals.length; named > 0; named -= 1) {
     const body = who + " Their goals: " + goals.slice(0, named).join(", ") + ".";
     if (body.length <= budget) return body;
@@ -373,9 +372,12 @@ type Answers = {
   business: string;
   businessWritten: boolean;
   website: string;
+  /* Whether the member has typed in or cleared the website box, which is when the workspace's
+     domain stops being offered in it. */
+  websiteWritten: boolean;
   profile: Profile | null;
   profilePending: boolean;
-  role: Role;
+  roles: Role[];
   rolePicked: boolean;
   otherRole: string;
   goals: string[];
@@ -391,17 +393,18 @@ function answersKey(member: Member): string {
   return ANSWERS_PREFIX + (member.workspace_id ?? member.email);
 }
 
-function freshAnswers(member: Member): Answers {
+function freshAnswers(): Answers {
   return {
     business: "",
     businessWritten: false,
-    website: signupWebsite(member.email),
+    website: "",
+    websiteWritten: false,
     profile: null,
     profilePending: false,
-    role: DEFAULT_ROLE,
+    roles: [DEFAULT_ROLE],
     rolePicked: false,
     otherRole: "",
-    goals: [],
+    goals: [DEFAULT_GOAL],
     otherGoal: "",
     tools: [],
     declined: false,
@@ -411,7 +414,7 @@ function freshAnswers(member: Member): Answers {
 /** The answers this tab holds for the member, or a fresh record where it holds none or the browser
  *  hands back no store. */
 function readAnswers(member: Member): Answers {
-  const fresh = freshAnswers(member);
+  const fresh = freshAnswers();
   try {
     const held = globalThis.sessionStorage?.getItem(answersKey(member));
     return held ? { ...fresh, ...(JSON.parse(held) as Partial<Answers>) } : fresh;
@@ -432,17 +435,13 @@ function holdAnswers(member: Member, answers: Answers | null): void {
   }
 }
 
-/** The steps the run stands, in order: the website it reads the business from wherever the deploy
- *  can act on the answer, the questions that read comes back to answer, the tools the role
- *  suggests, the Slack install wherever this deploy offers one, and the other surfaces once Slack
- *  is declined. */
+/** The steps the run stands, in order: the website, the business and the roles, the tools the
+ *  roles suggest, the Slack install wherever this deploy offers one, and the other surfaces once
+ *  Slack is declined. */
 function revealedSteps(payload: FirstRunPayload, declined: boolean, tools: boolean): string[] {
   const slack = payload.connectors.some((row) => row.name === SLACK_STEP);
-  const confirm = payload.actions.enrichment_profile.some(
-    (view) => view.name === CONFIRM_WEBSITE_ACTION,
-  );
   return [
-    ...(confirm ? [WEBSITE_STEP] : []),
+    WEBSITE_STEP,
     BUSINESS_STEP,
     POSITION_STEP,
     ...(tools ? [TOOLS_STEP] : []),
@@ -558,21 +557,19 @@ function Failed({ message, onToast }: { message: string; onToast: (title: string
 const CHOICES = "grid w-full grid-cols-[repeat(auto-fit,minmax(var(--container-choice),1fr))] gap-2xs";
 
 /** One option on a grid of picks: filled until it is on, then outlined in the accent with its
- *  check drawn. The role step and the goals step share it, so a pick reads the same on both. */
+ *  check drawn. The role step, the tools step and the goals step share it, so a pick reads the same
+ *  on each. Focus draws no outline of its own: the on state is the whole visual difference. */
 const CHOICE = cn(
   "group flex h-10 items-center justify-between gap-sm rounded-(--radius-answer)",
   "border border-transparent bg-fill px-2xl text-start text-label whitespace-nowrap text-ink",
-  "hover:bg-fill-strong",
+  "hover:bg-fill-strong focus-visible:outline-none",
   "data-[state=on]:border-link data-[state=on]:bg-transparent data-[state=on]:text-link",
   "data-[state=on]:hover:bg-transparent",
-  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
 );
 
-/** The filled card a written answer is typed into, holding the box and whatever stands under it. */
-const ANSWER_CARD = cn(
-  "flex w-full flex-col gap-2xl rounded-(--radius-answer) bg-fill p-lg",
-  "focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink",
-);
+/** The filled card a written answer is typed into, holding the box and whatever stands under it.
+ *  Focus draws no outline: the filled ground is the field, on this step and on every other. */
+const ANSWER_CARD = "flex w-full flex-col gap-2xl rounded-(--radius-answer) bg-fill p-lg";
 
 /** The box inside the card: it draws no surface of its own, because a second surface inside the
  *  first states a box within a box. */
@@ -639,7 +636,7 @@ function Welcome({ onStart, onClose }: { onStart: () => void; onClose: () => voi
             {POINTS.map((point, index) => (
               <li key={point.title} className="flex gap-2xl">
                 <span className="flex size-(--size-glyph) shrink-0 items-center justify-center rounded-sm bg-ink-soft">
-                  <span className={cn("text-fine font-medium text-surface", CAP_TRIM)} aria-hidden>
+                  <span className={cn("text-label font-medium text-surface", CAP_TRIM)} aria-hidden>
                     {index + 1}
                   </span>
                 </span>
@@ -647,7 +644,7 @@ function Welcome({ onStart, onClose }: { onStart: () => void; onClose: () => voi
                   <h2 className={cn("m-0 text-subtitle font-medium text-surface", CAP_TRIM)}>
                     {point.title}
                   </h2>
-                  <p className={cn("m-0 text-ui tracking-(--tracking-ui) text-ink-quiet", CAP_TRIM)}>
+                  <p className={cn("m-0 text-subtitle text-ink-quiet", CAP_TRIM)}>
                     {point.note}
                   </p>
                 </div>
@@ -830,7 +827,7 @@ export function FirstRun({
     holdAnswers(member, null);
     onClose();
   };
-  const { business, website, profile, role, otherRole, goals, otherGoal, tools } = answers;
+  const { business, website, profile, roles, otherRole, goals, otherGoal, tools } = answers;
   const declined = asked === SURFACES_STEP || answers.declined;
   const acceptProfile = useCallback((own: Profile) => {
     setAnswers((held) => {
@@ -839,11 +836,18 @@ export function FirstRun({
         ...held,
         profile: own,
         profilePending: false,
-        role: held.rolePicked ? held.role : suggestedRole(own),
+        roles: held.rolePicked ? held.roles : [suggestedRole(own)],
         business: held.businessWritten || !learned ? held.business : learned,
       };
     });
   }, []);
+  /* The website box opens on the workspace's domain once the read says what it is, until the
+     member writes in the box themselves. */
+  const domain = state.phase === "ready" ? state.payload.workspace_domain : null;
+  useEffect(() => {
+    if (!domain) return;
+    setAnswers((held) => (held.websiteWritten ? held : { ...held, website: domain }));
+  }, [domain]);
   const profileWatch = answers.profilePending ? (
     <ProfileWatch key={profileRead} email={member.email} onProfile={acceptProfile} />
   ) : null;
@@ -887,16 +891,15 @@ export function FirstRun({
           const confirm = payload.actions.enrichment_profile.find(
             (view) => view.name === CONFIRM_WEBSITE_ACTION,
           );
-          /** What this role works in, which is what the tools step suggests. The step stands only
-           *  where the catalog carries at least one of them, so a deploy with no connectors offers
-           *  no empty grid. */
-          const suggests = suggested(role, payload.providers);
-          const revealed = revealedSteps(payload, declined, suggests.length > 0);
+          /** What these roles work in, then the rest of the catalog. The step stands only where
+           *  the catalog carries something, so a deploy with no connectors offers no empty grid. */
+          const offers = offered(roles, payload.providers);
+          const revealed = revealedSteps(payload, declined, offers.length > 0);
           const at = Math.max(0, revealed.indexOf(asked));
           const step = revealed[at];
           const held = slack ? slack.installed : false;
           const installed = step === SLACK_STEP && (held || connected);
-          const said = role === OTHER_ROLE ? otherRole.trim() : role;
+          const said = saidRoles(roles, otherRole);
           const write = payload.actions.memory.find(
             (view) => view.name === RECORD_FIRST_RUN_ACTION,
           );
@@ -934,7 +937,13 @@ export function FirstRun({
                 : []),
             ];
             const outcome = await postAction(agent.id, write.call, {
-              body: firstRunRecorded(business, said, picked.map((goal) => goal.said), budget),
+              body: firstRunRecorded(
+                business,
+                website,
+                said,
+                picked.map((goal) => goal.said),
+                budget,
+              ),
             });
             if (!outcome.applied) {
               setBusy(false);
@@ -969,10 +978,13 @@ export function FirstRun({
             if (step === TOOLS_STEP && connecting) return setConnecting(false);
             return onStep(at ? revealed[at - 1] : undefined);
           };
-          /** Confirms the website, reads back what the enrichment made of it, and suggests the role
-           *  it found where the member has not picked one. A refusal is stated and holds the step. */
+          /** Confirms the website where the deploy can act on it, reads back what the enrichment
+           *  made of it, and suggests the role it found where the member has not picked one. A
+           *  refusal is stated and holds the step. A deploy without the act keeps the answer for the
+           *  memory the run writes and moves on. */
           const confirmWebsite = async () => {
-            if (!confirm || busy) return;
+            if (busy) return;
+            if (!confirm) return advance();
             setBusy(true);
             const outcome = await postAction(agent.id, confirm.call, { website: website.trim() });
             if (!outcome.applied) {
@@ -985,13 +997,12 @@ export function FirstRun({
               ...held,
               profile: null,
               profilePending: Boolean(website.trim()),
-              role: held.rolePicked ? held.role : DEFAULT_ROLE,
+              roles: held.rolePicked ? held.roles : [DEFAULT_ROLE],
               business: held.businessWritten ? held.business : "",
             }));
             setProfileRead((read) => read + 1);
             advance();
           };
-          const company = profile?.status === "matched" ? profile.company_name : null;
           return (
             <Frame
               title={
@@ -1033,7 +1044,7 @@ export function FirstRun({
                       rows={3}
                       aria-label="About your business"
                       autoFocus
-                      placeholder="Software startup, Marketing agency, Design studio, AI consulting…"
+                      placeholder="What does your business do, and who is it for?"
                       value={business}
                       onChange={(event) =>
                         answer({ business: event.target.value, businessWritten: true })
@@ -1054,13 +1065,9 @@ export function FirstRun({
               ) : null}
               {step === WEBSITE_STEP ? (
                 <Step onBack={back} onNext={confirmWebsite} nextDisabled={false} busy={busy}>
-                  <div className="flex flex-col gap-2xl">
-                    <h1 className="m-0 text-subtitle font-medium text-ink">Confirm your website</h1>
-                    <p className="m-0 text-label text-ink-soft">
-                      UFO looks up your website and your email address with People Data Labs to
-                      learn about your business. Clear it to skip: nothing is sent.
-                    </p>
-                  </div>
+                  <h1 className="m-0 text-subtitle font-medium text-ink">
+                    What’s the website for your business?
+                  </h1>
                   <div className="relative w-full">
                     <Input
                       surface="answer"
@@ -1070,7 +1077,9 @@ export function FirstRun({
                       autoComplete="url"
                       placeholder="company.com"
                       value={website}
-                      onChange={(event) => answer({ website: event.target.value })}
+                      onChange={(event) =>
+                        answer({ website: event.target.value, websiteWritten: true })
+                      }
                     />
                     {website ? (
                       <Button
@@ -1078,7 +1087,7 @@ export function FirstRun({
                         size="glyph"
                         aria-label="Clear"
                         className="absolute top-1/2 right-lg -translate-y-1/2"
-                        onClick={() => answer({ website: "" })}
+                        onClick={() => answer({ website: "", websiteWritten: true })}
                       >
                         <IconX stroke={1.5} aria-hidden />
                       </Button>
@@ -1087,29 +1096,26 @@ export function FirstRun({
                 </Step>
               ) : null}
               {step === POSITION_STEP ? (
-                <Step onBack={back} onNext={advance} nextDisabled={!said}>
-                  <div className="flex flex-col gap-sm">
-                    {company ? (
-                      <p className="m-0 text-subtitle font-medium text-ink-quiet">{company}</p>
-                    ) : null}
-                    <h1 className="m-0 text-subtitle font-medium text-ink">
-                      What is your role at the business?
-                    </h1>
-                  </div>
-                  <ToggleGroupOne
+                <Step onBack={back} onNext={advance} nextDisabled={!roles.length || !said}>
+                  <h1 className="m-0 text-subtitle font-medium text-ink">
+                    What is your role at the business?
+                  </h1>
+                  <ToggleGroup
                     aria-label="Role"
                     className={CHOICES}
-                    value={role}
-                    onValueChange={(value) => {
-                      if (!value) return;
-                      answer({ role: value as Role, rolePicked: true });
+                    value={roles}
+                    onValueChange={(picked) => {
+                      answer({
+                        roles: ROLES.filter((option) => picked.includes(option)),
+                        rolePicked: true,
+                      });
                     }}
                   >
                     {ROLES.map((option) => (
                       <ToggleGroupItem
                         key={option}
                         value={option}
-                        autoFocus={option === role}
+                        autoFocus={option === roles[0]}
                         className={cn(CHOICE, option === OTHER_ROLE && "text-ink-quiet")}
                       >
                         {option}
@@ -1120,8 +1126,8 @@ export function FirstRun({
                         />
                       </ToggleGroupItem>
                     ))}
-                  </ToggleGroupOne>
-                  {role === OTHER_ROLE ? (
+                  </ToggleGroup>
+                  {roles.includes(OTHER_ROLE) ? (
                     <Input
                       surface="answer"
                       aria-label="Your role"
@@ -1135,25 +1141,16 @@ export function FirstRun({
               ) : null}
               {step === TOOLS_STEP && !connecting ? (
                 <Step onBack={back} onNext={advance} nextDisabled={false}>
-                  <div className="flex flex-col gap-sm">
-                    {said ? (
-                      <p className="m-0 text-subtitle font-medium text-ink-quiet">{said}</p>
-                    ) : null}
-                    <h1 className="m-0 text-subtitle font-medium text-ink">
-                      Which tools do you work in?
-                    </h1>
-                    <p className="m-0 text-label text-ink-soft">
-                      These are the ones your role usually needs. Pick what UFO should work in, or
-                      skip and connect them later.
-                    </p>
-                  </div>
+                  <h1 className="m-0 text-subtitle font-medium text-ink">
+                    Which tools do you work in?
+                  </h1>
                   <ToggleGroup
                     aria-label="Tools"
                     className={CHOICES}
                     value={tools}
                     onValueChange={(picked) => answer({ tools: picked })}
                   >
-                    {suggests.map((tile) => (
+                    {offers.map((tile) => (
                       <ToggleGroupItem key={tile.name} value={tile.name} className={CHOICE}>
                         <span className="flex min-w-0 items-center gap-sm">
                           <BrandMark provider={tile.name} className="size-(--size-glyph) shrink-0" />
@@ -1171,16 +1168,11 @@ export function FirstRun({
               ) : null}
               {step === TOOLS_STEP && connecting ? (
                 <Step onBack={back} onNext={advance} nextDisabled={false}>
-                  <div className="flex flex-col gap-sm">
-                    <h1 className="m-0 text-subtitle font-medium text-ink">
-                      Connect the tools you picked
-                    </h1>
-                    <p className="m-0 text-label text-ink-soft">
-                      Each one opens its own consent page. Next carries on with whatever is left.
-                    </p>
-                  </div>
+                  <h1 className="m-0 text-subtitle font-medium text-ink">
+                    Connect the tools you picked
+                  </h1>
                   <ul className="m-0 flex w-full list-none flex-col gap-2xs p-0">
-                    {suggests
+                    {offers
                       .filter((tile) => tools.includes(tile.name))
                       .map((tile) => (
                         <ConnectTool
@@ -1203,14 +1195,9 @@ export function FirstRun({
                   onNext={advance}
                   nextDisabled={goals.includes(OTHER_GOAL) && !otherGoal.trim()}
                 >
-                  <div className="flex flex-col gap-sm">
-                    {company ? (
-                      <p className="m-0 text-subtitle font-medium text-ink-quiet">{company}</p>
-                    ) : null}
-                    <h1 className="m-0 text-subtitle font-medium text-ink">
-                      What is top of mind right now?
-                    </h1>
-                  </div>
+                  <h1 className="m-0 text-subtitle font-medium text-ink">
+                    What is top of mind right now?
+                  </h1>
                   <ToggleGroup
                     aria-label="Top of mind"
                     className={CHOICES}
@@ -1302,14 +1289,9 @@ export function FirstRun({
               ) : null}
               {step === SURFACES_STEP ? (
                 <Step onBack={back} onNext={finish} nextDisabled={false} busy={busy}>
-                  <div className="flex flex-col gap-sm">
-                    {company ? (
-                      <p className="m-0 text-body leading-(--leading-chrome) font-medium text-ink-quiet">{company}</p>
-                    ) : null}
-                    <h1 className="m-0 text-body leading-(--leading-chrome) font-medium text-ink">
-                      Get UFO everywhere you work
-                    </h1>
-                  </div>
+                  <h1 className="m-0 text-subtitle font-medium text-ink">
+                    Get UFO everywhere you work
+                  </h1>
                   <ConnectSurfaces
                     agent={agent}
                     member={member}

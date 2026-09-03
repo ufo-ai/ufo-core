@@ -25,9 +25,9 @@ const proxyRule = async (config = "vite.config.ts"): Promise<[string, ProxyOptio
   return [pattern, rule as ProxyOptions];
 };
 
-test("one rule covers the whole surface, so no route reaches the fleet unrouted", async () => {
+test("one rule covers the surface and the gateway's doors, so no route reaches the stack unrouted", async () => {
   const [pattern] = await proxyRule();
-  expect(pattern).toBe("^/(surface/web|ext/)");
+  expect(pattern).toBe("^/(surface/web|ext/|login|logout|join|v1/onboard)");
 });
 
 test("the sign-in redirect comes back on the dev origin", async () => {
@@ -35,7 +35,7 @@ test("the sign-in redirect comes back on the dev origin", async () => {
   // `open_session` answers a 303 rebuilt from the forwarded Host. Rewriting the origin sends the
   // developer to the backend, which serves the gitignored built tree this server exists to avoid.
   expect(rule.changeOrigin).toBe(false);
-  expect(rule.target).toBe("http://localhost:8710");
+  expect(rule.target).toBe("http://localhost:8080");
 });
 
 test("the sidebar shell's page is named under the base the server publishes", async () => {
@@ -53,17 +53,17 @@ test("the sidebar shell's page is named under the base the server publishes", as
   expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
 });
 
-test("both shells send their reads to the fleet UFO_SERVE_ORIGIN names", async () => {
-  // `make web` points the dev server at the Docker stack's published serve port with this
-  // variable, so a hard-coded target would leave that loop reading a fleet that is not running.
-  process.env.UFO_SERVE_ORIGIN = "http://ufo-2.localhost:18810";
+test("both shells send their reads to the stack origin UFO_STACK_ORIGIN names", async () => {
+  // `make web` points the dev server at the Docker stack's one published origin with this
+  // variable, so a hard-coded target would leave that loop reading a stack that is not running.
+  process.env.UFO_STACK_ORIGIN = "http://ufo-2.localhost:18180";
   try {
     for (const config of ["vite.config.ts", "sidebar/vite.config.ts"]) {
       const [, rule] = await proxyRule(config);
-      expect(rule.target).toBe("http://ufo-2.localhost:18810");
+      expect(rule.target).toBe("http://ufo-2.localhost:18180");
     }
   } finally {
-    delete process.env.UFO_SERVE_ORIGIN;
+    delete process.env.UFO_STACK_ORIGIN;
   }
 });
 

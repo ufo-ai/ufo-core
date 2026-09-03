@@ -678,7 +678,7 @@ CLAIMS = (
         " role,\nthe tools that role works in, and what is top of mind",
         source=FIRST_RUN_VIEW,
         pattern=(
-            r"\.\.\.\(confirm \? \[WEBSITE_STEP\] : \[\]\),\n\s+BUSINESS_STEP,\n"
+            r"return \[\n\s+WEBSITE_STEP,\n\s+BUSINESS_STEP,\n"
             r"\s+POSITION_STEP,\n\s+\.\.\.\(tools \? \[TOOLS_STEP\] : \[\]\),\n"
             r"\s+GOALS_STEP,"
         ),

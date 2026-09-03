@@ -69,7 +69,7 @@ const INPUT_SURFACES = {
     "h-10 w-full rounded-(--radius-answer) border border-transparent bg-fill px-2xl py-0",
     "font-sans text-label text-field-ink placeholder:text-ink-soft",
     "transition-[background-color] duration-100 ease-control hover:bg-fill-strong",
-    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
+    "focus-visible:bg-fill-strong focus-visible:outline-none",
     "user-invalid:border-ink user-invalid:border-dashed",
     "disabled:cursor-not-allowed disabled:opacity-(--disabled) disabled:hover:bg-fill",
   ),

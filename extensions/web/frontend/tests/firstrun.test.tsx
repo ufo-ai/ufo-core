@@ -34,6 +34,8 @@ const SLACK_LINK = "https://slack.com/oauth/v2/authorize?state=sealed";
 
 const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Setting up" };
 
+const WEBSITE_HEADING = "What’s the website for your business?";
+
 const ROLES = [
   "Founder",
   "Designer",
@@ -55,8 +57,8 @@ const SLACK_POINTS = [
   "One install for the whole workspace.",
 ];
 
-/** The nine goals the third step offers, in the order it offers them and the order their threads
- *  open in. */
+/** The nine goals the goals step offers, in the order it offers them and the order their threads
+ *  open in. The first is pressed when the step opens. */
 const GOALS = [
   "Growing revenue",
   "Shipping product",
@@ -69,26 +71,32 @@ const GOALS = [
   "Other",
 ];
 
+/** How every goal thread opens: who the member is, then the goal in their words. */
+function opens(role: string, goal: string): string {
+  return "I just set up this workspace. My business: Design studio. My role: " + role + ". My goal: " + goal + ". ";
+}
+
 /** The goal threads the picks below found, as the run says them. Each one carries the goal's own
  *  instructions: no skill routes on these words, so the words are the whole brief. */
-const REVENUE_THREAD =
-  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: growing " +
-  "revenue. Start by working out my funnel as it stands from whatever CRM, billing, analytics or " +
+const REVENUE_ASKS =
+  "Start by working out my funnel as it stands from whatever CRM, billing, analytics or " +
   "spreadsheet access I have granted: volume at each stage, conversion between them, and average " +
   "deal size. Name the single stage losing the most, and one experiment on it with a metric. Do " +
   "not guess a number I have not given you — say what you could not read. Ask me at most one " +
   "thing.";
 
+const REVENUE_THREAD = opens("Founder", "growing revenue") + REVENUE_ASKS;
+
 const COMPETITORS_THREAD =
-  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: " +
-  "understanding competitors. Start by naming the competitors my business implies, from my " +
+  opens("Founder", "understanding competitors") +
+  "Start by naming the competitors my business implies, from my " +
   "website and whatever CRM, support or analytics access I have granted: what each one sells, to " +
   "whom, and at what price. Say where we win and where we lose, in one line each. Do not invent " +
   "a competitor or a price you could not read — say what you could not read. Ask me at most one " +
   "thing.";
 
 const HIRING_THREAD =
-  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: hiring. " +
+  opens("Founder", "hiring") +
   "Start by listing the roles my business is hiring for, from whatever applicant tracking, " +
   "calendar or email access I have granted, and where each one stands: open, interviewing, or " +
   "offered. Name the one role holding the rest back. Contact no candidate and send nothing. Ask " +
@@ -96,8 +104,8 @@ const HIRING_THREAD =
 
 /** Other's thread, in the words the member typed for it. */
 const OTHER_THREAD =
-  "I just set up this workspace. My business: Design studio. My role: Founder. My goal: " +
-  "Launching in Japan. Start by saying what you can already read about it from whatever access I " +
+  opens("Founder", "Launching in Japan") +
+  "Start by saying what you can already read about it from whatever access I " +
   "have granted, and the first step you would take. Do not guess what you could not read — say " +
   "so. Ask me at most one thing.";
 
@@ -105,6 +113,10 @@ const OTHER_THREAD =
  *  step: the first task is the whole of it, and the run says it before every step that follows. */
 const OPENING =
   "I just set up this workspace. My business: Design studio. Set up my first task: a daily competitive analysis.";
+
+/** What the default answers leave in the chat: the first task, then the thread of the goal the run
+ *  opens with pressed. */
+const DEFAULT_SENT = [OPENING, REVENUE_THREAD];
 
 /** Where the run leaves the member: the thread it founded, with the connectors screen beside it. */
 const HANDED = homeHash({ opens: [homeConversationLane(CONVO_ID), HOME_CONNECTORS_LANE] });
@@ -144,8 +156,8 @@ const SURFACES_READ: Record<string, Route> = {
     }),
 };
 
-/** The acts the read projects for this member: the profile collection's confirm is the one the run
- *  draws a step for, and a deploy without the enrichment extension projects none. */
+/** The acts the read projects for this member: the profile collection's confirm is the one the
+ *  website step posts, and a deploy without the enrichment extension projects none. */
 const CONFIRM_VIEW: FirstRunPayload["actions"]["enrichment_profile"][number] = {
   name: "confirm_website",
   description: "Confirm the website the enrichment reads.",
@@ -168,36 +180,40 @@ const ACTIONS: Pick<FirstRunPayload, "actions"> = {
   actions: { member: [], memory: [RECORD_VIEW], enrichment_profile: [] },
 };
 
-/** The catalog most cases run on. Linear is the engineer's own tool and no other role's, so a run
- *  answered as the founder stands no tools step here and the steps stay the three questions. */
+const SLACK_TILE = { name: "slack", label: "Slack", summary: "Send and read messages.", group: "Messaging" };
+
+/** The domain the workspace was founded under, which the website step opens on. */
+const DOMAIN = "simplecasual.com";
+
+/** A deploy offering the Slack install and one connector besides it, so the tools step stands. */
 const FIRST_RUN = {
-  providers: [
-    { name: "slack", label: "Slack", summary: "Send and read messages.", group: "Messaging" },
-    { name: "linear", label: "Linear", summary: "Read issues and update projects.", group: "Code" },
-  ],
+  providers: [SLACK_TILE, { name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" }],
   connectors: [{ name: "slack", label: "Slack", installed: false }],
+  model_key_held: true,
+  workspace_domain: DOMAIN as string | null,
   ...ACTIONS,
 };
 
-/** A catalog carrying the code tool every founder who writes code works in: the founder's own
- *  suggestions name GitHub, so this deploy stands the tools step for that role too. */
-const WITH_GITHUB = {
-  ...FIRST_RUN,
-  providers: [
-    ...FIRST_RUN.providers,
-    {
-      name: "github",
-      label: "GitHub",
-      summary: "Read repositories, open issues, and push changes.",
-      group: "Code",
-    },
-  ],
-};
-
-/** A deploy running the enrichment extension: the run gains the website step. */
+/** A deploy running the enrichment extension: the website step posts its confirm. */
 const WITH_WEBSITE = {
   ...FIRST_RUN,
   actions: { ...ACTIONS.actions, enrichment_profile: [CONFIRM_VIEW] },
+};
+
+/** A catalog carrying nothing but Slack: no tool to offer, so no tools step. */
+const SLACK_ONLY = { ...FIRST_RUN, providers: [SLACK_TILE] };
+
+/** A catalog wide enough to rank: two of these are on both the designer's and the engineer's lists,
+ *  one on the engineer's alone, and one on neither. */
+const RANKED = {
+  ...FIRST_RUN,
+  providers: [
+    SLACK_TILE,
+    { name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" },
+    { name: "linear", label: "Linear", summary: "Track issues.", group: "Code" },
+    { name: "notion", label: "Notion", summary: "Read and write pages.", group: "Docs" },
+    { name: "gmail", label: "Gmail", summary: "Read and send mail.", group: "Mail" },
+  ],
 };
 
 /** What the enrichment made of the confirmed website, as the profile index projects it. */
@@ -224,7 +240,7 @@ const PROFILE_READ: Record<string, Route> = {
   "/objects/enrichment_profile": () => json({ objects: [PROFILE_ROW], next_cursor: null }),
 };
 
-/** A deploy offering no Slack install: the run is the three questions. */
+/** A deploy offering no Slack install: the run is the five questions. */
 const NO_SLACK = {
   ...FIRST_RUN,
   ...ACTIONS,
@@ -236,6 +252,9 @@ const HELD_SLACK = {
   ...ACTIONS,
   connectors: [{ name: "slack", label: "Slack", installed: true }],
 };
+
+/** Who the default answers say the workspace is for, as memory records it before the goals. */
+const WHO = "Design studio. Their website: " + DOMAIN + ". Their role: Founder.";
 
 beforeEach(() => {
   location.hash = "";
@@ -278,7 +297,7 @@ function mount(
   return wired;
 }
 
-/** The run past its welcome, stood on the first question. */
+/** The run past its welcome, stood on the website question. */
 async function open(
   routes: Record<string, Route> = {},
   member = ADMIN,
@@ -373,31 +392,58 @@ function counted(): (string | null)[] {
   return [progress.getAttribute("aria-valuenow"), progress.getAttribute("aria-valuemax")];
 }
 
-/** Answers the first question and moves on. */
+/** Presses the options of a grid until exactly the named ones are on. */
+async function press(group: string, on: string[]) {
+  const options = within(await screen.findByRole("group", { name: group })).getAllByRole("button");
+  for (const option of options) {
+    const pressed = option.getAttribute("aria-pressed") === "true";
+    if (pressed !== on.includes(option.textContent ?? "")) await userEvent.click(option);
+  }
+}
+
+/** Passes the website question as it opens and moves on. */
+async function passWebsite() {
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
+  await userEvent.click(next());
+}
+
+/** Answers the business question and moves on. */
 async function describeBusiness(about = "Design studio") {
   await userEvent.type(await screen.findByLabelText("About your business"), about);
   await userEvent.click(next());
 }
 
-/** Answers the second question and moves on. */
-async function pickRole(role = "Founder") {
-  await userEvent.click(await screen.findByRole("radio", { name: role }));
+/** Answers the role question with exactly these roles and moves on. */
+async function pickRoles(roles: string[] = ["Founder"]) {
+  await press("Role", roles);
   await userEvent.click(next());
 }
 
-/** Answers, or passes, the third question and moves on. Every named goal is picked on the way, and
- *  Other's words are typed where they are given. */
-async function pickGoals(goals: string[] = [], other = "") {
+async function pickRole(role = "Founder") {
+  await pickRoles([role]);
+}
+
+/** Passes the tools question with nothing picked and moves on. */
+async function skipTools() {
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(next());
+}
+
+/** Answers the goals question with exactly these goals — the first pressed by default until told
+ *  otherwise — types Other's words where they are given, and moves on. */
+async function pickGoals(goals: string[] = ["Growing revenue"], other = "") {
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  for (const goal of goals) await userEvent.click(screen.getByRole("button", { name: goal }));
+  await press("Top of mind", goals);
   if (other) await userEvent.type(screen.getByLabelText("What is top of mind"), other);
   await userEvent.click(next());
 }
 
-/** The three questions answered with the defaults, stood on the step after them. */
+/** The five questions answered with the defaults, stood on the step after them. */
 async function answer() {
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
   await pickGoals();
 }
 
@@ -412,7 +458,7 @@ async function returning() {
   }
 }
 
-test("the run opens on the welcome, and Get started leads to the first question", async () => {
+test("the run opens on the welcome, and Get started leads to the website question", async () => {
   mount();
 
   await screen.findByRole("heading", { name: "An AI operating system for your business" });
@@ -424,11 +470,11 @@ test("the run opens on the welcome, and Get started leads to the first question"
   ]);
   expect(screen.queryByRole("progressbar", { name: "Step" })).toBeNull();
   expect(screen.queryByRole("banner")).toBeNull();
-  expect(screen.queryByLabelText("About your business")).toBeNull();
+  expect(screen.queryByLabelText("Website")).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Get started" }));
 
-  await screen.findByRole("heading", { name: "Tell us a bit about your business" });
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
   expect(screen.queryByRole("button", { name: "Get started" })).toBeNull();
 });
 
@@ -464,8 +510,8 @@ test("the card's query lands on the first run's own address", async () => {
   expect(location.hash).toBe("#/first-run");
   await userEvent.click(screen.getByRole("button", { name: "Get started" }));
 
-  await screen.findByRole("heading", { name: "Tell us a bit about your business" });
-  await waitFor(() => expect(location.hash).toBe("#/first-run/business"));
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
+  await waitFor(() => expect(location.hash).toBe("#/first-run/website"));
   expect(screen.queryByPlaceholderText("Start new chat…")).toBeNull();
 });
 
@@ -474,8 +520,8 @@ test("the address opens the first run on its own, with no query at all", async (
   location.hash = "#/first-run";
   await open();
 
-  await screen.findByLabelText("About your business");
-  await waitFor(() => expect(location.hash).toBe("#/first-run/business"));
+  await screen.findByLabelText("Website");
+  await waitFor(() => expect(location.hash).toBe("#/first-run/website"));
 });
 
 /** The step is the address's, written over rather than stacked: a reload lands on the same step,
@@ -484,30 +530,41 @@ test("each step reached writes its own address, and Back from the first returns 
   const entries = history.length;
   await open(lanes(recorder()));
 
+  await screen.findByLabelText("Website");
+  await waitFor(() => expect(location.hash).toBe(firstRunHash("website")));
+  expect(destination()).toBe(WEBSITE_HEADING);
+  await passWebsite();
   await screen.findByLabelText("About your business");
-  await waitFor(() => expect(location.hash).toBe(firstRunHash("business")));
+  expect(location.hash).toBe(firstRunHash("business"));
   expect(destination()).toBe("Tell us a bit about your business");
   await describeBusiness();
-  await screen.findByRole("radiogroup", { name: "Role" });
+  await screen.findByRole("group", { name: "Role" });
   expect(location.hash).toBe(firstRunHash("position"));
   expect(destination()).toBe("What is your role at the business?");
   await pickRole();
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  expect(location.hash).toBe(firstRunHash("tools"));
+  await skipTools();
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   expect(location.hash).toBe(firstRunHash("goals"));
   expect(destination()).toBe("What is top of mind right now?");
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await userEvent.click(await screen.findByRole("button", { name: "Back" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Back" }));
   await screen.findByLabelText("About your business");
   expect(location.hash).toBe(firstRunHash("business"));
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByLabelText("Website");
+  expect(location.hash).toBe(firstRunHash("website"));
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await screen.findByRole("button", { name: "Get started" });
   expect(location.hash).toBe("#/first-run");
 
   await userEvent.click(screen.getByRole("button", { name: "Get started" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  for (let step = 0; step < 5; step += 1) {
+    await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  }
   await screen.findByRole("heading", { name: "Connect your messaging app" });
   expect(location.hash).toBe(firstRunHash("slack"));
   expect(destination()).toBe("Connect your messaging app");
@@ -522,10 +579,11 @@ test("each step reached writes its own address, and Back from the first returns 
 
 test("a reload on a step keeps the step and the answers under it", async () => {
   await open(lanes(recorder()));
+  await passWebsite();
   await describeBusiness("A two-person design studio");
   await pickRole("Engineer");
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(screen.getByRole("button", { name: "Linear" }));
+  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
   await userEvent.click(next());
   await screen.findByRole("heading", { name: "Connect the tools you picked" });
   await userEvent.click(next());
@@ -539,12 +597,15 @@ test("a reload on a step keeps the step and the answers under it", async () => {
   expect(
     (await screen.findByRole("button", { name: "Hiring" })).getAttribute("data-state"),
   ).toBe("on");
-  expect(counted()).toEqual(["4", "5"]);
+  expect(counted()).toEqual(["5", "6"]);
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(
-    (await screen.findByRole("button", { name: "Linear" })).getAttribute("data-state"),
+    (await screen.findByRole("button", { name: "GitHub" })).getAttribute("data-state"),
   ).toBe("on");
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(
+    (await screen.findByRole("button", { name: "Engineer" })).getAttribute("aria-pressed"),
+  ).toBe("true");
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(((await screen.findByLabelText("About your business")) as HTMLTextAreaElement).value).toBe(
     "A two-person design studio",
@@ -554,14 +615,14 @@ test("a reload on a step keeps the step and the answers under it", async () => {
 test("the Slack step's address with the answers held lands on the Slack step, counted", async () => {
   sessionStorage.setItem(
     ANSWERS_KEY,
-    JSON.stringify({ business: "Design studio", role: "Founder", goals: [] }),
+    JSON.stringify({ business: "Design studio", roles: ["Founder"], goals: [] }),
   );
   history.replaceState(null, "", location.pathname);
   location.hash = firstRunHash("slack");
   mount(lanes(recorder()));
 
   await screen.findByRole("heading", { name: "Connect your messaging app" });
-  expect(counted()).toEqual(["4", "4"]);
+  expect(counted()).toEqual(["6", "6"]);
   expect(screen.queryByRole("button", { name: "Get started" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
   await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
@@ -574,16 +635,18 @@ test("an address naming no step of the run lands on the first step, and is writt
   location.hash = "#/first-run/nonsense";
   mount();
 
-  await screen.findByLabelText("About your business");
-  expect(counted()).toEqual(["1", "4"]);
-  await waitFor(() => expect(location.hash).toBe(firstRunHash("business")));
+  await screen.findByLabelText("Website");
+  expect(counted()).toEqual(["1", "6"]);
+  await waitFor(() => expect(location.hash).toBe(firstRunHash("website")));
 });
 
 test("finishing the run drops the answers it held", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK);
+  await passWebsite();
   await describeBusiness();
   expect(stored()?.business).toBe("Design studio");
   await pickRole();
+  await skipTools();
   await pickGoals();
 
   await built();
@@ -593,55 +656,90 @@ test("finishing the run drops the answers it held", async () => {
 test("the page draws no shell around the step", async () => {
   await open();
 
-  await screen.findByRole("heading", { name: "Tell us a bit about your business" });
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
   expect(screen.queryByRole("banner")).toBeNull();
   expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
 });
 
-test("the head counts four steps with Slack, advancing one per answer under a Close on each", async () => {
+/** Every question is one headline: no company name over it and no line under it. */
+test("the head counts six steps with Slack, advancing one per answer under a single headline and a Close", async () => {
   await open(lanes(recorder()));
 
-  await screen.findByLabelText("About your business");
-  expect(counted()).toEqual(["1", "4"]);
-  expect(screen.getByRole("progressbar", { name: "Step" }).childElementCount).toBe(4);
-  expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  const alone = () => {
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading.parentElement!.querySelectorAll("p").length).toBe(0);
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  };
+
+  await screen.findByLabelText("Website");
+  expect(counted()).toEqual(["1", "6"]);
+  expect(screen.getByRole("progressbar", { name: "Step" }).childElementCount).toBe(6);
+  alone();
+
+  await passWebsite();
+  await screen.findByRole("heading", { name: "Tell us a bit about your business" });
+  expect(counted()).toEqual(["2", "6"]);
+  alone();
 
   await describeBusiness();
   await screen.findByRole("heading", { name: "What is your role at the business?" });
-  expect(counted()).toEqual(["2", "4"]);
-  expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  expect(counted()).toEqual(["3", "6"]);
+  expect(screen.queryByText("Pick every one that applies.")).toBeNull();
+  alone();
 
   await pickRole();
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  expect(counted()).toEqual(["4", "6"]);
+  alone();
+
+  await skipTools();
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  expect(counted()).toEqual(["3", "4"]);
-  expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
+  expect(counted()).toEqual(["5", "6"]);
+  alone();
 
   await pickGoals();
   await screen.findByRole("heading", { name: "Connect your messaging app" });
-  expect(counted()).toEqual(["4", "4"]);
+  expect(counted()).toEqual(["6", "6"]);
   expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
 });
 
-test("a deploy without Slack counts three steps, and the third's Next finishes the run", async () => {
+test("a deploy without Slack counts five steps, and the fifth's Next finishes the run", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK);
 
-  await screen.findByLabelText("About your business");
-  expect(counted()).toEqual(["1", "3"]);
-  expect(screen.getByRole("progressbar", { name: "Step" }).childElementCount).toBe(3);
+  await screen.findByLabelText("Website");
+  expect(counted()).toEqual(["1", "5"]);
+  expect(screen.getByRole("progressbar", { name: "Step" }).childElementCount).toBe(5);
 
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  expect(counted()).toEqual(["3", "3"]);
+  expect(counted()).toEqual(["5", "5"]);
   await userEvent.click(next());
 
   await built();
   expect(screen.queryByRole("heading", { name: "Connect your messaging app" })).toBeNull();
 });
 
+test("a catalog carrying only Slack stands no tools step, and the run counts five", async () => {
+  await open(lanes(recorder()), ADMIN, SLACK_ONLY);
+
+  await screen.findByLabelText("Website");
+  expect(counted()).toEqual(["1", "5"]);
+  await passWebsite();
+  await describeBusiness();
+  await pickRole("Engineer");
+
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  expect(counted()).toEqual(["4", "5"]);
+});
+
 test("Cmd+Enter is Next on every question, and holds where Next is disabled", async () => {
   await open();
 
+  await screen.findByLabelText("Website");
+  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
   const about = await screen.findByLabelText("About your business");
   await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
   expect(screen.queryByRole("heading", { name: "What is your role at the business?" })).toBeNull();
@@ -651,6 +749,8 @@ test("Cmd+Enter is Next on every question, and holds where Next is disabled", as
   await screen.findByRole("heading", { name: "What is your role at the business?" });
 
   await userEvent.keyboard("{Control>}{Enter}{/Control}");
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
 
   await userEvent.click(screen.getByRole("button", { name: "Other" }));
@@ -658,14 +758,13 @@ test("Cmd+Enter is Next on every question, and holds where Next is disabled", as
   expect(screen.getByRole("heading", { name: "What is top of mind right now?" })).toBeTruthy();
 });
 
-test("the first step gates Next on the business and names who is answering", async () => {
+test("the business step gates Next on the business and names who is answering", async () => {
   await open();
+  await passWebsite();
 
   const about = await screen.findByLabelText("About your business");
   expect(about).toBeInstanceOf(HTMLTextAreaElement);
-  expect(about.getAttribute("placeholder")).toBe(
-    "Software startup, Marketing agency, Design studio, AI consulting…",
-  );
+  expect(about.getAttribute("placeholder")).toBe("What does your business do, and who is it for?");
   expect(screen.getByText(ADMIN.email)).toBeTruthy();
   expect(next().disabled).toBe(true);
 
@@ -678,20 +777,32 @@ test("the first step gates Next on the business and names who is answering", asy
   await screen.findByRole("heading", { name: "What is your role at the business?" });
 });
 
-test("the role step offers the twelve roles, checks Founder until told otherwise, and Other asks for words", async () => {
+/** Roles are a set: a member who founded the company and designs for it presses both. */
+test("the role step offers the twelve roles as a set, presses Founder until told otherwise, and Other asks for words", async () => {
   await open();
+  await passWebsite();
   await describeBusiness();
 
-  const roles = within(await screen.findByRole("radiogroup", { name: "Role" })).getAllByRole("radio");
+  const group = await screen.findByRole("group", { name: "Role" });
+  const roles = within(group).getAllByRole("button");
   expect(roles.map((role) => role.textContent)).toEqual(ROLES);
-  expect(screen.getByRole("radio", { checked: true }).textContent).toBe("Founder");
+  const pressed = () =>
+    within(group)
+      .queryAllByRole("button", { pressed: true })
+      .map((role) => role.textContent);
+  expect(pressed()).toEqual(["Founder"]);
   expect(next().disabled).toBe(false);
   expect(screen.queryByLabelText("Your role")).toBeNull();
 
-  await userEvent.click(screen.getByRole("radio", { name: "Sales" }));
-  expect(screen.getByRole("radio", { checked: true }).textContent).toBe("Sales");
+  await userEvent.click(screen.getByRole("button", { name: "Sales" }));
+  expect(pressed()).toEqual(["Founder", "Sales"]);
+  await userEvent.click(screen.getByRole("button", { name: "Founder" }));
+  expect(pressed()).toEqual(["Sales"]);
+  await userEvent.click(screen.getByRole("button", { name: "Sales" }));
+  expect(pressed()).toEqual([]);
+  expect(next().disabled).toBe(true);
 
-  await userEvent.click(screen.getByRole("radio", { name: "Other" }));
+  await userEvent.click(screen.getByRole("button", { name: "Other" }));
   const own = screen.getByLabelText("Your role");
   expect(document.activeElement).toBe(own);
   expect(next().disabled).toBe(true);
@@ -704,32 +815,50 @@ test("the role step offers the twelve roles, checks Founder until told otherwise
  *  not carry is not offered, so the grid names only what a press can grant. */
 test("the tools step offers the connectors the picked role works in", async () => {
   await open(lanes(recorder()));
+  await passWebsite();
   await describeBusiness();
   await pickRole("Engineer");
 
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  expect(counted()).toEqual(["3", "5"]);
+  expect(counted()).toEqual(["4", "6"]);
   const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
-  expect(tools.map((tool) => tool.textContent)).toEqual(["Linear"]);
+  expect(tools.map((tool) => tool.textContent)).toEqual(["GitHub"]);
   expect(tools.map((tool) => tool.getAttribute("aria-pressed"))).toEqual(["false"]);
   expect(next().disabled).toBe(false);
 });
 
-/** A role whose tools this deploy does not carry has no step: the run counts four and goes from the
- *  role straight to the goals. */
-test("a role whose tools the catalog does not carry stands no tools step", async () => {
-  await open(lanes(recorder()));
+/** The grid ranks: what more of the picked roles name comes first, then what one names, then the
+ *  rest of the catalog in the catalog's order — and Slack, which has a step of its own, never. */
+test("the tools step ranks the picked roles' tools ahead of the rest of the catalog", async () => {
+  await open(lanes(recorder()), ADMIN, RANKED);
+  await passWebsite();
   await describeBusiness();
-  await pickRole("Sales");
+  await pickRoles(["Designer", "Engineer"]);
 
-  await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  expect(counted()).toEqual(["3", "4"]);
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
+  expect(tools.map((tool) => tool.textContent)).toEqual(["Notion", "Linear", "GitHub", "Gmail"]);
+  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+});
+
+/** A founder writes code too: GitHub stands among the founder's own tools, ahead of the catalog's
+ *  remainder, so the press that connects it is one step away on the default run. */
+test("the founder's own tools name GitHub ahead of the rest of the catalog", async () => {
+  await open(lanes(recorder()), ADMIN, RANKED);
+  await passWebsite();
+  await describeBusiness();
+  await pickRole("Founder");
+
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
+  expect(tools.map((tool) => tool.textContent)).toEqual(["Gmail", "Notion", "GitHub", "Linear"]);
 });
 
 /** Picking nothing is skipping: Next carries straight on to the goals, and nothing is connected. */
 test("the tools step skips to the goals where nothing is picked", async () => {
   const posted = recorder();
   await open(lanes(posted));
+  await passWebsite();
   await describeBusiness();
   await pickRole("Engineer");
 
@@ -749,56 +878,10 @@ test("a picked tool is stood to connect, and the press asks for that account", a
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
   onTestFinished(() => opened.mockRestore());
 
+  await passWebsite();
   await describeBusiness();
   await pickRole("Engineer");
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(screen.getByRole("button", { name: "Linear" }));
-  await userEvent.click(next());
-
-  await screen.findByRole("heading", { name: "Connect the tools you picked" });
-  await userEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
-
-  await waitFor(() =>
-    expect(intents(posted.calls)).toEqual([
-      {
-        lane: "intents",
-        body: { verb: "connect", kind: "connection", name: "linear", spec: { shared: false } },
-      },
-    ]),
-  );
-});
-
-/** Next off the connect list carries on with whatever is left unconnected: the run asks for the
- *  accounts once and never holds the member on them. */
-test("Next off the connect list carries on to the goals", async () => {
-  await open(lanes(recorder()));
-  await describeBusiness();
-  await pickRole("Engineer");
-  await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(screen.getByRole("button", { name: "Linear" }));
-  await userEvent.click(next());
-
-  await screen.findByRole("heading", { name: "Connect the tools you picked" });
-  await userEvent.click(next());
-
-  await screen.findByRole("heading", { name: "What is top of mind right now?" });
-});
-
-/** A founder writes code too, and GitHub is a member's own account to connect: the founder's step
- *  offers it beside the rest, and the press asks for that account. */
-test("the founder's tools step offers GitHub, and the press asks for that account", async () => {
-  const posted = recorder();
-  await open(lanes(posted), ADMIN, WITH_GITHUB);
-  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
-  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
-  onTestFinished(() => opened.mockRestore());
-
-  await describeBusiness();
-  await pickRole("Founder");
-
-  await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
-  expect(tools.map((tool) => tool.textContent)).toEqual(["GitHub"]);
   await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
   await userEvent.click(next());
 
@@ -815,15 +898,36 @@ test("the founder's tools step offers GitHub, and the press asks for that accoun
   );
 });
 
-test("the top-of-mind step offers the nine goals with none pressed, and Other asks for words", async () => {
+/** Next off the connect list carries on with whatever is left unconnected: the run asks for the
+ *  accounts once and never holds the member on them. */
+test("Next off the connect list carries on to the goals", async () => {
+  await open(lanes(recorder()));
+  await passWebsite();
+  await describeBusiness();
+  await pickRole("Engineer");
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "Connect the tools you picked" });
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+});
+
+test("the top-of-mind step offers the nine goals with Growing revenue pressed, and Other asks for words", async () => {
   await open();
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
 
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   const goals = within(screen.getByRole("group", { name: "Top of mind" })).getAllByRole("button");
   expect(goals.map((goal) => goal.textContent)).toEqual(GOALS);
-  expect(goals.map((goal) => goal.getAttribute("aria-pressed"))).toEqual(GOALS.map(() => "false"));
+  expect(goals.map((goal) => goal.getAttribute("aria-pressed"))).toEqual(
+    GOALS.map((goal) => String(goal === "Growing revenue")),
+  );
   expect(next().disabled).toBe(false);
   expect(screen.queryByLabelText("What is top of mind")).toBeNull();
 
@@ -839,35 +943,41 @@ test("the top-of-mind step offers the nine goals with none pressed, and Other as
 
 test("back walks the answers without losing one", async () => {
   await open();
+  await passWebsite();
   await describeBusiness();
   await pickRole("Engineer");
-  // The engineer's own tools stand between the role and the goals.
-  await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(next());
+  await skipTools();
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   await userEvent.click(screen.getByRole("button", { name: "Hiring" }));
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  expect((await screen.findByRole("radio", { checked: true })).textContent).toBe("Engineer");
-  expect(counted()).toEqual(["2", "5"]);
+  expect((await screen.findByRole("button", { name: "Engineer" })).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "Founder" }).getAttribute("aria-pressed")).toBe("false");
+  expect(counted()).toEqual(["3", "6"]);
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(((await screen.findByLabelText("About your business")) as HTMLTextAreaElement).value).toBe(
     "Design studio",
   );
-  expect(counted()).toEqual(["1", "5"]);
+  expect(counted()).toEqual(["2", "6"]);
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(((await screen.findByLabelText("Website")) as HTMLInputElement).value).toBe(DOMAIN);
+  expect(counted()).toEqual(["1", "6"]);
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await screen.findByRole("heading", { name: "An AI operating system for your business" });
   await userEvent.click(screen.getByRole("button", { name: "Get started" }));
+  expect(((await screen.findByLabelText("Website")) as HTMLInputElement).value).toBe(DOMAIN);
+
+  await userEvent.click(next());
   expect(((await screen.findByLabelText("About your business")) as HTMLTextAreaElement).value).toBe(
     "Design studio",
   );
-
   await userEvent.click(next());
-  await screen.findByRole("radiogroup", { name: "Role" });
+  await screen.findByRole("group", { name: "Role" });
   await userEvent.click(next());
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
   await userEvent.click(next());
@@ -963,7 +1073,7 @@ test("a connector the workspace already holds opens on the success screen, and C
   await screen.findByRole("heading", { name: "We were able to connect to Slack" });
   expect(screen.getByText("This installed UFO in Slack for your team")).toBeTruthy();
   expect(screen.getByText("Success")).toBeTruthy();
-  expect(counted()).toEqual(["4", "4"]);
+  expect(counted()).toEqual(["6", "6"]);
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
   await returning();
   expect(screen.getByRole("heading", { name: "We were able to connect to Slack" })).toBeTruthy();
@@ -1015,11 +1125,12 @@ test("the step's own watch lands the success screen while the tab stays open", a
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Get started" }));
   await settle();
+  fireEvent.click(next());
   fireEvent.change(screen.getByLabelText("About your business"), {
     target: { value: "Design studio" },
   });
   fireEvent.click(next());
-  fireEvent.click(screen.getByRole("radio", { name: "Founder" }));
+  fireEvent.click(next());
   fireEvent.click(next());
   fireEvent.click(next());
   fireEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
@@ -1041,22 +1152,24 @@ test("the step's own watch lands the success screen while the tab stays open", a
   fireEvent.click(screen.getByRole("button", { name: "Open your workspace" }));
   await settle();
   expect(location.hash).toBe(HANDED);
-  expect(chat.sent).toEqual([OPENING]);
+  expect(chat.sent).toEqual(DEFAULT_SENT);
 });
 
 test("declining Slack adds the surfaces step, whose Next finishes the run with the answers written, as one sentence", async () => {
   const posted = recorder();
   await open(lanes(posted));
 
+  await passWebsite();
   await describeBusiness("A two-person design studio.");
   await pickRole();
+  await skipTools();
   await pickGoals();
-  expect(counted()).toEqual(["4", "4"]);
+  expect(counted()).toEqual(["6", "6"]);
   await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
 
   await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
   expect(screen.queryByText("Text UFO from your phone, or chat from your terminal.")).toBeNull();
-  expect(counted()).toEqual(["5", "5"]);
+  expect(counted()).toEqual(["7", "7"]);
   expect((await screen.findAllByText("iMessage")).length).toBeGreaterThan(0);
   expect(screen.getAllByText("Terminal").length).toBeGreaterThan(0);
   expect(screen.queryByText("Slack")).toBeNull();
@@ -1073,24 +1186,14 @@ test("declining Slack adds the surfaces step, whose Next finishes the run with t
   expect(intents(posted.calls)).toEqual([
     {
       lane: "actions/memory/record_first_run",
-      body: { body: "A two-person design studio. Their role: Founder." },
+      body: {
+        body:
+          "A two-person design studio. Their website: " +
+          DOMAIN +
+          ". Their role: Founder. Their goals: growing revenue.",
+      },
     },
   ]);
-});
-
-test("the surfaces step names the matched company over its heading", async () => {
-  await open({ ...lanes(recorder()), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
-
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
-  await describeBusiness();
-  await userEvent.click(next());
-  await pickGoals();
-  await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
-
-  const heading = await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
-  expect(heading.parentElement!.querySelector("p")!.textContent).toBe("Simplecasual");
-  expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
 });
 
 test("Back from the surfaces step returns to the Slack step", async () => {
@@ -1104,7 +1207,7 @@ test("Back from the surfaces step returns to the Slack step", async () => {
 
   await screen.findByRole("heading", { name: "Connect your messaging app" });
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
-  expect(counted()).toEqual(["4", "5"]);
+  expect(counted()).toEqual(["6", "7"]);
 });
 
 /** The run ends on home, standing the assistant's own lane, and that lane's composer is the one the
@@ -1131,6 +1234,7 @@ test("the last screen lands home on the founded thread with connectors beside it
 test("the opening line is said to the chat app home stands, not the agent the run was drawn for", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK, [AGENT, CHAT_APP]);
 
+  await passWebsite();
   await describeBusiness();
 
   await waitFor(() => expect(chat.sent).toEqual([OPENING]));
@@ -1150,23 +1254,22 @@ test("a second run through opens a new conversation rather than the one the firs
   await answer();
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await userEvent.click(
-    await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 4 }),
+    await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 5 }),
   );
 
-  await waitFor(() => expect(chat.sent).toEqual([OPENING, OPENING]));
-  expect(chat.posted).toEqual([chat.posted[0], chat.posted[0]]);
-  expect(chat.posted[1]).toContain("conversation=new");
+  await waitFor(() => expect(chat.sent).toEqual([...DEFAULT_SENT, ...DEFAULT_SENT]));
+  expect(chat.posted).toEqual(chat.posted.map(() => chat.posted[0]));
+  expect(chat.posted[2]).toContain("conversation=new");
 });
 
-/** The store signs one file and refuses the other, so the send names the key it took and carries
- *  the file it did not — both beside the words. */
-test("the website step opens the run where the deploy offers the act, counts five steps with Slack, and is prefilled with the address's domain", async () => {
-  await open({}, ADMIN, WITH_WEBSITE);
+/** The website is the first question on every deploy, whether or not one can look it up. */
+test("the website step opens the run, prefilled with the workspace's domain, and Back returns to the welcome", async () => {
+  await open();
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
   const website = screen.getByLabelText("Website") as HTMLInputElement;
-  expect(website.value).toBe("example.com");
-  expect(counted()).toEqual(["1", "5"]);
+  expect(website.value).toBe(DOMAIN);
+  expect(counted()).toEqual(["1", "6"]);
   expect(screen.queryByLabelText("About your business")).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -1174,18 +1277,53 @@ test("the website step opens the run where the deploy offers the act, counts fiv
   expect(screen.queryByRole("progressbar", { name: "Step" })).toBeNull();
 });
 
-test("a mail provider's domain is not prefilled as the website", async () => {
-  await open({}, { ...ADMIN, email: "member@gmail.com" }, WITH_WEBSITE);
+/** A workspace founded under no domain — a personal address — opens the box empty, and where the
+ *  deploy has no confirm act Next posts nothing and simply moves on. */
+test("a workspace with no domain opens the website box empty, and Next posts nothing without the act", async () => {
+  const posted = recorder();
+  await open(lanes(posted), ADMIN, { ...FIRST_RUN, workspace_domain: null });
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
   expect((screen.getByLabelText("Website") as HTMLInputElement).value).toBe("");
+  expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
+  expect(next().disabled).toBe(false);
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "Tell us a bit about your business" });
+  expect(intents(posted.calls)).toEqual([]);
+});
+
+/** Once the member has written in the box, the domain the read hands back stays out of it. */
+test("a website the member typed survives a reload rather than being written over by the domain", async () => {
+  await open();
+
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
+  const website = screen.getByLabelText("Website");
+  await userEvent.clear(website);
+  await userEvent.type(website, "beta.co");
+
+  cleanup();
+  mount();
+  expect(((await screen.findByLabelText("Website")) as HTMLInputElement).value).toBe("beta.co");
+});
+
+test("a cleared website stays cleared across a reload", async () => {
+  await open();
+
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
+  await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+  expect((screen.getByLabelText("Website") as HTMLInputElement).value).toBe("");
+
+  cleanup();
+  mount();
+  expect(((await screen.findByLabelText("Website")) as HTMLInputElement).value).toBe("");
 });
 
 test("clearing the website empties the field, Next posts an empty website, and the business box is left empty", async () => {
   const posted = recorder();
   await open(lanes(posted), ADMIN, WITH_WEBSITE);
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
   const website = screen.getByLabelText("Website") as HTMLInputElement;
 
   await userEvent.click(screen.getByRole("button", { name: "Clear" }));
@@ -1197,7 +1335,7 @@ test("clearing the website empties the field, Next posts an empty website, and t
   expect(((await screen.findByLabelText("About your business")) as HTMLTextAreaElement).value).toBe(
     "",
   );
-  expect(counted()).toEqual(["2", "5"]);
+  expect(counted()).toEqual(["2", "6"]);
   expect(intents(posted.calls)).toEqual([
     { lane: "actions/enrichment_profile/confirm_website", body: { website: "" } },
   ]);
@@ -1214,8 +1352,7 @@ test("a matched website writes the business box once the job has written the row
     WITH_WEBSITE,
   );
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
+  await passWebsite();
 
   const about = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
   expect(about.value).toBe("");
@@ -1240,8 +1377,7 @@ test("a row that lands after the member has typed does not overwrite them", asyn
     WITH_WEBSITE,
   );
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
+  await passWebsite();
   const about = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
   await userEvent.type(about, "A two-person design studio");
 
@@ -1261,16 +1397,12 @@ test("confirming another website waits for that website's profile", async () => 
     WITH_WEBSITE,
   );
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
+  await passWebsite();
   const about = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
   await waitFor(() => expect(about.value).toBe(LEARNED));
-  await userEvent.click(next());
-  expect(await screen.findByText("Simplecasual")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  const website = screen.getByLabelText("Website");
+  const website = await screen.findByLabelText("Website");
   await userEvent.clear(website);
   await userEvent.type(website, "beta.co");
   rows = [
@@ -1285,12 +1417,10 @@ test("confirming another website waits for that website's profile", async () => 
 
   const betaAbout = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
   await waitFor(() => expect(betaAbout.value).toContain("Robots for warehouses."));
-  await userEvent.click(next());
-  expect(await screen.findByText("Beta")).toBeTruthy();
-  expect(screen.queryByText("Simplecasual")).toBeNull();
+  expect(betaAbout.value).not.toContain("keep it simple");
 });
 
-test("a profile that lands after the role step does not replace the confirmed role", async () => {
+test("a profile that lands after the role step does not replace the confirmed roles", async () => {
   let rows: unknown[] = [];
   await open(
     {
@@ -1301,50 +1431,53 @@ test("a profile that lands after the role step does not replace the confirmed ro
     WITH_WEBSITE,
   );
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
+  await passWebsite();
   await describeBusiness();
   await screen.findByRole("heading", { name: "What is your role at the business?" });
   await userEvent.click(next());
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
 
   rows = [{ ...PROFILE_ROW, job_title_levels: null, job_title_role: "engineering" }];
   await returning();
-  await screen.findByText("Simplecasual");
+  await waitFor(() => expect(stored()?.profile).toBeTruthy());
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
-  expect(screen.getByRole("radio", { name: "Founder" }).getAttribute("aria-checked")).toBe("true");
-  expect(screen.getByRole("radio", { name: "Engineer" }).getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByRole("button", { name: "Founder" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "Engineer" }).getAttribute("aria-pressed")).toBe("false");
 });
 
-test("confirming posts the website, pre-selects Founder, and the top-of-mind step names the company", async () => {
+/** The company the enrichment matched is written into the business box and nowhere else: no step
+ *  names it over its heading. */
+test("confirming posts the website and pre-selects Founder, and no step names the company", async () => {
   const posted = recorder();
   await open({ ...lanes(posted), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
-  await userEvent.click(next());
+  await passWebsite();
   await describeBusiness();
 
-  const founder = await screen.findByRole("radio", { name: "Founder" });
-  expect(founder.getAttribute("aria-checked")).toBe("true");
+  const founder = await screen.findByRole("button", { name: "Founder" });
+  expect(founder.getAttribute("aria-pressed")).toBe("true");
   expect(next().disabled).toBe(false);
   expect(intents(posted.calls)).toEqual([
-    { lane: "actions/enrichment_profile/confirm_website", body: { website: "example.com" } },
+    { lane: "actions/enrichment_profile/confirm_website", body: { website: DOMAIN } },
   ]);
+  expect(screen.queryByText("Simplecasual")).toBeNull();
   await userEvent.click(next());
+  await skipTools();
 
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  expect(screen.getByText("Simplecasual")).toBeTruthy();
+  expect(screen.queryByText("Simplecasual")).toBeNull();
 });
 
 test("a refused confirmation is stated as a toast and holds the website step", async () => {
   const posted = recorder({ confirm_website: { applied: false, message: "No key." } });
   await open({ ...lanes(posted), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
 
-  await screen.findByRole("heading", { name: "Confirm your website" });
+  await screen.findByRole("heading", { name: WEBSITE_HEADING });
   await userEvent.click(next());
 
   await screen.findByText("No key.");
-  expect(screen.getByRole("heading", { name: "Confirm your website" })).toBeTruthy();
-  expect(screen.queryByRole("radio")).toBeNull();
+  expect(screen.getByRole("heading", { name: WEBSITE_HEADING })).toBeTruthy();
+  expect(screen.queryByLabelText("About your business")).toBeNull();
 });
 
 test("each question opens with its own input focused", async () => {
@@ -1354,45 +1487,115 @@ test("each question opens with its own input focused", async () => {
   await userEvent.click(next());
   expect(document.activeElement).toBe(await screen.findByLabelText("About your business"));
   await describeBusiness();
-  expect(document.activeElement).toBe(await screen.findByRole("radio", { name: "Founder" }));
+  expect(document.activeElement).toBe(await screen.findByRole("button", { name: "Founder" }));
   await userEvent.click(next());
+  await skipTools();
   await userEvent.click(await screen.findByRole("button", { name: "Other" }));
   expect(document.activeElement).toBe(screen.getByLabelText("What is top of mind"));
 });
 
-test("a goal is picked and unpicked", async () => {
+test("the goal the step opens on is unpicked and picked again", async () => {
   await open();
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
 
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   const revenue = screen.getByRole("button", { name: "Growing revenue" });
-  expect(revenue.getAttribute("aria-pressed")).toBe("false");
-  await userEvent.click(revenue);
   expect(revenue.getAttribute("aria-pressed")).toBe("true");
   await userEvent.click(revenue);
   expect(revenue.getAttribute("aria-pressed")).toBe("false");
+  await userEvent.click(revenue);
+  expect(revenue.getAttribute("aria-pressed")).toBe("true");
 });
 
-test("the run writes the business, the role and the goals to memory before it hands over", async () => {
+test("the run writes the business, the website, the role and the goals to memory before it hands over", async () => {
   await open({}, ADMIN, NO_SLACK);
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
   await pickGoals(["Growing revenue", "Fundraising"]);
   await built();
 
   expect(intents(acts.calls)).toEqual([
     {
       lane: "actions/memory/record_first_run",
-      body: { body: "Design studio. Their role: Founder. Their goals: growing revenue, fundraising." },
+      body: { body: WHO + " Their goals: growing revenue, fundraising." },
+    },
+  ]);
+});
+
+/** Several roles are one answer, said as one: in memory, and on every goal thread. */
+test("several roles are joined in memory and in every goal thread", async () => {
+  await open({}, ADMIN, NO_SLACK);
+  await passWebsite();
+  await describeBusiness();
+  await pickRoles(["Founder", "Designer"]);
+  await skipTools();
+  await pickGoals();
+
+  await screen.findByRole("heading", { name: "Creating your business’s workspace" });
+  expect(chat.sent).toEqual([OPENING, opens("Founder / Designer", "growing revenue") + REVENUE_ASKS]);
+  await built();
+  expect(intents(acts.calls)).toEqual([
+    {
+      lane: "actions/memory/record_first_run",
+      body: {
+        body:
+          "Design studio. Their website: " +
+          DOMAIN +
+          ". Their role: Founder / Designer. Their goals: growing revenue.",
+      },
+    },
+  ]);
+});
+
+/** Other stands for the words the member typed for it, beside the roles picked off the grid. */
+test("Other's words stand in for it among the roles", async () => {
+  await open({}, ADMIN, NO_SLACK);
+  await passWebsite();
+  await describeBusiness();
+  await press("Role", ["Founder", "Other"]);
+  await userEvent.type(screen.getByLabelText("Your role"), "Barista");
+  await userEvent.click(next());
+  await skipTools();
+  await pickGoals([]);
+  await built();
+
+  expect(intents(acts.calls)).toEqual([
+    {
+      lane: "actions/memory/record_first_run",
+      body: { body: "Design studio. Their website: " + DOMAIN + ". Their role: Founder / Barista." },
+    },
+  ]);
+});
+
+/** A workspace with no domain and a member who typed none records no website. */
+test("a run with no website writes none", async () => {
+  await open({}, ADMIN, { ...NO_SLACK, workspace_domain: null });
+  await passWebsite();
+  await describeBusiness();
+  await pickRole();
+  await skipTools();
+  await pickGoals();
+  await built();
+
+  expect(intents(acts.calls)).toEqual([
+    {
+      lane: "actions/memory/record_first_run",
+      body: { body: "Design studio. Their role: Founder. Their goals: growing revenue." },
     },
   ]);
 });
 
 test("Other's words are written to memory as the member typed them, and open a thread of their own", async () => {
   await open({}, ADMIN, NO_SLACK);
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
   await pickGoals(["Hiring", "Other"], "Launching in Japan.");
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
@@ -1401,25 +1604,30 @@ test("Other's words are written to memory as the member typed them, and open a t
   expect(intents(acts.calls)).toEqual([
     {
       lane: "actions/memory/record_first_run",
-      body: { body: "Design studio. Their role: Founder. Their goals: hiring, Launching in Japan." },
+      body: { body: WHO + " Their goals: hiring, Launching in Japan." },
     },
   ]);
 });
 
 test("a run with no goal picked still writes who the workspace is for", async () => {
   await open({}, ADMIN, NO_SLACK);
-  await answer();
+  await passWebsite();
+  await describeBusiness();
+  await pickRole();
+  await skipTools();
+  await pickGoals([]);
   await built();
 
-  expect(intents(acts.calls)).toEqual([
-    { lane: "actions/memory/record_first_run", body: { body: "Design studio. Their role: Founder." } },
-  ]);
+  expect(chat.sent).toEqual([OPENING]);
+  expect(intents(acts.calls)).toEqual([{ lane: "actions/memory/record_first_run", body: { body: WHO } }]);
 });
 
 test("each picked goal opens a thread of its own, before the workspace screen", async () => {
   await open({}, ADMIN, NO_SLACK);
+  await passWebsite();
   await describeBusiness();
   await pickRole();
+  await skipTools();
   await pickGoals(["Growing revenue", "Understanding competitors"]);
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
@@ -1431,9 +1639,7 @@ test("each picked goal opens a thread of its own, before the workspace screen", 
 
 test("the workspace screen names the goals it opened a thread on", async () => {
   await open({}, ADMIN, NO_SLACK);
-  await describeBusiness();
-  await pickRole();
-  await pickGoals(["Growing revenue"]);
+  await answer();
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await screen.findByText("Started work on your goals", {}, { timeout: BUILD_STEP_MS * 6 });
@@ -1449,9 +1655,7 @@ test("the build screen states when a goal thread did not start", async () => {
     ADMIN,
     NO_SLACK,
   );
-  await describeBusiness();
-  await pickRole();
-  await pickGoals(["Growing revenue"]);
+  await answer();
 
   expect(
     await screen.findByRole("heading", { name: "Creating your business’s workspace" }),
@@ -1493,9 +1697,12 @@ test("the workspace builds itself one app at a time, then the assistant, then of
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Get started" }));
   await settle();
+  fireEvent.click(next());
   fireEvent.change(screen.getByLabelText("About your business"), { target: { value: "Design studio" } });
   fireEvent.click(next());
   fireEvent.click(next());
+  fireEvent.click(next());
+  fireEvent.click(screen.getByRole("button", { name: "Growing revenue" }));
   fireEvent.click(next());
   await settle();
 
@@ -1537,9 +1744,12 @@ test("a withheld app is left out of the build screen rather than promised", asyn
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Get started" }));
   await settle();
+  fireEvent.click(next());
   fireEvent.change(screen.getByLabelText("About your business"), { target: { value: "Design studio" } });
   fireEvent.click(next());
   fireEvent.click(next());
+  fireEvent.click(next());
+  fireEvent.click(screen.getByRole("button", { name: "Growing revenue" }));
   fireEvent.click(next());
   await settle();
 
@@ -1550,7 +1760,6 @@ test("a withheld app is left out of the build screen rather than promised", asyn
   await tick();
   await tick();
   expect(screen.getByRole("button", { name: "Open your workspace" })).toBeTruthy();
-  // The withheld app is named nowhere on the screen, and nothing promises it.
   expect(screen.queryByText("Wiki")).toBeNull();
   expect(screen.queryByText("Coming soon")).toBeNull();
 });

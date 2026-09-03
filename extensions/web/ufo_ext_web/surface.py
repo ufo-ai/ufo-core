@@ -3965,7 +3965,11 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     is in the deploy and this environment's flag is open — so every member sees that branch after
     the team step only where both hold, and whether the reading member holds a provider key of their
     own under either slot, which is the reader's answer rather than the workspace's: a key is what
-    the member's own turns run on, so the step that offers the door reads the member. The Slack step
+    the member's own turns run on, so the step that offers the door reads the member.
+    `workspace_domain` is the sign-up policy's verdict on the founding address: the company domain a
+    work address founded the workspace under, and null where the policy made none — a personal-mail
+    workspace, or one founded by `ufoctl init` — which the website step reads so a gmail.com founder
+    is offered no website. The Slack step
     reads the leg its own Connect act writes: the surface installation `slack_connect` binds. That
     row is the whole workspace's rather than the reader's audience: it is stated as a bare boolean,
     and a step narrowed by audience would tell a member to install what the workspace already has.
@@ -3975,13 +3979,18 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, _audience = resolved
-    surfaces = {entry.surface for entry in await ctx.list_installations()}
+    installations, model_key_held, workspace_domain = await asyncio.gather(
+        ctx.list_installations(),
+        ctx.member_holds_own_model_key(member_id),
+        ctx.founding_domain(),
+    )
+    surfaces = {entry.surface for entry in installations}
     held = {SURFACE_SLACK: SURFACE_SLACK in surfaces}
-    model_key_held = await ctx.member_holds_own_model_key(member_id)
     return JSONResponse(
         {
             "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
             "model_key_held": model_key_held,
+            "workspace_domain": workspace_domain,
             "connectors": [
                 ConnectStep(name=tile.name, label=tile.label, installed=held[tile.name]).model_dump(
                     mode="json"

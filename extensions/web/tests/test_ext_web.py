@@ -212,6 +212,7 @@ from ufo.runtime.hub import (
 )
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.objects import OBJECT_LIST_PAGE
+from ufo.runtime.seats import signup_workspace_id
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
@@ -803,8 +804,8 @@ class ConnectProvider:
         return OAuthAccount(account_id="github-account")
 
 
-async def _seed_workspace() -> tuple[UUID, UUID]:
-    workspace_id, agent_id = uuid4(), uuid4()
+async def _seed_workspace(workspace_id: UUID | None = None) -> tuple[UUID, UUID]:
+    workspace_id, agent_id = workspace_id or uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -2356,9 +2357,15 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
         "connectors",
         "actions",
         "model_key_held",
+        "workspace_domain",
     }
     assert [view["name"] for view in payload["actions"]["member"]] == ["add_member"]
     assert payload["actions"]["enrichment_profile"] == []
+    assert payload["workspace_domain"] is None
+    founded_id, _ = await _seed_workspace(signup_workspace_id("example.com"))
+    _founder, founder_token = await _seed_member(founded_id, "f@example.com")
+    founded = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={founder_token}"})
+    assert founded.json()["workspace_domain"] == "example.com"
 
 
 @pytest.mark.usefixtures("database_url")

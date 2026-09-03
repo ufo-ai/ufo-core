@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,7 +11,7 @@ REPO = Path(__file__).parents[2]
 
 
 def _check_stack_slot_selects_one_complete_compose_project() -> None:
-    for stack, host, postgres, redis, gateway, serve, ingress in [
+    for stack, host, postgres, redis, front, serve, ingress in [
         ("1", "ufo-1.localhost", "15541", "15543", "18080", "18710", "18100"),
         ("2", "ufo-2.localhost", "15641", "15643", "18180", "18810", "18200"),
         ("3", "ufo-3.localhost", "15741", "15743", "18280", "18910", "18300"),
@@ -40,7 +41,7 @@ def _check_stack_slot_selects_one_complete_compose_project() -> None:
         assert f"UFO_STACK_HOST={host}" in command
         assert f"UFO_PG_PORT={postgres}" in command
         assert f"UFO_REDIS_PORT={redis}" in command
-        assert f"UFO_GATEWAY_PORT_HOST={gateway}" in command
+        assert f"UFO_STACK_PORT_HOST={front}" in command
         assert f"UFO_SERVE_PORT_HOST={serve}" in command
         assert f"UFO_INGRESS_PORT_HOST={ingress}" in command
         assert f'UFO_WORKSPACE_ROOT="{workspace_root}"' in command
@@ -49,21 +50,34 @@ def _check_stack_slot_selects_one_complete_compose_project() -> None:
 
 def _check_stack_origin_reaches_every_browser_callback() -> None:
     compose = yaml.safe_load((REPO / "compose.yaml").read_text())
-    gateway = compose["services"]["gateway"]["environment"]
+    gateway = compose["services"]["gateway"]
     serve = compose["services"]["serve"]["environment"]
+    front = compose["services"]["front"]
     ingress = compose["services"]["ingress"]
 
-    gateway_origin = "http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}"
-    serve_origin = "http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}"
+    stack_origin = "http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}"
     ingress_origin = "http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}"
-    assert gateway["UFO_PUBLIC_BASE_URL"] == gateway_origin
-    assert gateway["UFO_WORKSPACE_BASE_URL"] == serve_origin
-    assert gateway["WORKOS_REDIRECT_URI"] == f"{gateway_origin}/v1/onboard/auth/callback"
-    assert serve["UFO_PUBLIC_BASE_URL"] == serve_origin
+    assert gateway["environment"]["UFO_PUBLIC_BASE_URL"] == stack_origin
+    assert gateway["environment"]["UFO_WORKSPACE_BASE_URL"] == stack_origin
+    assert (
+        gateway["environment"]["WORKOS_REDIRECT_URI"] == f"{stack_origin}/v1/onboard/auth/callback"
+    )
+    assert "ports" not in gateway
+    assert front["ports"] == ["127.0.0.1:${UFO_STACK_PORT_HOST:-8080}:8080"]
+    assert "./dev/front.conf:/etc/nginx/conf.d/default.conf:ro" in front["volumes"]
+    conf = (REPO / "dev/front.conf").read_text()
+    assert "resolver 127.0.0.11 valid=10s;" in conf
+    assert "set $gateway http://gateway:8080;" in conf
+    assert "set $serve http://serve:8710;" in conf
+    for door in ["/login", "/logout", "/join", "/v1/onboard", "/ufo"]:
+        assert f"location {door} {{ proxy_pass $gateway; }}" in conf
+    assert "location / { proxy_pass $serve; }" in conf
+    assert "proxy_set_header Host $http_host;" in conf
+    assert serve["UFO_PUBLIC_BASE_URL"] == stack_origin
     assert serve["UFO_INGRESS_PUBLIC_URL"] == ingress_origin
     assert ingress["command"] == ["ingress"]
     assert ingress["network_mode"] == "service:serve"
-    assert ingress["environment"]["UFO_PUBLIC_BASE_URL"] == serve_origin
+    assert ingress["environment"]["UFO_PUBLIC_BASE_URL"] == stack_origin
     assert ingress["environment"]["UFO_INGRESS_PUBLIC_URL"] == ingress_origin
     assert "127.0.0.1:${UFO_INGRESS_PORT_HOST:-8100}:8100" in compose["services"]["serve"]["ports"]
     assert 'public_base_url = "__PUBLIC_BASE_URL__"' in (REPO / "dev/ufo.toml").read_text()
@@ -120,12 +134,12 @@ def _check_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> Non
 
 
 def _check_web_reloads_from_source_against_each_slot() -> None:
-    for stack, host, web, serve in [
-        ("1", "ufo-1.localhost", "15173", "18710"),
-        ("2", "ufo-2.localhost", "15273", "18810"),
-        ("3", "ufo-3.localhost", "15373", "18910"),
-        ("4", "ufo-4.localhost", "15473", "19010"),
-        ("5", "ufo-5.localhost", "15573", "19110"),
+    for stack, host, web, front in [
+        ("1", "ufo-1.localhost", "15173", "18080"),
+        ("2", "ufo-2.localhost", "15273", "18180"),
+        ("3", "ufo-3.localhost", "15373", "18280"),
+        ("4", "ufo-4.localhost", "15473", "18380"),
+        ("5", "ufo-5.localhost", "15573", "18480"),
     ]:
         command = subprocess.run(
             ["make", "--no-print-directory", "-n", "web", f"STACK={stack}"],
@@ -135,7 +149,7 @@ def _check_web_reloads_from_source_against_each_slot() -> None:
             check=True,
         ).stdout
 
-        assert f"UFO_SERVE_ORIGIN=http://{host}:{serve}" in command
+        assert f"UFO_STACK_ORIGIN=http://{host}:{front}" in command
         # The flags go to vite bare: pnpm swallows a `--` before them and vite then serves the
         # lanes shell on its own default port.
         assert "pnpm -C extensions/web/frontend run dev --config sidebar/vite.config.ts" in command
@@ -160,10 +174,29 @@ def _check_web_reloads_from_source_against_each_slot() -> None:
     assert refused.returncode != 0
     assert "SHELL_NAME must be one of: sidebar lanes" in refused.stderr
 
-    # The dev server reads the fleet through this variable, and its own suite pins the reading.
+    # The dev server reads the stack through this variable, and its own suite pins the reading.
     for config in ["vite.config.ts", "sidebar/vite.config.ts"]:
         source = (REPO / "extensions/web/frontend" / config).read_text()
-        assert "process.env.UFO_SERVE_ORIGIN" in source
+        assert "process.env.UFO_STACK_ORIGIN" in source
+
+
+def _check_signin_seats_the_dev_email_on_the_stack_origin() -> None:
+    for stack, host, front in [
+        ("1", "ufo-1.localhost", "18080"),
+        ("3", "ufo-3.localhost", "18280"),
+    ]:
+        command = subprocess.run(
+            ["make", "--no-print-directory", "-n", "signin", f"STACK={stack}"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+            env={name: value for name, value in os.environ.items() if name != "BROWSER"},
+        ).stdout
+        assert f'dev/signin.py --origin http://{host}:{front} --email "$UFO_DEV_EMAIL"' in command
+        assert 'test -n "$UFO_DEV_EMAIL"' in command
+        assert "BROWSER='open -a \"Google Chrome\" %s'" in command
+    assert "UFO_DEV_EMAIL=" in (REPO / ".env.template").read_text().splitlines()
 
 
 def _check_stack_refuses_a_slot_outside_its_closed_range() -> None:
@@ -192,6 +225,6 @@ def _check_db_keeps_the_test_and_eval_postgres_port() -> None:
 
 def test_dev_stack_sync_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 8
+    assert len(checks) == 9
     for check in checks:
         check()
