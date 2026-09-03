@@ -5,6 +5,7 @@
 pub mod editor;
 pub mod history;
 pub mod markdown;
+pub mod masthead;
 pub mod osc;
 pub mod picker;
 pub mod plain;
@@ -305,6 +306,11 @@ impl<W: Write> App<W> {
 
     pub fn set_pr(&mut self, pr: Option<Pr>) {
         self.pr = pr;
+    }
+
+    /// The mark, at the head of the transcript.
+    pub fn masthead(&mut self) {
+        self.retained.push(Entry::Masthead);
     }
 
     // ── directives ────────────────────────────────────────────────────────────────────────────

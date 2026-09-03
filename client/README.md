@@ -11,9 +11,10 @@ else has to be installed for that: the binary is self-contained, and it is built
 and Windows.
 
 It picks its renderer from the terminal it finds. An interactive terminal gets the full-screen
-interface; a pipe, a dumb terminal, or `UFO_PLAIN` gets plain lines; `--json` reads and writes JSON
-events on stdin and stdout so another program can drive it. `--remote` leaves the current directory
-on the member's machine and runs the conversation in the workspace's configured sandbox.
+interface, which opens under the drawn mark with this build's version beside it; a pipe, a dumb
+terminal, or `UFO_PLAIN` gets plain lines; `--json` reads and writes JSON events on stdin and stdout so another program can
+drive it. `--remote` leaves the current directory on the member's machine and runs the conversation
+in the workspace's configured sandbox.
 
 ```
 ufo [--resume [id]] [--remote] [--json] [message...]

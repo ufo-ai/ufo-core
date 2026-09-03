@@ -71,8 +71,9 @@ ship — visual character lives in CSS and the mark, never in the characters of 
 
 **`∵` is the mark and stays.** It is drawn, not said — the metaphor ban governs words, and the
 mark is exempt from the punctuation rule that governs them. The curl card heads its host with it,
-held there by a test; strip decoration around it, never it. The apex serves browsers the brand page
-instead, and its words answer to the same rules.
+held there by a test; strip decoration around it, never it. The terminal client opens a conversation
+under the whole logo the mark is taken from, drawn in characters off the drawn file and held the
+same way. The apex serves browsers the brand page instead, and its words answer to the same rules.
 
 ## Prompts
 

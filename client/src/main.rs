@@ -1002,6 +1002,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     let first_for_wire = first.clone();
     thread::spawn(move || wire.run(first_for_wire));
 
+    app.masthead();
     if !first.is_empty() {
         app.begin_turn();
     }

@@ -6,7 +6,7 @@
 use ratatui::text::{Line, Span};
 
 use crate::ui::theme::Theme;
-use crate::ui::{markdown, wrap, PROMPT_IDLE};
+use crate::ui::{markdown, masthead, wrap, PROMPT_IDLE};
 
 pub const ENTRY_MAX: usize = 2000;
 const ECHO_INDENT: &str = "  ";
@@ -29,6 +29,8 @@ pub enum Entry {
     Steps { steps: Vec<Step>, fold: Fold },
     /// Pre-rendered lines that re-wrap by clipping only (image markers, raw spans).
     Raw(Vec<Line<'static>>),
+    /// The mark at the head of the transcript, drawn to the width it is read at.
+    Masthead,
 }
 
 /// One step of a turn: a thought the agent wrote between its calls, the one line a call or a
@@ -553,6 +555,7 @@ fn render(entry: &Entry, theme: &Theme, width: u16) -> Vec<Line<'static>> {
         Entry::Note(text) => vec![Line::styled(text.clone(), theme.muted)],
         Entry::Steps { steps, fold } => steps_lines(steps, *fold, theme, width),
         Entry::Raw(lines) => lines.clone(),
+        Entry::Masthead => masthead::masthead(theme, width),
     }
 }
 
@@ -1027,6 +1030,37 @@ mod tests {
             Some("https://ufo.test")
         );
         assert_eq!(retained.link_at(0, 22, &theme), None);
+    }
+
+    /// The mark holds its source, not its pixels, so the width the member is at reaches it on
+    /// every read — not only the one the conversation opened at.
+    #[test]
+    fn the_mark_is_drawn_at_the_width_it_is_read_at() {
+        let theme = theme();
+        let mut retained = Retained::new(80);
+        retained.push(Entry::Masthead);
+        let wide = texts(&retained.document(&theme));
+        assert!(
+            wide.iter()
+                .any(|row| row.contains(env!("CARGO_PKG_VERSION"))),
+            "{wide:?}"
+        );
+        retained.set_width(45);
+        let narrow = texts(&retained.document(&theme));
+        assert_eq!(narrow.len(), wide.len());
+        assert!(
+            narrow
+                .iter()
+                .all(|row| !row.contains(env!("CARGO_PKG_VERSION"))),
+            "a width with no room for the version drops it: {narrow:?}"
+        );
+        retained.set_width(30);
+        assert!(
+            texts(&retained.document(&theme)).is_empty(),
+            "a width with no room for the mark drops it whole"
+        );
+        retained.set_width(80);
+        assert_eq!(texts(&retained.document(&theme)), wide);
     }
 
     #[test]

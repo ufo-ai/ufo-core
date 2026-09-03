@@ -440,6 +440,7 @@ struct OnPty {
     keys: std::fs::File,
     child: std::process::Child,
     painted: Arc<Mutex<Vec<u8>>>,
+    size: (u16, u16),
 }
 
 #[cfg(unix)]
@@ -450,11 +451,21 @@ impl OnPty {
         thread::sleep(Duration::from_millis(600));
     }
 
-    /// The dock as it stands, replayed through a terminal emulator.
+    /// The dock as it stands, replayed through a terminal emulator the size of the pty: a row
+    /// wider than the client's own terminal has to wrap in the reading exactly as it wrapped on
+    /// the screen.
     fn screen(&self) -> String {
-        let mut parser = vt100::Parser::new(24, 100, 0);
-        parser.process(&self.painted.lock().unwrap());
-        parser.screen().contents()
+        replayed(&self.painted.lock().unwrap(), self.size)
+    }
+
+    /// Retype the terminal's size. The pty raises SIGWINCH on the client, which reads it as a
+    /// resize and repaints the whole alternate screen.
+    fn resized(&mut self, size: (u16, u16)) {
+        use std::os::fd::AsRawFd;
+
+        self.size = size;
+        set_winsize(self.keys.as_raw_fd(), size);
+        thread::sleep(Duration::from_millis(600));
     }
 
     /// Everything ever painted, so a popup that came and went is still evidence.
@@ -494,6 +505,43 @@ impl OnPty {
     }
 }
 
+/// The size every pty rig runs at unless a test states another. The client reads it off the pty,
+/// so it is the width the mark, the composer and every wrapped row are painted to.
+#[cfg(unix)]
+const SCREEN: (u16, u16) = (80, 24);
+
+/// Two terminals the mark answers differently: one with room for the drawing but not the version,
+/// and one with room for neither.
+#[cfg(unix)]
+const MARK_ONLY: (u16, u16) = (45, 24);
+#[cfg(unix)]
+const NARROW: (u16, u16) = (40, 24);
+
+/// Type a terminal's size onto the pty. Before the client starts this is the size it reads; after,
+/// the kernel raises SIGWINCH on the foreground group and the client repaints at the new one.
+#[cfg(unix)]
+fn set_winsize(tty: std::os::fd::RawFd, (cols, rows): (u16, u16)) {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(tty, libc::TIOCSWINSZ as _, &size) },
+        0,
+        "the pty takes its size"
+    );
+}
+
+/// Painted bytes read back through a terminal emulator of the given size.
+#[cfg(unix)]
+fn replayed(painted: &[u8], (cols, rows): (u16, u16)) -> String {
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(painted);
+    parser.screen().contents()
+}
+
 /// The client on a pty, with the leader handed back: whoever holds it types the keys and plays
 /// the terminal. `workspace` is the surface a signed-in client posts to; `None` leaves the client
 /// signed out, so it drives the gateway's onboarding prompts instead.
@@ -504,6 +552,7 @@ fn spawn_on_a_pty(
     home: &std::path::Path,
     workspace: Option<&str>,
     truecolor: bool,
+    size: (u16, u16),
 ) -> (std::fs::File, std::process::Child) {
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
@@ -515,6 +564,7 @@ fn spawn_on_a_pty(
     let name = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(leader)) }.to_owned();
     let follower = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
     assert!(follower >= 0, "the pty follower opens");
+    set_winsize(leader, size);
 
     let scratch_tmp = home.join("tmp");
     std::fs::create_dir_all(&scratch_tmp).expect("scratch tmp");
@@ -553,8 +603,10 @@ fn spawn_on_a_pty(
         };
     }
     unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
+        command.pre_exec(move || {
+            if libc::setsid() < 0 || libc::ioctl(follower, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
@@ -612,11 +664,12 @@ struct Played {
     child: std::process::Child,
     keys: std::fs::File,
     tape: Arc<Mutex<Tape>>,
+    size: (u16, u16),
 }
 
 #[cfg(unix)]
 fn play_the_terminal(url: &str, home: &std::path::Path, terminal: Terminal) -> Played {
-    let (keys, child) = spawn_on_a_pty(url, &["go"], home, Some(url), true);
+    let (keys, child) = spawn_on_a_pty(url, &["go"], home, Some(url), true, SCREEN);
     let mut reader = keys.try_clone().expect("the leader duplicates");
     let mut writer = keys.try_clone().expect("the leader duplicates");
     let tape = Arc::new(Mutex::new(Tape::default()));
@@ -654,7 +707,12 @@ fn play_the_terminal(url: &str, home: &std::path::Path, terminal: Terminal) -> P
             }
         }
     });
-    Played { child, keys, tape }
+    Played {
+        child,
+        keys,
+        tape,
+        size: SCREEN,
+    }
 }
 
 #[cfg(unix)]
@@ -696,9 +754,7 @@ impl Played {
     }
 
     fn screen(&self) -> String {
-        let mut parser = vt100::Parser::new(24, 100, 0);
-        parser.process(&self.tape.lock().unwrap().painted);
-        parser.screen().contents()
+        replayed(&self.tape.lock().unwrap().painted, self.size)
     }
 
     fn press(&mut self, keys: &[u8]) {
@@ -723,8 +779,9 @@ fn run_client_on_pty(
     args: &[&str],
     home: &std::path::Path,
     workspace: Option<&str>,
+    size: (u16, u16),
 ) -> OnPty {
-    let (keys, child) = spawn_on_a_pty(url, args, home, workspace, false);
+    let (keys, child) = spawn_on_a_pty(url, args, home, workspace, false, size);
     let mut reader = keys.try_clone().expect("the leader duplicates");
     let painted = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&painted);
@@ -741,6 +798,7 @@ fn run_client_on_pty(
         keys,
         child,
         painted,
+        size,
     }
 }
 
@@ -1206,6 +1264,149 @@ fn a_mid_turn_send_posts_instantly_and_settles_on_absorption() {
 
 #[cfg(unix)]
 #[test]
+fn a_conversation_opens_under_the_mark() {
+    let served = serve(vec![Exchange {
+        delay_ms: 900,
+        status: 200,
+        reply_lines: &["say\thello", "exit\t0"],
+    }]);
+    let home = scratch_home("tty-masthead");
+    let mut session = run_client_on_pty(&served.url, &["echoed"], &home, Some(&served.url), SCREEN);
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the launch message reaches the gateway");
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !session.screen().contains(&version) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the masthead never painted: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let screen = session.screen();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    served.gateway.done();
+    assert_eq!(
+        screen.matches("(o)").count(),
+        3,
+        "the mark draws the logo's three discs: {screen}"
+    );
+    assert!(
+        screen.contains("\\_____/") && screen.contains("`---'"),
+        "the wordmark stands beside them: {screen}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A terminal narrower than the drawing opens bare. The rows are a fixed width and the frame
+/// writes each one after an absolute cursor move, so an over-wide row would wrap into the row
+/// beneath it and the diff would keep the wreckage on every frame after.
+#[cfg(unix)]
+#[test]
+fn a_terminal_too_narrow_for_the_mark_opens_bare() {
+    let served = serve(vec![Exchange {
+        delay_ms: 900,
+        status: 200,
+        reply_lines: &["say\thello", "exit\t0"],
+    }]);
+    let home = scratch_home("tty-masthead-narrow");
+    let mut session = run_client_on_pty(&served.url, &["echoed"], &home, Some(&served.url), NARROW);
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the launch message reaches the gateway");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !session.screen().contains("hello") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the reply never painted, so the head of the transcript is not yet evidence: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let screen = session.screen();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    served.gateway.done();
+    assert!(
+        !screen.contains("(o)") && !screen.contains("\\_____/"),
+        "no part of the drawing is painted at {} columns: {screen}",
+        NARROW.0
+    );
+    assert!(
+        !screen.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+        "{screen}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The mark is drawn to the width the member is at, not the one the conversation opened at. A
+/// terminal widened past the version's room gains the version, which is the half of a resize a
+/// pre-rendered row cannot fake: pulling one in only clips it.
+#[cfg(unix)]
+#[test]
+fn the_mark_is_redrawn_when_the_terminal_resizes() {
+    let served = serve(vec![Exchange {
+        delay_ms: 900,
+        status: 200,
+        reply_lines: &["say\thello", "exit\t0"],
+    }]);
+    let home = scratch_home("tty-masthead-resize");
+    let mut session = run_client_on_pty(
+        &served.url,
+        &["echoed"],
+        &home,
+        Some(&served.url),
+        MARK_ONLY,
+    );
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the launch message reaches the gateway");
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while session.screen().matches("(o)").count() != 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mark never painted at {} columns: {}",
+            MARK_ONLY.0,
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !session.screen().contains(&version),
+        "a terminal with no room for the version opens without it: {}",
+        session.screen()
+    );
+    session.resized(SCREEN);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !session.screen().contains(&version) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the widened terminal never gained the version: {}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let screen = session.screen();
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    served.gateway.done();
+    assert_eq!(
+        screen.matches("(o)").count(),
+        3,
+        "the drawing stands whole at the new width: {screen}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
 fn the_first_frame_is_painted_before_the_loop_waits_on_anything() {
     let served = serve(vec![Exchange {
         delay_ms: 900,
@@ -1213,7 +1414,7 @@ fn the_first_frame_is_painted_before_the_loop_waits_on_anything() {
         reply_lines: &["say\thello", "exit\t0"],
     }]);
     let home = scratch_home("tty-frame-zero");
-    let mut session = run_client_on_pty(&served.url, &["echoed"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["echoed"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1260,7 +1461,7 @@ fn esc_on_a_running_turn_posts_the_stop() {
         },
     ]);
     let home = scratch_home("stop");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1309,7 +1510,7 @@ fn a_second_esc_in_one_turn_leaves_the_next_turn_running() {
         },
     ]);
     let home = scratch_home("stop-twice");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1381,7 +1582,7 @@ fn an_ack_naming_no_arrival_settles_the_row_at_once() {
         },
     ]);
     let home = scratch_home("tty-settle");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1408,9 +1609,7 @@ fn an_ack_naming_no_arrival_settles_the_row_at_once() {
     let leave = printed
         .rfind("\x1b[?1049l")
         .expect("the session leaves the alternate screen");
-    let mut parser = vt100::Parser::new(24, 100, 0);
-    parser.process(&printed.as_bytes()[leave..]);
-    let document = parser.screen().contents();
+    let document = replayed(&printed.as_bytes()[leave..], session.size);
     assert_eq!(
         document.matches("\u{203a} later thought").count(),
         1,
@@ -1492,7 +1691,7 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
     ]);
     let home = scratch_home("tty-image");
     stub_clipboard_image(&home);
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1565,7 +1764,7 @@ fn a_clipboard_read_lands_only_in_the_entry_that_asked() {
             ("xclip", slow),
         ],
     );
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1605,7 +1804,7 @@ fn a_clipboard_deadline_frees_ctrl_v() {
     }]);
     let home = scratch_home("tty-clipwedge");
     stub_clipboard_hang(&home);
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1657,7 +1856,7 @@ fn a_dropped_image_path_attaches_as_an_image() {
     let source = home.join("shot one.png");
     let png = [0x89u8, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 7, 7];
     std::fs::write(&source, png).unwrap();
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1739,7 +1938,7 @@ fn ctrl_v_with_a_copied_image_file_attaches_it() {
             ("xclip", &file_clipboard),
         ],
     );
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1785,7 +1984,7 @@ fn an_image_at_the_path_popup_names_the_drop() {
     }]);
     let home = scratch_home("tty-clippath");
     stub_clipboard_image(&home);
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1837,7 +2036,7 @@ fn a_hung_clipboard_tool_never_wedges_the_session() {
     ]);
     let home = scratch_home("tty-cliphang");
     stub_clipboard_hang(&home);
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1876,7 +2075,7 @@ fn ctrl_v_pastes_text_into_the_masked_entry() {
     ]);
     let home = scratch_home("tty-clipsecret");
     stub_clipboard_text(&home, "sk-live-abc123");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1915,7 +2114,7 @@ fn an_empty_clipboard_names_itself() {
     }]);
     let home = scratch_home("tty-clipempty");
     stub_clipboard_text(&home, "");
-    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -1971,7 +2170,7 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
         },
     ]);
     let home = scratch_home("tty-recall");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2028,9 +2227,7 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
     let leave = printed
         .rfind("\x1b[?1049l")
         .expect("the session leaves the alternate screen");
-    let mut parser = vt100::Parser::new(24, 100, 0);
-    parser.process(&printed.as_bytes()[leave..]);
-    let document = parser.screen().contents();
+    let document = replayed(&printed.as_bytes()[leave..], session.size);
     assert_eq!(
         document.matches("\u{203a} later thought").count(),
         1,
@@ -2065,7 +2262,7 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
         },
     ]);
     let home = scratch_home("tty-send");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2131,7 +2328,7 @@ fn an_idle_tty_listens_and_prints_the_turn_that_wakes_the_conversation() {
         },
     ]);
     let home = scratch_home("tty-listen");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !session.ended() {
         assert!(std::time::Instant::now() < deadline, "client never exited");
@@ -2197,7 +2394,7 @@ fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
         },
     ]);
     let home = scratch_home("tty-detach-listen");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2274,7 +2471,7 @@ fn a_severed_bounce_runs_the_reconnect_ladder_to_its_end() {
         },
     ]);
     let home = scratch_home("tty-severed-bounce");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !session.ended() {
         assert!(
@@ -2323,7 +2520,7 @@ fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
         },
     ]);
     let home = scratch_home("tty-secret-listen");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2385,7 +2582,7 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
         },
     ]);
     let home = scratch_home("signin");
-    let mut session = run_client_on_pty(&served.url, &[], &home, None);
+    let mut session = run_client_on_pty(&served.url, &[], &home, None, SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2444,7 +2641,7 @@ fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
         },
     ]);
     let home = scratch_home("mention");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2501,7 +2698,7 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
         },
     ]);
     let home = scratch_home("paste");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2574,7 +2771,7 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
         },
     ]);
     let home = scratch_home("tty-rollup");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2658,7 +2855,7 @@ fn generated_activity_accumulates_live_and_rolls_up() {
         },
     ]);
     let home = scratch_home("tty-generated-activity");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2717,7 +2914,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         ],
     }]);
     let home = scratch_home("tty-background-run");
-    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
     served
         .arrived
         .recv_timeout(ARRIVAL_WAIT)
@@ -2827,7 +3024,7 @@ fn hover(row: u16, col: u16) -> String {
 
 #[cfg(unix)]
 fn cell_underlined(session: &OnPty, row: u16, col: u16) -> bool {
-    let mut parser = vt100::Parser::new(24, 100, 0);
+    let mut parser = vt100::Parser::new(session.size.1, session.size.0, 0);
     parser.process(&session.painted.lock().unwrap());
     parser
         .screen()
