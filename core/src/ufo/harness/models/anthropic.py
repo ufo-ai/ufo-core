@@ -33,7 +33,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.models.spec import KEY_REJECTED_STATUS, RATE_LIMITED_STATUS, ModelSpec
 from ufo.harness.o11y import emit_metric, log
-from ufo.harness.rounds import ModelStreamInterrupted
+from ufo.harness.rounds import ModelRetryAfter, ModelStreamInterrupted
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -43,6 +43,7 @@ OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.
 MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
+PROVIDER_PARK_THRESHOLD_SECONDS = 10.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
 STABLE_PREFIX_CACHE_TTL = "1h"
 STREAM_TRANSPORT_ERRORS = (
@@ -133,6 +134,7 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
 class _AnthropicRetry:
     spec: ModelSpec
     model: str
+    defer_long_retry: bool
     attempt: int = 0
     delay: float = INITIAL_RETRY_DELAY_SECONDS
 
@@ -222,6 +224,12 @@ class _AnthropicRetry:
             model=self.model,
             kind="status",
         )
+        if (
+            self.defer_long_retry
+            and error.status_code == 429
+            and wait > PROVIDER_PARK_THRESHOLD_SECONDS
+        ):
+            raise ModelRetryAfter(wait) from error
         await asyncio.sleep(wait)
         return replace(
             self,
@@ -420,7 +428,12 @@ class AnthropicClient:
         result for the turn loop's nudge — a tool-call-only response has yielded and never
         degrades.
         """
-        retry = _AnthropicRetry(self.spec, request.model, delay=INITIAL_RETRY_DELAY_SECONDS)
+        retry = _AnthropicRetry(
+            self.spec,
+            request.model,
+            request.defer_long_retry,
+            delay=INITIAL_RETRY_DELAY_SECONDS,
+        )
         empty_attempt = 0
         while True:
             state = _AnthropicStream()

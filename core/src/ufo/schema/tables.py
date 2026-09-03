@@ -256,6 +256,7 @@ turn = sa.Table(
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("running_attempt", sa.Text, nullable=True),
     sa.Column("dispatch_enqueued_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("retry_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),
@@ -287,6 +288,12 @@ turn = sa.Table(
         "workspace_id",
         postgresql_where=sa.text("status = 'parked'"),
         sqlite_where=sa.text("status = 'parked'"),
+    ),
+    sa.Index(
+        "turn_retry_at",
+        "retry_at",
+        postgresql_where=sa.text("status = 'parked' and retry_at is not null"),
+        sqlite_where=sa.text("status = 'parked' and retry_at is not null"),
     ),
     sa.Index(
         "turn_spoken",

@@ -58,7 +58,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.models.registry import MemberAccounts, ModelRegistry
 from ufo.harness.models.spec import ModelSpec
-from ufo.harness.rounds import ModelStreamInterrupted
+from ufo.harness.rounds import ModelRetryAfter, ModelStreamInterrupted
 from ufo.harness.sandbox.session import (
     RUNTIME_DIRNAME,
     SANDBOX_UFO_HOME,
@@ -214,6 +214,7 @@ from ufo.schema.records import (
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
+    PARKED,
     SCHEDULED_ADMISSION,
     Agent,
     ConnectRequest,
@@ -1877,9 +1878,9 @@ async def test_preemptibility_reads_the_builtin_declarations(db: None, tmp_path:
     )
 
 
-async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_path: Path) -> None:
-    """A resumed park is a fresh workflow with an empty step log: rows the parked attempt claimed
-    must return to pending, or the resume would never see them."""
+async def test_park_keeps_absorbed_arrivals_and_releases_unabsorbed_arrivals(
+    db: None, tmp_path: Path
+) -> None:
     turn = await _seed_turn("running", None)
     with ws(turn.workspace_id):
         engine = _engine(turn, object(), tmp_path)
@@ -1887,26 +1888,178 @@ async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_pat
         await _queue_arrival(turn, "two")
         claimed = await engine._claim_arrivals(())
         assert [_arrival_body(arrival) for arrival in claimed] == ["one", "two"]
-        await engine._park("over a spend cap", [])
+        await engine._park("over a spend cap", [], absorbed=(claimed[0].id,))
         async with workspace_tx() as connection:
-            pending = (
-                (
-                    await connection.execute(
-                        sa.select(tables.inbound_message.c.body)
-                        .where(tables.inbound_message.c.consumed_turn_id.is_(None))
-                        .order_by(tables.inbound_message.c.seq)
-                    )
+            arrivals = (
+                await connection.execute(
+                    sa.select(
+                        tables.inbound_message.c.body,
+                        tables.inbound_message.c.consumed_turn_id,
+                    ).order_by(tables.inbound_message.c.seq)
                 )
-                .scalars()
-                .all()
-            )
+            ).all()
             status = (
                 await connection.execute(
                     sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
                 )
             ).scalar_one()
-    assert pending == ["one", "two"]
+    assert [(row.body, row.consumed_turn_id) for row in arrivals] == [
+        ("one", turn.id),
+        ("two", None),
+    ]
     assert status == "parked"
+
+
+async def test_a_delivering_child_parks_until_the_provider_retry_time(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    parent_conversation_id = uuid4()
+    parent_turn_id = uuid4()
+    parent_terminal = TerminalFrame(status="done", text="delegated")
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == turn.conversation_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=parent_conversation_id,
+                workspace_id=turn.workspace_id,
+                agent_id=turn.agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=parent_turn_id,
+                workspace_id=turn.workspace_id,
+                conversation_id=parent_conversation_id,
+                agent_id=turn.agent_id,
+                seq=1,
+                status="done",
+                inbound="delegate",
+                admission_source=MEMBER_ADMISSION,
+                terminal=parent_terminal.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(parent_turn_id=parent_turn_id, result_delivery="pending")
+            .where(tables.turn.c.id == turn.id)
+        )
+    turn = turn.model_copy(update={"parent_turn_id": parent_turn_id, "result_delivery": "pending"})
+    before = datetime.now(UTC)
+    carrier = RecordingCarrier()
+    engine = _engine(
+        turn,
+        ToolThenInterruptedModel(ModelRetryAfter(3600)),
+        tmp_path,
+        carrier=carrier,
+    )
+    arrival_id = await _queue_arrival(turn, "use this once", admission_source=INTERNAL_ADMISSION)
+
+    with pytest.raises(TurnParked) as raised:
+        await engine.run()
+
+    assert raised.value.retry_at is not None
+    assert raised.value.retry_at >= before + timedelta(seconds=3599)
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.retry_at).where(
+                    tables.turn.c.id == turn.id
+                )
+            )
+        ).one()
+    assert row.status == "parked"
+    assert row.retry_at is not None
+    assert row.retry_at.replace(tzinfo=UTC) >= before + timedelta(seconds=3599)
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.from_run
+    assert stored.parked is not None and stored.parked.absorbed == (arrival_id,)
+    assert any(
+        isinstance(message.content, tuple)
+        and any(isinstance(block, ToolResultBlock) for block in message.content)
+        for message in stored.messages
+    )
+    assert len(carrier.calls) == 1
+
+    client = _RecordingEnqueue()
+    await TurnDispatcher(client=client).run()
+    assert client.options == []
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(retry_at=datetime.now(UTC) - timedelta(seconds=1))
+            .where(tables.turn.c.id == turn.id)
+        )
+    await TurnDispatcher(client=client).run()
+    assert len(client.options) == 1
+    assert client.options[0]["workflow_id"] != str(turn.id)
+    assert client.options[0]["queue_name"] == "express"
+
+    resumed = turn.model_copy(update={"status": "queued"})
+    frame = await _engine(resumed, ToolCallingModel(), tmp_path, carrier=carrier).run()
+    assert frame is not None and frame.status == "done"
+    assert len(carrier.calls) == 1
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.messages[-1] == Message(role="assistant", content="done")
+    assert (
+        sum(
+            isinstance(message.content, str) and message.content.endswith("\nuse this once")
+            for message in stored.messages
+        )
+        == 1
+    )
+
+
+async def test_a_turn_fails_and_releases_arrivals_when_its_parked_window_does_not_persist(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn = await _seed_turn("queued", None)
+    arrival_id = await _queue_arrival(turn, "do not lose this")
+    engine = _engine(turn, ToolThenInterruptedModel(ModelRetryAfter(3600)), tmp_path)
+
+    async def refused(*args: object, **kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(TurnEngine, "_persist_parked", refused)
+
+    with pytest.raises(RuntimeError, match="could not save its resumable state"):
+        await engine.run()
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.inbound_message.c.consumed_turn_id,
+                )
+                .select_from(
+                    tables.turn.join(
+                        tables.inbound_message,
+                        tables.inbound_message.c.admitted_turn_id == tables.turn.c.id,
+                    )
+                )
+                .where(
+                    tables.turn.c.id == turn.id,
+                    tables.inbound_message.c.id == arrival_id,
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    assert row.consumed_turn_id is None
 
 
 async def test_absorbed_arrivals_from_any_speaker_fold_into_the_one_turn(
@@ -5297,6 +5450,18 @@ async def test_revoking_an_absorbed_speakers_seat_parks_the_aggregate(
             )
         ).scalar_one()
     assert status == "parked"
+    parked = await engine.transcript.read()
+    assert parked is not None and parked.parked is not None
+    assert {requester.member_id for requester in parked.parked.requesters} == {
+        founder,
+        second_member,
+    }
+
+    resumed_model = CapturingModel()
+    resumed = turn.model_copy(update={"status": "queued"})
+    with pytest.raises(TurnParked, match="seat was revoked"):
+        await _engine(resumed, resumed_model, tmp_path, member_id=founder).run()
+    assert resumed_model.seen == []
 
 
 async def test_a_revocation_during_the_model_call_stops_its_tool_dispatch(
@@ -5525,19 +5690,16 @@ async def test_per_step_park_then_resume_persists_full_transcript(db: None, tmp_
     transcript = Transcript(
         blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
     )
-    assert await transcript.read() is None
+    parked = await transcript.read()
+    assert parked is not None and parked.from_run
+    assert len(parked.messages) == 1
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.spend_cap)
             .values(limit_micro_usd=10_000_000, updated_at=sa.func.now())
             .where(tables.spend_cap.c.id == cap)
         )
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(status="queued", updated_at=sa.func.now())
-            .where(tables.turn.c.id == turn.id)
-        )
-    resumed = turn.model_copy(update={"status": "queued"})
+    resumed = turn.model_copy(update={"status": PARKED})
     frame = await _engine(resumed, EchoModel(), tmp_path).run()
     assert frame is not None and frame.status == "done"
     stored = await transcript.read()

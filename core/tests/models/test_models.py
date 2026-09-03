@@ -25,6 +25,7 @@ from ufo.harness.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC
 from ufo.harness.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
 from ufo.harness.models.anthropic import (
     OAUTH_SYSTEM_PREFIX,
+    PROVIDER_PARK_THRESHOLD_SECONDS,
     AnthropicClient,
     anthropic_sdk_client,
 )
@@ -64,7 +65,7 @@ from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.registry import ServingModel, model_registry
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport
-from ufo.harness.rounds import ModelStreamInterrupted
+from ufo.harness.rounds import ModelRetryAfter, ModelStreamInterrupted
 from ufo.runtime.access.credentials import CredentialValueInvalid
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.workspace import ws
@@ -295,9 +296,11 @@ def zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
 
 
-async def collect(client: AnthropicClient | OpenAIClient) -> list[ModelEvent]:
+async def collect(
+    client: AnthropicClient | OpenAIClient, request: ModelRequest = REQUEST
+) -> list[ModelEvent]:
     return [
-        event async for event in client.complete(REQUEST) if not isinstance(event, ModelStreamStart)
+        event async for event in client.complete(request) if not isinstance(event, ModelStreamStart)
     ]
 
 
@@ -743,6 +746,45 @@ async def test_retryable_status_retries_then_succeeds(
         record for record in caplog.records if record.getMessage() == "model.provider_status_retry"
     )
     assert retry.ufo["status_code"] == status
+
+
+async def test_anthropic_defers_a_long_retry_for_a_delivering_child() -> None:
+    wait = PROVIDER_PARK_THRESHOLD_SECONDS + 1
+    create = ScriptedCreate(
+        provider_error(anthropic.APIStatusError, 429, str(wait)),
+        ([anthropic_message_start(), anthropic_text("late"), anthropic_output(1)], None),
+    )
+    request = REQUEST.model_copy(update={"defer_long_retry": True})
+    client = AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC)
+
+    with pytest.raises(ModelRetryAfter) as raised:
+        await collect(client, request)
+
+    assert raised.value.seconds == wait
+    assert create.calls == 1
+
+
+async def test_anthropic_keeps_a_long_retry_inside_a_foreground_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait = PROVIDER_PARK_THRESHOLD_SECONDS + 1
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("ufo.harness.models.anthropic.asyncio.sleep", sleep)
+    create = ScriptedCreate(
+        provider_error(anthropic.APIStatusError, 429, str(wait)),
+        ([anthropic_message_start(), anthropic_text("ok"), anthropic_output(1)], None),
+    )
+    client = AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC)
+
+    events = await collect(client)
+
+    assert slept == [wait]
+    assert events[0] == TextDelta(text="ok")
+    assert create.calls == 2
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)

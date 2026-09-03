@@ -141,7 +141,9 @@ class ModelRequest(BaseModel):
     turn's rounds, the job for a background call. A router pins a session to one upstream so that
     provider's cache is the one the next call meets, and a router client raises on a request that
     names none; a client that speaks to a single provider has one cache and never reads it, so the
-    calls that reach only those leave it unset."""
+    calls that reach only those leave it unset. `defer_long_retry` lets a durable background caller
+    end its workflow when a provider gives a long retry delay; callers that must answer inline keep
+    the retry inside their request."""
 
     model: str
     system: str
@@ -152,6 +154,7 @@ class ModelRequest(BaseModel):
     tools: tuple[ToolSchema, ...] = ()
     tool_choice: str | None = None
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+    defer_long_retry: bool = False
 
     @model_validator(mode="after")
     def _forced_choice_names_an_offered_tool(self) -> "ModelRequest":

@@ -784,6 +784,10 @@ class Admission:
                     tables.turn.c.speaker_member_id,
                     tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.runtime_config,
+                    sa.or_(
+                        tables.turn.c.retry_at.is_(None),
+                        tables.turn.c.retry_at <= sa.func.now(),
+                    ).label("retry_due"),
                 )
                 .where(
                     tables.turn.c.workspace_id == workspace_id,
@@ -915,11 +919,20 @@ class Admission:
                 comment,
             )
             return _FoldResult(admitted=admitted)
+        if not live_turn.retry_due:
+            admitted = await self._record_comment(
+                connection,
+                workspace_id,
+                Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id),
+                comment,
+            )
+            return _FoldResult(admitted=admitted)
         await connection.execute(
             sa.update(tables.turn)
             .values(
                 status=QUEUED,
                 dispatch_enqueued_at=sa.func.now(),
+                retry_at=None,
                 updated_at=sa.func.now(),
             )
             .where(tables.turn.c.id == live_turn.id, tables.turn.c.status == PARKED)

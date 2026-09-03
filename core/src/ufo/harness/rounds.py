@@ -36,6 +36,14 @@ class ModelStreamInterrupted(RuntimeError):
         self.kind = kind
 
 
+class ModelRetryAfter(RuntimeError):
+    """A provider asked this model request to retry after a stated number of seconds."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(seconds)
+        self.seconds = seconds
+
+
 class _TextEvent(Protocol):
     text: str
 
@@ -75,6 +83,7 @@ class CollectedRound[ToolCallT, ReasoningT, UsageT]:
     error_class: str | None = None
     error_message: str | None = None
     error_kind: str | None = None
+    retry_after_seconds: float | None = None
     partial_output: str = ""
     wall_ms: int = 0
     provider_start_ms: int | None = None
@@ -211,6 +220,7 @@ class _RoundState[RequestT, ToolCallT, ReasoningT, UsageT]:
                 error_class=type(error).__name__,
                 error_message=str(error),
                 error_kind=error.kind if isinstance(error, ModelStreamInterrupted) else None,
+                retry_after_seconds=(error.seconds if isinstance(error, ModelRetryAfter) else None),
                 partial_output="\n\n".join(
                     segment for segment in ("".join(self.parts), *partial_calls) if segment
                 ),

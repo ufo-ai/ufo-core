@@ -81,6 +81,7 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
                 .values(
                     status=CANCELLED,
                     terminal=frame.model_dump(mode="json"),
+                    retry_at=None,
                     updated_at=sa.func.now(),
                 )
                 .where(

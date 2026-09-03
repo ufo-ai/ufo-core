@@ -17,7 +17,7 @@ from base64 import b64decode, b64encode
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from html import escape
 from io import BytesIO
@@ -195,11 +195,12 @@ from ufo.runtime.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
 from ufo.runtime.turns.audience import Audience, audience_member, audience_subjects
 from ufo.runtime.turns.contracts import Contract, freeform_result_contract
 from ufo.runtime.turns.delivery_register import DIRECT_PROSE_RESULT_MAX_CHARS
-from ufo.runtime.turns.transcript import Conversation
+from ufo.runtime.turns.transcript import Conversation, ParkedRequester, ParkedTurn
 from ufo.runtime.turns.workspace_changes import WorkspaceChangeRecorder, change_targets
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
+    DELIVERY_PENDING,
     FINAL_ACT_FIELDS,
     INTERNAL_ADMISSION,
     LAST_CALL_ACT,
@@ -236,6 +237,7 @@ CACHE_1H_SECONDS = 60 * 60
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
+PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
 TRUNCATION_FEEDBACK = (
     "Your previous response exceeded the output budget and was cut off. Produce large content "
     "by writing files with sandbox code or by emitting it in small parts across calls; keep any "
@@ -322,6 +324,7 @@ async def _claim_turn(turn_id: UUID, attempt: str) -> str | None:
                     status=RUNNING,
                     running_attempt=attempt,
                     dispatch_enqueued_at=None,
+                    retry_at=None,
                     updated_at=sa.func.now(),
                 )
                 .where(
@@ -387,6 +390,7 @@ class StreamResult(BaseModel):
     error_class: str | None = None
     error_message: str | None = None
     error_kind: str | None = None
+    retry_after_seconds: float | None = None
     partial_output: str = ""
 
 
@@ -700,12 +704,12 @@ class ModelStreamError(Exception):
 
 
 class TurnParked(Exception):
-    """A running turn crossed a spend cap: it stops mid-run and is held non-terminally, resumable by
-    the resume job once the cap is raised. Carries the in-surface reason for the Parked frame."""
+    """A running turn is held non-terminally until its gate clears or its retry time arrives."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, retry_at: datetime | None = None) -> None:
         super().__init__(message)
         self.message = message
+        self.retry_at = retry_at
 
 
 CRUD_INTENT_TOOLS = frozenset({"object_apply", "object_delete"})
@@ -1385,6 +1389,30 @@ class TranscriptRepair:
             from_run=True,
         )
 
+    async def _persist_parked(
+        self,
+        messages: tuple[Message, ...],
+        absorbed: tuple[UUID, ...],
+        requesters: Mapping[UUID, ActiveMessage],
+        system: str,
+        injected: str,
+    ) -> bool:
+        return await self.write_conversation(
+            messages,
+            system=system,
+            injected=injected or None,
+            from_run=True,
+            parked=ParkedTurn(
+                absorbed=absorbed,
+                requesters=tuple(
+                    ParkedRequester(
+                        id=id_, member_id=requester.member_id, rendered=requester.rendered
+                    )
+                    for id_, requester in requesters.items()
+                ),
+            ),
+        )
+
     async def persist_inbound(
         self,
         arrivals: tuple[Message, ...] = (),
@@ -1407,15 +1435,27 @@ class TranscriptRepair:
         await self.write_conversation((*founding, *arrivals))
 
     async def load_messages(self) -> tuple[Message, ...]:
-        """Prior transcript plus this turn's inbound, prefixed with the <context> tag on a member
-        turn — the model has no clock, so the tag carries the admission moment, the sender, and the
-        source the surface named, and it persists into the transcript so each past exchange keeps
-        its moment. A spawned turn's inbound stays the bare payload its target's
-        contract promises."""
+        """A parked turn's saved window, or prior transcript plus this turn's inbound. A member
+        turn's inbound has the <context> tag with its admission moment, sender, and surface source.
+        A spawned turn's inbound stays the bare payload its target's contract promises."""
+        stored = await self._parked_record()
+        if stored is not None:
+            return stored.messages
         inbound = self.turn.inbound
         if not self.turn.spawned:
             inbound = _context_tag(self.turn.id, self.turn.context, self.turn.created_at) + inbound
         return (*await self._prior_messages(), Message(role="user", content=inbound))
+
+    async def _parked_record(self) -> Conversation | None:
+        stored = await self.transcript.read()
+        if (
+            stored is None
+            or stored.seq != self.turn.seq
+            or not stored.from_run
+            or stored.parked is None
+        ):
+            return None
+        return stored
 
     async def _prior_messages(self) -> tuple[Message, ...]:
         """The conversation before this turn; self-exclusion keeps a replay from reading its own
@@ -1431,18 +1471,19 @@ class TranscriptRepair:
         system: str | None = None,
         injected: str | None = None,
         from_run: bool = False,
-    ) -> None:
+        parked: ParkedTurn | None = None,
+    ) -> bool:
         conversation = Conversation(
             seq=self.turn.seq,
             messages=messages,
             system=system,
             injected=injected,
             from_run=from_run,
+            parked=parked,
         )
         for attempt in range(TRANSCRIPT_WRITE_ATTEMPTS):
             try:
-                await self.transcript.write(conversation)
-                return
+                return await self.transcript.write(conversation)
             except Exception as error:
                 log(
                     "transcript.write_failed",
@@ -1452,6 +1493,7 @@ class TranscriptRepair:
                 )
                 if attempt + 1 < TRANSCRIPT_WRITE_ATTEMPTS:
                     await asyncio.sleep(TRANSCRIPT_WRITE_RETRY_SECONDS)
+        return False
 
 
 PREEMPTED = "preempted"
@@ -1665,6 +1707,8 @@ class TurnEngine:
         )
         created: dict[ObjectRef, None] = dict.fromkeys(self.turn.created_refs)
         messages: tuple[Message, ...] = ()
+        system = self.system_prompt.content
+        injected = ""
         try:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
@@ -1735,8 +1779,24 @@ class TurnEngine:
                 await self._record_workspace_changes(tuple(change_paths))
                 return frame
         except TurnParked as parked:
+            persisted = bool(self._window.messages) and await self._persist_parked(
+                self._window.messages,
+                tuple(absorbed_ids),
+                requesters,
+                system,
+                injected,
+            )
+            if not persisted:
+                error = RuntimeError("The turn could not save its resumable state.")
+                frame = await self._commit(
+                    "failed", usage_events, meter, error=error, created=tuple(created)
+                )
+                await self._release_unabsorbed(())
+                if frame is not None:
+                    await self._publish_terminal(frame)
+                raise error from parked
             meter.exited(PARKED)
-            await self._park(parked.message, usage_events)
+            await self._park(parked.message, usage_events, parked.retry_at, tuple(absorbed_ids))
             raise
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
@@ -1795,6 +1855,29 @@ class TurnEngine:
         requesters: dict[UUID, ActiveMessage],
         pending_guard: bool,
     ) -> _PreparedRun:
+        repair = self._repair()
+        parked_record = await repair._parked_record()
+        if parked_record is not None:
+            parked = parked_record.parked
+            if parked is None:
+                raise RuntimeError("parked transcript has no resumable state")
+            absorbed_ids.extend(parked.absorbed)
+            requesters.update(
+                {
+                    requester.id: ActiveMessage(
+                        member_id=requester.member_id,
+                        rendered=requester.rendered,
+                    )
+                    for requester in parked.requesters
+                }
+            )
+            return _PreparedRun(
+                parked_record.system
+                if parked_record.system is not None
+                else self.system_prompt.content,
+                parked_record.messages,
+                parked_record.injected or "",
+            )
         system = self.system_prompt.content
         if self.turn.admission_source == SCHEDULED_ADMISSION:
             system = await self._scheduled_system(system)
@@ -1964,7 +2047,7 @@ class TurnEngine:
             return frame
         except TurnParked as parked:
             meter.exited(PARKED)
-            await self._park(parked.message, usage_events)
+            await self._park(parked.message, usage_events, parked.retry_at, ())
             raise
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
@@ -2494,6 +2577,11 @@ class TurnEngine:
                 usage_events
             ):
                 continue
+            if result.retry_after_seconds is not None:
+                retry_at = datetime.now(UTC) + timedelta(seconds=result.retry_after_seconds)
+                raise TurnParked(
+                    PROVIDER_RETRY_NOTICE.format(retry_at=retry_at.isoformat()), retry_at
+                )
             if result.error_kind is None or interruptions >= MAX_MIDSTREAM_ROUND_RETRIES:
                 return result
             interruptions += 1
@@ -2648,6 +2736,7 @@ class TurnEngine:
                 if round_input.force_finish
                 else self.agent.reasoning
             ),
+            defer_long_retry=self.turn.result_delivery == DELIVERY_PENDING,
         )
         provider = self.serving.spec.provider
         if not round_input.first_round:
@@ -2767,6 +2856,7 @@ class TurnEngine:
             error_class=result.error_class,
             error_message=result.error_message,
             error_kind=result.error_kind,
+            retry_after_seconds=result.retry_after_seconds,
             partial_output=result.partial_output,
         )
 
@@ -3733,11 +3823,17 @@ class TurnEngine:
                 return TerminalFrame.model_validate(row.terminal), False
         return frame, True
 
-    async def _park(self, message: str, usage_events: list[Usage]) -> None:
-        """Hold the turn at a spend cap: bill this attempt's consumed tokens, commit the
-        non-terminal parked state (durable, resumable), release the arrivals this attempt claimed
-        (a resume is a fresh workflow with an empty step log, so it must re-drain them), and end
-        the surface's stream with the reason — one transaction.
+    async def _park(
+        self,
+        message: str,
+        usage_events: list[Usage],
+        retry_at: datetime | None = None,
+        absorbed: tuple[UUID, ...] = (),
+    ) -> None:
+        """Hold the turn at a gate or provider retry time: bill this attempt's consumed tokens,
+        commit the non-terminal parked state (durable, resumable), release the arrivals this
+        attempt claimed (a resume is a fresh workflow with an empty step log, so it must re-drain
+        them), and end the surface's stream with the reason — one transaction.
         Billing at park is what makes a tight cap CONVERGE: the ledger
         reflects the real burn, so the resume sweep re-decides against actual spend and finds no
         headroom until the cap is raised — never an unbilled runaway re-burning tokens the cap
@@ -3746,7 +3842,7 @@ class TurnEngine:
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.turn)
-                .values(status=PARKED, updated_at=sa.func.now())
+                .values(status=PARKED, retry_at=retry_at, updated_at=sa.func.now())
                 .where(
                     tables.turn.c.id == self.turn.id,
                     tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
@@ -3757,7 +3853,10 @@ class TurnEngine:
                 await connection.execute(
                     sa.update(tables.inbound_message)
                     .values(consumed_turn_id=None)
-                    .where(tables.inbound_message.c.consumed_turn_id == self.turn.id)
+                    .where(
+                        tables.inbound_message.c.consumed_turn_id == self.turn.id,
+                        ~tables.inbound_message.c.id.in_(absorbed),
+                    )
                 )
         if updated.rowcount == 1:
             await self._publish(Parked(message=message))
@@ -3863,6 +3962,18 @@ class TurnEngine:
             await self._repair().persist_interrupted(self._labeled(messages), ran=self._window.ran)
         else:
             await self._repair().persist_inbound(founding_denial=self._window.denied)
+
+    async def _persist_parked(
+        self,
+        messages: tuple[Message, ...],
+        absorbed: tuple[UUID, ...],
+        requesters: Mapping[UUID, ActiveMessage],
+        system: str,
+        injected: str,
+    ) -> bool:
+        return await self._repair()._persist_parked(
+            self._labeled(messages), absorbed, requesters, system, injected
+        )
 
     def _labeled(self, messages: tuple[Message, ...]) -> tuple[Message, ...]:
         """The window with each tool result carrying the activity line this turn showed for it, so

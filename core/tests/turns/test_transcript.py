@@ -19,6 +19,7 @@ from ufo.runtime.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,
+    ParkedTurn,
     compaction_key,
     decode,
     encode,
@@ -161,7 +162,7 @@ async def test_stored_bytes_are_lz4_compact_json(tmp_path: Path) -> None:
     raw = await blob.get(transcript_key(conversation_id))
     decoded = lz4.frame.decompress(raw).decode()
     assert decoded == (
-        '{"seq":1,"messages":[{"role":"user","content":"hi"}],"system":null,"injected":null,"from_run":false}'
+        '{"seq":1,"messages":[{"role":"user","content":"hi"}],"system":null,"injected":null,"from_run":false,"parked":null}'
     )
 
 
@@ -300,3 +301,31 @@ async def test_a_fuller_run_record_still_supersedes_the_thin_fallback(tmp_path: 
     )
     stored = await transcript.read()
     assert stored is not None and stored.from_run and len(stored.messages) == 3
+
+
+async def test_a_completed_compacted_run_replaces_its_longer_parked_record(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    transcript = Transcript(blob=blob, conversation_id=conversation_id)
+    parked = Conversation(
+        seq=2,
+        messages=(
+            Message(role="user", content="founding"),
+            *(Message(role="assistant", content=str(index)) for index in range(10)),
+        ),
+        from_run=True,
+        parked=ParkedTurn(absorbed=(), requesters=()),
+    )
+    completed = Conversation(
+        seq=2,
+        messages=(
+            Message(role="user", content="compacted summary"),
+            Message(role="assistant", content="done"),
+        ),
+        from_run=True,
+    )
+
+    await transcript.write(parked)
+    await transcript.write(completed)
+
+    assert await transcript.read() == completed

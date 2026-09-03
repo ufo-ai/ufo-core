@@ -16,6 +16,23 @@ from ufo.blob import BlobNotFound, BlobStore
 from ufo.harness.models.interface import Message
 
 
+class ParkedRequester(BaseModel):
+    """One active message whose member identity and rendered content survive a turn park."""
+
+    model_config = ConfigDict(strict=True)
+    id: UUID
+    member_id: UUID | None
+    rendered: str
+
+
+class ParkedTurn(BaseModel):
+    """The arrivals and requester identities already represented in a parked message window."""
+
+    model_config = ConfigDict(strict=True)
+    absorbed: tuple[UUID, ...]
+    requesters: tuple[ParkedRequester, ...]
+
+
 class Conversation(BaseModel):
     """The durable transcript: the message window at `seq`, plus — on a completed turn's write —
     the exact `system` string that turn's model calls ran with and the `injected` context its
@@ -24,7 +41,8 @@ class Conversation(BaseModel):
 
     `from_run` marks the write as the one the turn's own execution made, carrying what the turn
     did. A write without it knows only the member's messages — the repair fallback for a turn whose
-    run may never have written, and every record stored before this field existed."""
+    run may never have written, and every record stored before this field existed. `parked` names a
+    resumable window, the arrivals already present in it, and their requester identities."""
 
     model_config = ConfigDict(strict=True)
     seq: int = Field(ge=1)
@@ -32,6 +50,7 @@ class Conversation(BaseModel):
     system: str | None = None
     injected: str | None = None
     from_run: bool = False
+    parked: ParkedTurn | None = None
 
 
 class TranscriptDecodeError(ValueError):
@@ -44,7 +63,7 @@ def transcript_key(conversation_id: UUID) -> str:
 
 
 def encode(conversation: Conversation) -> bytes:
-    body = json.dumps(conversation.model_dump(), separators=(",", ":")).encode()
+    body = json.dumps(conversation.model_dump(mode="json"), separators=(",", ":")).encode()
     return lz4.frame.compress(body)
 
 

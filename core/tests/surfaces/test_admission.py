@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -625,6 +625,38 @@ async def test_fold_onto_a_parked_turn_dispatches_its_resume(db: None) -> None:
     assert dbos.enqueued == [str(first.turn_id), str(first.turn_id)]
     assert dbos.workflow_ids[0] == str(first.turn_id)
     assert dbos.workflow_ids[1] != str(first.turn_id)
+
+
+async def test_fold_onto_a_provider_park_waits_for_retry_at(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
+    retry_at = datetime.now(UTC) + timedelta(hours=1)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="parked", retry_at=retry_at, updated_at=sa.func.now())
+            .where(tables.turn.c.id == first.turn_id)
+        )
+
+    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
+
+    assert second == Admitted(
+        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
+    )
+    assert await _queued_bodies(conversation_id) == ["two"]
+    async with workspace_tx() as connection:
+        status, stored_retry_at = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.retry_at).where(
+                    tables.turn.c.id == first.turn_id
+                )
+            )
+        ).one()
+    assert status == "parked"
+    assert stored_retry_at.replace(tzinfo=UTC) == retry_at
+    assert dbos.enqueued == [str(first.turn_id)]
 
 
 async def test_redelivery_of_a_fold_resumed_turn_retries_under_a_fresh_workflow_id(

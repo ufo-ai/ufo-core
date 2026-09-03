@@ -133,9 +133,10 @@ class TurnDispatcher:
     A never-claimed
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
-    PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-, balance-
-    and seat-gated: a parked turn stays held while its founder, scheduled creator, or any pending
-    absorbed speaker holds no seat, and resumes when every one is seated. A row
+    PARKED rows share the same scanner and advisory dispatch stamp, but remain retry-time-, spend-,
+    balance-, and seat-gated: a timed provider park is invisible until `retry_at`, and any parked
+    turn stays held while its founder, scheduled creator, or any pending absorbed speaker holds no
+    seat. A row
     that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
     fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
     reads `running_attempt` from the stamping update itself, so a claim-park-requeue racing the
@@ -191,17 +192,17 @@ class TurnDispatcher:
             await self._enqueue(turn)
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
-        cutoff = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
+        now = datetime.now(UTC)
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.turn.c.workspace_id).where(self._eligible(cutoff)).distinct()
+                    sa.select(tables.turn.c.workspace_id).where(self._eligible(now)).distinct()
                 )
             ).all()
         return tuple(row.workspace_id for row in rows)
 
     async def _dispatchable_turns(self) -> tuple[_DispatchTurn, ...]:
-        cutoff = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
+        now = datetime.now(UTC)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -218,7 +219,7 @@ class TurnDispatcher:
                         tables.turn.c.parent_turn_id,
                     )
                     .select_from(tables.turn.join(tables.conversation))
-                    .where(self._eligible(cutoff))
+                    .where(self._eligible(now))
                     .order_by(
                         sa.case((tables.turn.c.status == QUEUED, 0), else_=1),
                         tables.turn.c.created_at,
@@ -244,7 +245,8 @@ class TurnDispatcher:
         )
 
     async def _enqueue(self, turn: _DispatchTurn) -> None:
-        cutoff = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)
         order_guard = self._first_in_status(turn.status)
         async with workspace_tx() as connection:
             claimed = (
@@ -255,6 +257,7 @@ class TurnDispatcher:
                         tables.turn.c.id == turn.id,
                         tables.turn.c.status == turn.status,
                         self._stale(cutoff),
+                        self._retry_due(now),
                         order_guard,
                     )
                     .returning(tables.turn.c.id, tables.turn.c.running_attempt)
@@ -274,7 +277,7 @@ class TurnDispatcher:
         }
         await self.client.enqueue_async(options, str(turn.workspace_id), str(turn.id))
 
-    def _eligible(self, cutoff: datetime) -> sa.ColumnElement[bool]:
+    def _eligible(self, now: datetime) -> sa.ColumnElement[bool]:
         """A stale queued or parked turn with nothing ahead of it. The no-running guard is what
         the plain queue does not provide: one conversation runs one turn at a time, so nothing is
         offered while a sibling executes — the exit handoff or a later sweep offers it then."""
@@ -288,13 +291,17 @@ class TurnDispatcher:
         )
         return sa.and_(
             tables.turn.c.status.in_((QUEUED, PARKED)),
-            self._stale(cutoff),
+            self._stale(now - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS)),
+            self._retry_due(now),
             no_running_sibling,
             sa.or_(
                 sa.and_(tables.turn.c.status == QUEUED, self._first_in_status(QUEUED)),
                 sa.and_(tables.turn.c.status == PARKED, self._first_in_status(PARKED)),
             ),
         )
+
+    def _retry_due(self, now: datetime) -> sa.ColumnElement[bool]:
+        return sa.or_(tables.turn.c.retry_at.is_(None), tables.turn.c.retry_at <= now)
 
     def _stale(self, cutoff: datetime) -> sa.ColumnElement[bool]:
         return sa.or_(

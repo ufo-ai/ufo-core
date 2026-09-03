@@ -576,6 +576,7 @@ class Turn(BaseModel):
     What says one request was answered, where the account alone cannot: a member may hold two on one
     provider, and may reconnect from another conversation entirely."""
     result_delivery: ResultDelivery | None = None
+    retry_at: datetime | None = None
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
     runtime_config: TurnRuntimeConfig | None = None
@@ -598,7 +599,7 @@ class Turn(BaseModel):
         that created nothing carries SQL NULL — which reads as the empty set."""
         return () if value is None else value
 
-    @field_validator("created_at", "updated_at")
+    @field_validator("created_at", "updated_at", "retry_at")
     @classmethod
     def _aware_utc(cls, value: datetime | None) -> datetime | None:
         """The row's timestamp is UTC by construction; a driver that drops the marker (sqlite)

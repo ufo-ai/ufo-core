@@ -22,27 +22,36 @@ class Transcript:
             return None
         return decode(body)
 
-    async def write(self, conversation: Conversation) -> None:
+    async def write(self, conversation: Conversation) -> bool:
         current = await self.read()
         if current is not None and not _supersedes(conversation, current):
-            return
+            return False
         await self.blob.put(transcript_key(self.conversation_id), encode(conversation))
+        return True
 
 
 def _supersedes(incoming: Conversation, stored: Conversation) -> bool:
-    """Whether `incoming` may replace what is stored. A later seq always may. At the same seq only
-    the run's own record may replace the repair fallback, which knows the member's messages and
-    nothing the turn did — the terminal row is committed before the blob is written, so a
-    redelivery can reach the fallback while the run that owns the seq is still writing, and
-    first-write-wins would strand the record of what the turn actually ran.
+    """Whether `incoming` may replace what is stored. A later seq always may. At the same seq, the
+    run's record may replace the repair fallback, a later parked attempt may replace the parked
+    window it resumed, and a completed attempt may replace its parked window even when compaction
+    made the completed window shorter. The fallback knows the member's messages and nothing the
+    turn did — the terminal row is committed before the blob is written, so a redelivery can reach
+    the fallback while the run that owns the seq is still writing, and first-write-wins would
+    strand what the turn ran.
 
-    And only when it does not shrink the record. The run builds its window from the conversation
-    before it, so its record holds everything the fallback did and more — except a record rebuilt
-    from a read that self-excludes the fallback's own same-seq write (a turn that persists after its
-    commit, so a redelivery can land the fallback in between), which comes back shorter and must
-    not stand over the fuller history the fallback preserved."""
+    Against a fallback, the run must not shrink the record. The run builds its window from the
+    conversation before it, so its record holds everything the fallback did and more — except a
+    record rebuilt from a read that self-excludes the fallback's own same-seq write (a turn that
+    persists after its commit, so a redelivery can land the fallback in between), which comes back
+    shorter and must not stand over the fuller history the fallback preserved."""
     if incoming.seq != stored.seq:
         return incoming.seq > stored.seq
-    return (
-        incoming.from_run and not stored.from_run and len(incoming.messages) >= len(stored.messages)
-    )
+    if not incoming.from_run:
+        return False
+    if incoming.parked is not None:
+        return not stored.from_run or stored.parked is not None
+    if stored.from_run:
+        if stored.parked is not None:
+            return True
+        return len(incoming.messages) > len(stored.messages)
+    return len(incoming.messages) >= len(stored.messages)
