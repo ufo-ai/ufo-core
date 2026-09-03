@@ -15,6 +15,7 @@ const SCHEMES: [&str; 2] = ["https://", "http://"];
 const FOLD_ROLLED: &str = "▸";
 const FOLD_OPENED: &str = "▾";
 const STEP_INDENT: &str = "  ";
+const CALL_MARKER: &str = "⏺ ";
 const RUN_INDENT: &str = "  ";
 
 /// One retained transcript element, held as its source.
@@ -648,10 +649,6 @@ fn steps_rows(
     };
     let disclosed = fold == Fold::Opened;
     let indent = if disclosed { STEP_INDENT } else { "" };
-    let said = |text: &str| match disclosed {
-        true => described(text).to_string(),
-        false => text.to_string(),
-    };
     for (index, step) in steps.iter().enumerate() {
         match step {
             Step::Thought(source) => rows.extend(
@@ -665,7 +662,10 @@ fn steps_rows(
                     }),
             ),
             Step::Note(text) => rows.push((
-                Line::styled(format!("{indent}{}", said(text)), theme.muted),
+                Line::styled(
+                    format!("{indent}{CALL_MARKER}{}", described(text)),
+                    theme.tool_title,
+                ),
                 None,
             )),
             Step::Op { header, body } => {
@@ -692,8 +692,8 @@ fn steps_rows(
                     for held in narrated {
                         rows.push((
                             Line::styled(
-                                format!("{indent}{RUN_INDENT}{}", said(held)),
-                                theme.muted,
+                                format!("{indent}{RUN_INDENT}{CALL_MARKER}{}", described(held)),
+                                theme.tool_title,
                             ),
                             None,
                         ));
@@ -708,7 +708,8 @@ fn steps_rows(
     rows
 }
 
-/// The work a narrated call states, without the `running <tool>: ` the live line leads with.
+/// The work a call states. The wire carries two shapes — a model's own sentence, and a
+/// `running <tool>: ` lead over one — and only the second has anything to strip.
 fn described(text: &str) -> &str {
     text.strip_prefix("running ")
         .and_then(|rest| rest.split_once(": "))
@@ -740,7 +741,9 @@ fn clipped(line: &Line<'static>, width: u16) -> Line<'static> {
 /// latest thing it narrated, the way the web's run row states what it is doing.
 fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
     match (opened, fold, rows.last()) {
-        (false, Fold::Live, Some(latest)) => format!("{label} · {latest} {FOLD_ROLLED}"),
+        (false, Fold::Live, Some(latest)) => {
+            format!("{label} · {} {FOLD_ROLLED}", described(latest))
+        }
         (false, ..) => format!("{label} {FOLD_ROLLED}"),
         (true, ..) => format!("{label} {FOLD_OPENED}"),
     }
@@ -1179,8 +1182,8 @@ mod tests {
             texts(&retained.document(&theme)),
             [
                 "reading the calendar next",
-                "running read: the calendar",
-                "loading skill: office/pptx",
+                "⏺ the calendar",
+                "⏺ loading skill: office/pptx",
             ]
         );
     }
@@ -1196,7 +1199,7 @@ mod tests {
         assert_eq!(
             texts(&retained.document(&theme)),
             [
-                "Checking the result.",
+                "⏺ Checking the result.",
                 "The answer has started and now ends."
             ]
         );
@@ -1220,12 +1223,7 @@ mod tests {
         retained.push_step(Step::Note("running read: the drafts".into()));
         assert_eq!(
             texts(&retained.document(&theme)),
-            [
-                "\u{203a} draft the post",
-                "",
-                "",
-                "running read: the drafts"
-            ],
+            ["\u{203a} draft the post", "", "", "⏺ the drafts"],
             "two rows stand between the ask and the first thing the turn did"
         );
     }
@@ -1268,7 +1266,7 @@ mod tests {
             [
                 "Completed 2 steps ▾",
                 "  first the calendar",
-                "  the calendar",
+                "  ⏺ the calendar",
                 "",
                 "the answer",
             ]
@@ -1323,24 +1321,24 @@ mod tests {
         retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▾", "  reviewer", "  reviewer ▸", ""]
+            ["Completed 2 steps ▾", "  ⏺ reviewer", "  reviewer ▸", ""]
         );
         assert!(retained.toggle(2, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
             [
                 "Completed 2 steps ▾",
-                "  reviewer",
+                "  ⏺ reviewer",
                 "  reviewer ▾",
-                "    the diff",
-                "    cargo test",
+                "    ⏺ the diff",
+                "    ⏺ cargo test",
                 "",
             ]
         );
         assert!(retained.toggle(2, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▾", "  reviewer", "  reviewer ▸", ""]
+            ["Completed 2 steps ▾", "  ⏺ reviewer", "  reviewer ▸", ""]
         );
     }
 
@@ -1356,21 +1354,17 @@ mod tests {
         retained.push_under("reviewer", "running bash: cargo test".into());
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["reviewer · running bash: cargo test ▸"]
+            ["reviewer · cargo test ▸"]
         );
         assert!(retained.toggle(0, 2, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            [
-                "reviewer ▾",
-                "  running read: the diff",
-                "  running bash: cargo test",
-            ]
+            ["reviewer ▾", "  ⏺ the diff", "  ⏺ cargo test",]
         );
         assert!(retained.toggle(0, 2, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["reviewer · running bash: cargo test ▸"]
+            ["reviewer · cargo test ▸"]
         );
     }
 
@@ -1387,7 +1381,7 @@ mod tests {
         assert!(retained.toggle(0, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▾", "  ls", "", "the answer"]
+            ["Completed 1 step ▾", "  ⏺ ls", "", "the answer"]
         );
         assert!(retained.toggle(0, 5, &theme));
         assert_eq!(
@@ -1415,7 +1409,7 @@ mod tests {
         retained.push_under("reviewer", "running bash: late".into());
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▸", "", "reviewer · running bash: late ▸"]
+            ["Completed 1 step ▸", "", "reviewer · late ▸"]
         );
     }
 
@@ -1429,7 +1423,7 @@ mod tests {
         retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▾", "  notes", "", "running bash: ls"]
+            ["Completed 1 step ▾", "  ⏺ notes", "", "⏺ ls"]
         );
     }
 
@@ -1443,10 +1437,7 @@ mod tests {
         assert_eq!(retained.take_reply(), None);
         retained.push_step(Step::Thought(held.expect("the reply was open")));
         retained.push_step(Step::Note("running bash: ls".into()));
-        assert_eq!(
-            texts(&retained.document(&theme)),
-            ["a thought", "running bash: ls"]
-        );
+        assert_eq!(texts(&retained.document(&theme)), ["a thought", "⏺ ls"]);
     }
 
     #[test]

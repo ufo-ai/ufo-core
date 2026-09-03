@@ -2793,9 +2793,9 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
     let mut at = 0;
     for step in [
         "Reading the notes first.",
-        "running read: the notes",
+        "⏺ the notes",
         "Now the calendar.",
-        "running read: the calendar",
+        "⏺ the calendar",
     ] {
         let found = live[at..]
             .find(step)
@@ -2824,7 +2824,7 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
         .expect("the answer stands under it");
     assert!(line < answer, "{settled}");
     assert!(
-        !settled.contains("running read: the notes"),
+        !settled.contains("⏺ the notes"),
         "the steps stand behind the line, not beside it: {settled}"
     );
 
@@ -2835,8 +2835,8 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
         "Ctrl+T opens the rollup: {opened}"
     );
     assert!(
-        opened.contains("  the notes") && opened.contains("  the calendar"),
-        "the opened rollup states each call's work, indented: {opened}"
+        opened.contains("  ⏺ the notes") && opened.contains("  ⏺ the calendar"),
+        "the opened rollup states each call's work, marked and indented: {opened}"
     );
 
     session.press(b"\x03");
@@ -2968,7 +2968,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         "a click opens the rollup: {opened}"
     );
     assert!(
-        opened.lines().any(|line| line.trim_end() == "  reviewer")
+        opened.lines().any(|line| line.trim_end() == "  ⏺ reviewer")
             && opened.contains("reviewer \u{25b8}"),
         "the run stands as one closed row among the steps: {opened}"
     );
@@ -2982,8 +2982,8 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
     let run_opened = session.screen();
     assert!(
         run_opened.contains("reviewer \u{25be}")
-            && run_opened.contains("    Reading the diff.")
-            && run_opened.contains("    Running focused tests."),
+            && run_opened.contains("    ⏺ Reading the diff.")
+            && run_opened.contains("    ⏺ Running focused tests."),
         "the run's row opens to everything it narrated: {run_opened}"
     );
     assert!(
