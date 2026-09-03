@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AppInit, Placement } from "@/apps/kit";
+import { endpointFor } from "@/lib/bridge";
 
 import { json, objectIndex, wire, AGENT, CONVO_ID, MEMBER, TASK_KIND, TURN_ID } from "./harness";
 
@@ -203,6 +204,35 @@ test("an attachment send decomposes into parts the message can carry", async () 
   expect(sent[0].value).toBe("hello");
   expect((sent[1].value as File).name).toBe("notes.txt");
   expect(calls[0].body).toBeUndefined();
+});
+
+test("an opened document's page render rides as parts the shell's table admits", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const runtime = await connected((message) => {
+    calls.push(message);
+    window.postMessage(
+      {
+        ufo: "data",
+        id: message.id,
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ start_page: 1, page_count: 3, pages: ["cGFnZQ=="] }),
+        refusal: null,
+        fault: null,
+      },
+      "*",
+    );
+  });
+  runtime.installShims();
+  const form = new FormData();
+  form.append("file", new Blob(["%PDF-1.7"], { type: "application/pdf" }), "report.pdf");
+  form.append("start_page", "1");
+  const res = await fetch("/surface/web/preview", { method: "POST", body: form });
+  expect(await res.json()).toMatchObject({ page_count: 3 });
+  expect(endpointFor(calls[0].method as string, calls[0].path as string)).toBeTruthy();
+  const sent = calls[0].form as { name: string; value: string | File }[];
+  expect((sent[0].value as File).name).toBe("report.pdf");
+  expect(sent[1].value).toBe("1");
 });
 
 test("a credential form's urlencoded body rides as its string", async () => {

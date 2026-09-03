@@ -227,6 +227,10 @@ presses the file.
   rather than two hundred. A batch the service refuses leaves the pages already drawn and ends the
   asking, rather than offering an act that fails the same way again. A file of one page is drawn as
   the one picture the store already rendered, so nothing changes for a cover.
+- The artifacts shelf draws that same sheet from a framed app page, so its render rides the shell's
+  bridge on a `multipart` endpoint row (RFC 0039 Contract 1) rather than reaching the route itself;
+  the bytes come straight off the signed artifact link, which the download route serves under an
+  origin a framed fetch can read.
 
 **Ideal (not yet built).** Sending the file uploads it again and the transcript re-renders the same
 content. The upgrade: the browser gets a presigned PUT, uploads the file to the blob store once,

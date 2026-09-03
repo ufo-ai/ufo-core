@@ -82,6 +82,7 @@ test("the endpoint table admits its rows and their fills, and nothing else", () 
   expect(endpointFor("POST", "credentials")).toBeTruthy();
   expect(endpointFor("POST", "agents/" + AGENT_ID + "/chat?conversation=new")).toBeTruthy();
   expect(endpointFor("GET", "api/chats?conversation=" + AGENT_ID)).toBeTruthy();
+  expect(endpointFor("POST", "preview")).toBeTruthy();
   // Not a row, the wrong method for one, the wrong depth, or a traversal in a filled segment.
   expect(endpointFor("GET", "workspace/usage")).toBeNull();
   expect(endpointFor("GET", "workspace/radar")).toBeNull();
@@ -511,6 +512,33 @@ test("a form call reassembles the multipart body the page decomposed", async () 
   expect(sent.get("message")).toBe("hello");
   expect((sent.get("files") as File).name).toBe("notes.txt");
   expect(posted[0]).toMatchObject({ ufo: "data", id: "f1", ok: true });
+});
+
+test("a page renders an opened document's pages through the preview row", async () => {
+  const rendered = { start_page: 1, page_count: 3, pages: ["cGFnZQ=="] };
+  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(rendered));
+  vi.stubGlobal("fetch", fetchMock);
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  deliver(
+    {
+      ufo: "call",
+      id: "p1",
+      method: "POST",
+      path: "preview",
+      form: [
+        { name: "file", value: new File(["%PDF-1.7"], "report.pdf", { type: "application/pdf" }) },
+        { name: "start_page", value: "1" },
+      ],
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  const sent = fetchMock.mock.calls[0][1]?.body as FormData;
+  expect(fetchMock.mock.calls[0][0]).toBe(BASE + "/preview");
+  expect((sent.get("file") as File).name).toBe("report.pdf");
+  expect(sent.get("start_page")).toBe("1");
+  expect(posted[0]).toMatchObject({ ufo: "data", id: "p1", ok: true });
 });
 
 test("a chat post from a frame that is not the chat surface is refused without a fetch", async () => {

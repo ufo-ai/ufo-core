@@ -18,7 +18,7 @@ import type { Agent, Member } from "@/lib/types";
  *  with a `*` target origin. The endpoint table and the route table's own frame column are the only
  *  fences, and they bound what the frame can reach, not who authored it. */
 
-type BodyKind = "json" | "text" | "urlencoded";
+type BodyKind = "json" | "multipart" | "text" | "urlencoded";
 
 type Endpoint = { method: "GET" | "POST"; template: string[]; body?: BodyKind; stream?: boolean };
 
@@ -48,6 +48,7 @@ const ENDPOINTS: Endpoint[] = (
     ["POST", "agents/{id}/actions/{kind}/{action}", "json"],
     ["POST", "agents/{id}/actions/{kind}/{name}/{action}", "json"],
     ["POST", "credentials", "urlencoded"],
+    ["POST", "preview", "multipart"],
   ] as const
 ).map(([method, template, body]) => ({ method, template: template.split("/"), body }));
 
@@ -112,7 +113,8 @@ type BridgeMessage =
       body?: unknown;
       /** A multipart body as its parts: `FormData` cannot ride `postMessage`, but its entries —
        *  strings and Files — structured-clone whole, so the page decomposes and the shell
-       *  reassembles. Only the chat admit takes one. */
+       *  reassembles. A `text` row takes one beside its text (the chat admit's attachments), a
+       *  `multipart` row takes one and nothing else. */
       form?: unknown;
       headers?: Record<string, string>;
     }
@@ -220,7 +222,8 @@ function isBridgeMessage(data: unknown): data is BridgeMessage {
 
 /** The one shape a call's body may take for its row: a JSON object for a `json` row — as the
  *  object itself or as the string a page's own fetch serialized it to — a non-empty string for a
- *  `text` row, nothing for a row that takes none. Returns the refusal, or null. */
+ *  `text` row, the parts alone for a `multipart` row, nothing for a row that takes none. Returns
+ *  the refusal, or null. */
 function bodyFault(endpoint: Endpoint, body: unknown): string | null {
   switch (endpoint.body) {
     case "json":
@@ -239,6 +242,8 @@ function bodyFault(endpoint: Endpoint, body: unknown): string | null {
         return "This endpoint takes a form body.";
       }
       return null;
+    case "multipart":
+      return "This endpoint takes a multipart body.";
     case undefined:
       return body === undefined || body === null ? null : "This endpoint takes no body.";
   }
@@ -359,7 +364,7 @@ export function attachBridge({
         if (message.form !== undefined) {
           const parts = message.form;
           if (
-            endpoint.body !== "text" ||
+            (endpoint.body !== "text" && endpoint.body !== "multipart") ||
             body !== undefined ||
             !Array.isArray(parts) ||
             parts.some(
