@@ -19,6 +19,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from ufo_ext_embed_openai import EMBED_DIM
+from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.manifest import RECORD_CORRECTION_ACTION, RecordCorrectionInput
 from ufo_ext_memory.store import (
@@ -37,6 +38,7 @@ from ufo_ext_scheduled_tasks.tools import (
 )
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
+from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
@@ -210,6 +212,7 @@ def _mount_portal(
     )
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     app = FastAPI()
+    app.state.instance_id = uuid4()
     _mount_shared_surfaces(
         app,
         manifests,
@@ -869,3 +872,38 @@ async def test_memory_filter_narrows_to_one_class_and_composes_with_paging(
     assert empty["matches"] == []
     unknown = await client.get(f"{path}?kind=invented", headers=headers)
     assert unknown.status_code == 400
+
+
+async def _offered(app: FastAPI, workspace_id: UUID, email: str) -> dict[str, bool]:
+    _member_id, headers = await _seed_member(workspace_id, email)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
+        answer = await client.get("/surface/web/workspace/surfaces", headers=headers)
+    assert answer.status_code == 200
+    return {row["name"]: row["offered"] for row in answer.json()["surfaces"]}
+
+
+async def test_a_chat_surface_is_offered_only_where_its_connect_act_would_dispatch(
+    db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A row states `offered` from the deploy's own declarations, so the act it draws is one
+    dispatch will take. A pack without the Slack or iMessage extension declares neither connect
+    action and offers neither row. A pack holding both declares them, and Slack is offered — while
+    iMessage still is not, because this deploy has no provider: the declaration and the provider are
+    both required."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    for name in ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"UFO_{name}", raising=False)
+    workspace_id, _agent_a, _agent_b = await _seed_workspace()
+
+    bare = await _offered(_mount_portal(tmp_path, with_memory=False), workspace_id, "bare@x.com")
+    assert bare == {"slack": False, "imessage": False, "ufo": True}
+
+    packed = await _offered(
+        _mount_portal(
+            tmp_path, with_memory=False, installed=(slack_manifest(), imessage_manifest())
+        ),
+        workspace_id,
+        "packed@x.com",
+    )
+    assert packed == {"slack": True, "imessage": False, "ufo": True}

@@ -11,6 +11,8 @@ import httpx
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from ufo.sdk.credentials import deploy_env
+from ufo.sdk.http import plain_local
+from ufo_ext_imessage.local_line import LocalLine
 from ufo_ext_imessage.proto.photon.imessage.v1 import (
     attachment_service_pb2,
     attachment_service_pb2_grpc,
@@ -23,6 +25,7 @@ from ufo_ext_imessage.proto.photon.imessage.v1 import (
 from ufo_ext_imessage.provider import (
     InboundMessage,
     MessageAttachment,
+    MessageProvider,
     ProviderEvent,
     ProviderNotConfigured,
 )
@@ -309,15 +312,47 @@ class SpectrumProject:
                     yield frame.primary_chunk
 
 
-@cache
-def spectrum_project() -> SpectrumProject:
+NOT_CONFIGURED = (
+    f"Set UFO_{SPECTRUM_PROJECT_ID_ENV} and UFO_{SPECTRUM_PROJECT_SECRET_ENV} "
+    f"(or {SPECTRUM_PROJECT_ID_ENV} and {SPECTRUM_PROJECT_SECRET_ENV})"
+)
+
+
+def _spectrum_pair() -> tuple[str, str] | None:
     project_id = deploy_env(SPECTRUM_PROJECT_ID_ENV)
     project_secret = deploy_env(SPECTRUM_PROJECT_SECRET_ENV)
     if not project_id or not project_secret:
-        raise ProviderNotConfigured(
-            f"Set UFO_{SPECTRUM_PROJECT_ID_ENV} and UFO_{SPECTRUM_PROJECT_SECRET_ENV} "
-            f"(or {SPECTRUM_PROJECT_ID_ENV} and {SPECTRUM_PROJECT_SECRET_ENV})"
-        )
+        return None
+    return project_id, project_secret
+
+
+def spectrum_configured() -> bool:
+    """Whether this deploy carries the Spectrum project pair the iMessage provider signs in with."""
+    return _spectrum_pair() is not None
+
+
+def imessage_offered(public_base_url: str | None) -> bool:
+    """Whether this deploy connects an iMessage phone: it holds the Spectrum project pair, or it is
+    a plain-local dev deploy, which runs the connect flow on the local line."""
+    return spectrum_configured() or plain_local(public_base_url)
+
+
+def line_provider(public_base_url: str | None) -> MessageProvider:
+    """The deploy's iMessage provider: the Spectrum project where its pair is set, the local line on
+    a plain-local dev deploy, and a refusal naming the pair anywhere else."""
+    if spectrum_configured():
+        return spectrum_project()
+    if plain_local(public_base_url):
+        return LocalLine()
+    raise ProviderNotConfigured(NOT_CONFIGURED)
+
+
+@cache
+def spectrum_project() -> SpectrumProject:
+    pair = _spectrum_pair()
+    if pair is None:
+        raise ProviderNotConfigured(NOT_CONFIGURED)
+    project_id, project_secret = pair
     return SpectrumProject(
         project_id=project_id,
         project_secret=project_secret,

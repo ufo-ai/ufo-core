@@ -42,6 +42,7 @@ let sent: string[] = [];
 beforeEach(() => {
   location.hash = "";
   history.replaceState(null, "", location.pathname + "?first=1");
+  sessionStorage.clear();
   resetChatStore();
   sent = [];
   useStreamFake();

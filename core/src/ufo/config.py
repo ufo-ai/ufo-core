@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.harness.models.interface import AUTO_MODEL
+from ufo.sdk.http import plain_local
 
 CONFIG_PATH_ENV = "UFO_CONFIG"
 DEFAULT_CONFIG_PATH = Path("ufo.toml")
@@ -253,10 +254,9 @@ class SandboxConfig(BaseModel):
         if self.ingress_public_url is None:
             return self
         base = urlsplit(self.ingress_public_url)
-        plain_local = base.scheme == "http" and (
-            base.hostname == "localhost" or (base.hostname or "").endswith(".localhost")
-        )
-        if not base.hostname or (base.scheme != "https" and not plain_local):
+        if not base.hostname or (
+            base.scheme != "https" and not plain_local(self.ingress_public_url)
+        ):
             raise ValueError(
                 "sandbox.ingress_public_url must be an https base with a host "
                 "(e.g. https://example.com) — a site carries a member's session, and plain http "

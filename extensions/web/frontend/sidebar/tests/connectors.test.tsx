@@ -670,6 +670,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
           pending.set(url, resolve);
         });
       }
+      if (url.includes("/workspace/surfaces")) return json({ surfaces: [] });
       if (url.includes("/settings")) return json(SETTINGS);
       if (url.includes("/api/agents/status")) return json({ statuses: [] });
       if (url.includes("/objects/conversation")) return json({ objects: [] });

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -8,13 +9,22 @@ import {
 } from "react";
 import {
   IconCirclePlus,
+  IconBroadcast,
+  IconX,
   IconPlus,
   IconSettings,
   IconVolume,
   IconVolumeOff,
 } from "@tabler/icons-react";
 
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { usePanelRead } from "@/kernel/panel";
+import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
 import { statusDot, useAppStatus } from "@/lib/appStatusStore";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
@@ -24,12 +34,13 @@ import { setMuted, useMuted } from "@/lib/sound";
 import { useOfferedTabs } from "@/lib/surfaces";
 import type { ChatRow } from "@/lib/rail";
 import { Spotlight } from "@/views/Spotlight";
-import type { Agent } from "@/lib/types";
+import type { Agent, Member } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
 
 const HOME = "Home";
 const LAUNCHER = "Launcher";
 const NEW_APP = "New app";
+const CHANNELS = "Channels";
 const WORKSPACE = "Workspace";
 const MUTE = "Mute sounds";
 const UNMUTE = "Unmute sounds";
@@ -74,6 +85,68 @@ function RailTip({ label, children }: { label: string; children: ReactElement })
   );
 }
 
+/** The tile that opens the channels the member can reach the workspace on, with a dot while any of
+ *  them is still unconnected. The rows are the same component the onboarding step and the Messaging
+ *  section draw; the read stands at the shell's own cadence and is taken again when the dialog
+ *  closes. A row this deploy does not offer is no missing channel. */
+function ChannelsTile({ agent, member }: { agent: Agent; member: Member }) {
+  const [open, setOpen] = useState(false);
+  const [toast, setToast] = useState<ToastState>(SILENT);
+  const [reloads, setReloads] = useState(0);
+  const state = usePanelRead<SurfacesPayload>(SURFACES_READ, reloads);
+  const refuse = useCallback((title: string) => setToast({ title }), []);
+  const missing =
+    state.phase === "ready" &&
+    state.payload.surfaces.some((row) => row.offered && !row.connected);
+  return (
+    <>
+      <RailTip label={CHANNELS}>
+        <button
+          type="button"
+          aria-label={CHANNELS}
+          onClick={() => setOpen(true)}
+          className={cn(TILE, "relative")}
+        >
+          <IconBroadcast className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
+          {missing ? (
+            <span
+              aria-hidden
+              className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
+            />
+          ) : null}
+        </button>
+      </RailTip>
+      {open ? (
+          <Dialog
+            open
+            onOpenChange={(next) => {
+              if (next) return;
+              setOpen(false);
+              setReloads((count) => count + 1);
+            }}
+          >
+          <DialogContent>
+            <DialogHeader className="flex-row items-center justify-between">
+              <DialogTitle>{CHANNELS}</DialogTitle>
+              <DialogPrimitive.Close asChild>
+                <Button variant="mark" size="glyph" aria-label="Close" className="text-ink-quiet">
+                  <IconX stroke={1.25} aria-hidden />
+                </Button>
+              </DialogPrimitive.Close>
+            </DialogHeader>
+            <ConnectSurfaces
+              agent={agent}
+              member={member}
+              onRefused={refuse}
+            />
+          </DialogContent>
+        </Dialog>
+      ) : null}
+      <Toast state={toast} onDone={() => setToast(SILENT)} />
+    </>
+  );
+}
+
 /** The column opening the shell on the left: the mark, the act that opens a tab, one tile per tab
  *  home stands, the act that builds an app, and the workspace at its foot.
  *
@@ -95,6 +168,8 @@ export function MinimalSidebar({
   agents,
   chats,
   pinned,
+  member,
+  main,
   account,
   onEnterLane,
   onLane,
@@ -113,6 +188,10 @@ export function MinimalSidebar({
    *  run. The seek and the address both belong to the shell, so the rail hands the panel the same
    *  act its own tiles are pressed with. */
   onEnterLane: (lane: string, opens: string[]) => void;
+  /** The member the rail serves, and the agent the channels connect to: the Channels tile reads the
+   *  member's own connection state and opens the rows against the workspace's main agent. */
+  member: Member;
+  main: Agent | null;
   /** The member's own menu — identity, theme, administration, sign out — drawn at the rail's foot,
    *  because at a desk width this rail is the whole shell and the way out has to stand on it. */
   account: ReactNode;
@@ -222,6 +301,7 @@ export function MinimalSidebar({
           <IconCirclePlus className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
         </button>
       </RailTip>
+      {main ? <ChannelsTile agent={main} member={member} /> : null}
       {/* The track speaks when the bracket keys walk the row, and this is where a member takes that
           back. The word names the act, as every other tile's does, and the glyph carries the
           state. */}

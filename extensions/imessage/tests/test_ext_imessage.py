@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import grpc
@@ -18,6 +19,7 @@ from ufo_ext_imessage.cloud import (
     SpectrumCloudError,
     SpectrumProject,
 )
+from ufo_ext_imessage.local_line import LOCAL_LINE, LocalLine
 from ufo_ext_imessage.provider import (
     InboundMessage,
     MessageAttachment,
@@ -248,7 +250,9 @@ def _message(
     )
 
 
-async def _tool_context(workspace_id: UUID, member_id: UUID, root: Path) -> ToolContext:
+async def _tool_context(
+    workspace_id: UUID, member_id: UUID, root: Path, public_base_url: str | None = None
+) -> ToolContext:
     """A tool call inside a real turn: the connect tool shares the opt-in QR as an artifact of the
     turn it runs in, which is a row like any other."""
     turn = Turn(
@@ -302,6 +306,7 @@ async def _tool_context(workspace_id: UUID, member_id: UUID, root: Path) -> Tool
             frozenset(),
             surfaces=frozenset({SURFACE_IMESSAGE}),
             addressed_surfaces=frozenset({SURFACE_IMESSAGE}),
+            public_base_url=public_base_url,
         ),
     )
 
@@ -424,12 +429,12 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None, tmp_pat
     with ws(workspace_id):
         assert admin.ext is not None
         await admin.ext.installations.bind(SURFACE_IMESSAGE, "project:old")
-        refused = await ImessageConnect(provider=lambda: provider).run(
+        refused = await ImessageConnect(provider=lambda _base: provider).run(
             member,
             ImessageConnectInput(phone_number="+14155550123"),
         )
         before = await admin.ext.installations.installation(SURFACE_IMESSAGE)
-        connected = await ImessageConnect(provider=lambda: provider).run(
+        connected = await ImessageConnect(provider=lambda _base: provider).run(
             admin,
             ImessageConnectInput(phone_number="+14155550123"),
         )
@@ -441,6 +446,109 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None, tmp_pat
     assert before == "project:old"
     assert json.loads(connected.content[0].text)["state"] == "pending"
     assert after == "project:new"
+
+
+def test_spectrum_configured_needs_both_halves_of_the_project_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (cloud.SPECTRUM_PROJECT_ID_ENV, cloud.SPECTRUM_PROJECT_SECRET_ENV):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"UFO_{name}", raising=False)
+    assert cloud.spectrum_configured() is False
+    monkeypatch.setenv(f"UFO_{cloud.SPECTRUM_PROJECT_ID_ENV}", "project")
+    assert cloud.spectrum_configured() is False
+    monkeypatch.setenv(cloud.SPECTRUM_PROJECT_SECRET_ENV, "secret")
+    assert cloud.spectrum_configured() is True
+
+
+LOCAL_BASE = "http://ufo-3.localhost:18280"
+PUBLIC_BASE = "https://ufo.example.test"
+
+
+def _unset_spectrum_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (cloud.SPECTRUM_PROJECT_ID_ENV, cloud.SPECTRUM_PROJECT_SECRET_ENV):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"UFO_{name}", raising=False)
+
+
+def test_line_provider_is_spectrum_then_the_local_line_then_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _unset_spectrum_pair(monkeypatch)
+    for base in (PUBLIC_BASE, None):
+        assert cloud.imessage_offered(base) is False
+        with pytest.raises(ProviderNotConfigured, match="SPECTRUM_PROJECT_ID"):
+            cloud.line_provider(base)
+    assert cloud.imessage_offered(LOCAL_BASE) is True
+    assert isinstance(cloud.line_provider(LOCAL_BASE), LocalLine)
+    monkeypatch.setenv(f"UFO_{cloud.SPECTRUM_PROJECT_ID_ENV}", "project")
+    monkeypatch.setenv(f"UFO_{cloud.SPECTRUM_PROJECT_SECRET_ENV}", "secret")
+    cloud.spectrum_project.cache_clear()
+    for base in (PUBLIC_BASE, LOCAL_BASE, None):
+        assert cloud.imessage_offered(base) is True
+        assert isinstance(cloud.line_provider(base), SpectrumProject)
+    cloud.spectrum_project.cache_clear()
+
+
+async def test_the_local_line_connects_a_phone_on_a_dev_deploy(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _unset_spectrum_pair(monkeypatch)
+    workspace_id, member_id = await _seed()
+    phone = "+14155550123"
+    tool_context = await _tool_context(workspace_id, member_id, tmp_path, LOCAL_BASE)
+    with ws(workspace_id):
+        assert tool_context.ext is not None
+        result = await ImessageConnect(provider=cloud.line_provider).run(
+            tool_context, ImessageConnectInput(phone_number=phone)
+        )
+        bound = await tool_context.ext.installations.installation(SURFACE_IMESSAGE)
+        stored = await tool_context.ext.store.get(claim_key(member_id, phone))
+        shared = await _shared_artifacts()
+    claim = PendingClaim.model_validate(stored)
+    assert bound == LocalLine().installation_id == "local-line"
+    assert json.loads(result.content[0].text) == {
+        "state": "pending",
+        "instruction": (
+            f'Text "UFO {claim.opt_in_code}" to (555) 555-0100 from that phone within '
+            f"{PHONE_CLAIM_MINUTES} minutes."
+        ),
+        "assigned_phone_number": LOCAL_LINE,
+        "opt_in_text": f"UFO {claim.opt_in_code}",
+        "opt_in_link": f"sms:{LOCAL_LINE}?&body=UFO%20{claim.opt_in_code}",
+    }
+    assert await _claimed_phones() == [(phone, member_id, None)]
+    assert [(name, media, subject) for name, media, subject, _key in shared] == [
+        ("opt-in.png", "image/png", "Scan with that phone to open the message.")
+    ]
+
+
+async def test_the_local_line_listens_forever_and_delivers_nothing() -> None:
+    line = LocalLine()
+    assert [event async for event in line.catch_up(None)] == []
+    ready = asyncio.Event()
+
+    async def first_frame() -> None:
+        async for _frame in line.subscribe(ready):
+            raise AssertionError("the local line spoke")
+
+    task = asyncio.create_task(first_frame())
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    with pytest.raises(RuntimeError, match="delivers nothing"):
+        await line.send_text("chat", "hi", "key")
+    with pytest.raises(RuntimeError, match="delivers nothing"):
+        await line.send_attachment("chat", "a.txt", b"a", "key")
+    with pytest.raises(RuntimeError, match="delivers nothing"):
+        async for _chunk in line.download_attachment("attachment"):
+            raise AssertionError("the local line delivered")
+    await line.invalidate()
+    assert line.invalid_cursor(RuntimeError()) is False
+    assert line.external_error(RuntimeError()) is False
+    assert line.error_code(RuntimeError()) == "local_line"
 
 
 def test_phone_and_queue_boundaries() -> None:
@@ -496,10 +604,12 @@ def test_a_phone_that_states_no_readable_number_is_refused_not_rewritten() -> No
 
 
 async def test_missing_provider_keeps_listener_inactive() -> None:
-    def missing_provider():
+    def missing_provider(_base: str | None):
         raise ProviderNotConfigured("Set provider keys")
 
-    task = asyncio.create_task(ImessageSurface(provider=missing_provider).listen(object()))
+    task = asyncio.create_task(
+        ImessageSurface(provider=missing_provider).listen(SimpleNamespace(public_base_url=None))
+    )
     await asyncio.sleep(0)
     assert not task.done()
     task.cancel()
@@ -516,6 +626,8 @@ async def test_direct_writeback_mints_the_requesting_members_connect_url() -> No
             return "message"
 
     class Context:
+        public_base_url = "https://ufo.example.test"
+
         async def connect_url(self, _turn_id: UUID, member_id: UUID) -> str:
             assert member_id == requester
             return "https://ufo.example.test/connect"
@@ -524,7 +636,7 @@ async def test_direct_writeback_mints_the_requesting_members_connect_url() -> No
             return "https://ufo.example.test"
 
     provider = Provider()
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     writeback = Writeback(
         turn_id=uuid4(),
         conversation_id=uuid4(),
@@ -627,7 +739,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     workspace_id, member_id = await _seed()
     phone = "+14155550123"
     provider = RecordingProvider()
-    tool = ImessageConnect(provider=lambda: provider)
+    tool = ImessageConnect(provider=lambda _base: provider)
     tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     dbos = StubDbos()
     context = _context(workspace_id, tmp_path, dbos)
@@ -659,7 +771,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     assert provider.sends == []
     assert provider.delivered == []
 
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     with ws(workspace_id):
         await surface._admit_message(
             context,
@@ -741,7 +853,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: P
     with ws(workspace_id):
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        result = await ImessageConnect(provider=lambda: provider).run(
+        result = await ImessageConnect(provider=lambda _base: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone),
         )
@@ -778,7 +890,7 @@ async def test_connect_refuses_a_phone_another_member_is_connecting(
     with ws(workspace_id):
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        result = await ImessageConnect(provider=lambda: provider).run(
+        result = await ImessageConnect(provider=lambda _base: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone),
         )
@@ -800,7 +912,7 @@ async def test_an_unreadable_row_is_dropped_and_never_parks_the_surface(
     provider = RecordingProvider()
     tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     context = _context(workspace_id, tmp_path, StubDbos())
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     unreadable = {"member_id": str(member_id)}
     await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
@@ -811,7 +923,7 @@ async def test_an_unreadable_row_is_dropped_and_never_parks_the_surface(
         )
         assert tool_context.ext is not None
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        result = await ImessageConnect(provider=lambda: provider).run(
+        result = await ImessageConnect(provider=lambda _base: provider).run(
             tool_context,
             ImessageConnectInput(phone_number=phone),
         )
@@ -852,7 +964,7 @@ async def test_a_code_stored_under_another_member_completes_nothing(
                 mode="json"
             ),
         )
-        await ImessageSurface(provider=lambda: provider)._admit_message(
+        await ImessageSurface(provider=lambda _base: provider)._admit_message(
             context, provider, _message(phone, f"UFO {CLAIM_CODE}", message_id="unmatched-opt-in")
         )
     assert await _claimed_phones() == [(phone, member_id, None)]
@@ -871,7 +983,7 @@ async def test_a_wrong_code_is_answered_and_an_expired_claim_says_so(
     phone = "+14155550123"
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
         for text, message_id in (
@@ -925,7 +1037,7 @@ async def test_an_opt_out_reply_cancels_the_claim_in_silence(db: None, tmp_path:
     context = _context(workspace_id, tmp_path, StubDbos())
     await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ImessageSurface(provider=lambda: provider)._admit_message(
+        await ImessageSurface(provider=lambda _base: provider)._admit_message(
             context, provider, _message(phone, " STOP ", message_id="stop")
         )
         assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
@@ -948,7 +1060,7 @@ async def test_only_a_direct_message_from_the_claimed_phone_completes_the_claim(
     phone = "+14155550123"
     provider = RecordingProvider()
     context = _context(workspace_id, tmp_path, StubDbos())
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
         await surface._admit_message(context, provider, message)
@@ -976,7 +1088,7 @@ async def test_bad_attachments_do_not_block_the_inbound_message(
         }
     )
     context = _context(workspace_id, tmp_path, StubDbos())
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     attachments = (
         MessageAttachment(id="oversize", filename="large.txt", size_bytes=0),
         MessageAttachment(id="missing", filename="gone.txt", size_bytes=0),
@@ -1006,7 +1118,7 @@ async def test_connection_acknowledgement_replays_without_admitting_the_opt_in(
     acknowledgement_key = "imessage-connected:opt-in"
     provider = RecordingProvider(fail_once={acknowledgement_key})
     context = _context(workspace_id, tmp_path, StubDbos())
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
         with pytest.raises(httpx.ConnectError, match="send failed"):
@@ -1035,8 +1147,10 @@ async def test_a_refused_contact_card_leaves_the_phone_connected(db: None, tmp_p
     context = _context(workspace_id, tmp_path, StubDbos())
     await _claim(workspace_id, member_id, phone)
     with ws(workspace_id):
-        await ImessageSurface(provider=lambda: provider)._admit_message(context, provider, message)
-        await ImessageSurface(provider=lambda: provider)._admit_message(
+        await ImessageSurface(provider=lambda _base: provider)._admit_message(
+            context, provider, message
+        )
+        await ImessageSurface(provider=lambda _base: provider)._admit_message(
             context, provider, _message(phone, message_id="request-1")
         )
     async with workspace_tx() as connection:
@@ -1059,6 +1173,7 @@ async def test_one_shared_line_serves_every_workspace_and_member(db: None, tmp_p
     dbos = StubDbos()
     listener = SurfaceListenerContext(
         surface=SURFACE_IMESSAGE,
+        public_base_url=None,
         _auth=SurfaceAuth(
             _credentials=None, _declared=frozenset({SURFACE_IMESSAGE}), _surface=SURFACE_IMESSAGE
         ),
@@ -1072,7 +1187,7 @@ async def test_one_shared_line_serves_every_workspace_and_member(db: None, tmp_p
     }
     for phone, (workspace_id, member_id) in phones.items():
         await _linked(workspace_id, member_id, phone)
-    surface = ImessageSurface(provider=lambda: provider)
+    surface = ImessageSurface(provider=lambda _base: provider)
     for sequence, phone in enumerate(phones, start=1):
         await surface._process_event(
             listener,
@@ -1109,7 +1224,7 @@ async def test_a_second_workspace_connects_on_the_same_project(db: None, tmp_pat
     first_workspace, first_admin = await _seed()
     second_workspace, second_admin = await _seed()
     provider = RecordingProvider()
-    tool = ImessageConnect(provider=lambda: provider)
+    tool = ImessageConnect(provider=lambda _base: provider)
     results = []
     for workspace_id, admin_id, phone in (
         (first_workspace, first_admin, "+14155550001"),
@@ -1153,7 +1268,7 @@ async def test_inbound_message_from_an_unclaimed_phone_is_ignored(db: None, tmp_
         lock=asyncio.Lock(),
         token_state={},
     )
-    surface = ImessageSurface(provider=lambda: project)
+    surface = ImessageSurface(provider=lambda _base: project)
     try:
         with ws(workspace_id):
             await surface._admit_message(context, project, _message("+14155550123"))

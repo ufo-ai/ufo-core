@@ -17,13 +17,14 @@ import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Notice, Panel, PanelSkeleton, usePanelRead } from "@/kernel/panel";
 import { Frame, Head } from "@/views/Frame";
 import { AgentIcon } from "@/lib/agentIcon";
-import { BASE, getJson, postAction, postIntent, postObjectAction, type ObjectAction } from "@/lib/api";
+import { BASE, getJson, postAction, postIntent, postObjectAction } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { chatSurface } from "@/lib/mainAgent";
 import { openConversation } from "@/lib/turnStream";
 import type { ActionView, Agent, Member } from "@/lib/types";
+import { CONNECT_INSTALLS, Connect, ConnectSurfaces } from "@/views/Surfaces";
 
 type ProviderTile = { name: string; label: string; summary: string; group: string };
 
@@ -63,11 +64,14 @@ const PROFILE_READ = "/objects/enrichment_profile";
 const CONFIRM_WEBSITE_ACTION = "confirm_website";
 
 const BUSINESS_STEP = "business";
+/** The step the welcome leads to. It is the first the run can stand, and a deploy that cannot act
+ *  on the answer lands the address on the first step it does stand instead. */
 const WEBSITE_STEP = "website";
 const POSITION_STEP = "position";
 const TOOLS_STEP = "tools";
 const GOALS_STEP = "goals";
 const SLACK_STEP = "slack";
+const SURFACES_STEP = "surfaces";
 
 const ROLES = [
   "Founder",
@@ -188,15 +192,6 @@ const RECORD_FIRST_RUN_ACTION = "record_first_run";
  *  seconds they spend over there rather than in the half-minute a pane showing records can hold a
  *  stale answer for. */
 export const WATCH_MS = 3_000;
-
-/** The object a workspace install acts on and the action that installs it, keyed by the connector
- *  that takes one: Slack's is the surface object's connect. The object's detail is read for the act
- *  it projects and the act mints the install link inside the turn, so installing takes no message
- *  the member has to send. Every provider outside this map connects a member's own account through
- *  the broker verb instead. */
-export const CONNECT_INSTALLS: Record<string, ObjectAction> = {
-  slack: { kind: "surface", name: "slack", action: "slack_connect" },
-};
 
 /** The connections this member already holds, as the pool projects them. The tools step reads it
  *  while it waits: an account is granted on the provider's own pages, so the grant landing here is
@@ -369,6 +364,95 @@ export function firstRunRecorded(
     if (body.length <= budget) return body;
   }
   return who.slice(0, budget);
+}
+
+/** What the member has answered so far, held in this tab across a reload so the step the address
+ *  names is drawn with its content intact. One record under one key per workspace, written as it
+ *  changes and dropped when the run ends or is closed. */
+type Answers = {
+  business: string;
+  website: string;
+  profile: Profile | null;
+  role: Role;
+  rolePicked: boolean;
+  otherRole: string;
+  goals: string[];
+  otherGoal: string;
+  /* The tools the member picked off their role's suggestions, by provider name. */
+  tools: string[];
+  declined: boolean;
+};
+
+const ANSWERS_PREFIX = "ufo.first-run.";
+
+function answersKey(member: Member): string {
+  return ANSWERS_PREFIX + (member.workspace_id ?? member.email);
+}
+
+function freshAnswers(member: Member): Answers {
+  return {
+    business: "",
+    website: signupWebsite(member.email),
+    profile: null,
+    role: DEFAULT_ROLE,
+    rolePicked: false,
+    otherRole: "",
+    goals: [],
+    otherGoal: "",
+    tools: [],
+    declined: false,
+  };
+}
+
+/** The answers this tab holds for the member, or a fresh record where it holds none or the browser
+ *  hands back no store. */
+function readAnswers(member: Member): Answers {
+  const fresh = freshAnswers(member);
+  try {
+    const held = globalThis.sessionStorage?.getItem(answersKey(member));
+    return held ? { ...fresh, ...(JSON.parse(held) as Partial<Answers>) } : fresh;
+  } catch {
+    return fresh;
+  }
+}
+
+/** Hold the answers, or drop them where `answers` is null. A browser that refuses the write costs
+ *  the member their answers on a reload, never the run. */
+function holdAnswers(member: Member, answers: Answers | null): void {
+  try {
+    const held = globalThis.sessionStorage;
+    if (answers === null) held?.removeItem(answersKey(member));
+    else held?.setItem(answersKey(member), JSON.stringify(answers));
+  } catch {
+    return;
+  }
+}
+
+/** The steps the run stands, in order: the website it reads the business from wherever the deploy
+ *  can act on the answer, the questions that read comes back to answer, the tools the role
+ *  suggests, the Slack install wherever this deploy offers one, and the other surfaces once Slack
+ *  is declined. */
+function revealedSteps(payload: FirstRunPayload, declined: boolean, tools: boolean): string[] {
+  const slack = payload.connectors.some((row) => row.name === SLACK_STEP);
+  const confirm = payload.actions.enrichment_profile.some(
+    (view) => view.name === CONFIRM_WEBSITE_ACTION,
+  );
+  return [
+    ...(confirm ? [WEBSITE_STEP] : []),
+    BUSINESS_STEP,
+    POSITION_STEP,
+    ...(tools ? [TOOLS_STEP] : []),
+    GOALS_STEP,
+    ...(slack ? [SLACK_STEP] : []),
+    ...(slack && declined ? [SURFACES_STEP] : []),
+  ];
+}
+
+/** An address naming a step the run does not stand — a bad link, the Slack step on a deploy without
+ *  one — is written over with the step the screen draws in its place. */
+function Land({ step, onStep }: { step: string; onStep: (step: string) => void }) {
+  useEffect(() => onStep(step), [step, onStep]);
+  return null;
 }
 
 /** How long each row of the building screen waits for the one before it. The rows land one at a
@@ -690,37 +774,35 @@ function Building({
  *  act that touches a conversation is the shell's: `onDone` carries the member to the thread the
  *  first task runs on, named by the conversation the run founded. Every other act here — the
  *  enrichment read, the memory write, the thread per goal, the build screen — is the same wherever
- *  the run is drawn, so it lives here once. */
+ *  the run is drawn, so it lives here once.
+ *
+ *  The step the run is on is the address's: `step` names it and `onStep` moves it, so a reload
+ *  lands where the member was. No step is the welcome; the build screen follows the finish and is
+ *  named by no address. */
 export function FirstRun({
   agent,
   agents,
   member,
+  step: asked,
+  onStep,
   onClose,
   onDone,
 }: {
   agent: Agent;
   agents: Agent[];
   member: Member;
+  step: string | undefined;
+  onStep: (step: string | undefined) => void;
   onClose: () => void;
   onDone: (conversationId: string | null) => void;
 }) {
   const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ, 0);
-  const [business, setBusiness] = useState("");
-  const [website, setWebsite] = useState(() => signupWebsite(member.email));
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [role, setRole] = useState<Role>(DEFAULT_ROLE);
-  const [rolePicked, setRolePicked] = useState(false);
-  const [otherRole, setOtherRole] = useState("");
-  const [goals, setGoals] = useState<string[]>([]);
-  const [otherGoal, setOtherGoal] = useState("");
-  /* The tools the member picked off their role's suggestions, by provider name, and whether the
-     step is standing its picks to connect rather than offering them. */
-  const [tools, setTools] = useState<string[]>([]);
+  const [answers, setAnswers] = useState<Answers>(() => readAnswers(member));
+  /* Whether the tools step is standing its picks to connect rather than offering them. */
   const [connecting, setConnecting] = useState(false);
   /* The accounts this member holds, read only while the step stands the picks to connect: a grant
      lands on the provider's pages, so the pool is the one place this screen learns of it. */
   const pool = usePanelRead<PoolPayload>(connecting ? POOL_READ : null, 0, WATCH_MS);
-  const [at, setAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [building, setBuilding] = useState(false);
@@ -734,13 +816,20 @@ export function FirstRun({
   const founding = useRef<Promise<string | null> | null>(null);
   const [thread, setThread] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(SILENT);
-  const [welcomed, setWelcomed] = useState(false);
   /* Held across renders, because the failed panel raises its sentence from an effect keyed on this
      function: a new one every render would raise the sentence again on every render it caused. */
   const refuse = useCallback((title: string) => setToast({ title }), []);
+  useEffect(() => holdAnswers(member, answers), [member, answers]);
+  const answer = (patch: Partial<Answers>) => setAnswers((held) => ({ ...held, ...patch }));
+  const close = () => {
+    holdAnswers(member, null);
+    onClose();
+  };
+  const { business, website, profile, role, otherRole, goals, otherGoal, tools } = answers;
+  const declined = asked === SURFACES_STEP || answers.declined;
 
-  if (!welcomed) {
-    return <Welcome onStart={() => setWelcomed(true)} onClose={onClose} />;
+  if (asked === undefined) {
+    return <Welcome onStart={() => onStep(WEBSITE_STEP)} onClose={close} />;
   }
   if (building) {
     return (
@@ -760,12 +849,12 @@ export function FirstRun({
       <Panel
         state={state}
         loading={() => (
-          <Frame actions={<Close onClick={onClose} />}>
+          <Frame actions={<Close onClick={close} />}>
             <PanelSkeleton shape="form" />
           </Frame>
         )}
         failed={(message) => (
-          <Frame actions={<Close onClick={onClose} />}>
+          <Frame actions={<Close onClick={close} />}>
             <Failed message={message} onToast={refuse} />
           </Frame>
         )}
@@ -779,19 +868,8 @@ export function FirstRun({
            *  where the catalog carries at least one of them, so a deploy with no connectors offers
            *  no empty grid. */
           const suggests = suggested(role, payload.providers);
-          /** The run the member is on: the website it reads the business from, then the questions
-           *  that read comes back to answer, the tools the role suggests, then the Slack install
-           *  wherever this deploy offers one. The website step stands only where the deploy can act
-           *  on the answer. Every step is certain from the start, so the head counts them all from
-           *  the first screen. */
-          const revealed = [
-            ...(confirm ? [WEBSITE_STEP] : []),
-            BUSINESS_STEP,
-            POSITION_STEP,
-            ...(suggests.length ? [TOOLS_STEP] : []),
-            GOALS_STEP,
-            ...(slack ? [SLACK_STEP] : []),
-          ];
+          const revealed = revealedSteps(payload, declined, suggests.length > 0);
+          const at = Math.max(0, revealed.indexOf(asked));
           const step = revealed[at];
           const held = slack ? slack.installed : false;
           const installed = step === SLACK_STEP && (held || connected);
@@ -850,17 +928,18 @@ export function FirstRun({
             setThreads(opened);
             setBusy(false);
             setBuilding(true);
+            holdAnswers(member, null);
           };
           const advance = () => {
             if (step === BUSINESS_STEP) kickOff();
             /* The tools step answers twice: the picks, then connecting them. A step that picked
                nothing has nothing to connect and moves straight on. */
             if (step === TOOLS_STEP && tools.length && !connecting) return setConnecting(true);
-            return at + 1 < revealed.length ? setAt(at + 1) : void finish();
+            return at + 1 < revealed.length ? onStep(revealed[at + 1]) : void finish();
           };
           const back = () => {
             if (step === TOOLS_STEP && connecting) return setConnecting(false);
-            return at ? setAt(at - 1) : setWelcomed(false);
+            return onStep(at ? revealed[at - 1] : undefined);
           };
           /** Confirms the website, reads back what the enrichment made of it, and suggests the role
            *  it found where the member has not picked one. A refusal is stated and holds the step. */
@@ -882,10 +961,13 @@ export function FirstRun({
               return;
             }
             const own = read.payload.objects.find((row) => row.name === member.email) ?? null;
-            setProfile(own);
-            if (own && !rolePicked) setRole(suggestedRole(own));
             const learned = own ? describes(own) : "";
-            if (learned) setBusiness((held) => (held.trim() ? held : learned));
+            setAnswers((held) => ({
+              ...held,
+              profile: own,
+              role: own && !held.rolePicked ? suggestedRole(own) : held.role,
+              business: held.business.trim() || !learned ? held.business : learned,
+            }));
             advance();
           };
           const company = profile?.status === "matched" ? profile.company_name : null;
@@ -917,8 +999,9 @@ export function FirstRun({
               }
               at={at}
               steps={revealed.length}
-              actions={<Close onClick={onClose} />}
+              actions={<Close onClick={close} />}
             >
+              {revealed.includes(asked) ? null : <Land step={step} onStep={onStep} />}
               {step === BUSINESS_STEP ? (
                 <Step onBack={back} onNext={advance} nextDisabled={!business.trim()}>
                   <h1 className="m-0 text-subtitle font-medium text-ink">
@@ -931,7 +1014,7 @@ export function FirstRun({
                       autoFocus
                       placeholder="Software startup, Marketing agency, Design studio, AI consulting…"
                       value={business}
-                      onChange={(event) => setBusiness(event.target.value)}
+                      onChange={(event) => answer({ business: event.target.value })}
                       className={ANSWER_BOX}
                     />
                     <span
@@ -964,7 +1047,7 @@ export function FirstRun({
                       autoComplete="url"
                       placeholder="company.com"
                       value={website}
-                      onChange={(event) => setWebsite(event.target.value)}
+                      onChange={(event) => answer({ website: event.target.value })}
                     />
                     {website ? (
                       <Button
@@ -972,7 +1055,7 @@ export function FirstRun({
                         size="glyph"
                         aria-label="Clear"
                         className="absolute top-1/2 right-lg -translate-y-1/2"
-                        onClick={() => setWebsite("")}
+                        onClick={() => answer({ website: "" })}
                       >
                         <IconX stroke={1.5} aria-hidden />
                       </Button>
@@ -996,8 +1079,7 @@ export function FirstRun({
                     value={role}
                     onValueChange={(value) => {
                       if (!value) return;
-                      setRole(value as Role);
-                      setRolePicked(true);
+                      answer({ role: value as Role, rolePicked: true });
                     }}
                   >
                     {ROLES.map((option) => (
@@ -1023,7 +1105,7 @@ export function FirstRun({
                       autoFocus
                       placeholder="Your role"
                       value={otherRole}
-                      onChange={(event) => setOtherRole(event.target.value)}
+                      onChange={(event) => answer({ otherRole: event.target.value })}
                     />
                   ) : null}
                 </Step>
@@ -1046,7 +1128,7 @@ export function FirstRun({
                     aria-label="Tools"
                     className={CHOICES}
                     value={tools}
-                    onValueChange={setTools}
+                    onValueChange={(picked) => answer({ tools: picked })}
                   >
                     {suggests.map((tile) => (
                       <ToggleGroupItem key={tile.name} value={tile.name} className={CHOICE}>
@@ -1110,7 +1192,7 @@ export function FirstRun({
                     aria-label="Top of mind"
                     className={CHOICES}
                     value={goals}
-                    onValueChange={setGoals}
+                    onValueChange={(picked) => answer({ goals: picked })}
                   >
                     {[...GOALS.map((goal) => goal.label), OTHER_GOAL].map((option) => (
                       <ToggleGroupItem
@@ -1134,7 +1216,7 @@ export function FirstRun({
                       autoFocus
                       placeholder="What is top of mind"
                       value={otherGoal}
-                      onChange={(event) => setOtherGoal(event.target.value)}
+                      onChange={(event) => answer({ otherGoal: event.target.value })}
                     />
                   ) : null}
                 </Step>
@@ -1174,9 +1256,12 @@ export function FirstRun({
                         variant="quiet"
                         size="bar"
                         className="h-10 w-full bg-fill text-ink hover:bg-fill-strong"
-                        onClick={finish}
+                        onClick={() => {
+                          answer({ declined: true });
+                          onStep(SURFACES_STEP);
+                        }}
                       >
-                        I use something different
+                        I don't use Slack
                       </Button>
                       {LOCAL_DEV ? (
                         <Button
@@ -1192,109 +1277,30 @@ export function FirstRun({
                   </div>
                 </div>
               ) : null}
+              {step === SURFACES_STEP ? (
+                <Step onBack={back} onNext={finish} nextDisabled={false} busy={busy}>
+                  <div className="flex flex-col gap-sm">
+                    {company ? (
+                      <p className="m-0 text-body leading-(--leading-chrome) font-medium text-ink-quiet">{company}</p>
+                    ) : null}
+                    <h1 className="m-0 text-body leading-(--leading-chrome) font-medium text-ink">
+                      Get UFO everywhere you work
+                    </h1>
+                  </div>
+                  <ConnectSurfaces
+                    agent={agent}
+                    member={member}
+                    hidden={[SLACK_STEP]}
+                    onRefused={refuse}
+                  />
+                </Step>
+              ) : null}
             </Frame>
           );
         }}
       </Panel>
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>
-  );
-}
-
-/** Waits for the install this step asked for, and reports it once. The install is granted on the
- *  provider's pages, which tell this page nothing, so the only account of it is the projection the
- *  page already reads — asked for often while a step waits on it, and once more the moment the tab
- *  carrying that step is looked at again, which is what a member coming back from the install is
- *  doing. The page's own read of that projection is `held`: whichever of the two reads sees the
- *  install first is the one that reports it, so the order the network answers in cannot strand
- *  the step on a connected install.
- *
- *  A step that opened on a connector the workspace already held never arms: it reads nothing, and
- *  reports nothing to advance past. So the report is only ever the install arriving under a member
- *  who was waiting for it, which is the one thing that should move them on. */
-function useConnected(name: string, held: boolean, onConnected: () => void) {
-  const armed = useRef(!held);
-  const state = usePanelRead<FirstRunPayload>(
-    armed.current && !held ? FIRST_RUN_READ : null,
-    0,
-    WATCH_MS,
-  );
-  const landed =
-    held ||
-    (state.phase === "ready" &&
-      state.payload.connectors.some((row) => row.name === name && row.installed));
-  const reported = useRef(false);
-  useEffect(() => {
-    if (!armed.current || !landed || reported.current) return;
-    reported.current = true;
-    onConnected();
-  }, [landed, onConnected]);
-}
-
-/** One connector's own step. The act dispatches that connector's admin-gated tool, which seals the
- *  install link for this workspace and answers with it — a non-admin is told who installs it rather
- *  than pressing an act the workspace refuses. The link expires, so the act stays on the step and
- *  mints another.
- *
- *  Pressing it is the whole thing: the consent window opens on the press and the minted link lands
- *  in it, rather than appearing under the button as a second thing to find. A browser that refuses
- *  the window is the only case that still renders the link, because then there is nothing else to
- *  carry the member over. A refusal is the run's to state, so it is handed up rather than drawn
- *  here. The act carries the mark itself, so the product is named once rather than drawn twice on
- *  one page. */
-function Connect({
-  agent,
-  admin,
-  row,
-  held,
-  onConnected,
-  onRefused,
-}: {
-  agent: Agent;
-  admin: boolean;
-  row: Connector;
-  held: boolean;
-  onConnected: () => void;
-  onRefused: (message: string) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [link, setLink] = useState<string | null>(null);
-  useConnected(row.name, held, onConnected);
-
-  async function connect() {
-    if (busy) return;
-    setBusy(true);
-    // Opened on the press, before the round trip that mints the link: a window opened afterwards
-    // has lost the gesture the browser opens one for. It waits on the provider's own page.
-    const consent = openConsentWindow();
-    const outcome = await postObjectAction(agent.id, CONNECT_INSTALLS[row.name], {});
-    setBusy(false);
-    if (consent && outcome.url) consent.location.href = outcome.url;
-    if (consent && !outcome.url) consent.close();
-    // The step keeps the link only for a member whose browser refused the window, so pressing once
-    // is the whole act for everybody else.
-    setLink(consent ? null : (outcome.url ?? null));
-    if (!outcome.url) onRefused(outcome.message);
-  }
-
-  return (
-    <div className="flex w-full max-w-(--container-connect) flex-col items-center gap-sm px-2xl">
-      {admin ? (
-        <Button variant="send" size="bar" className="h-10 w-full" busy={busy} onClick={connect}>
-          <BrandMark provider={row.name} onInk className="size-(--size-glyph)" />
-          {"Connect " + row.label}
-        </Button>
-      ) : (
-        <span className="flex h-10 w-full items-center justify-center text-center text-label text-ink-soft">
-          {"A workspace admin connects " + row.label + "."}
-        </span>
-      )}
-      {link ? (
-        <Notice>
-          <ConsentLink url={link}>{"Open the " + row.label + " install page"}</ConsentLink>
-        </Notice>
-      ) : null}
-    </div>
   );
 }
 

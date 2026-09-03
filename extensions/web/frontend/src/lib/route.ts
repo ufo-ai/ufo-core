@@ -12,10 +12,11 @@ export const WORKSPACE_TABS = [
   "billing",
 ] as const;
 
-/** Every top-level screen name the address codec reads and writes. The portal itself hosts only
- *  `connectors`; the rest are screens shipped as apps, and a section address naming one lands on
- *  that app with its place carried — the name outlives who renders it, so links keep working. */
-export const SECTIONS = ["wiki", "artifacts", "radar", "connectors"] as const;
+/** Every top-level screen name the address codec reads and writes. The portal itself hosts
+ *  `connectors` and `messaging`; the rest are screens shipped as apps, and a section address naming
+ *  one lands on that app with its place carried — the name outlives who renders it, so links keep
+ *  working. */
+export const SECTIONS = ["wiki", "artifacts", "radar", "connectors", "messaging"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
@@ -54,7 +55,7 @@ export type Route =
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
-  | { kind: "first-run" }
+  | { kind: "first-run"; step?: string }
   | { kind: "bad-link" };
 
 export type RouteKind = Route["kind"];
@@ -250,7 +251,8 @@ export const AGENTS_HASH = "#/agents";
 export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
 /** The first run's own address. It is a place, not a boot flag: a member can return to it, and
- *  send a teammate to it, exactly as they can to any other screen. */
+ *  send a teammate to it, exactly as they can to any other screen. The bare address is the welcome;
+ *  a step the run is on rides as one segment under it, so a reload lands on the same step. */
 export const FIRST_RUN_HASH = "#/first-run";
 
 /** Every part an address is spelled from. A pattern and the builder that answers it are built out
@@ -272,6 +274,7 @@ const ARTIFACT_PATH_PREFIX = "/artifacts/";
 const UUID = "[0-9a-f-]{36}";
 const SLOT_NAME = "[a-z][a-z0-9_-]{0,63}";
 const SECTION_NAME = "[a-z][a-z-]*";
+const STEP_NAME = "[a-z][a-z-]*";
 const TAB_NAME = "[\\w-]+";
 /** What a screen's own address may end in: the place it stands at, captured whole for the place
  *  codec to read. */
@@ -324,9 +327,9 @@ const HOME = row(
 
 const FIRST_RUN = row(
   "first-run",
-  bare(FIRST_RUN_HASH),
-  () => ({ kind: "first-run" }),
-  () => FIRST_RUN_HASH,
+  new RegExp(`^${FIRST_RUN_HASH}(?:/(${STEP_NAME}))?(?:\\?.*)?$`),
+  (match) => ({ kind: "first-run", ...(match[1] ? { step: match[1] } : {}) }),
+  (step?: string) => FIRST_RUN_HASH + (step ? "/" + step : ""),
 );
 
 const APPS = row<"workspace", [WorkspacePlace?]>(
@@ -623,3 +626,5 @@ export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): s
 }
 /** The address of a section, optionally at a place. */
 export const sectionHash = SECTION.write;
+/** The address of the first run, at a step or at its welcome. */
+export const firstRunHash = FIRST_RUN.write;

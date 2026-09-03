@@ -2193,18 +2193,116 @@ async def test_workspace_surfaces_names_each_installed_surface_inside_the_audien
     path = "/surface/web/workspace/surfaces"
     view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token}"})
     assert view.status_code == 200
-    assert view.json() == {"installations": [{"surface": "slack", "agent_id": str(agent_id)}]}
+    assert view.json()["installations"] == [{"surface": "slack", "agent_id": str(agent_id)}]
     assert str(second_agent) not in view.text
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"})
-    assert admin_view.json() == {
-        "installations": [
-            {"surface": "slack", "agent_id": str(agent_id)},
-            {"surface": "teams", "agent_id": str(second_agent)},
-        ]
-    }
+    assert admin_view.json()["installations"] == [
+        {"surface": "slack", "agent_id": str(agent_id)},
+        {"surface": "teams", "agent_id": str(second_agent)},
+    ]
     await _grant_web_access(workspace_id, second_agent, "m@example.com")
     widened = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    assert widened.json() == admin_view.json()
+    assert widened.json()["installations"] == admin_view.json()["installations"]
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_workspace_surfaces_states_each_chat_surface_for_the_reader(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three chat surfaces in one fixed order, each with whether the deploy offers it and
+    whether the reader reaches it: Slack by the workspace's installation, iMessage by the reader's
+    own proved address — a reservation nobody proved and another member's address count for
+    nothing — and the terminal by the identity its first authenticated request links, beside the
+    install line built from the deploy's public base. iMessage is offered where the deploy holds
+    the provider pair; this fixture's https base is no dev deploy, so without the pair it is not."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    other_id, other_token = await _seed_member(workspace_id, "n@example.com")
+    for name in ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"UFO_{name}", raising=False)
+    path = "/surface/web/workspace/surfaces"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    bare = await client.get(path, headers=cookie)
+    assert bare.status_code == 200
+    assert set(bare.json()) == {"installations", "surfaces"}
+    assert bare.json()["surfaces"] == [
+        {
+            "name": "slack",
+            "label": "Slack",
+            "offered": True,
+            "connected": False,
+            "install_command": None,
+        },
+        {
+            "name": "imessage",
+            "label": "iMessage",
+            "offered": False,
+            "connected": False,
+            "install_command": None,
+        },
+        {
+            "name": "ufo",
+            "label": "Terminal",
+            "offered": True,
+            "connected": False,
+            "install_command": "curl -fsSL https://web/ufo | sh",
+        },
+    ]
+    monkeypatch.setenv("UFO_SPECTRUM_PROJECT_ID", "project")
+    monkeypatch.setenv("UFO_SPECTRUM_PROJECT_SECRET", "secret")
+    live = datetime.now(UTC) + timedelta(minutes=10)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_installation).values(
+                routes_ingress=True,
+                workspace_id=workspace_id,
+                surface="slack",
+                installation_id="team:T42",
+                agent_id=agent_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for address, holder, proved_by in (
+            ("+15550000001", member_id, "msg-1"),
+            ("+15550000002", other_id, None),
+        ):
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface="imessage",
+                    address=address,
+                    workspace_id=workspace_id,
+                    member_id=holder,
+                    claim_expires_at=None if proved_by else live,
+                    proved_by=proved_by,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface="ufo",
+                external_id="m@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    connected = await client.get(path, headers=cookie)
+    assert [
+        (row["name"], row["offered"], row["connected"]) for row in connected.json()["surfaces"]
+    ] == [("slack", True, True), ("imessage", True, True), ("ufo", True, True)]
+    other = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
+    assert [(row["name"], row["connected"]) for row in other.json()["surfaces"]] == [
+        ("slack", True),
+        ("imessage", False),
+        ("ufo", False),
+    ]
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
 

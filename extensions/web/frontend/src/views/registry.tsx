@@ -4,6 +4,7 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { WorkspaceConnectors } from "@/views/Connectors";
+import { WorkspaceMessaging } from "@/views/Surfaces";
 import { Apps } from "@/views/Apps";
 import { Memory } from "@/views/Memory";
 import { Tasks } from "@/views/Tasks";
@@ -91,8 +92,15 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   },
 };
 
+export const MESSAGING: PaneView = {
+  label: "Messaging",
+  remountOnPlace: false,
+  render: () => <WorkspaceMessaging />,
+};
+
 /** The sections the portal renders itself. A `Section` outside this record is a screen an app
  *  ships, and the router lands its address on that app. */
 export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {
   connectors: CONNECTORS,
+  messaging: MESSAGING,
 };

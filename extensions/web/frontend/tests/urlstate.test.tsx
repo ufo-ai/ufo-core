@@ -16,6 +16,7 @@ import {
   bootRoute,
   chatHash,
   conversationSlotHash,
+  firstRunHash,
   homeHash,
   homeLaneAgent,
   mintHomeLane,
@@ -549,6 +550,12 @@ test("the sign-in that founded the workspace boots on its opening chat", () => {
   expect(bootRoute("", "?first=1")).toEqual({ kind: "first-run" });
   expect(parseHash("#/first-run")).toEqual({ kind: "first-run" });
   expect(bootRoute("#/first-run", "")).toEqual({ kind: "first-run" });
+  expect(firstRunHash()).toBe(FIRST_RUN_HASH);
+  expect(firstRunHash("slack")).toBe("#/first-run/slack");
+  expect(parseHash(firstRunHash("slack"))).toEqual({ kind: "first-run", step: "slack" });
+  expect(parseHash("#/first-run/slack?x=1")).toEqual({ kind: "first-run", step: "slack" });
+  expect(bootRoute("#/first-run/slack", "?first=1")).toEqual({ kind: "first-run", step: "slack" });
+  expect(parseHash("#/first-run/Slack")).toEqual({ kind: "bad-link" });
   expect(bootRoute("", "?first=1&c=" + CONVO_ID)).toEqual({
     kind: "chat",
     conversationId: CONVO_ID,
@@ -717,6 +724,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
       if (url.includes("/workspace/memory")) {
         return json({ available: true, actions: [], kinds: ["fact"], matches: [] });
       }
+      if (url.includes("/workspace/surfaces")) return json({ surfaces: [] });
       if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });
       return json({ messages: [] });

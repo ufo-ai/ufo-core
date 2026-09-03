@@ -10,6 +10,7 @@
    their width. */
 @source "../../src/views/FirstRun.tsx";
 @source "../../src/views/Frame.tsx";
+@source "../../src/views/Surfaces.tsx";
 @source inline("text-fill-ink");
 
 

@@ -1211,6 +1211,7 @@ def _mount_shared_surfaces(
                         surface=spec.name,
                         instance_id=app.state.instance_id,
                         listener=spec.listen,
+                        public_base_url=public_base_url,
                         _auth=auth,
                         _context_for=context_for,
                     )

@@ -9,9 +9,9 @@ import type { Agent, Member } from "@/lib/types";
 
 import { FirstRun as Run } from "../../../src/views/FirstRun";
 
-/** What this shell's other pages read off the run: the Connect page shares its catalog read and
- *  its two installs, and the seam test needs the build screen's own step. Nothing else crosses. */
-export { BUILD_STEP_MS, CONNECT_INSTALLS, FIRST_RUN_READ, WATCH_MS } from "../../../src/views/FirstRun";
+/** What this shell's other pages read off the run: the Connect page shares its catalog read, and
+ *  the seam test needs the build screen's own step. Nothing else crosses. */
+export { BUILD_STEP_MS, FIRST_RUN_READ, WATCH_MS } from "../../../src/views/FirstRun";
 export type { FirstRunPayload } from "../../../src/views/FirstRun";
 
 /** The sidebar shell stands one chat at a time rather than a track of lanes, so the member is
@@ -20,11 +20,15 @@ export function FirstRun({
   agent,
   agents,
   member,
+  step,
+  onStep,
   onOpenChat,
 }: {
   agent: Agent;
   agents: Agent[];
   member: Member;
+  step: string | undefined;
+  onStep: (step: string | undefined) => void;
   onOpenChat: (conversationId: string | null) => void;
 }) {
   return (
@@ -32,6 +36,8 @@ export function FirstRun({
       agent={agent}
       agents={agents}
       member={member}
+      step={step}
+      onStep={onStep}
       onClose={() => onOpenChat(null)}
       onDone={onOpenChat}
     />

@@ -690,6 +690,7 @@ test("the bar is drawn while the first read is still in flight", async () => {
           pending.set(url, resolve);
         });
       }
+      if (url.includes("/workspace/surfaces")) return json({ surfaces: [] });
       if (url.includes("/settings")) return json(SETTINGS);
       if (url.includes("/api/agents/status")) return json({ statuses: [] });
       if (url.includes("/objects/conversation")) return json({ objects: [] });
@@ -1275,6 +1276,43 @@ test("a library row connects the member's account through the main agent", async
     expect(consent.location.href).toBe("/surface/web/turns/" + TURN_ID + "/connect"),
   );
   expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
+  opened.mockRestore();
+});
+
+test("the GitHub row connects the member's account through the broker", async () => {
+  const posted: { url: string; body: unknown }[] = [];
+  const acted: string[] = [];
+  location.hash = sectionHash("connectors");
+  library({
+    "/workspace/first-run": () =>
+      json({
+        ...CATALOG,
+        connectors: [{ name: "slack", label: "Slack", installed: false }],
+      }),
+    "/intents": (url, init) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
+      return json({ applied: true, message: "", turn_id: TURN_ID });
+    },
+    "/actions/": (url) => {
+      acted.push(url);
+      return json({ applied: false, message: "no such action" });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
+  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+
+  await screen.findByRole("heading", { name: "Available" });
+  await userEvent.click(connects("GitHub"));
+
+  expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
+  expect(posted[0].body).toEqual({
+    verb: "connect",
+    kind: "connection",
+    name: "github",
+    spec: { shared: false },
+  });
+  expect(acted).toEqual([]);
   opened.mockRestore();
 });
 

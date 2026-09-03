@@ -7,6 +7,7 @@ arrive as; `FormParserError` is what a malformed form body raises out of `Reques
 and answers the client's 400."""
 
 from typing import Literal
+from urllib.parse import urlsplit
 
 from python_multipart.exceptions import FormParserError as FormParserError
 from starlette.datastructures import FormData as FormData
@@ -30,6 +31,16 @@ def cookie_secure(published_scheme: str) -> bool:
     attribute is what makes a session cookie safe to carry, and only a surface that says it
     publishes plain http gives it up."""
     return published_scheme != "http"
+
+
+def plain_local(published_base: str | None) -> bool:
+    """Whether a published base is plain http on a host that never leaves the machine — `localhost`
+    or a subdomain of it, which browsers resolve to the loopback. The one base a deploy may publish
+    without TLS, and the mark of a dev deploy; a base nobody stated is not local."""
+    base = urlsplit(published_base or "")
+    return base.scheme == "http" and (
+        base.hostname == "localhost" or (base.hostname or "").endswith(".localhost")
+    )
 
 
 def set_session_cookie(

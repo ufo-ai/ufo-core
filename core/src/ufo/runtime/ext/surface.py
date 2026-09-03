@@ -3798,6 +3798,23 @@ class SurfaceContext:
             InstallationSummary(surface=row.surface, agent_id=row.agent_id) for row in rows
         )
 
+    async def member_surfaces(self, member_id: UUID) -> frozenset[str]:
+        """The surfaces one member of this workspace is reachable on: every surface holding an
+        identity linked to them, and every surface whose address they proved. A reservation nobody
+        proved yet routes nothing and is not counted."""
+        identities = sa.select(tables.surface_identity.c.surface).where(
+            tables.surface_identity.c.workspace_id == self.workspace_id,
+            tables.surface_identity.c.member_id == member_id,
+        )
+        addresses = sa.select(tables.surface_address.c.surface).where(
+            tables.surface_address.c.workspace_id == self.workspace_id,
+            tables.surface_address.c.member_id == member_id,
+            tables.surface_address.c.proved_by.is_not(None),
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(sa.union(identities, addresses))).scalars().all()
+        return frozenset(rows)
+
     async def list_conversations(
         self, limit: int = LIST_CONVERSATIONS_LIMIT
     ) -> tuple[ConversationSummary, ...]:
@@ -4646,6 +4663,7 @@ class SurfaceListenerContext:
     scope for the complete event and releases it when delivery ends."""
 
     surface: str
+    public_base_url: str | None
     _auth: SurfaceAuth
     _context_for: SurfaceContextFactory
     _owned: SurfaceListenerOwner
@@ -4744,6 +4762,7 @@ class SurfaceListenerRunner:
     surface: str
     instance_id: UUID
     listener: SurfaceListener
+    public_base_url: str | None
     _auth: SurfaceAuth
     _context_for: SurfaceContextFactory
     poll_seconds: float = SURFACE_LISTENER_OWNER_POLL_SECONDS
@@ -4757,6 +4776,7 @@ class SurfaceListenerRunner:
                 self.listener(
                     SurfaceListenerContext(
                         surface=self.surface,
+                        public_base_url=self.public_base_url,
                         _auth=self._auth,
                         _context_for=self._context_for,
                         _owned=self._owns,

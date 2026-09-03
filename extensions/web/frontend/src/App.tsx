@@ -7,6 +7,7 @@ import {
   IconLogout,
   IconMenu2,
   IconMoon,
+  IconMessages,
   IconPlug,
   IconPlus,
   IconSun,
@@ -34,7 +35,7 @@ import { SignIn } from "@/views/SignIn";
 import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
-import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
+import { CONNECTORS, MESSAGING, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import { WEB_SURFACE, isPortalChat, Viewer, WorkspaceId, surfaceWord, useViewer } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
@@ -81,6 +82,7 @@ import {
   openNewChat,
   openSlot,
   placeAgent,
+  placeFirstRun,
   placeHome,
   placeSection,
   placeWorkspace,
@@ -287,6 +289,8 @@ export function App({
                   agent={mainAgent}
                   agents={agents}
                   member={member}
+                  step={route.step}
+                  onStep={placeFirstRun}
                   onClose={() => openNewChat(mainAgent.id)}
                   onDone={(conversationId) => {
                     /* The thread the run founded, where the first task is already answering. A run
@@ -369,6 +373,8 @@ export function App({
                     agents={listed}
                     chats={rail.rows}
                     pinned={pinned}
+                    member={member}
+                    main={mainAgent}
                     account={<AccountMenu member={member} />}
                     onLane={(lane) => {
                       if (!homeOpens.includes(lane)) return;
@@ -599,6 +605,7 @@ const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
+  messaging: <IconMessages className={GLYPH} aria-hidden />,
 };
 
 
@@ -799,6 +806,15 @@ function WorkspaceSidebar({
             onClick={() => placeSection("connectors", {}, "push")}
           >
             {CONNECTORS.label}
+          </NavRow>
+        </li>
+        <li>
+          <NavRow
+            icon={SECTION_GLYPHS.messaging}
+            current={standing(route, "section:messaging")}
+            onClick={() => placeSection("messaging", {}, "push")}
+          >
+            {MESSAGING.label}
           </NavRow>
         </li>
         <li>

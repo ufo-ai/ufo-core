@@ -2,13 +2,13 @@ import { useSyncExternalStore } from "react";
 
 import {
   BUILDER_HASH,
-  FIRST_RUN_HASH,
   HOME_CONNECTORS_LANE,
   HOME_NEW_LANE,
   agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
+  firstRunHash,
   homeHash,
   newChatHash,
   parseHash,
@@ -206,7 +206,7 @@ export function startRouter(): () => void {
      they can return to and send on. */
   if (!location.hash) {
     if (booted.kind === "chat") history.replaceState(null, "", chatHash(booted.conversationId));
-    if (booted.kind === "first-run") history.replaceState(null, "", FIRST_RUN_HASH);
+    if (booted.kind === "first-run") history.replaceState(null, "", firstRunHash(booted.step));
   }
   publish(arrive(booted, null));
   window.addEventListener("hashchange", readAddress);
@@ -301,6 +301,12 @@ export function placeSection(section: Section, place: WorkspacePlace, step: Plac
   stepPlace(step, seen.kind === "section" && seen.section === section, () =>
     sectionHash(section, place),
   );
+}
+
+/** The step the first run stands on, written over the address rather than stacked on it: the run's
+ *  Back is its own button, so the browser's leaves the run, and a reload lands on the same step. */
+export function placeFirstRun(step: string | undefined): void {
+  stepPlace("replace", heldRoute().kind === "first-run", () => firstRunHash(step));
 }
 
 export function resetRouter(): void {

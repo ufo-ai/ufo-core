@@ -59,12 +59,8 @@ import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
-import {
-  CONNECT_INSTALLS,
-  FIRST_RUN_READ,
-  WATCH_MS,
-  type FirstRunPayload,
-} from "@/views/FirstRun";
+import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
+import { CONNECT_INSTALLS } from "@/views/Surfaces";
 
 type SourcesPayload = {
   sources: {

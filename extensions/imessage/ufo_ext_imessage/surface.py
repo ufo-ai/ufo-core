@@ -140,12 +140,12 @@ async def _attachment_content(data: bytes) -> AsyncIterator[bytes]:
 
 @dataclass(frozen=True)
 class ImessageSurface:
-    provider: Callable[[], MessageProvider]
+    provider: Callable[[str | None], MessageProvider]
 
     async def listen(self, context: SurfaceListenerContext) -> None:
         """Read the provider's durable event stream and admit each inbound iMessage once."""
         try:
-            provider = self.provider()
+            provider = self.provider(context.public_base_url)
         except ProviderNotConfigured as error:
             log("imessage.listener.inactive", reason=str(error))
             await asyncio.Event().wait()
@@ -437,21 +437,21 @@ class ImessageSurface:
     async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
         """Send one terminal turn reply to its iMessage chat."""
         conversation = conversation_from_queue(writeback.queue_key)
-        return await self.provider().send_text(
+        return await self.provider(ctx.public_base_url).send_text(
             conversation.id,
             await self._terminal_text(ctx, writeback, direct=conversation.direct),
             str(writeback.turn_id),
         )
 
-    async def speak(self, _ctx: SurfaceContext, reply: MidTurnReply) -> str:
+    async def speak(self, ctx: SurfaceContext, reply: MidTurnReply) -> str:
         """Send one reply produced before its turn ends."""
-        return await self.provider().send_text(
+        return await self.provider(ctx.public_base_url).send_text(
             conversation_from_queue(reply.queue_key).id, reply.text, str(reply.id)
         )
 
     async def attach(self, ctx: SurfaceContext, writeback: Writeback, _reply_ref: str) -> None:
         """Upload each shared file that fits the provider's bounded attachment request."""
-        provider = self.provider()
+        provider = self.provider(ctx.public_base_url)
         conversation_id = conversation_from_queue(writeback.queue_key).id
         for index, artifact in enumerate(writeback.artifacts):
             if artifact.size_bytes > MAX_ATTACHMENT_BYTES:

@@ -1055,6 +1055,58 @@ async def test_link_member_id_requires_a_member_of_the_workspace(db: None, tmp_p
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_member_surfaces_counts_linked_identities_and_proved_addresses(
+    db: None, tmp_path
+) -> None:
+    workspace_id, _, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    other_id = uuid4()
+    live = datetime.now(UTC) + timedelta(minutes=10)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_id,
+                workspace_id=workspace_id,
+                email="other@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=other_id,
+                surface="ufo",
+                external_id="other@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for surface, address, holder, proved_by in (
+            ("imessage", "+15550000001", member_id, "msg-1"),
+            ("imessage", "+15550000002", member_id, None),
+            ("sms", "+15550000003", other_id, "msg-3"),
+        ):
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface=surface,
+                    address=address,
+                    workspace_id=workspace_id,
+                    member_id=holder,
+                    claim_expires_at=None if proved_by else live,
+                    proved_by=proved_by,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.member_surfaces(member_id) == frozenset({"imessage"})
+    assert await context.link_member("UBEE", "bee@example.com") == member_id
+    assert await context.member_surfaces(member_id) == frozenset({"imessage", SURFACE})
+    assert await context.member_surfaces(other_id) == frozenset({"ufo", "sms"})
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     surface_context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -1064,6 +1116,7 @@ async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp
 
     listener = SurfaceListenerContext(
         surface=SURFACE,
+        public_base_url=None,
         _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
         _context_for=lambda _workspace_id, _surface: surface_context,
         _owned=owned,
@@ -1140,6 +1193,7 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
         surface=SURFACE,
         instance_id=first_id,
         listener=fail,
+        public_base_url=None,
         _auth=auth,
         _context_for=context_for,
         poll_seconds=LISTENER_POLL_SECONDS,
@@ -1149,6 +1203,7 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
         surface=SURFACE,
         instance_id=second_id,
         listener=wait,
+        public_base_url=None,
         _auth=auth,
         _context_for=context_for,
         poll_seconds=LISTENER_POLL_SECONDS,
@@ -1216,6 +1271,7 @@ async def test_surface_listener_survives_one_failed_claim_tick(
         surface=SURFACE,
         instance_id=instance_id,
         listener=wait,
+        public_base_url=None,
         _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
         _context_for=context_for,
         poll_seconds=LISTENER_POLL_SECONDS,
@@ -1264,6 +1320,7 @@ async def test_surface_listener_restarts_after_a_database_failure(db: None) -> N
         surface=SURFACE,
         instance_id=instance_id,
         listener=listen,
+        public_base_url=None,
         _auth=SurfaceAuth(_credentials=None, _declared=frozenset(), _surface=SURFACE),
         _context_for=context_for,
         poll_seconds=LISTENER_POLL_SECONDS,

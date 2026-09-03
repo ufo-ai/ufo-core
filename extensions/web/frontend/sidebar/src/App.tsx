@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconBrandSlack,
+  IconBroadcast,
   IconChevronDown,
   IconFilter2,
   IconChevronRight,
@@ -31,6 +32,7 @@ import {
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AgentSetup } from "@/views/AgentSetup";
 
 import { Agents, AppsIndex } from "@/views/Agents";
@@ -41,6 +43,7 @@ import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { FirstRun } from "@/views/FirstRun";
 import { SignIn } from "@/views/SignIn";
+import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
@@ -62,7 +65,7 @@ import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
-import { Loading } from "@/kernel/panel";
+import { Loading, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
@@ -109,6 +112,7 @@ import {
   openNewChat,
   openSlot,
   placeAgent,
+  placeFirstRun,
   placeSection,
   placeWorkspace,
   startRouter,
@@ -251,6 +255,8 @@ export function App({
                 agent={mainAgent}
                 agents={agents}
                 member={member}
+                step={route.step}
+                onStep={placeFirstRun}
                 onOpenChat={(conversationId) =>
                   conversationId ? openChat(conversationId) : openNewChat(mainAgent.id)
                 }
@@ -495,6 +501,7 @@ function AccountMenu({ member }: { member: Member }) {
 
 const APPS = "Apps";
 const CHATS = "Chats";
+const CHANNELS = "Channels";
 
 /** A sidebar section's heading — the muted band the whole line of which opens the section's menu.
  *  The glyph that states the menu is drawn only once the section is pointed at, reached by keyboard,
@@ -622,6 +629,76 @@ function SchemePick({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/** The channels a member reaches the workspace from, held behind the foot of the sidebar: the dot
+ *  states that one of the three is still unconnected, and the dialog is where they connect it. The
+ *  read stands at the shell's own cadence and is taken again when the dialog closes, which is when
+ *  a connect made inside it has landed. A row this deploy does not offer is no missing channel. */
+function ChannelsPick({
+  collapsed,
+  agent,
+  member,
+}: {
+  collapsed: boolean;
+  agent: Agent | null;
+  member: Member;
+}) {
+  const [open, setOpen] = useState(false);
+  const [toast, setToast] = useState(SILENT);
+  const [reloads, setReloads] = useState(0);
+  const state = usePanelRead<SurfacesPayload>(SURFACES_READ, reloads);
+  const refuse = useCallback((title: string) => setToast({ title }), []);
+  const missing =
+    state.phase === "ready" &&
+    state.payload.surfaces.some((row) => row.offered && !row.connected);
+  return (
+    <>
+      <SidebarTooltip collapsed={collapsed} label={CHANNELS}>
+        <button
+          type="button"
+          aria-label={CHANNELS}
+          onClick={() => setOpen(true)}
+          className="relative rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
+        >
+          <IconBroadcast className={GLYPH} aria-hidden />
+          {missing ? (
+            <span
+              aria-hidden
+              className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
+            />
+          ) : null}
+        </button>
+      </SidebarTooltip>
+      {open && agent ? (
+          <Dialog
+            open
+            onOpenChange={(next) => {
+              if (next) return;
+              setOpen(false);
+              setReloads((count) => count + 1);
+            }}
+          >
+          <DialogContent>
+            <DialogHeader className="flex-row items-center justify-between">
+              <DialogTitle>{CHANNELS}</DialogTitle>
+              <DialogPrimitive.Close asChild>
+                <Button variant="mark" size="glyph" aria-label="Close" className="text-ink-quiet">
+                  <IconX stroke={1.25} aria-hidden />
+                </Button>
+              </DialogPrimitive.Close>
+            </DialogHeader>
+            <ConnectSurfaces
+              agent={agent}
+              member={member}
+              onRefused={refuse}
+            />
+          </DialogContent>
+        </Dialog>
+      ) : null}
+      <Toast state={toast} onDone={() => setToast(SILENT)} />
+    </>
   );
 }
 
@@ -838,6 +915,7 @@ function WorkspaceSidebar({
           <span className="truncate text-label">{member.email}</span>
           <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
         </span>
+        <ChannelsPick collapsed={collapsed} agent={mainAgent} member={member} />
         <SchemePick collapsed={collapsed} />
         <SidebarTooltip collapsed={collapsed} label="Sign out">
           <button

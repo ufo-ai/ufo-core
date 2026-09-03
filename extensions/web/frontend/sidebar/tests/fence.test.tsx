@@ -41,6 +41,7 @@ test("leaving a view discards the read left behind rather than painting it", asy
           releaseConnectors = resolve;
         });
       }
+      if (url.includes("/workspace/surfaces")) return json({ surfaces: [] });
       if (url.includes("/settings")) return json(SETTINGS);
       if (url.includes("/workspace/radar")) return json({ runs: [] });
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);

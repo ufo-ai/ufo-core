@@ -108,7 +108,7 @@ def _opt_in_result(assigned_phone_number: str, opt_in_code: str) -> ToolResult:
 
 @dataclass(frozen=True)
 class ImessageConnect:
-    provider: Callable[[], MessageProvider]
+    provider: Callable[[str | None], MessageProvider]
 
     async def run(self, ctx: ToolContext, args: ImessageConnectInput) -> ToolResult:
         """Bind this deploy's provider to the workspace and stage one member's phone claim."""
@@ -118,7 +118,7 @@ class ImessageConnect:
                 "not_connected", "A signed-in workspace member must request this connection."
             )
         try:
-            provider = self.provider()
+            provider = self.provider(ctx.ext.public_base_url)
         except ProviderNotConfigured:
             return _result("not_connected", "This deploy has no iMessage provider credentials.")
         configured = await ctx.ext.installations.installation(SURFACE_IMESSAGE)

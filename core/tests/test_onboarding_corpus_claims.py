@@ -677,7 +677,7 @@ CLAIMS = (
         source=FIRST_RUN_VIEW,
         pattern=(
             r"\.\.\.\(confirm \? \[WEBSITE_STEP\] : \[\]\),\n\s+BUSINESS_STEP,\n"
-            r"\s+POSITION_STEP,\n\s+\.\.\.\(suggests\.length \? \[TOOLS_STEP\] : \[\]\),\n"
+            r"\s+POSITION_STEP,\n\s+\.\.\.\(tools \? \[TOOLS_STEP\] : \[\]\),\n"
             r"\s+GOALS_STEP,"
         ),
     ),

@@ -171,6 +171,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Chats options",
     "Connectors",
     "Workspace",
+    "Channels",
     "Theme",
     "Sign out",
   ]);
@@ -337,6 +338,7 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Chats options",
     "Connectors",
     "Workspace",
+    "Channels",
     "Theme",
     "Sign out",
   ]);

@@ -529,6 +529,7 @@ test("an unopened box lists the apps and the places, and reads nothing", async (
     "Home",
     "Apps",
     "Connectors",
+    "Messaging",
     "Workspace",
   ]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);

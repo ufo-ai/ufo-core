@@ -1,11 +1,16 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { BUILD_STEP_MS, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
 import { resetChatStore } from "@/lib/chatStore";
-import { HOME_CONNECTORS_LANE, homeConversationLane, homeHash } from "@/lib/route";
+import {
+  firstRunHash,
+  HOME_CONNECTORS_LANE,
+  homeConversationLane,
+  homeHash,
+} from "@/lib/route";
 
 import {
   AGENT,
@@ -14,6 +19,7 @@ import {
   CHAT_APP_ID,
   chatsOnWire,
   CONVO_ID,
+  destination,
   json,
   MEMBER,
   type Route,
@@ -114,6 +120,25 @@ const INSTALL_READS: Record<string, Route> = {
           input_schema: { properties: {} },
           call: { kind: "surface", action: "slack_connect", name: "slack", input: {} },
           label: "Connect",
+        },
+      ],
+    }),
+};
+
+/** The surfaces the workspace offers once Slack is declined, as the surfaces read projects them:
+ *  nothing connected, iMessage offered, and the install command the terminal card shows. */
+const SURFACES_READ: Record<string, Route> = {
+  "/workspace/surfaces$": () =>
+    json({
+      surfaces: [
+        { name: "slack", label: "Slack", offered: true, connected: false, install_command: null },
+        { name: "imessage", label: "iMessage", offered: true, connected: false, install_command: null },
+        {
+          name: "ufo",
+          label: "Terminal",
+          offered: true,
+          connected: false,
+          install_command: "curl -fsSL https://ufo.example/ufo | sh",
         },
       ],
     }),
@@ -220,11 +245,20 @@ const HELD_SLACK = {
 beforeEach(() => {
   location.hash = "";
   history.replaceState(null, "", location.pathname + "?first=1");
+  sessionStorage.clear();
   resetChatStore();
   chat = chatSink();
   acts = recorder();
   useStreamFake();
 });
+
+/** The one record the run holds in this tab across a reload, under the member's own key. */
+const ANSWERS_KEY = "ufo.first-run." + ADMIN.email;
+
+function stored(): Record<string, unknown> | null {
+  const held = sessionStorage.getItem(ANSWERS_KEY);
+  return held ? (JSON.parse(held) as Record<string, unknown>) : null;
+}
 
 /** The first run's own reads, plus the reads home makes once the run hands the member over, plus
  *  whatever the case wires over them, drawn as far as the welcome. */
@@ -237,6 +271,7 @@ function mount(
   const wired = wire({
     ...chatsOnWire([]),
     ...INSTALL_READS,
+    ...SURFACES_READ,
     "/workspace/first-run": () => json(payload),
     "/actions/": acts.route,
     "/chat": chat.route,
@@ -408,7 +443,8 @@ test("closing the welcome opens the chat", async () => {
   await userEvent.click(await screen.findByRole("button", { name: "Close" }));
 
   await screen.findByPlaceholderText("Start new chat…");
-  expect(location.hash).not.toBe("#/first-run");
+  expect(location.hash.startsWith("#/first-run")).toBe(false);
+  expect(stored()).toBeNull();
 });
 
 /** Closing walks out of the run rather than finishing it: nothing more is said, and the first
@@ -421,15 +457,20 @@ test("closing a step opens the chat with nothing more asked", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await screen.findByPlaceholderText("Start new chat…");
-  expect(location.hash).not.toBe("#/first-run");
+  expect(location.hash.startsWith("#/first-run")).toBe(false);
   expect(chat.sent).toEqual([OPENING]);
+  expect(stored()).toBeNull();
 });
 
 test("the card's query lands on the first run's own address", async () => {
-  await open();
+  mount();
 
-  await waitFor(() => expect(location.hash).toBe("#/first-run"));
+  await screen.findByRole("button", { name: "Get started" });
+  expect(location.hash).toBe("#/first-run");
+  await userEvent.click(screen.getByRole("button", { name: "Get started" }));
+
   await screen.findByRole("heading", { name: "Tell us a bit about your business" });
+  await waitFor(() => expect(location.hash).toBe("#/first-run/business"));
   expect(screen.queryByPlaceholderText("Start new chat…")).toBeNull();
 });
 
@@ -439,7 +480,119 @@ test("the address opens the first run on its own, with no query at all", async (
   await open();
 
   await screen.findByLabelText("About your business");
+  await waitFor(() => expect(location.hash).toBe("#/first-run/business"));
+});
+
+/** The step is the address's, written over rather than stacked: a reload lands on the same step,
+ *  and the browser's Back leaves the run rather than walking it. */
+test("each step reached writes its own address, and Back from the first returns to the welcome", async () => {
+  const entries = history.length;
+  await open(lanes(recorder()));
+
+  await screen.findByLabelText("About your business");
+  await waitFor(() => expect(location.hash).toBe(firstRunHash("business")));
+  expect(destination()).toBe("Tell us a bit about your business");
+  await describeBusiness();
+  await screen.findByRole("radiogroup", { name: "Role" });
+  expect(location.hash).toBe(firstRunHash("position"));
+  expect(destination()).toBe("What is your role at the business?");
+  await pickRole();
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  expect(location.hash).toBe(firstRunHash("goals"));
+  expect(destination()).toBe("What is top of mind right now?");
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Back" }));
+  await screen.findByLabelText("About your business");
+  expect(location.hash).toBe(firstRunHash("business"));
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByRole("button", { name: "Get started" });
   expect(location.hash).toBe("#/first-run");
+
+  await userEvent.click(screen.getByRole("button", { name: "Get started" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  await screen.findByRole("heading", { name: "Connect your messaging app" });
+  expect(location.hash).toBe(firstRunHash("slack"));
+  expect(destination()).toBe("Connect your messaging app");
+  await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
+  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
+  expect(location.hash).toBe(firstRunHash("surfaces"));
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByRole("heading", { name: "Connect your messaging app" });
+  expect(location.hash).toBe(firstRunHash("slack"));
+  expect(history.length).toBe(entries);
+});
+
+test("a reload on a step keeps the step and the answers under it", async () => {
+  await open(lanes(recorder()));
+  await describeBusiness("A two-person design studio");
+  await pickRole("Engineer");
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
+  await userEvent.click(next());
+  await screen.findByRole("heading", { name: "Connect the tools you picked" });
+  await userEvent.click(next());
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  await userEvent.click(screen.getByRole("button", { name: "Hiring" }));
+  expect(location.hash).toBe(firstRunHash("goals"));
+
+  cleanup();
+  mount(lanes(recorder()));
+
+  expect(
+    (await screen.findByRole("button", { name: "Hiring" })).getAttribute("data-state"),
+  ).toBe("on");
+  expect(counted()).toEqual(["4", "5"]);
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(
+    (await screen.findByRole("button", { name: "GitHub" })).getAttribute("data-state"),
+  ).toBe("on");
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(((await screen.findByLabelText("About your business")) as HTMLTextAreaElement).value).toBe(
+    "A two-person design studio",
+  );
+});
+
+test("the Slack step's address with the answers held lands on the Slack step, counted", async () => {
+  sessionStorage.setItem(
+    ANSWERS_KEY,
+    JSON.stringify({ business: "Design studio", role: "Founder", goals: [] }),
+  );
+  history.replaceState(null, "", location.pathname);
+  location.hash = firstRunHash("slack");
+  mount(lanes(recorder()));
+
+  await screen.findByRole("heading", { name: "Connect your messaging app" });
+  expect(counted()).toEqual(["4", "4"]);
+  expect(screen.queryByRole("button", { name: "Get started" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
+  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  await built();
+});
+
+test("an address naming no step of the run lands on the first step, and is written over", async () => {
+  history.replaceState(null, "", location.pathname);
+  location.hash = "#/first-run/nonsense";
+  mount();
+
+  await screen.findByLabelText("About your business");
+  expect(counted()).toEqual(["1", "4"]);
+  await waitFor(() => expect(location.hash).toBe(firstRunHash("business")));
+});
+
+test("finishing the run drops the answers it held", async () => {
+  await open(lanes(recorder()), ADMIN, NO_SLACK);
+  await describeBusiness();
+  expect(stored()?.business).toBe("Design studio");
+  await pickRole();
+  await pickGoals();
+
+  await built();
+  expect(stored()).toBeNull();
 });
 
 test("the page draws no shell around the step", async () => {
@@ -707,7 +860,7 @@ test("the Slack step states what installing does and offers the admin the act", 
   expect(screen.getByText("This will install UFO in Slack for your team")).toBeTruthy();
   expect(screen.getAllByRole("listitem").map((point) => point.textContent)).toEqual(SLACK_POINTS);
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "I use something different" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "I don't use Slack" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
 });
 
@@ -741,7 +894,7 @@ test("a browser that refuses the window still hands the member the link", async 
   const link = await screen.findByRole("link", { name: "Open the Slack install page" });
   expect(link.getAttribute("href")).toBe(SLACK_LINK);
   expect(intents(posted.calls)).toEqual([{ lane: "actions/surface/slack/slack_connect", body: {} }]);
-  expect(location.hash).toBe("#/first-run");
+  expect(location.hash).toBe(firstRunHash("slack"));
   expect(screen.queryByPlaceholderText("Start new chat…")).toBeNull();
 });
 
@@ -770,7 +923,9 @@ test("a member who is not an admin is told who installs, and finishes past it", 
 
   await screen.findByText("A workspace admin connects Slack.");
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "I use something different" }));
+  await userEvent.click(screen.getByRole("button", { name: "I don't use Slack" }));
+  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await built();
 });
 
@@ -863,14 +1018,28 @@ test("the step's own watch lands the success screen while the tab stays open", a
   expect(chat.sent).toEqual([OPENING]);
 });
 
-test("I use something different finishes the run with the answers written, as one sentence", async () => {
+test("declining Slack adds the surfaces step, whose Next finishes the run with the answers written, as one sentence", async () => {
   const posted = recorder();
   await open(lanes(posted));
 
   await describeBusiness("A two-person design studio.");
   await pickRole();
   await pickGoals();
-  await userEvent.click(await screen.findByRole("button", { name: "I use something different" }));
+  expect(counted()).toEqual(["4", "4"]);
+  await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
+
+  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
+  expect(screen.queryByText("Text UFO from your phone, or chat from your terminal.")).toBeNull();
+  expect(counted()).toEqual(["5", "5"]);
+  expect((await screen.findAllByText("iMessage")).length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Terminal").length).toBeGreaterThan(0);
+  expect(screen.queryByText("Slack")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
+  expect(chat.sent).toEqual([
+    "I just set up this workspace. My business: A two-person design studio. Set up my first task: " +
+      "a daily competitive analysis.",
+  ]);
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
 
   await built(
     "I just set up this workspace. My business: A two-person design studio. Set up my first task: a daily competitive analysis.",
@@ -883,9 +1052,38 @@ test("I use something different finishes the run with the answers written, as on
   ]);
 });
 
-/** The run ends on home, standing the thread it founded for the first task, and the connectors
- *  screen stands beside it: the member reads the work already running and connects the tools it
- *  needs without leaving the page. */
+test("the surfaces step names the matched company over its heading", async () => {
+  await open({ ...lanes(recorder()), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
+
+  await screen.findByRole("heading", { name: "Confirm your website" });
+  await userEvent.click(next());
+  await describeBusiness();
+  await userEvent.click(next());
+  await pickGoals();
+  await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
+
+  const heading = await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
+  expect(heading.parentElement!.querySelector("p")!.textContent).toBe("Simplecasual");
+  expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
+});
+
+test("Back from the surfaces step returns to the Slack step", async () => {
+  await open(lanes(recorder()));
+
+  await answer();
+  await userEvent.click(await screen.findByRole("button", { name: "I don't use Slack" }));
+  await screen.findByRole("heading", { name: "Get UFO everywhere you work" });
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+
+  await screen.findByRole("heading", { name: "Connect your messaging app" });
+  expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
+  expect(counted()).toEqual(["4", "5"]);
+});
+
+/** The run ends on home, standing the assistant's own lane, and that lane's composer is the one the
+ *  opening line was committed for: it says it on arrival, with no keystroke, and the transcript the
+ *  member lands on is the conversation they asked for rather than an empty box. */
 test("the last screen lands home on the founded thread with connectors beside it", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK);
 

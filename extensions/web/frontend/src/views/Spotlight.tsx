@@ -6,6 +6,7 @@ import {
   IconFilter2,
   IconMessage,
   IconMessageCircle,
+  IconMessages,
   IconPlug,
   IconSearch,
   IconTerminal2,
@@ -122,6 +123,7 @@ const SEARCHED_THREADS = "Conversations";
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
+  messaging: IconMessages,
 };
 
 /** The glyph each surface a conversation arrives on is drawn with, the marks the rest of the portal

@@ -5,7 +5,7 @@ from ufo.sdk.tools import ActionPresentation, ObjectBinding, ToolDef
 from ufo_ext_imessage.cloud import (
     SPECTRUM_PROJECT_ID_ENV,
     SPECTRUM_PROJECT_SECRET_ENV,
-    spectrum_project,
+    line_provider,
 )
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE, ImessageSurface
 from ufo_ext_imessage.tools import (
@@ -19,8 +19,8 @@ VERSION = "0.1.0"
 
 
 def manifest() -> Manifest:
-    surface = ImessageSurface(provider=spectrum_project)
-    connect = ImessageConnect(provider=spectrum_project)
+    surface = ImessageSurface(provider=line_provider)
+    connect = ImessageConnect(provider=line_provider)
     return Manifest(
         name=NAME,
         version=VERSION,

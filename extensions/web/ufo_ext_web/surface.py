@@ -41,10 +41,15 @@ from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
+from ufo_ext_imessage.cloud import imessage_offered
+from ufo_ext_imessage.surface import SURFACE_IMESSAGE
+from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
 from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION
 from ufo_ext_sites.objects import SITE_KIND
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
 from ufo_ext_slack.surface import SURFACE_SLACK
+from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
+from ufo_ext_ufo.surface import SURFACE_UFO
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
@@ -119,6 +124,7 @@ from ufo.sdk.objects import (
     ARTIFACT_KIND,
     CREDENTIAL_KIND,
     MEMBER_KIND,
+    SURFACE_KIND,
     ActionView,
     ObjectListQuery,
     ObjectRef,
@@ -3852,18 +3858,78 @@ async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
 
 
+class SurfaceRow(BaseModel):
+    """One chat surface as the reading member stands with it: whether this deploy offers it, whether
+    the reader reaches it, and for the terminal the line that installs the client."""
+
+    name: str
+    label: str
+    offered: bool
+    connected: bool
+    install_command: str | None
+
+
+def _connect_declared(ctx: SurfaceContext, surface: str, action: str) -> bool:
+    """Whether this deploy declares the act that connects one surface. A pack that omits the
+    surface's extension registers no such action, and dispatch would refuse the press, so the row
+    states the surface as unofferable instead of drawing a Connect it cannot complete."""
+    return any(
+        view.name == action for view in ctx.object_actions(SURFACE_KIND, "instance", name=surface)
+    )
+
+
 async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
-    """The surface installations bound to the agents this member's web audience holds, each with
-    the agent its conversations land on — the edges the agents topology graph draws between
-    surfaces and agents. An agent outside that audience is named nowhere here, as on every other
-    portal route; the whole workspace's bindings are the administration read's."""
+    """Two reads of the workspace's surfaces. `installations`: the surface installations bound to
+    the agents this member's web audience holds, each with the agent its conversations land on —
+    the edges the agents topology graph draws; an agent outside that audience is named nowhere here.
+    `surfaces`: the three chat surfaces in fixed order as the reader stands with them — Slack is the
+    workspace's installation, iMessage the reader's own proved address (an unproved reservation
+    reaches nothing), the terminal the identity its first authenticated request links, with its
+    install line built from the deploy's public base. A row is offered only where the act that
+    connects it would dispatch: the deploy declares that surface's connect action, and iMessage
+    additionally holds a provider."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    _member_id, _email, audience = resolved
+    member_id, _email, audience = resolved
     installations = await ctx.list_installations()
     visible = (entry for entry in installations if audience.allows(entry.agent_id))
-    return JSONResponse({"installations": [entry.model_dump(mode="json") for entry in visible]})
+    reached = await ctx.member_surfaces(member_id)
+    install_command = (
+        None
+        if ctx.public_base_url is None
+        else f"curl -fsSL {ctx.public_base_url.rstrip('/')}/ufo | sh"
+    )
+    surfaces = (
+        SurfaceRow(
+            name=SURFACE_SLACK,
+            label="Slack",
+            offered=_connect_declared(ctx, SURFACE_SLACK, SLACK_CONNECT_ACTION),
+            connected=SURFACE_SLACK in {entry.surface for entry in installations},
+            install_command=None,
+        ),
+        SurfaceRow(
+            name=SURFACE_IMESSAGE,
+            label="iMessage",
+            offered=_connect_declared(ctx, SURFACE_IMESSAGE, IMESSAGE_CONNECT_ACTION)
+            and imessage_offered(ctx.public_base_url),
+            connected=SURFACE_IMESSAGE in reached,
+            install_command=None,
+        ),
+        SurfaceRow(
+            name=SURFACE_UFO,
+            label="Terminal",
+            offered=True,
+            connected=SURFACE_UFO in reached,
+            install_command=install_command,
+        ),
+    )
+    return JSONResponse(
+        {
+            "installations": [entry.model_dump(mode="json") for entry in visible],
+            "surfaces": [row.model_dump(mode="json") for row in surfaces],
+        }
+    )
 
 
 CONNECT_STEP_NAMES = (SURFACE_SLACK,)

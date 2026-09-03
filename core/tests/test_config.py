@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from ufo.config import CONFIG_PATH_ENV, load_config
+from ufo.sdk.http import plain_local
 
 VALID = """
 [database]
@@ -228,6 +229,24 @@ def test_ingress_public_url_must_be_a_full_https_base(tmp_path: Path) -> None:
     ):
         path.write_text(VALID + f'\n[sandbox]\ningress_public_url = "{accepted}"\n')
         assert load_config(path).sandbox.ingress_public_url == accepted
+
+
+def test_plain_local_names_the_one_http_base_that_never_leaves_the_machine() -> None:
+    for local in (
+        "http://localhost:8710",
+        "http://ufo.localhost:8710",
+        "http://ufo-3.localhost:18280",
+    ):
+        assert plain_local(local) is True
+    for other in (
+        None,
+        "",
+        "https://ufo.localhost:8710",
+        "http://ufo.example.com",
+        "http://localhost.example.com",
+        "ufo.localhost",
+    ):
+        assert plain_local(other) is False
 
 
 def test_ingress_public_url_is_a_scheme_and_a_host_and_nothing_else(tmp_path: Path) -> None:
