@@ -17,7 +17,10 @@ class _Judge:
         self.systems.append(system)
         content = messages[0].content
         assert isinstance(content, str)
-        tool = json.loads(content)["tool_call"]["name"]
+        payload = json.loads(content)
+        tool = payload["tool_call"]["name"]
+        if tool == "bash" and "ext4.txt" in payload["tool_call"]["arguments"]:
+            return "Reading the corrected repository source"
         return {
             "memory_update": "Saving the Monday standup time",
             "edit_file": "Updating the release notes heading",

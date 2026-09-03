@@ -4,7 +4,7 @@ suites = ["tool_activity"]
 repeats = 3
 concurrency = 1
 max_stacks = 1
-budget_usd = 10.0
+budget_usd = 11.0
 est_usd_per_case = 0.10
 
 [template]

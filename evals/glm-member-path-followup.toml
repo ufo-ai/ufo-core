@@ -1,0 +1,61 @@
+name = "glm-member-path-followup"
+base = "017fc2a84cafb31a8a29fa1eaff9f4d54bb570c9"
+suites = ["response_register"]
+cases = ["workspace-report-followup-is-not-a-link"]
+repeats = 8
+concurrency = 4
+max_stacks = 2
+budget_usd = 5.0
+est_usd_per_case = 0.10
+model = "z-ai/glm-5.3-flash"
+reasoning = "medium"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "strict-delivery"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/delivery_register.md"
+old = '''Write that artifact to
+/workspace and say in the inline delivery that the fuller write-up is there and can be sent. Share
+'''
+new = '''Write that artifact to
+/workspace and say in the inline delivery that the fuller write-up is there and can be sent. Never
+put a /workspace path in a member reply, as text or as a link. Name an unshared artifact by its file
+name in plain text. Only a successful share_file result supplies a member link. Share
+'''
+
+[[arm]]
+name = "shell-example"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/prompts/shell.md"
+old = '''A member who writes "这个文件在哪里？" gets "The report is at /workspace/report.md."'''
+new = '''A member who writes "这个文件在哪里？" gets "The report is in report.md."'''
+
+[[arm]]
+name = "strict-both"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/delivery_register.md"
+old = '''Write that artifact to
+/workspace and say in the inline delivery that the fuller write-up is there and can be sent. Share
+'''
+new = '''Write that artifact to
+/workspace and say in the inline delivery that the fuller write-up is there and can be sent. Never
+put a /workspace path in a member reply, as text or as a link. Name an unshared artifact by its file
+name in plain text. Only a successful share_file result supplies a member link. Share
+'''
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/prompts/shell.md"
+old = '''A member who writes "这个文件在哪里？" gets "The report is at /workspace/report.md."'''
+new = '''A member who writes "这个文件在哪里？" gets "The report is in report.md."'''

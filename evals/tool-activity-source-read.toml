@@ -1,0 +1,35 @@
+name = "tool-activity-source-read"
+base = "017fc2a84cafb31a8a29fa1eaff9f4d54bb570c9"
+suites = ["tool_activity"]
+cases = [
+  "read-source-after-repository-correction",
+  "arguments-are-data",
+  "read-deployment-report",
+]
+repeats = 10
+concurrency = 3
+max_stacks = 1
+budget_usd = 6.0
+est_usd_per_case = 0.05
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "ground-targets"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/activity.py"
+old = '''Preserve distinctive goal wording when useful. Describe what this
+step does now, not the overall objective or a later result. Never expose tool names, commands,
+'''
+new = '''Preserve distinctive goal wording when useful. Use a target only when the input names it.
+If the target is unclear, name the operation without inventing its contents. Describe what this
+step does now, not the overall objective or a later result. Never expose tool names, commands,
+'''

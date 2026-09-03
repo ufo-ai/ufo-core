@@ -61,6 +61,9 @@ HEADER_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+\S|\*\*[^*\n]{1,60}\*\*:?\s*$)", re
 BULLET_RE = re.compile(r"^\s{0,3}(?:[-*•]\s+\S|\d{1,2}[.)]\s+\S)", re.MULTILINE)
 BULLET_MARKER_RE = re.compile(r"^\s{0,3}(?:[-*•]|\d{1,2}[.)])\s+")
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,}).*?(?:^\s{0,3}\1\s*$|\Z)", re.MULTILINE | re.DOTALL)
+MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]\n]+\]\(\s*(?P<target><[^>\n]+>|[^)\s]+)")
+HTTP_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+WORKSPACE_PATH_RE = re.compile(r"/workspace(?:/[A-Za-z0-9._/-]+)?")
 REPORT_GLOB = "*.md"
 DELEGATED_TASK = "delegated_response_register"
 DELEGATED_CLOSING_MAX_CHARS = 400
@@ -167,12 +170,44 @@ def measure(text: str) -> Shape:
     )
 
 
+def _unreachable_markdown_targets(output: CapabilityOutput) -> tuple[str, ...]:
+    shared_urls: set[str] = set()
+    for call in output.calls:
+        if call.name != "share_file" or not call.succeeded:
+            continue
+        try:
+            payload = json.loads(call.result)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, list):
+            shared_urls.update(
+                entry["url"]
+                for entry in payload
+                if isinstance(entry, dict) and isinstance(entry.get("url"), str)
+            )
+    prose = FENCE_RE.sub("", output.response)
+    targets = tuple(match.group("target").strip("<>") for match in MARKDOWN_LINK_RE.finditer(prose))
+    return tuple(
+        target
+        for target in targets
+        if HTTP_URL_RE.match(target) is None and target not in shared_urls
+    )
+
+
+def _workspace_paths(text: str) -> tuple[str, ...]:
+    return tuple(
+        path.rstrip(".,;:!?") for path in WORKSPACE_PATH_RE.findall(FENCE_RE.sub("", text))
+    )
+
+
 def conversational_scorer(max_words: int, max_lines: int) -> Grader:
     """A chat-register reply: inside the word and line budget, no headers, no bullet list."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         shape = measure(output.response.strip())
         failures = []
+        unreachable_targets = _unreachable_markdown_targets(output)
+        workspace_paths = _workspace_paths(output.response)
         if shape.words > max_words:
             failures.append(f"{shape.words} words over the {max_words} budget")
         if shape.lines > max_lines:
@@ -181,11 +216,19 @@ def conversational_scorer(max_words: int, max_lines: int) -> Grader:
             failures.append(f"{shape.headers} section headers")
         if shape.bullets:
             failures.append(f"{shape.bullets} bullet lines")
-        if failures:
-            return CapabilityVerdict(
-                False, "report register: " + ", ".join(failures), shape.evidence
+        if unreachable_targets:
+            failures.append(
+                "member-unreachable Markdown targets: " + ", ".join(unreachable_targets)
             )
-        return CapabilityVerdict(True, f"chat register: {shape.words} words", shape.evidence)
+        if workspace_paths:
+            failures.append("member-inaccessible workspace paths: " + ", ".join(workspace_paths))
+        evidence: JsonObject = shape.evidence | {
+            "unreachableMarkdownTargets": list(unreachable_targets),
+            "workspacePaths": list(workspace_paths),
+        }
+        if failures:
+            return CapabilityVerdict(False, "report register: " + ", ".join(failures), evidence)
+        return CapabilityVerdict(True, f"chat register: {shape.words} words", evidence)
 
     return DescribedGrader(
         f"a chat-register reply: at most {max_words} words and {max_lines} lines, "
@@ -264,6 +307,16 @@ def written_report_scorer(
             failures.append(f"summary has {summary.headers} section headers")
         if summary.bullets:
             failures.append(f"summary has {summary.bullets} bullet lines")
+        unreachable_targets = _unreachable_markdown_targets(output)
+        workspace_paths = _workspace_paths(output.response)
+        if unreachable_targets:
+            failures.append(
+                "summary links member-unreachable targets: " + ", ".join(unreachable_targets)
+            )
+        if workspace_paths:
+            failures.append(
+                "summary exposes member-inaccessible workspace paths: " + ", ".join(workspace_paths)
+            )
         if output.artifact_error:
             failures.append(f"artifact inspection failed: {output.artifact_error}")
         shared = tuple(name for call in output.calls for name in shared_file_names(call))
@@ -293,7 +346,12 @@ def written_report_scorer(
                         f"report has {report_shape.headers} headers under the "
                         f"{report_min_headers} floor"
                     )
-        evidence: JsonObject = {"summary": summary.evidence, "sharedFiles": delivered}
+        evidence: JsonObject = {
+            "summary": summary.evidence,
+            "sharedFiles": delivered,
+            "unreachableMarkdownTargets": list(unreachable_targets),
+            "workspacePaths": list(workspace_paths),
+        }
         if report is not None and report_shape is not None:
             evidence["report"] = {"name": report.name, **report_shape.evidence}
         if failures:
@@ -309,7 +367,8 @@ def written_report_scorer(
     return DescribedGrader(
         f"a written delivery: a plain chat summary of at least {summary_min_words} and at most "
         f"{summary_max_words} words over at most {summary_max_lines} lines that names the "
-        f"write-up, plus exactly one Markdown report of at least {report_min_words} words under "
+        f"write-up by file name without a workspace path or member-unreachable Markdown link, "
+        f"plus exactly one Markdown report of at least {report_min_words} words under "
         f"at least {report_min_headers} section headers, written to the workspace and never shared",
         grade,
     )
@@ -350,6 +409,16 @@ def shared_report_scorer(
             failures.append(f"summary has {summary.headers} section headers")
         if summary.bullets:
             failures.append(f"summary has {summary.bullets} bullet lines")
+        unreachable_targets = _unreachable_markdown_targets(output)
+        workspace_paths = _workspace_paths(output.response)
+        if unreachable_targets:
+            failures.append(
+                "summary links member-unreachable targets: " + ", ".join(unreachable_targets)
+            )
+        if workspace_paths:
+            failures.append(
+                "summary exposes member-inaccessible workspace paths: " + ", ".join(workspace_paths)
+            )
         if output.artifact_error:
             failures.append(f"artifact inspection failed: {output.artifact_error}")
         shared = tuple(name for call in output.calls for name in shared_file_names(call))
@@ -383,7 +452,12 @@ def shared_report_scorer(
         written = written_markdown(output, REPORT_GLOB)
         if len(written) != 1:
             failures.append(f"left {len(written)} Markdown reports in the workspace, expected one")
-        evidence: JsonObject = {"summary": summary.evidence, "sharedFiles": len(shared)}
+        evidence: JsonObject = {
+            "summary": summary.evidence,
+            "sharedFiles": len(shared),
+            "unreachableMarkdownTargets": list(unreachable_targets),
+            "workspacePaths": list(workspace_paths),
+        }
         if report_shape is not None:
             evidence["report"] = {"name": delivered[0].name, **report_shape.evidence}
         if failures:
@@ -1316,6 +1390,61 @@ CASES = (
             "the note's workspace-key requirement as shipped behavior.",
             "The report separates evidence about credential precedence from hypotheses about why "
             "this particular Drive sync requested a key.",
+        ),
+    ),
+    CapabilityCase(
+        "workspace-report-followup-is-not-a-link",
+        "Where is the full write-up? Do not send the file yet.",
+        conversational_scorer(max_words=50, max_lines=4),
+        samples=1,
+        digest_tag="register:workspace-report-followup-is-not-a-link",
+        workspace_files=(
+            WorkspaceFile(
+                "glm-provider-routing.md",
+                b"# Provider routing\n\nSet one provider order for glm-5.3 and another for "
+                b"glm-5.3-flash. Parse each comma-separated environment value at startup and "
+                b"reject empty provider names. Build the OpenRouter provider object with order "
+                b"and allow_fallbacks. Omit the object when its setting is absent. Keep provider "
+                b"selection separate from response parsing.\n\n## Tests\n\nCheck valid and invalid "
+                b"environment values. Check the request body for both models. Check that an "
+                b"unset value sends no provider object. Check that the client preserves the "
+                b"response model, usage, and provider data. Run the focused tests without a "
+                b"network key.\n\n## Rollout\n\nSet the variables in testing first. Confirm the "
+                b"served provider in request records. Then set production and watch error rate, "
+                b"latency, and fallback use.",
+            ),
+        ),
+        prior_messages=(
+            "GitHub access is unavailable. Write the complete OpenRouter provider-routing plan "
+            "to glm-provider-routing.md, but do not send it yet.",
+            "The complete plan is written. It is not sent.",
+        ),
+        rubric=(
+            "The reply names glm-provider-routing.md and does not claim that the file was sent.",
+        ),
+    ),
+    CapabilityCase(
+        "report-workspace-path-is-not-a-link",
+        "GitHub access is unavailable. Write the full OpenRouter provider-routing plan to "
+        "glm-provider-routing.md. Cover the environment value for glm-5.3 and glm-5.3-flash, "
+        "client parsing, the provider object, and tests. Keep it in the workspace. In chat, give "
+        "me only the conclusion and tell me where the report is. Do not send the file yet.",
+        written_report_scorer(
+            summary_min_words=20,
+            summary_max_words=100,
+            summary_max_lines=5,
+            report_min_words=120,
+            report_min_headers=2,
+        ),
+        samples=1,
+        digest_tag="register:report-workspace-path-is-not-a-link",
+        written_report=REPORT_GLOB,
+        rubric=(
+            "The summary says the report is ready and names it without claiming that it was sent.",
+        ),
+        artifact_rubric=(
+            "The report covers both named model slugs, the environment value, client parsing, the "
+            "provider object, and tests.",
         ),
     ),
     CapabilityCase(
