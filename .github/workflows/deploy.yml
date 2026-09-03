@@ -633,6 +633,35 @@ jobs:
         working-directory: infra/envs/edge
         run: terraform init -input=false
 
+      # Cloudflare refuses to delete a queue or a database a Worker still binds, and Terraform plans
+      # that delete against the live script: a release that drops a binding and the resource behind
+      # it in one change leaves no reference for the graph to order on, so the destroy runs first and
+      # the API rejects it. The script settles in its own apply ahead of the module's. A plan
+      # targeting the script carries the resources it binds, so a new binding's resource is created
+      # before the script names it, and a retired one is unbound before the module's apply destroys
+      # it. The plan reaches no flag, so it carries neither environment's Flagship credential.
+      - name: Terraform bindings plan
+        working-directory: infra/envs/edge
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          LOCK=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            LOCK=false
+          fi
+          terraform plan -input=false -no-color -lock="$LOCK" -lock-timeout=10m \
+            -target=module.testing.cloudflare_workers_script.edge \
+            -out="$RUNNER_TEMP/edge-bindings.tfplan"
+
+      - name: Reject destructive binding changes
+        working-directory: infra/envs/edge
+        run: terraform show -json "$RUNNER_TEMP/edge-bindings.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Terraform bindings apply
+        if: github.event_name != 'pull_request'
+        working-directory: infra/envs/edge
+        run: terraform apply -input=false "$RUNNER_TEMP/edge-bindings.tfplan"
+
       - name: Terraform plan
         working-directory: infra/envs/edge
         env:

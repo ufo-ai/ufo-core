@@ -1358,6 +1358,9 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         "init_step_name",
         "plan_step_name",
         "condition",
+        "bindings_target",
+        "bindings_plan_name",
+        "bindings_step_names",
     ),
     [
         (
@@ -1377,6 +1380,13 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
             "Terraform init",
             "Terraform plan",
             "github.event_name != 'pull_request'",
+            "module.testing.cloudflare_workers_script.edge",
+            "edge-bindings",
+            (
+                "Terraform bindings plan",
+                "Reject destructive binding changes",
+                "Terraform bindings apply",
+            ),
         ),
         (
             "deploy-production.yml",
@@ -1391,6 +1401,13 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
             "Terraform production edge init",
             "Terraform production edge plan",
             None,
+            "module.prod.cloudflare_workers_script.edge",
+            "production-edge-bindings",
+            (
+                "Terraform production bindings plan",
+                "Reject destructive production binding changes",
+                "Terraform production bindings apply",
+            ),
         ),
     ],
 )
@@ -1408,6 +1425,9 @@ def test_edge_deploys_are_isolated(
     init_step_name: str,
     plan_step_name: str,
     condition: str | None,
+    bindings_target: str,
+    bindings_plan_name: str,
+    bindings_step_names: tuple[str, str, str],
 ) -> None:
     jobs = _workflow(WORKFLOWS / workflow)["jobs"]
     assert isinstance(jobs, dict)
@@ -1440,6 +1460,32 @@ def test_edge_deploys_are_isolated(
         'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
     )
     assert apply["run"] == f'terraform apply -input=false "{plan_path}"'
+    # Cloudflare refuses to delete a queue or a database a Worker still binds, and a release that
+    # drops the binding and the resource together leaves the graph no reference to order on, so the
+    # module's plan schedules that delete against the live script. The script settles in an apply of
+    # its own first, carrying the resources it binds with it, and on the account token alone: the
+    # plan reaches no flag, so neither environment's Flagship token is in the step.
+    bindings_plan = _step(job_name, bindings_step_names[0], workflow)
+    bindings_guard = _step(job_name, bindings_step_names[1], workflow)
+    bindings_apply = _step(job_name, bindings_step_names[2], workflow)
+    bindings_path = f"$RUNNER_TEMP/{bindings_plan_name}.tfplan"
+    assert bindings_plan["working-directory"] == "infra/envs/edge"
+    assert bindings_guard["working-directory"] == "infra/envs/edge"
+    assert bindings_apply["working-directory"] == "infra/envs/edge"
+    assert bindings_plan["env"] == {
+        "TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+    }
+    assert "-lock-timeout=10m" in bindings_plan["run"]
+    assert tuple(re.findall(r"-target=(\S+)", bindings_plan["run"])) == (bindings_target,)
+    assert f'-out="{bindings_path}"' in bindings_plan["run"]
+    assert bindings_guard["run"] == (
+        f'terraform show -json "{bindings_path}" | '
+        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+    )
+    assert bindings_apply["run"] == f'terraform apply -input=false "{bindings_path}"'
+    assert bindings_apply.get("if") == condition
+    assert steps.index(bindings_plan) < steps.index(bindings_guard) < steps.index(bindings_apply)
+    assert steps.index(bindings_apply) < steps.index(plan)
     assert steps.index(plan) < steps.index(guard) < steps.index(apply) < steps.index(gate)
     assert apply.get("if") == condition
     assert gate.get("if") == condition
