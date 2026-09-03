@@ -726,16 +726,21 @@ class MemberReadableObjects[SpecT: BaseModel, OwnerT: ObjectOwner](
 
 @dataclass(frozen=True)
 class ObjectKind[SpecT: BaseModel]:
-    """One registered kind: the YAML `kind:` name, a one-line description that also says in prose
-    what mutations the kind accepts and by whom, the guidance `object_explain` returns verbatim —
-    a kind that replaces bespoke tools carries their tuned descriptions ~verbatim there, so no
-    instruction is lost with the tool — the model every authored spec validates against, and the
-    store whose handlers do the work. `list_fields` is the kind's own filter and order vocabulary —
-    whatever scalar its rows carry, spec field or not, so a read-only kind exposes a filterable
-    column without widening the spec its apply refuses — and declaring it makes filter and order
-    validation independent of whether any rows currently exist. A row carrying a field the kind
-    never declared is refused; a declared field its rows never produce reads as null, so each
-    kind's own listing proof is what holds declaration and rows in step."""
+    """One registered kind: the YAML `kind:` name, a one-line description, the guidance
+    `object_explain` returns verbatim — a kind that replaces bespoke tools carries their tuned
+    descriptions ~verbatim there, so no instruction is lost with the tool — the model every
+    authored spec validates against, and the store whose handlers do the work. The description is
+    an index line the system prompt lists for every registered kind, so it follows the same rubric
+    a skill's frontmatter description does: one or two sentences within 200 characters and 30
+    words, plain words, saying what one row is and who may write it. Everything else is guidance —
+    field lists, naming rules, which verbs refuse, pause and expiry semantics, admin exceptions,
+    and visibility rules — because guidance is read by the turn that calls `object_explain`, while
+    the description is read by every turn. `list_fields` is the kind's own filter and order
+    vocabulary — whatever scalar its rows carry, spec field or not, so a read-only kind exposes a
+    filterable column without widening the spec its apply refuses — and declaring it makes filter
+    and order validation independent of whether any rows currently exist. A row carrying a field
+    the kind never declared is refused; a declared field its rows never produce reads as null, so
+    each kind's own listing proof is what holds declaration and rows in step."""
 
     name: str
     description: str

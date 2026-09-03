@@ -632,11 +632,8 @@ RESTORE_APPLICATION_TOOL_DEF = ToolDef(
 AGENT_OBJECT = ObjectKind(
     name=AGENT_KIND,
     description=(
-        "A workspace agent: its prompt, model, reasoning effort, public-internet policy, "
-        "workspace-skill use, portal visibility, icon, and the I/O contract a spawn of it "
-        "validates against — creatable by any member and updatable by its owner or a workspace "
-        "admin. Delete archives it: the app stops, its record stays, and its name becomes "
-        "available."
+        "A workspace agent: its prompt, model, settings, and the I/O contract a spawn of it "
+        "validates against. Any member may create one; its owner or an admin may change it."
     ),
     guidance=(
         "A workspace agent as an object. Any member may create one and owns what they created; "

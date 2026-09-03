@@ -1229,9 +1229,8 @@ def _validated_base_url(provider: str, base_url: str | None) -> str | None:
 SOURCE_OBJECT = ObjectKind(
     name=SOURCE_KIND,
     description=(
-        "A registered content-sync binding: one provider account's selected streams, synced "
-        "privately to its registering member unless shared. An apply settles it on the streams it "
-        "names; only the registrar may share, while an admin may inspect or remove."
+        "A content-sync binding: one provider account's selected streams, synced into memory "
+        "for the member who registered it."
     ),
     guidance=(
         "Apply a manifest to register selected streams of a content-source provider; an unknown "
@@ -1258,9 +1257,8 @@ SOURCE_OBJECT = ObjectKind(
 SOURCE_TRIGGER_OBJECT = ObjectKind(
     name=SOURCE_TRIGGER_KIND,
     description=(
-        "A standing wake-up for one shared source. Delivery can wake the current conversation for "
-        "each batch or open one stable agent conversation per changed page. Only its creator or a "
-        "workspace admin may delete it."
+        "A standing wake-up for one shared source: each batch of changed pages wakes a "
+        "conversation. Only its creator or an admin may delete it."
     ),
     guidance=(
         "Apply a manifest naming a shared source. Set `delivery: current` to wake this "

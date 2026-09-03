@@ -348,10 +348,8 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
 SITE_OBJECT = ObjectKind(
     name=SITE_KIND,
     description=(
-        "A website hosted at a permanent link by deploy_website or publish_website: list this "
-        "workspace's sites, get one for its link and visibility, apply to change who may open it, "
-        "delete to unhost it. Create is refused — a deploy hosts a site. Only the site's creator "
-        "may change its visibility; a workspace admin may only make it private."
+        "A website a deploy left hosted at a permanent link. Its creator sets who may open it, "
+        "and delete unhosts it."
     ),
     guidance=(
         "Sites a deploy left hosted, one object per site and conversation, named "

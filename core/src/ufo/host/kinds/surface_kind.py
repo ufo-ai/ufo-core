@@ -279,9 +279,8 @@ class SurfaceObjects:
 
 
 SURFACE_DESCRIPTION = (
-    "A chat surface an installed extension registers, with whether this workspace holds an "
-    "installation for it and which agent that installation runs as. Read-only — a surface is set "
-    "up through its own connect flow."
+    "A chat surface an installed extension registers, with the installation this workspace holds "
+    "for it. Read-only: a surface is set up by its own connect flow."
 )
 SURFACE_GUIDANCE = (
     "The chat surfaces this deploy registers, one object each, named by the surface name and "

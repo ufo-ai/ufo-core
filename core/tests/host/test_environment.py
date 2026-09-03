@@ -1,10 +1,12 @@
 import pytest
+import ufo_ext_sample as sample
 from pydantic import BaseModel, Field
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.host import environment
 from ufo.host.assemble import (
     _applied_document,
+    _object_kind_index,
     _run_command,
     _run_tool,
     _skills_with_document,
@@ -19,10 +21,11 @@ from ufo.host.environment import (
 )
 from ufo.host.spawn_catalog import SpawnTarget
 from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_TOOL
+from ufo.runtime.objects import BoundAction, BoundKind, ObjectKind, ObjectVerbs
 from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.skills.runtime import SkillCard, SkillRegistry, parse_skill_content
 from ufo.runtime.tools.context import ToolContext, ToolResult
-from ufo.runtime.tools.registry import ToolDef, ToolRegistry
+from ufo.runtime.tools.registry import ActionBinding, ObjectBinding, ToolDef, ToolRegistry
 from ufo.runtime.workspace import ws
 
 
@@ -330,6 +333,53 @@ def test_a_member_skill_is_never_a_documents_to_change() -> None:
     )
     with pytest.raises(ValueError, match="member skill"):
         _skills_with_document(registry, document)
+
+
+def _widget_verbs() -> ObjectVerbs:
+    def bound_action(name: str, binding: ActionBinding) -> BoundAction:
+        return BoundAction(
+            action=ToolDef(
+                name=name,
+                description=f"{name} a widget",
+                input_model=_BashInput,
+                handler=_never,
+                bound=ObjectBinding(kind=sample.WIDGET_KIND, binding=binding),
+            ),
+            extension="sample",
+            context=None,
+        )
+
+    kind = ObjectKind(
+        name=sample.WIDGET_KIND,
+        description="A widget.",
+        guidance="g",
+        spec_model=sample.WidgetSpec,
+        store=sample.WidgetStore(),
+    )
+    return ObjectVerbs(
+        registry={sample.WIDGET_KIND: BoundKind(kind=kind, extension="sample", context=None)},
+        actions={
+            sample.WIDGET_KIND: {
+                "polish": bound_action("polish", "instance"),
+                "sweep": bound_action("sweep", "collection"),
+                "melt": bound_action("melt", "instance"),
+            }
+        },
+    )
+
+
+def test_the_object_kind_index_carries_each_kinds_granted_actions() -> None:
+    """The prompt lists every registered kind with its own description, and under it only the
+    actions this turn holds — an action the turn cannot call is never advertised."""
+    verbs = _widget_verbs()
+    granted = frozenset(
+        {f"action:{sample.WIDGET_KIND}:polish", f"action:{sample.WIDGET_KIND}:sweep"}
+    )
+    assert _object_kind_index(verbs, granted) == (
+        (sample.WIDGET_KIND, "A widget.", ("polish (instance)", "sweep (collection)")),
+    )
+    assert _object_kind_index(verbs, frozenset()) == ((sample.WIDGET_KIND, "A widget.", ()),)
+    assert _object_kind_index(ObjectVerbs(registry={}), frozenset()) == ()
 
 
 def test_the_spawn_offer_carries_this_turns_targets_and_their_keys() -> None:

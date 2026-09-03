@@ -55,8 +55,10 @@ from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.objects import ObjectVerbs
 from ufo.runtime.prompts.render import (
+    OBJECT_KINDS_SECTION,
     WORKSPACE_FACTS_SECTION,
     RenderedPrompt,
+    render_object_kinds,
     render_system_prompt,
     render_workspace_facts,
     rendered_prompt,
@@ -158,6 +160,9 @@ class HostEnvironment:
                 all_tools,
                 granted_actions,
             )
+            kinds = render_object_kinds(_object_kind_index(verbs, granted_actions))
+            if kinds:
+                sections = (*sections, (OBJECT_KINDS_SECTION, kinds))
             skills = _skills_with_document(skills, document)
             cards = tuple(skills.member_cards.values())
             view = member_visibility(turn.inbound, cards)
@@ -274,6 +279,26 @@ class HostEnvironment:
         if self.blob is None:
             raise RuntimeError("the host holds no blob store to load environment documents")
         return self.blob
+
+
+def _object_kind_index(
+    verbs: ObjectVerbs, granted_actions: frozenset[str]
+) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """Every registered kind, lexical by name, with its description and the actions this turn
+    holds — each action named with the binding it acts on, so the prompt says whether a call takes
+    an instance or the collection."""
+    return tuple(
+        (
+            name,
+            bound.kind.description,
+            tuple(
+                f"{short_name} ({entry.action.bound.binding})"
+                for short_name, entry in sorted(verbs.actions.get(name, {}).items())
+                if entry.action.bound is not None and entry.action.canonical_id in granted_actions
+            ),
+        )
+        for name, bound in sorted(verbs.registry.items())
+    )
 
 
 def _skills_with_document(

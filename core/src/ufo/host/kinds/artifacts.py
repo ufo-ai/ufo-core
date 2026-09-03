@@ -631,10 +631,8 @@ def artifact_object(
     return ObjectKind(
         name=ARTIFACT_KIND,
         description=(
-            "A file shared out of a turn by share_file, one object per conversation and filename — "
-            "re-shares in the same conversation are versions: list this agent's shared files, "
-            "get one to copy its latest bytes back into the workspace, delete to remove every "
-            "stored version. Create and update are refused — share_file is the producer."
+            "A file share_file sent out of a turn, one object per conversation and filename, "
+            "each re-share a new version. share_file is the only producer."
         ),
         guidance=(
             "Files shared with members by share_file, one object per conversation and filename, "

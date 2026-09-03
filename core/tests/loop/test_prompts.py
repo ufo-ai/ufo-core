@@ -16,6 +16,7 @@ from ufo.runtime.prompts.render import (
     SHELL,
     WORKSPACE_FACTS_CLOSER,
     RenderedPrompt,
+    render_object_kinds,
     render_skill_index,
     render_system_prompt,
     render_template,
@@ -210,6 +211,30 @@ def test_skill_index_renders_a_block_and_is_empty_without_skills() -> None:
     assert block.startswith("<available_skills>")
     assert "- sandbox: run commands" in block
     assert "- memory: store facts" in block
+
+
+def test_the_object_kinds_block_lists_each_kind_with_its_actions() -> None:
+    """One plain line per registered kind with its whole description, and the actions the turn
+    holds under it. A deploy with no kind renders nothing, so the prompt carries no empty tag."""
+    assert render_object_kinds(()) == ""
+    page = "A hosted page a member opens by permanent link. Delete unhosts it."
+    block = render_object_kinds(
+        (
+            ("note", "A note.", ("publish (instance)", "search (collection)")),
+            ("page", page, ()),
+        )
+    )
+    assert block.startswith("<workspace_objects>\n")
+    assert "- kind: note - A note.\n  actions: publish (instance), search (collection)" in block
+    assert f"- kind: page - {page}\n</workspace_objects>" in block
+
+
+def test_main_prompt_renders_the_object_kinds_block_as_a_section() -> None:
+    block = render_object_kinds((("note", "A note.", ("publish (instance)",)),))
+    prompt = render_system_prompt(
+        "A", (("workspace_objects", block),), knowledge_cutoff="2026-01"
+    ).content
+    assert block in prompt
 
 
 def test_main_prompt_renders_the_deploy_skill_index() -> None:

@@ -452,15 +452,8 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
 SCHEDULED_TASK_OBJECT = ObjectKind(
     name=SCHEDULED_TASK_KIND,
     description=(
-        "A durable recurring task: a 5-field UTC cron schedule that re-invokes the agent with "
-        "the spec's prompt, reporting into the conversation that created it. Seen by whoever "
-        "reads that conversation — a task reporting into a workspace-shared one is read by every "
-        "member, a task reporting into one member's own conversation by that member alone. Only "
-        "the creator may update or delete it; an admin may list any task's management metadata, "
-        "change cadence, expiry, or pause, or delete it, and reads the content of one whose "
-        "conversation is not theirs only where that conversation is shared; a fire acts on the "
-        "creator's behalf. Applying `paused: true` stops fires without losing "
-        "the task; false resumes from the next cron fire. One-shot scheduling is not supported."
+        "A recurring task on a UTC cron schedule: it re-invokes the agent with its prompt and "
+        "reports into the conversation that created it. Only its creator may change it."
     ),
     guidance=(
         "Apply a manifest to schedule a recurring task for yourself: give a 5-field cron "
@@ -487,7 +480,9 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "`reports_to` link naming the conversation it posts into. A run's per-run output is not "
         "durable memory — it belongs "
         "in the reply the run posts, not in a saved fact; keep in-task state in files or todo "
-        "items. Load the task-scheduling skill before scheduling."
+        "items. Applying `paused: true` stops fires without losing the task; false resumes from "
+        "the next cron fire. One-shot scheduling is not supported. Load the task-scheduling "
+        "skill before scheduling."
     ),
     spec_model=ScheduledTaskSpec,
     store=ScheduledTaskObjects(),

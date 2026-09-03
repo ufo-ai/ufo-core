@@ -322,9 +322,8 @@ class SkillObjects:
 SKILL_OBJECT = ObjectKind(
     name=SKILL_KIND,
     description=(
-        "A member-authored skill of the workspace: SKILL.md plus bundled text files, added to "
-        "the loadable skill set on later turns. Any member may create, update, or delete; a skill "
-        "can never shadow a built-in one."
+        "A member-authored skill of the workspace: SKILL.md plus bundled text files, loadable "
+        "on later turns. Any member may create, update, or delete one."
     ),
     guidance=(
         "Apply a manifest to save a skill you authored in the workspace so it persists and can "

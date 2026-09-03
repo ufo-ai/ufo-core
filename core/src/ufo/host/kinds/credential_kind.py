@@ -224,10 +224,8 @@ class CredentialObjects:
 
 
 CREDENTIAL_DESCRIPTION = (
-    "A declared BYOK credential slot, filled or empty — the value itself is never shown. Fill "
-    "or rotate through the collection's request_credentials action; delete (admin-only) clears "
-    "the stored value while "
-    "the slot stays declared."
+    "A BYOK credential slot an extension declares, filled or empty. The stored value is never "
+    "shown."
 )
 CREDENTIAL_GUIDANCE = (
     "The BYOK secret slots installed extensions declare, filled or empty; values never appear "

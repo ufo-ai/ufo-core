@@ -128,6 +128,29 @@ def render_workspace_facts(lines: Sequence[str]) -> str:
     )
 
 
+OBJECT_KINDS_SECTION = "workspace_objects"
+
+
+def render_object_kinds(kinds: Sequence[tuple[str, str, Sequence[str]]]) -> str:
+    """The workspace object kinds this turn can address, one line each with the kind's own
+    description and the actions it carries. A deploy registering no kind renders nothing, so the
+    prompt never carries an empty tag."""
+    if not kinds:
+        return ""
+    lines: list[str] = []
+    for name, description, actions in kinds:
+        lines.append(f"- kind: {name} - {description}")
+        if actions:
+            lines.append(f"  actions: {', '.join(actions)}")
+    return "\n".join(
+        (
+            f"<{OBJECT_KINDS_SECTION}>",
+            *lines,
+            f"</{OBJECT_KINDS_SECTION}>",
+        )
+    )
+
+
 def render_skill_index(skills: Sequence[tuple[str, str]]) -> str:
     if not skills:
         return ""

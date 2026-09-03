@@ -169,9 +169,8 @@ class ExtensionObjects:
 
 
 EXTENSION_DESCRIPTION = (
-    "An extension this deploy loaded: its version and what it declares — tools, object kinds, "
-    "credential slots, surfaces, jobs, hooks, sources, and subagents. Read-only; "
-    "installing or removing one is a deploy act through the lockfile."
+    "An extension this deploy loaded, with its version and everything it declares. Read-only: "
+    "the deploy's lockfile installs and removes one."
 )
 EXTENSION_GUIDANCE = (
     "The extensions this deploy is running, one object each, named lowercase and hyphenated "

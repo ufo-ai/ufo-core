@@ -390,9 +390,7 @@ GBRAIN_OBJECT = ObjectKind(
     name=GBRAIN_KIND,
     description=(
         "A markdown page source: one GitHub repository or one serve-local directory, synced "
-        "privately to its registering member unless shared. Only the registrar may share and an "
-        "admin may inspect or remove; a directory arrives from the deploy's [[sources]] config, "
-        "never from apply."
+        "into memory for the member who registered it."
     ),
     guidance=(
         "Apply a manifest whose spec names a GitHub `repo` (owner/name); `branch` only refines "

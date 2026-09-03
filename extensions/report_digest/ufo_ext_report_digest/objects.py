@@ -308,10 +308,8 @@ def _ext(carrier: ToolContext | ExtensionContext | None) -> ExtensionContext:
 REPORT_OBJECT = ObjectKind(
     name=REPORT_KIND,
     description=(
-        "A scheduled run the member's radar reads — one object per terminal scheduled turn that "
-        "published a report or failed trying: when and where it fired, the task that fired it, "
-        "the files it shared with signed links, and the digest entry written from what it "
-        "published. Read-only: reports exist by tasks running."
+        "One scheduled run the member's radar reads: when it fired, the task behind it, the "
+        "files it shared, and the digest entry written from it. Read-only."
     ),
     guidance=(
         "The radar's rows: scheduled runs, named by turn id, newest first under "

@@ -168,14 +168,8 @@ class MonitorObjects(MemberReadableObjects[MonitorSpec, GeneratedObjectOwner]):
 MONITOR_OBJECT = ObjectKind(
     name=MONITOR_KIND,
     description=(
-        "One armed watch: a shell command probed in a conversation's sandbox every "
-        "`interval_minutes`, which fires the agent once — on a change in the probe's output, on "
-        "three consecutive probe failures, or at `deadline_at` — and then retires. Seen by whoever "
-        "reads the conversation it watches: a monitor on a workspace-shared conversation by every "
-        "member, one on a member's own conversation by that member alone. Arming is not an apply: "
-        "the baseline is seeded by a probe run in a live turn, so this kind's `monitor` action "
-        "arms and its list and get read. Deleting stops the watch, and is the creator's or a "
-        "workspace admin's."
+        "One armed watch: a shell command probed in a conversation's sandbox, which fires the "
+        "agent once and then retires. Its creator or an admin may delete it."
     ),
     guidance=(
         "Each monitor is named for the conversation it watches and the slug the watch was armed "
@@ -190,7 +184,11 @@ MONITOR_OBJECT = ObjectKind(
         "refused: arm through the `monitor` action this kind lists, which runs the probe once and "
         "records what it returned. "
         "When a member says to stop watching something, delete the monitor by name — that is what "
-        "disarms it, and a monitor never fires again after its one fire anyway."
+        "disarms it, and a monitor never fires again after its one fire anyway. A monitor fires "
+        "on a change in the probe's output, on three consecutive probe failures, or at "
+        "`deadline_at`, and is as visible as the conversation it watches: one on a "
+        "workspace-shared conversation is read by every member, one on a member's own "
+        "conversation by that member alone."
     ),
     spec_model=MonitorSpec,
     store=MonitorObjects(),
