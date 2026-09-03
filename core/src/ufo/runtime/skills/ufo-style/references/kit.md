@@ -277,9 +277,11 @@ the theme, both colour schemes and every width at once, and a shape built beside
 
 ## table
 
+- **`Clip`** — Prose a measured table still cuts.
 - **`Lede`** — What a record's first cell holds:
 - **`Td`** — One table cell:
 - **`TdFact`** — A column holding one short fact the eye compares straight down — a model id, a state.
+- **`TdWhole`** — A cell whose value is read entire — the name a member finds a record by.
 - **`DataTable`** — `note` is what a *narrowed* table says when nothing is left:
 
 ## Also published

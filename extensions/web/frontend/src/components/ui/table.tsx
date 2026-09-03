@@ -19,6 +19,7 @@ export function Table({
   className,
   columns,
   floor,
+  measured,
   style,
   ...props
 }: ComponentProps<"table"> & {
@@ -30,15 +31,22 @@ export function Table({
    *  `min-width` itself, because a stacked table has no tracks to protect and an inline width is
    *  past overriding. */
   floor?: string;
+  /** Whether one column's track is measured from the rows rather than declared. A value a member
+   *  identifies a record by — a file's own name — is worth nothing cut, so the column carrying it
+   *  takes the width its longest value needs and the container scrolls sideways to reach it. The
+   *  columns beside it bound their own prose, so they keep the track they always had. */
+  measured?: boolean;
 }) {
   return (
     <div data-slot="table-container" className="shrink-0 overflow-x-auto">
       <table
         data-slot="table"
         data-stacks={columns ? "" : undefined}
+        data-measured={measured ? "" : undefined}
         style={{ ...labelProperties(columns), "--table-floor": floor, ...style } as CSSProperties}
         className={cn(
-          "w-full min-w-(--table-floor) table-fixed border-collapse [&_tr]:h-(--size-record)",
+          "w-full min-w-(--table-floor) border-collapse [&_tr]:h-(--size-record)",
+          measured ? "table-auto" : "table-fixed",
           "[&_:where(th,td):first-child]:pl-0 [&_:where(th,td):last-child]:pr-0",
           className,
         )}
@@ -114,6 +122,24 @@ export function Td({ className, ...props }: ComponentProps<"td">) {
   return <td data-slot="table-cell" className={cn(CELL, "truncate", className)} {...props} />;
 }
 
+/** A cell whose value is read entire — the name a member finds a record by. It holds one line, like
+ *  every other cell, but the line is not cut: the column it stands in is measured from the rows, so
+ *  the cell is as wide as it needs and the container scrolls sideways to reach the rest of the
+ *  table. It drops `truncate` rather than overriding it, for the reason `TdActs` does. */
+export function TdWhole({ className, ...props }: ComponentProps<"td">) {
+  return (
+    <td data-slot="table-cell" className={cn(CELL, "whitespace-nowrap", className)} {...props} />
+  );
+}
+
+/** Prose a measured table still cuts. A measured track is the widest thing in its column, so a cell
+ *  left to say as much as it likes would make the Details column the table's width; bounding the run
+ *  of prose itself is what keeps that column the track every other table gives it. The bound rides
+ *  an inner block because `max-width` does not apply to a cell. */
+export function Clip({ children }: { children: ReactNode }) {
+  return <span className="block max-w-(--size-prose-column) truncate">{children}</span>;
+}
+
 /** A column holding one short fact the eye compares straight down — a model id, a state. It is
  *  sized rather than left to the content, so the same fact lands on the same line in every row and
  *  the two flexible columns beside it take whatever is left. */
@@ -141,7 +167,16 @@ export const ACTS = "flex flex-nowrap items-center justify-end gap-xs";
  *  line rather than sliding left in the rows that have nothing to show. The name is cut to the
  *  track instead of wrapping, because a row is one pitch tall and a second line would be drawn
  *  behind the row's own edge. */
-export function Lede({ mark, children }: { mark: ReactNode; children: ReactNode }) {
+export function Lede({
+  mark,
+  whole,
+  children,
+}: {
+  mark: ReactNode;
+  /** Whether the name is read entire, in a cell whose column is measured from the rows. */
+  whole?: boolean;
+  children: ReactNode;
+}) {
   return (
     <span className="flex min-w-0 items-center gap-md">
       <span
@@ -152,7 +187,7 @@ export function Lede({ mark, children }: { mark: ReactNode; children: ReactNode 
       >
         {mark}
       </span>
-      <span className="min-w-0 truncate">{children}</span>
+      <span className={whole ? "whitespace-nowrap" : "min-w-0 truncate"}>{children}</span>
     </span>
   );
 }

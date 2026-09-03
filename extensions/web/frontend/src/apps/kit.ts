@@ -97,7 +97,7 @@ import {
   StatMedia,
   StatValue,
 } from "@/components/ui/stat";
-import { Lede, Td, TdFact } from "@/components/ui/table";
+import { Clip, Lede, Td, TdFact, TdWhole } from "@/components/ui/table";
 import {
   ARTIFACT_TEXT_BYTES,
   ArtifactText,
@@ -303,9 +303,11 @@ export {
   StatLabel,
   StatMedia,
   StatValue,
+  Clip,
   Lede,
   Td,
   TdFact,
+  TdWhole,
   ARTIFACT_TEXT_BYTES,
   ArtifactText,
   FileSheet,

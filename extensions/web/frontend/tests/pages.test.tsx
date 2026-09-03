@@ -431,6 +431,51 @@ test("the artifacts page mounts and draws the empty shelf with its search", asyn
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 });
 
+/** The list view is one of the two shapes the bar offers, so a narrow pane must not take it away:
+ *  the rows stay a table with its tracks, and the container around them scrolls sideways. The name
+ *  is what the member finds the file by, so its column is measured from the rows and its cell is not
+ *  cut — the scroll is what reaches the rest of the table. */
+test("the artifacts list view stays a table rather than stacking into records", async () => {
+  const filename = "q3-revenue-review-of-every-region.md";
+  await runPage(
+    "artifacts",
+    {
+      "/objects/site": () => objectIndex(SITE_KIND, []),
+      "/objects/artifact": () =>
+        json({
+          objects: [
+            {
+              name: "Report",
+              filename,
+              subject: null,
+              media_type: "text/markdown",
+              size_bytes: 12,
+              shared_at: "2026-08-20T09:00:00+00:00",
+              url: "https://example.test/report.md",
+              preview_url: null,
+              owner_email: MEMBER.email,
+              origin: null,
+              conversation: CONVO_ID,
+              surface: "web",
+              source: null,
+            },
+          ],
+        }),
+    },
+    { place: { face: "table" } },
+  );
+
+  const table = await screen.findByRole("table");
+  expect(table.getAttribute("data-stacks")).toBeNull();
+  expect(table.style.getPropertyValue("--table-floor")).toContain("--size-prose-column");
+  expect(table.closest('[data-slot="table-container"]')?.className).toContain("overflow-x-auto");
+
+  expect(table.getAttribute("data-measured")).toBe("");
+  const name = await screen.findByText(filename);
+  expect(name.className).not.toContain("truncate");
+  expect(name.closest("td")?.className).not.toContain("truncate");
+});
+
 function sharedFile(filename: string, mediaType: string) {
   return {
     name: "conv1-" + filename,

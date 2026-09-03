@@ -4,6 +4,7 @@
 import {
   ArtifactText,
   CardGrid,
+  Clip,
   DataTable,
   FacetMenu,
   FileSheet,
@@ -23,6 +24,7 @@ import {
   Sheet,
   Td,
   TdFact,
+  TdWhole,
   ToolbarRule,
   ViewSwitch,
   buttonVariants,
@@ -549,8 +551,13 @@ function OpenSite({ href }: { href: string }) {
   );
 }
 
-const COLUMNS = ["Name", "Details", { label: "Type", fact: true }];
+/** A file's name is what a member finds it by, so the column carrying it is measured from the rows
+ *  rather than cut to a track: `q3-revenue-review.md` and `q3-revenue-rebuild.md` stand one record
+ *  apart, and `q3-revenue-re…` names neither. */
+const COLUMNS = [{ label: "Name", whole: true }, "Details", { label: "Type", fact: true }];
 
+/** The list view of the shelf. The cards are the other view the bar offers, so a narrow pane does
+ *  not stack these rows into cards of its own: the table holds its tracks and scrolls sideways. */
 function Shapes({
   cards,
   opens,
@@ -563,6 +570,7 @@ function Shapes({
   return (
     <DataTable
       columns={COLUMNS}
+      stacks={false}
       rows={cards}
       rowKey={(card) => card.key}
       empty="A file or site an app makes in a conversation is listed here."
@@ -572,10 +580,14 @@ function Shapes({
     >
       {(card) => (
         <>
+          <TdWhole>
+            <Lede mark={<Mark card={card} />} whole>
+              {card.name}
+            </Lede>
+          </TdWhole>
           <Td>
-            <Lede mark={<Mark card={card} />}>{card.name}</Lede>
+            <Clip>{card.body ?? card.meta}</Clip>
           </Td>
-          <Td>{card.body ?? card.meta}</Td>
           <TdFact>{card.type}</TdFact>
         </>
       )}

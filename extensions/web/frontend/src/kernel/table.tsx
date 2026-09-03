@@ -13,8 +13,10 @@ export const OPEN = "Open";
 /** A column head. A plain string names a column carrying prose, which the read cannot order by and
  *  which shares the width left over. The object form carries the key the read orders on — which is
  *  what makes the head pressable — and `fact` marks a column holding one short value, which states
- *  its own width so the same fact lands on the same line in every row. */
-export type Column = string | { label: string; sort?: string; fact?: boolean };
+ *  its own width so the same fact lands on the same line in every row. `whole` marks the one column
+ *  whose value is never cut: its track is measured from the rows, and the table scrolls sideways
+ *  rather than ending a name in an ellipsis. */
+export type Column = string | { label: string; sort?: string; fact?: boolean; whole?: boolean };
 
 export type Sort = { by: string; descending: boolean; onSort: (key: string) => void };
 
@@ -23,13 +25,20 @@ function label(column: Column): string {
 }
 
 /** The tracks are fixed, so a width declared on a body cell arrives too late — the head is what
- *  sizes the column. */
-function width(column: Column): string | undefined {
-  return typeof column === "string" || !column.fact ? undefined : "w-(--size-fact-column)";
+ *  sizes the column. A measured table declares the shared columns their track as well, since the
+ *  column that measures itself would otherwise take what is left of them. */
+function width(column: Column, measured: boolean): string | undefined {
+  if (isFact(column)) return "w-(--size-fact-column)";
+  if (!measured || isWhole(column)) return undefined;
+  return "w-(--size-prose-column)";
 }
 
 function isFact(column: Column): boolean {
   return typeof column !== "string" && Boolean(column.fact);
+}
+
+function isWhole(column: Column): boolean {
+  return typeof column !== "string" && Boolean(column.whole);
 }
 
 /** Drawn inline, like the chevron and the tick in `select.tsx`. Three glyphs still do not earn an
@@ -52,8 +61,8 @@ function Caret({ descending }: { descending: boolean }) {
 /** The order lives on the head of the column it orders, never in a picker beside the search. The
  *  member reading a column down is already pointing at the thing they want ordered, and a picker
  *  states the same field names a second time, in a control that pushes the act off the bar. */
-function Head({ column, sort }: { column: Column; sort?: Sort }) {
-  const track = width(column);
+function Head({ column, sort, measured }: { column: Column; sort?: Sort; measured: boolean }) {
+  const track = width(column, measured);
   const key = typeof column === "string" ? undefined : column.sort;
   if (!key || !sort) return <Th className={track}>{label(column)}</Th>;
   const active = sort.by === key;
@@ -115,6 +124,7 @@ export function DataTable<Row>({
   open,
   current,
   act,
+  stacks = true,
   children,
 }: {
   columns: Column[];
@@ -130,14 +140,20 @@ export function DataTable<Row>({
   current?: (row: Row) => boolean;
   /** What the row's own act says, or null where the row carries none. */
   act?: (row: Row) => string | null;
+  /** Whether a narrow pane may stack the rows into a column of records. A screen that offers the
+   *  cards as a view of its own hands the member that shape on the bar, so its table stays a table
+   *  at every width and the container scrolls sideways instead. */
+  stacks?: boolean;
   children: (row: Row) => ReactNode;
 }) {
   if (!rows.length && !note) return <PanelBlank body={empty} />;
   const span = columns.length + (act ? 1 : 0);
   const facts = columns.filter(isFact).length;
+  const measured = columns.some(isWhole);
   return (
     <Table
-      columns={[...columns.map(label), ...(act ? [""] : [])]}
+      columns={stacks ? [...columns.map(label), ...(act ? [""] : [])] : undefined}
+      measured={measured}
       floor={tableFloor({
         prose: columns.length - facts,
         fact: facts,
@@ -147,7 +163,7 @@ export function DataTable<Row>({
       <thead>
         <tr>
           {columns.map((column, index) => (
-            <Head key={label(column) + index} column={column} sort={sort} />
+            <Head key={label(column) + index} column={column} sort={sort} measured={measured} />
           ))}
           {act ? <Th className="w-(--size-act)">{""}</Th> : null}
         </tr>

@@ -11,7 +11,7 @@ import { getJson } from "@/lib/api";
 import { Notice, OutcomeNotice, Panel, QUIET, Section, usePanelRead } from "@/kernel/panel";
 import { CardGrid } from "@/kernel/cards";
 import { DataTable } from "@/kernel/table";
-import { Table, Td, Th } from "@/components/ui/table";
+import { Clip, Lede, Table, Td, TdWhole, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { Sheet } from "@/components/ui/sheet";
@@ -968,6 +968,88 @@ test("the table states its heads for the phone that stacks its rows", () => {
   expect(table.style.getPropertyValue("--table-label-1")).toBe('"Member"');
   expect(table.style.getPropertyValue("--table-label-2")).toBe('"Role"');
   expect(table.style.getPropertyValue("--table-label-3")).toBe('""');
+});
+
+/** A screen that offers the cards on its bar keeps its table a table: it states no head words, so
+ *  no width stacks it, and the floor it declares is what the container scrolls sideways to. */
+test("a table the member chose over cards holds its tracks at every width", () => {
+  render(
+    <DataTable
+      columns={["Name", { label: "Type", fact: true }]}
+      stacks={false}
+      rows={[{ name: "one" }]}
+      rowKey={() => "one"}
+      empty="none"
+      act={() => "Open"}
+    >
+      {() => <Td />}
+    </DataTable>,
+  );
+
+  const table = screen.getByRole("table");
+  expect(table.getAttribute("data-stacks")).toBeNull();
+  expect(table.style.getPropertyValue("--table-label-1")).toBe("");
+  expect(declaredFloor(table)).toBe(
+    "calc(1 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+  );
+});
+
+/** A column marked whole is measured from the rows: the table drops its fixed tracks so the cell can
+ *  be as wide as the name it carries, the measured head declares no width of its own, and the shared
+ *  column beside it declares the track it would otherwise lose. */
+test("a table with a whole column measures it and holds the tracks beside it", () => {
+  render(
+    <DataTable
+      columns={[{ label: "Name", whole: true }, "Details", { label: "Type", fact: true }]}
+      stacks={false}
+      rows={[{ name: "one" }]}
+      rowKey={() => "one"}
+      empty="none"
+      act={() => "Open"}
+    >
+      {() => <Td />}
+    </DataTable>,
+  );
+
+  const table = screen.getByRole("table");
+  expect(table.getAttribute("data-measured")).toBe("");
+  expect(table.className).toContain("table-auto");
+  expect(table.className).not.toContain("table-fixed");
+  const heads = screen.getAllByRole("columnheader");
+  expect(heads[0].className).not.toContain("w-(");
+  expect(heads[1].className).toContain("w-(--size-prose-column)");
+  expect(heads[2].className).toContain("w-(--size-fact-column)");
+});
+
+/** The cell carrying the name a member finds a record by never cuts it, and the prose beside it is
+ *  cut inside the cell rather than by it — a measured column is as wide as its widest value. */
+test("the whole cell keeps its name and the prose beside it keeps its bound", () => {
+  render(
+    <table>
+      <tbody>
+        <tr>
+          <TdWhole>
+            <Lede mark={null} whole>
+              q3-revenue-review-of-every-region.md
+            </Lede>
+          </TdWhole>
+          <Td>
+            <Clip>A run of details the column still cuts</Clip>
+          </Td>
+        </tr>
+      </tbody>
+    </table>,
+  );
+
+  const cells = screen.getAllByRole("cell");
+  expect(cells[0].className).not.toContain("truncate");
+  expect(cells[0].className).toContain("whitespace-nowrap");
+  expect(screen.getByText("q3-revenue-review-of-every-region.md").className).not.toContain(
+    "truncate",
+  );
+  const clipped = screen.getByText("A run of details the column still cuts");
+  expect(clipped.className).toContain("truncate");
+  expect(clipped.className).toContain("max-w-(--size-prose-column)");
 });
 
 test("the pager offers only the directions the payload carries", async () => {
