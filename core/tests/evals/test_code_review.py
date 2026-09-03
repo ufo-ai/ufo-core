@@ -635,3 +635,75 @@ async def test_a_foreground_launch_reads_as_a_foreground_launch() -> None:
     assert "2 of 2 launches ran in the foreground" in verdict.reason
     assert verdict.evidence["spawn_count"] == 2
     assert verdict.evidence["foreground_launches"] == 2
+
+
+async def test_published_verdict_grader_holds_the_head_the_context_and_the_state() -> None:
+    """The suite could not reach this fact before: the eval workspace had no granted GitHub
+    account, so every publication was refused and three cases failed for the gap rather than for
+    anything the agent did."""
+
+    def output(*statuses: JsonObject, is_error: bool = False) -> CapabilityOutput:
+        calls = tuple(
+            _call(
+                "call_external_tool",
+                f"publish-{index}",
+                {
+                    "source_id": "eval_github",
+                    "slug": code_review.PUBLISH_STATUS_TOOL,
+                    "arguments": status,
+                },
+                is_error=is_error,
+            )
+            for index, status in enumerate(statuses, start=1)
+        )
+        return CapabilityOutput("", calls, own_calls=calls)
+
+    passing = {
+        "sha": code_review.HEAD_SHA,
+        "state": "success",
+        "context": code_review.PUBLISH_CONTEXT,
+    }
+    none = await code_review._grade_published_verdict(CapabilityOutput("", (), own_calls=()))
+    twice = await code_review._grade_published_verdict(output(passing, passing))
+    stale = await code_review._grade_published_verdict(
+        output({**passing, "sha": code_review.OLD_HEAD_SHA})
+    )
+    failed = await code_review._grade_published_verdict(output({**passing, "state": "failure"}))
+    unread = await code_review._grade_published_verdict(
+        output({**passing, "context": "code-review"})
+    )
+    published = await code_review._grade_published_verdict(output(passing))
+
+    refused = await code_review._grade_published_verdict(output(passing, is_error=True))
+    repaired_calls = (
+        _call(
+            "call_external_tool",
+            "publish-refused",
+            {"slug": code_review.PUBLISH_STATUS_TOOL, "arguments": passing},
+            is_error=True,
+        ),
+        _call(
+            "call_external_tool",
+            "publish-ok",
+            {"slug": code_review.PUBLISH_STATUS_TOOL, "arguments": passing},
+        ),
+    )
+    repaired = await code_review._grade_published_verdict(
+        CapabilityOutput("", repaired_calls, own_calls=repaired_calls)
+    )
+
+    assert not none.passed
+    assert "no publication call succeeded" in none.reason
+    assert not refused.passed
+    assert "no publication call succeeded" in refused.reason
+    assert repaired.passed, repaired.reason
+    assert repaired.evidence["published"] == 1
+    assert not twice.passed
+    assert "expected 1" in twice.reason
+    assert not stale.passed
+    assert "other than the head" in stale.reason
+    assert not failed.passed
+    assert not unread.passed
+    assert "no branch rule reads" in unread.reason
+    assert published.passed, published.reason
+    assert published.evidence["states"] == ["success"]

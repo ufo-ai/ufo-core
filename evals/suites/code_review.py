@@ -9,7 +9,7 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
@@ -25,6 +25,9 @@ from evals.harness.harness import Json, JsonObject
 from evals.harness.timing import TurnTiming
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 
 BASE_SHA = "08871cfcd60a9c407221af81ff22411754224c7e"
@@ -44,6 +47,7 @@ LARGE_REVIEW_PAGE_ID = UUID("20000000-0000-0000-0000-000000000007")
 STALE_OBJECTIVE_PAGE_ID = UUID("20000000-0000-0000-0000-000000000008")
 LAUNCH_PAGE_ID = UUID("20000000-0000-0000-0000-000000000009")
 RECOVERY_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000a")
+PUBLISH_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000b")
 SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
 PREEMPT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000002")
 INSTRUCTION_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000003")
@@ -54,6 +58,12 @@ LARGE_REVIEW_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000007")
 STALE_OBJECTIVE_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000008")
 LAUNCH_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000009")
 RECOVERY_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000a")
+PUBLISH_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000b")
+EVAL_GITHUB_PROVIDER = "eval_github"
+EVAL_GITHUB_ACCOUNT = "eval-env-account"
+PUBLICATION_SURFACE = "code-review-publication"
+PUBLISH_STATUS_TOOL = "create_commit_status"
+PUBLISH_CONTEXT = "ufo review"
 OLD_SPAWNS = (
     "40000000-0000-0000-0000-000000000001",
     "40000000-0000-0000-0000-000000000002",
@@ -383,6 +393,44 @@ LARGE_WORKSPACE_FILES = (
 )
 
 
+async def _grant_publication(agent_id: UUID) -> None:
+    """The connector the verdict publishes through. Without a granted account every case ends on
+    `no 'github' account is available to this turn`: the review runs, the verdict is reached, the
+    status call is refused, and the agent's prompt correctly fails the turn — so three cases used
+    to fail for a gap in this workspace rather than anything the agent did."""
+    workspace = ws_current()
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id)
+                .where(tables.member.c.workspace_id == workspace.workspace_id)
+                .order_by(tables.member.c.created_at)
+                .limit(1)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace.workspace_id,
+                agent_id=agent_id,
+                surface=PUBLICATION_SURFACE,
+                queue_key=f"{PUBLICATION_SURFACE}:{conversation_id}",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with agent(agent_id):
+        await GrantStore().record(
+            provider=EVAL_GITHUB_PROVIDER,
+            account_id=EVAL_GITHUB_ACCOUNT,
+            host="",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=True,
+        )
+
+
 async def _seed_page(
     workspace_id: UUID,
     agent_id: UUID,
@@ -456,6 +504,7 @@ async def _seed_page(
                 updated_at=FIXTURE_TIME,
             )
         )
+    await _grant_publication(agent_id)
 
 
 async def _seed_review(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
@@ -492,6 +541,10 @@ async def _seed_launch(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobSt
 
 async def _seed_recovery(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
     await _seed_page(workspace_id, agent_id, blob, RECOVERY_PAGE_ID, RECOVERY_SOURCE_ID, HEAD_SHA)
+
+
+async def _seed_publish(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    await _seed_page(workspace_id, agent_id, blob, PUBLISH_PAGE_ID, PUBLISH_SOURCE_ID, HEAD_SHA)
 
 
 async def _seed_no_plan(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
@@ -1158,6 +1211,67 @@ async def _grade_recovered_launch(output: CapabilityOutput) -> CapabilityVerdict
     )
 
 
+async def _grade_published_verdict(output: CapabilityOutput) -> CapabilityVerdict:
+    """The end of the chain: a verdict reaches the head SHA as a commit status.
+
+    Every earlier case stops at what the reviewers returned, so a run where the review was right
+    and the publication was refused read as a launch fault. The eval connector now takes the
+    write, so the status is a fact a grader can hold: one call, the exact head, the `ufo review`
+    context, and a state the empty finding list justifies."""
+    published = tuple(
+        call
+        for call in output.calls
+        if call.name == "call_external_tool"
+        and PUBLISH_STATUS_TOOL in json.dumps(call.input)
+        and call.succeeded
+    )
+    states = tuple(
+        str(arguments.get("state"))
+        for call in published
+        if isinstance(arguments := _publish_arguments(call), dict)
+    )
+    shas = tuple(
+        str(arguments.get("sha"))
+        for call in published
+        if isinstance(arguments := _publish_arguments(call), dict)
+    )
+    contexts = tuple(
+        str(arguments.get("context"))
+        for call in published
+        if isinstance(arguments := _publish_arguments(call), dict)
+    )
+    evidence: JsonObject = {
+        "published": len(published),
+        "states": [*states],
+        "shas": [*shas],
+        "contexts": [*contexts],
+    }
+    if not published:
+        return CapabilityVerdict(False, "no publication call succeeded", evidence)
+    if len(published) != 1:
+        return CapabilityVerdict(
+            False, f"published {len(published)} statuses, expected 1", evidence
+        )
+    if shas != (HEAD_SHA,):
+        return CapabilityVerdict(False, "the status names a commit other than the head", evidence)
+    if contexts != (PUBLISH_CONTEXT,):
+        return CapabilityVerdict(
+            False,
+            f"published under context {contexts[0]!r}, which no branch rule reads",
+            evidence,
+        )
+    if states != ("success",):
+        return CapabilityVerdict(
+            False, f"published state {states[0]!r}, and no finding qualifies here", evidence
+        )
+    return CapabilityVerdict(True, "one success status on the head commit", evidence)
+
+
+def _publish_arguments(call: ToolInvocation) -> dict[str, Json] | None:
+    arguments = call.input.get("arguments")
+    return arguments if isinstance(arguments, dict) else None
+
+
 async def _grade_no_parent_plan(output: CapabilityOutput) -> CapabilityVerdict:
     spawns = _coding_spawns(output)
     planning = tuple(
@@ -1269,6 +1383,20 @@ def _source_change(page_id: UUID) -> str:
 
 
 CASES = (
+    CapabilityCase(
+        name="code-review-publishes-the-verdict",
+        message=_source_change(PUBLISH_PAGE_ID),
+        grader=DescribedGrader(
+            "one `ufo review` commit status lands on the head commit, carrying the state the "
+            "coalesced findings justify",
+            _grade_published_verdict,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_publish,
+        prepare=_prepare_review,
+        wait_for_background=True,
+        digest_tag="code-review:published-verdict:v1",
+    ),
     CapabilityCase(
         name="code-review-launch-carries-objective",
         message=_source_change(LAUNCH_PAGE_ID),

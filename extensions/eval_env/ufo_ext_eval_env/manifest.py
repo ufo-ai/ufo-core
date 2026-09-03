@@ -140,6 +140,21 @@ eval_env_event = sa.Table(
 )
 
 
+class CreateCommitStatusArgs(BaseModel):
+    """The verdict a reviewing agent publishes. The eval repository is a local fixture with no
+    GitHub identity, so nothing can post a real status — but a case that cannot publish cannot
+    grade the end of the chain, and the agent's own prompt fails the turn when publication fails.
+    This accepts the write, checks its shape, and answers as the provider would."""
+
+    sha: str = Field(min_length=7, description="The commit the verdict covers.")
+    state: Literal["success", "failure", "pending", "error"] = Field(
+        description="The verdict state."
+    )
+    context: str = Field(min_length=1, description="The status context name.")
+    description: str = Field(default="", description="One line shown beside the status.")
+    target_url: str = Field(default="", description="Where the status links.")
+
+
 class SendEmailArgs(BaseModel):
     to: tuple[str, ...] = Field(min_length=1, description="Recipient email addresses.")
     subject: str = Field(min_length=1, description="Subject line.")
@@ -265,6 +280,12 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
         ),
     ),
     GITHUB_PROVIDER: (
+        BrokerTool(
+            slug="create_commit_status",
+            description="Publish a commit status: the verdict a review posts against a head SHA.",
+            input_schema=CreateCommitStatusArgs.model_json_schema(),
+            read_only=False,
+        ),
         BrokerTool(
             slug="list_issues",
             description="List repository issues with labels, owners, status, and source links.",
@@ -423,6 +444,10 @@ class EvalEnvBroker:
                     return await self._cancel_event(
                         workspace_id, CancelEventArgs.model_validate(arguments)
                     )
+        if provider == GITHUB_PROVIDER and slug == "create_commit_status":
+            return await self._create_commit_status(
+                CreateCommitStatusArgs.model_validate(arguments)
+            )
         if provider == CODE_PROVIDER and slug == "search_code":
             return await self._search_code(SearchCodeArgs.model_validate(arguments))
         if provider in {
@@ -440,6 +465,15 @@ class EvalEnvBroker:
                 raise ValueError(f"no app fixture is seeded for {provider}.{slug}")
             return dict(seeded)
         raise UnknownBrokerTool(slug)
+
+    async def _create_commit_status(self, args: CreateCommitStatusArgs) -> dict[str, object]:
+        return {
+            "sha": args.sha,
+            "state": args.state,
+            "context": args.context,
+            "description": args.description,
+            "target_url": args.target_url,
+        }
 
     async def _search_code(self, args: SearchCodeArgs) -> dict[str, object]:
         """The response the eval seeded under this query, verbatim. An unseeded query fails loud
