@@ -2998,7 +2998,8 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         "a second click closes the run: {}",
         session.screen()
     );
-    session.press(click(row, col).as_bytes());
+    let (rollup_row, rollup_col) = locate(&session.screen(), "Completed 2 steps \u{25be}");
+    session.press(click(rollup_row, rollup_col).as_bytes());
     let closed = session.screen();
     assert!(
         closed.contains("Completed 2 steps \u{25b8}") && !closed.contains("reviewer \u{25b8}"),

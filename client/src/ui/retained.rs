@@ -34,19 +34,32 @@ pub enum Entry {
 }
 
 impl Entry {
-    /// Whether the transcript's blank-row rules govern this entry. Prose reads better with two
-    /// adjacent blanks collapsed and none at the very top; the mark is a drawing that stands in
-    /// its own air, so the blank rows it draws are its own.
+    /// Whether a run of blank rows inside this entry reads as one. Prose collapses; the mark is
+    /// a drawing that stands in its own air, and a member message ends on a deliberate pair that
+    /// holds the turn's work clear of the ask.
     fn keeps_its_blanks(&self) -> bool {
+        matches!(self, Entry::Masthead | Entry::Member(_))
+    }
+
+    /// Whether the blank this entry opens on stands even under the entry above it. Only the
+    /// mark's air is its own; every other entry lets its leading blank meet the row above.
+    fn keeps_its_leading_blank(&self) -> bool {
         matches!(self, Entry::Masthead)
     }
 }
 
 /// One step of a turn: a thought the agent wrote between its calls, the one line a call or a
-/// skill load narrated, or a subagent run.
+/// skill load narrated, a call this terminal ran, or a subagent run.
 pub enum Step {
     Thought(String),
     Note(String),
+    /// One call this terminal ran: the header naming it over the rows its result showed. Held
+    /// rendered, because the reply they read is gone once the wire has it, and clipped to the
+    /// width each paint asks for.
+    Op {
+        header: Line<'static>,
+        body: Vec<Line<'static>>,
+    },
     /// One subagent run: its name, the rows it narrated, and whether the member opened it. A run
     /// is one step however much it did — the count the web states — and its rows stand behind
     /// its own fold, like the web's run row.
@@ -197,6 +210,28 @@ impl Retained {
         };
         if let Entry::Steps { steps, .. } = &mut self.entries[at] {
             steps.push(step);
+        }
+        self.invalidate(at);
+        self.grew = true;
+    }
+
+    /// The client's own account of a call stands where the note that narrated it did, so one
+    /// call is one step whichever end of the wire stated it. A call the agent narrated nothing
+    /// for has no row to stand in and joins the steps as its own.
+    pub fn restate_step(&mut self, narrated: &str, step: Step) {
+        let found = self.live_steps.and_then(|at| match &self.entries[at] {
+            Entry::Steps { steps, .. } => steps
+                .iter()
+                .rposition(|held| matches!(held, Step::Note(text) if described(text) == narrated))
+                .map(|index| (at, index)),
+            _ => None,
+        });
+        let Some((at, index)) = found else {
+            self.push_step(step);
+            return;
+        };
+        if let Entry::Steps { steps, .. } = &mut self.entries[at] {
+            steps[index] = step;
         }
         self.invalidate(at);
         self.grew = true;
@@ -473,7 +508,7 @@ impl Retained {
         let mut tail_blank = true;
         for index in 0..self.entries.len() {
             let shape = self.shape(index, theme);
-            let held = self.entries[index].keeps_its_blanks();
+            let held = self.entries[index].keeps_its_leading_blank();
             let from = usize::from(shape.starts_blank && tail_blank && !held);
             let kept = shape.lines - from;
             places.push(Place { start: at, from });
@@ -633,6 +668,16 @@ fn steps_rows(
                 Line::styled(format!("{indent}{}", said(text)), theme.muted),
                 None,
             )),
+            Step::Op { header, body } => {
+                let room = width.saturating_sub(indent.len() as u16);
+                for line in std::iter::once(header).chain(body) {
+                    let mut row = clipped(line, room);
+                    if disclosed {
+                        row.spans.insert(0, Span::raw(STEP_INDENT));
+                    }
+                    rows.push((row, None));
+                }
+            }
             Step::Run {
                 label,
                 rows: narrated,
@@ -670,6 +715,27 @@ fn described(text: &str) -> &str {
         .map_or(text, |(_, description)| description)
 }
 
+/// One held row at the width the paint asks for: spans are kept whole until one runs past the
+/// room left, and that one is cut where it stops fitting.
+fn clipped(line: &Line<'static>, width: u16) -> Line<'static> {
+    let mut used = 0;
+    let mut kept = Vec::new();
+    for span in &line.spans {
+        let room = (width as usize).saturating_sub(used);
+        if room == 0 {
+            break;
+        }
+        let cut = wrap::clip(&span.content, room);
+        used += wrap::width(cut);
+        if cut.len() < span.content.len() {
+            kept.push(Span::styled(cut.to_string(), span.style));
+            break;
+        }
+        kept.push(span.clone());
+    }
+    Line::from(kept)
+}
+
 /// A run's own row: its name before a fold mark and — closed while the turn still runs — the
 /// latest thing it narrated, the way the web's run row states what it is doing.
 fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
@@ -680,6 +746,8 @@ fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
     }
 }
 
+/// A member message: the caret over what they wrote, held clear of the turn beneath it — the
+/// work a turn narrates starts far enough below the ask to be read as the answer to it.
 fn member_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut rows = text.lines();
     let first = rows.next().unwrap_or("").to_string();
@@ -696,6 +764,7 @@ fn member_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
             theme.member,
         )));
     }
+    lines.push(Line::raw(""));
     lines.push(Line::raw(""));
     lines
 }
@@ -911,7 +980,10 @@ mod tests {
         let theme = theme();
         let mut retained = Retained::new(40);
         retained.push(Entry::Member("one\ntwo".into()));
-        assert_eq!(texts(&retained.document(&theme)), ["› one", "  two", ""]);
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["› one", "  two", "", ""]
+        );
     }
 
     #[test]
@@ -956,7 +1028,8 @@ mod tests {
         retained.push(Entry::Markdown("body".into()));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["› hi", "", "› again", "", "body"]
+            ["› hi", "", "", "› again", "", "", "body"],
+            "each message keeps its own pair; the next entry's leading blank still collapses"
         );
     }
 
@@ -980,8 +1053,8 @@ mod tests {
         retained.push(Entry::Note("done".into()));
         assert_eq!(retained.text_of(0, &theme), "› hi");
         assert_eq!(retained.text_of(1, &theme), "");
-        assert_eq!(retained.text_of(2, &theme), "done");
-        assert_eq!(retained.text_of(3, &theme), "");
+        assert_eq!(retained.text_of(2, &theme), "");
+        assert_eq!(retained.text_of(3, &theme), "done");
     }
 
     #[test]
@@ -1139,6 +1212,25 @@ mod tests {
     }
 
     #[test]
+    fn a_member_message_stands_clear_of_the_work_it_started() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push(Entry::Member("draft the post".into()));
+        retained.begin_turn();
+        retained.push_step(Step::Note("running read: the drafts".into()));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "\u{203a} draft the post",
+                "",
+                "",
+                "running read: the drafts"
+            ],
+            "two rows stand between the ask and the first thing the turn did"
+        );
+    }
+
+    #[test]
     fn a_new_turns_first_step_stays_below_the_previous_answer() {
         let theme = theme();
         let mut retained = Retained::new(40);
@@ -1204,6 +1296,7 @@ mod tests {
                 "Completed 1 step ▸",
                 "",
                 "› and again",
+                "",
                 "",
                 "Completed 2 steps ▸",
                 "",

@@ -83,5 +83,5 @@ fn render_an_edits_diff(bencher: divan::Bencher) {
         arg: String::new(),
         params: edit_params(&old, &new),
     });
-    bencher.bench(|| divan::black_box(view.body(Ok(b"{}"), &theme, WIDTH)));
+    bencher.bench(|| divan::black_box(view.body(Ok(b"{}"), &theme)));
 }

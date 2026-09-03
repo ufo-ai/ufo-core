@@ -1,5 +1,6 @@
 //! The terminal app: a scrollback transcript over a repainted dock — activity row, rule, queued
 //! sends, the composer (or a picker, a masked secret entry, or the hotkey sheet), rule, footer.
+//! The dock states what is happening now; what happened is the transcript's.
 //! Every member-visible string renders through the theme's roles.
 
 pub mod editor;
@@ -53,7 +54,6 @@ pub const PROMPT_IDLE: &str = "›";
 const QUEUE_SHOWN: usize = 3;
 const ENTRY_ROWS_MAX: usize = 8;
 const PICKER_ROWS: usize = 8;
-const OP_LOG_ROWS: usize = 6;
 const ECHO_INDENT: &str = "  ";
 const IMAGE_COLS_MAX: u16 = 60;
 const IMAGE_BYTES_MAX: usize = 2 * 1024 * 1024;
@@ -224,7 +224,6 @@ pub struct App<W: Write = io::Stdout> {
     clicks: ClickTracker,
     focused: bool,
     flash: Option<(String, Instant)>,
-    op_log: Vec<Line<'static>>,
     running_op: Option<OpView>,
     running_desc: Option<String>,
     narration: Option<(String, String)>,
@@ -280,7 +279,6 @@ impl<W: Write> App<W> {
             clicks: ClickTracker::new(),
             focused: true,
             flash: None,
-            op_log: Vec::new(),
             running_op: None,
             running_desc: None,
             narration: None,
@@ -317,7 +315,6 @@ impl<W: Write> App<W> {
 
     pub fn say(&mut self, text: &str) {
         self.flush_stream();
-        self.op_log.clear();
         self.last_reply = text.to_string();
         self.retained.push(Entry::Markdown(text.to_string()));
         self.reply_open = false;
@@ -335,9 +332,6 @@ impl<W: Write> App<W> {
         if source.is_empty() {
             return;
         }
-        if !source.trim().is_empty() {
-            self.op_log.clear();
-        }
         if self.reply_open {
             self.retained.extend_markdown(&source);
         } else if !source.trim().is_empty() {
@@ -353,11 +347,8 @@ impl<W: Write> App<W> {
     /// client writes about itself is no step of the agent's work and joins the transcript on its
     /// own.
     pub fn note(&mut self, text: &str) {
-        if let Some(rest) = text.strip_prefix("running ") {
-            if let Some((tool, detail)) = rest.split_once(": ") {
-                self.narration = Some((tool.to_string(), detail.to_string()));
-            }
-            self.status_text(text);
+        if text.starts_with("running ") {
+            self.narrate(text);
         } else if text.starts_with("loading skill") {
             self.status_text(text);
         }
@@ -388,11 +379,12 @@ impl<W: Write> App<W> {
     }
 
     pub fn activity(&mut self, text: &str, run: Option<&str>) {
-        self.status_text(text);
         let Some(label) = run else {
-            self.step(Step::Note(text.to_string()), false);
+            self.narrate(text);
+            self.step(Step::Note(text.to_string()), true);
             return;
         };
+        self.status_text(text);
         let prefix = format!("{label}: ");
         let row = text.strip_prefix(&prefix).unwrap_or(text).to_string();
         match self.runs_counted.insert(label.to_string()) {
@@ -409,6 +401,18 @@ impl<W: Write> App<W> {
                 self.retained.push_under(label, row);
             }
         }
+    }
+
+    /// The call a narration names, held for the op that answers it: the client states one call
+    /// once, under the words the agent wrote for it, whichever directive carried them.
+    fn narrate(&mut self, text: &str) {
+        if let Some((tool, detail)) = text
+            .strip_prefix("running ")
+            .and_then(|rest| rest.split_once(": "))
+        {
+            self.narration = Some((tool.to_string(), detail.to_string()));
+        }
+        self.status_text(text);
     }
 
     /// One step of the running turn, `own` for a dispatch the turn made itself. Its own dispatch
@@ -449,9 +453,7 @@ impl<W: Write> App<W> {
             .push(Entry::Raw(vec![Line::styled(line, self.theme.muted)]));
     }
 
-    /// The op's header throbs in the activity row while it runs; it joins the dock's op log
-    /// when it answers, and the log clears the moment the reply starts streaming — tool activity
-    /// is read while it happens and never crowds the transcript.
+    /// The op's header throbs in the activity row while it runs.
     pub fn op_started(&mut self, op: &OpRequest) {
         self.running_desc = match self.narration.take() {
             Some((tool, detail)) if tool == op.name || tool == op.kind => Some(detail),
@@ -460,21 +462,28 @@ impl<W: Write> App<W> {
         self.running_op = Some(OpView::from_request(op));
     }
 
+    /// The answered op joins the turn's steps, its header over the rows its result showed —
+    /// the work stands in the transcript where it happened, and the turn's end rolls it up with
+    /// every other step. A call the agent narrated restates that narration's row rather than
+    /// adding one of its own.
     pub fn op_finished(&mut self, op: &OpRequest, result: &Result<Vec<u8>, String>) {
         self.running_op = None;
-        let description = self.running_desc.take();
+        let narrated = self.running_desc.take();
         let view = OpView::from_request(op);
         let reply = match result {
             Ok(bytes) => Ok(bytes.as_slice()),
             Err(failure) => Err(failure.as_str()),
         };
-        let width = self.cols;
-        self.op_log
-            .push(view.header(description.as_deref(), &self.theme, width));
-        self.op_log.extend(view.body(reply, &self.theme, width));
-        let overflow = self.op_log.len().saturating_sub(OP_LOG_ROWS);
-        if overflow > 0 {
-            self.op_log.drain(..overflow);
+        let step = Step::Op {
+            header: view.header(narrated.as_deref(), &self.theme),
+            body: view.body(reply, &self.theme),
+        };
+        match narrated {
+            Some(said) => {
+                self.flush_stream();
+                self.retained.restate_step(&said, step);
+            }
+            None => self.step(step, true),
         }
         if let Ok(bytes) = result {
             self.inline_read_image(op, bytes);
@@ -521,7 +530,6 @@ impl<W: Write> App<W> {
 
     pub fn end_turn(&mut self, waiting: bool) {
         self.working = false;
-        self.op_log.clear();
         self.running_op = None;
         self.flush_stream();
         self.reply_open = false;
@@ -1158,7 +1166,6 @@ impl<W: Write> App<W> {
             ));
         }
         dock.push(self.activity_line(cols));
-        dock.extend(self.op_log.iter().cloned());
         let rule = || Line::styled("─".repeat(cols.saturating_sub(1)), self.theme.prompt);
         dock.push(rule());
         self.queued_rows(&mut dock, cols);
@@ -1584,6 +1591,27 @@ mod tests {
         }
     }
 
+    /// The whole transcript as one string, for asserting what a member can read back.
+    fn transcript(app: &mut App<Vec<u8>>) -> String {
+        let theme = app.theme.clone();
+        app.retained
+            .document(&theme)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+
+    fn exec_reply(exit_code: i32, stdout: &str) -> String {
+        format!(
+            r#"{{"exit_code":{exit_code},"stdout_b64":"{}","stderr_b64":""}}"#,
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                stdout.as_bytes()
+            )
+        )
+    }
+
     /// Every member message the transcript holds, in order — the caret marks them.
     fn members(app: &mut App<Vec<u8>>) -> Vec<String> {
         let theme = app.theme.clone();
@@ -1824,33 +1852,114 @@ mod tests {
     }
 
     #[test]
-    fn the_op_log_keeps_its_newest_rows_and_drops_the_rest() {
+    fn every_call_this_terminal_ran_stays_in_the_transcript() {
         let mut app = app_on_memory();
+        app.begin_turn();
         for run in [
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
         ] {
             app.op_finished(
                 &asked("exec", "exec", &format!(r#"{{"argv":["make","{run}"]}}"#)),
-                &Ok(b"{\"code\":0,\"out_b64\":\"\"}".to_vec()),
+                &Ok(exec_reply(0, &format!("built {run}\n")).into_bytes()),
             );
         }
-        assert_eq!(
-            app.op_log.len(),
-            OP_LOG_ROWS,
-            "eight calls overflow a log of {OP_LOG_ROWS} rows"
-        );
-        let logged: String = app.op_log.iter().map(Line::to_string).collect();
-        assert!(
-            logged.contains("theta"),
-            "the newest call survives the cap: {logged}"
-        );
-        assert!(
-            !logged.contains("alpha"),
-            "and the oldest is what gets dropped: {logged}"
-        );
+        let document = transcript(&mut app);
+        for run in ["alpha", "theta"] {
+            assert!(
+                document.contains(&format!("⏺ exec make {run}")),
+                "the call is a step of the turn: {document}"
+            );
+            assert!(
+                document.contains(&format!("built {run}")),
+                "and its output stands under it: {document}"
+            );
+        }
         assert!(
             app.running_op.is_none(),
             "a finished op is no longer running"
+        );
+        app.end_turn(false);
+        assert!(
+            transcript(&mut app).contains("Completed 8 steps"),
+            "the turn's end rolls the calls up with its other steps"
+        );
+    }
+
+    #[test]
+    fn a_narrated_call_states_its_result_under_the_row_it_narrated() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        app.note("running exec: counting the rows");
+        let op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
+        app.op_started(&op);
+        app.op_finished(&op, &Ok(exec_reply(0, "42\n").into_bytes()));
+        let document = transcript(&mut app);
+        assert!(
+            !document.contains("running exec: counting the rows"),
+            "the narration's row became the call's own: {document}"
+        );
+        assert!(
+            document.contains("⏺ counting the rows") && document.contains("42"),
+            "which states the agent's words over the result: {document}"
+        );
+        app.end_turn(false);
+        assert!(
+            transcript(&mut app).contains("Completed 1 step"),
+            "one call is one step, whichever end of the wire stated it"
+        );
+    }
+
+    #[test]
+    fn text_between_two_dispatches_is_the_thought_each_round_wrote() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        app.txt("Template is in place. Now writing the schema.\n");
+        app.activity("Build the content management system", None);
+        app.txt("Now the routes with auth:\n");
+        app.activity("Create the blog admin dashboard", None);
+        app.txt("Now the frontend pages.\n");
+        app.end_turn(false);
+        let document = transcript(&mut app);
+        assert!(
+            !document.contains("schema.Now") && !document.contains("auth:Now"),
+            "a round's words end where the next round's begin: {document}"
+        );
+        app.retained.toggle_steps();
+        let opened = transcript(&mut app);
+        let thought = opened
+            .find("Now the routes with auth:")
+            .expect("the thought");
+        let after = opened
+            .find("Create the blog admin dashboard")
+            .expect("the call it wrote before");
+        assert!(
+            thought < after,
+            "each round's words stand above the call it made: {opened}"
+        );
+    }
+
+    #[test]
+    fn a_call_the_activity_directive_narrated_states_itself_once() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        app.activity("running exec: counting the rows", None);
+        let op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
+        app.op_started(&op);
+        app.op_finished(&op, &Ok(exec_reply(0, "42\n").into_bytes()));
+        app.end_turn(false);
+        assert!(
+            transcript(&mut app).contains("Completed 1 step"),
+            "the narration and the call it named are one step, not two"
+        );
+        app.retained.toggle_steps();
+        let opened = transcript(&mut app);
+        assert!(
+            opened.contains("⏺ counting the rows") && opened.contains("42"),
+            "stated under the agent's own words, over its result: {opened}"
+        );
+        assert!(
+            !opened.contains("exec wc -l"),
+            "the command is not restated beside the words: {opened}"
         );
     }
 
@@ -1861,8 +1970,22 @@ mod tests {
             &asked("exec", "exec", r#"{"argv":["make"]}"#),
             &Err("ENOENT: no such tool".to_string()),
         );
-        let logged: String = app.op_log.iter().map(Line::to_string).collect();
-        assert!(logged.contains("ENOENT: no such tool"), "{logged}");
+        let document = transcript(&mut app);
+        assert!(document.contains("ENOENT: no such tool"), "{document}");
+    }
+
+    #[test]
+    fn a_call_row_clips_to_the_width() {
+        let mut app = app_on_memory();
+        app.retained.set_width(14);
+        app.op_finished(
+            &asked("exec", "exec", r#"{"argv":["make","test","--verbose"]}"#),
+            &Ok(exec_reply(0, "").into_bytes()),
+        );
+        assert!(
+            transcript(&mut app).contains("⏺ exec make"),
+            "the header takes the room the transcript has"
+        );
     }
 
     #[test]

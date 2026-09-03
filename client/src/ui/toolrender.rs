@@ -1,21 +1,21 @@
 //! Local rendering of the ops a `run` directive asks of this terminal: a header naming the act,
 //! a colored diff for edits, and a bounded tail of exec output — all from data the client
-//! already holds, nothing added to the wire.
+//! already holds, nothing added to the wire. The rows come out full width; the transcript that
+//! holds them clips them to its own.
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine as _;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
 use crate::ops::{OP_EXEC, OP_FILE, OP_READ, OP_WRITE};
 use crate::ui::theme::Theme;
-use crate::ui::wrap::{clip, width as columns};
 use crate::wire::OpRequest;
 
 /// How many trailing output lines an op result shows before folding.
-pub const RESULT_TAIL_LINES: usize = 5;
+const RESULT_TAIL_LINES: usize = 5;
 
 const MARKER: &str = "⏺ ";
 const INDENT: &str = "  ";
@@ -42,11 +42,10 @@ impl OpView {
 
     /// The header line stating what is running: the agent's own narration where it wrote one,
     /// else the command a member reads — `⏺ edit src/main.rs`.
-    pub fn header(&self, description: Option<&str>, theme: &Theme, width: u16) -> Line<'static> {
-        styled(
+    pub fn header(&self, description: Option<&str>, theme: &Theme) -> Line<'static> {
+        Line::styled(
             format!("{MARKER}{}", self.title(description)),
             theme.tool_title,
-            width,
         )
     }
 
@@ -61,19 +60,14 @@ impl OpView {
     /// The body lines once the op answered: a diff for edits (old/new from the op's own params),
     /// the bounded output tail for exec, one status line otherwise. `reply` is the op's reply
     /// body, `failed` the failure string when the op refused.
-    pub fn body(
-        &self,
-        reply: Result<&[u8], &str>,
-        theme: &Theme,
-        width: u16,
-    ) -> Vec<Line<'static>> {
+    pub fn body(&self, reply: Result<&[u8], &str>, theme: &Theme) -> Vec<Line<'static>> {
         let reply = match reply {
             Ok(reply) => reply,
-            Err(failure) => return vec![styled(format!("{INDENT}{failure}"), theme.error, width)],
+            Err(failure) => return vec![Line::styled(format!("{INDENT}{failure}"), theme.error)],
         };
         match self.kind.as_str() {
-            OP_EXEC => exec_tail(reply, theme, width),
-            OP_FILE => self.file_result(reply, theme, width),
+            OP_EXEC => exec_tail(reply, theme),
+            OP_FILE => self.file_result(reply, theme),
             _ => Vec::new(),
         }
     }
@@ -100,10 +94,10 @@ impl OpView {
         serde_json::from_str(&self.params).unwrap_or(Value::Null)
     }
 
-    fn file_result(&self, reply: &[u8], theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    fn file_result(&self, reply: &[u8], theme: &Theme) -> Vec<Line<'static>> {
         let result: Value = serde_json::from_slice(reply).unwrap_or(Value::Null);
         if let Some(refusal) = result.get("error").and_then(Value::as_str) {
-            return vec![styled(format!("{INDENT}{refusal}"), theme.error, width)];
+            return vec![Line::styled(format!("{INDENT}{refusal}"), theme.error)];
         }
         if self.name != "edit" {
             return Vec::new();
@@ -119,7 +113,7 @@ impl OpView {
                 &decoded(edit.get("new_string_b64")),
             ));
         }
-        folded(diff_lines(&rows, theme, width), theme, width)
+        folded(diff_lines(&rows, theme), theme)
     }
 }
 
@@ -177,7 +171,7 @@ fn field<'a>(params: &'a Value, key: &str) -> &'a str {
     params.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn exec_tail(reply: &[u8], theme: &Theme, width: u16) -> Vec<Line<'static>> {
+fn exec_tail(reply: &[u8], theme: &Theme) -> Vec<Line<'static>> {
     let result: Value = serde_json::from_slice(reply).unwrap_or(Value::Null);
     let mut bytes = unbase64(field(&result, "stdout_b64"));
     bytes.extend(unbase64(field(&result, "stderr_b64")));
@@ -186,14 +180,14 @@ fn exec_tail(reply: &[u8], theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let hidden = lines.len().saturating_sub(RESULT_TAIL_LINES);
     let mut body = Vec::new();
     if hidden > 0 {
-        body.push(fold(hidden, theme, width));
+        body.push(fold(hidden, theme));
     }
     for line in &lines[hidden..] {
-        body.push(styled(format!("{INDENT}{line}"), theme.tool_output, width));
+        body.push(Line::styled(format!("{INDENT}{line}"), theme.tool_output));
     }
     match result.get("exit_code").and_then(Value::as_i64) {
         Some(code) if code != 0 => {
-            body.push(styled(format!("{INDENT}exit {code}"), theme.error, width));
+            body.push(Line::styled(format!("{INDENT}exit {code}"), theme.error));
             body
         }
         _ => body,
@@ -227,15 +221,14 @@ fn changed_rows(old: &str, new: &str) -> Vec<(ChangeTag, String)> {
     rows
 }
 
-fn diff_lines(rows: &[(ChangeTag, String)], theme: &Theme, width: u16) -> Vec<Line<'static>> {
+fn diff_lines(rows: &[(ChangeTag, String)], theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut at = 0;
     while at < rows.len() {
         if rows[at].0 == ChangeTag::Equal {
-            lines.push(styled(
+            lines.push(Line::styled(
                 format!("{INDENT} {}", rows[at].1),
                 theme.diff_context,
-                width,
             ));
             at += 1;
             continue;
@@ -245,22 +238,20 @@ fn diff_lines(rows: &[(ChangeTag, String)], theme: &Theme, width: u16) -> Vec<Li
         at += removed.len() + added.len();
         if removed.len() == 1 && added.len() == 1 {
             let (old, new) = emphasized(&removed[0].1, &added[0].1, theme);
-            lines.push(clipped(old, width));
-            lines.push(clipped(new, width));
+            lines.push(Line::from(old));
+            lines.push(Line::from(new));
             continue;
         }
         for row in removed {
-            lines.push(styled(
+            lines.push(Line::styled(
                 format!("{INDENT}-{}", row.1),
                 theme.diff_removed,
-                width,
             ));
         }
         for row in added {
-            lines.push(styled(
+            lines.push(Line::styled(
                 format!("{INDENT}+{}", row.1),
                 theme.diff_added,
-                width,
             ));
         }
     }
@@ -295,42 +286,18 @@ fn emphasized(old: &str, new: &str, theme: &Theme) -> (Vec<Span<'static>>, Vec<S
     (removed, added)
 }
 
-fn folded(mut lines: Vec<Line<'static>>, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+fn folded(mut lines: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
     if lines.len() <= BODY_MAX_LINES {
         return lines;
     }
     let hidden = lines.len() - (BODY_MAX_LINES - 1);
     lines.truncate(BODY_MAX_LINES - 1);
-    lines.push(fold(hidden, theme, width));
+    lines.push(fold(hidden, theme));
     lines
 }
 
-fn fold(hidden: usize, theme: &Theme, width: u16) -> Line<'static> {
-    styled(format!("{INDENT}… +{hidden} lines"), theme.muted, width)
-}
-
-fn styled(text: String, style: Style, width: u16) -> Line<'static> {
-    Line::styled(clip(&text, width as usize).to_string(), style)
-}
-
-fn clipped(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
-    let max = width as usize;
-    let mut used = 0;
-    let mut kept = Vec::new();
-    for span in spans {
-        let room = max.saturating_sub(used);
-        if room == 0 {
-            break;
-        }
-        let cut = clip(&span.content, room).len();
-        used += columns(&span.content[..cut]);
-        if cut < span.content.len() {
-            kept.push(Span::styled(span.content[..cut].to_string(), span.style));
-            break;
-        }
-        kept.push(span);
-    }
-    Line::from(kept)
+fn fold(hidden: usize, theme: &Theme) -> Line<'static> {
+    Line::styled(format!("{INDENT}… +{hidden} lines"), theme.muted)
 }
 
 #[cfg(test)]
@@ -394,12 +361,12 @@ mod tests {
             r#"{"argv":["make","test"],"env":{}}"#,
         ));
         assert_eq!(
-            view.header(Some("Running the test suite"), &theme, 80)
+            view.header(Some("Running the test suite"), &theme)
                 .to_string(),
             "⏺ Running the test suite"
         );
         assert_eq!(
-            view.header(Some("  "), &theme, 80).to_string(),
+            view.header(Some("  "), &theme).to_string(),
             "⏺ exec make test"
         );
     }
@@ -467,20 +434,8 @@ mod tests {
         ];
         for (request, expected) in cases {
             let view = OpView::from_request(&request);
-            assert_eq!(view.header(None, &theme, 80).to_string(), expected);
+            assert_eq!(view.header(None, &theme).to_string(), expected);
         }
-    }
-
-    #[test]
-    fn header_clips_to_the_width() {
-        let theme = theme();
-        let view = OpView::from_request(&op(
-            OP_EXEC,
-            "exec",
-            "",
-            r#"{"argv":["make","test","--verbose"]}"#,
-        ));
-        assert_eq!(view.header(None, &theme, 10).to_string(), "⏺ exec mak");
     }
 
     #[test]
@@ -492,7 +447,7 @@ mod tests {
             "let total = one + three\n",
         );
         let view = OpView::from_request(&op(OP_FILE, "edit", "", &params));
-        let body = view.body(Ok(br#"{"replacements":1}"#), &theme, 80);
+        let body = view.body(Ok(br#"{"replacements":1}"#), &theme);
         assert_eq!(
             rendered(&body),
             vec!["  -let total = one + two", "  +let total = one + three"]
@@ -511,7 +466,7 @@ mod tests {
         );
         let view = OpView::from_request(&op(OP_FILE, "edit", "", &params));
         assert_eq!(
-            rendered(&view.body(Ok(b"{}"), &theme, 80)),
+            rendered(&view.body(Ok(b"{}"), &theme)),
             vec![
                 "   one", "   two", "  -three", "  -four", "  +THREE", "  +FOUR", "   five",
                 "   six",
@@ -526,7 +481,7 @@ mod tests {
         let new: String = (1..=60).map(|n| format!("row {n}\n")).collect();
         let params = edit_params("/w/a.rs", &old, &new);
         let view = OpView::from_request(&op(OP_FILE, "edit", "", &params));
-        let body = rendered(&view.body(Ok(b"{}"), &theme, 80));
+        let body = rendered(&view.body(Ok(b"{}"), &theme));
         assert_eq!(body.len(), BODY_MAX_LINES);
         assert_eq!(body[BODY_MAX_LINES - 1], "  … +81 lines");
     }
@@ -536,7 +491,7 @@ mod tests {
         let theme = theme();
         let params = edit_params("/w/a.rs", "old\n", "new\n");
         let view = OpView::from_request(&op(OP_FILE, "edit", "", &params));
-        let body = view.body(Ok(br#"{"error":"old_string not found"}"#), &theme, 80);
+        let body = view.body(Ok(br#"{"error":"old_string not found"}"#), &theme);
         assert_eq!(rendered(&body), vec!["  old_string not found"]);
     }
 
@@ -545,7 +500,7 @@ mod tests {
         let theme = theme();
         let output: String = (1..=8).map(|n| format!("line {n}\n")).collect();
         let view = OpView::from_request(&op(OP_EXEC, "exec", "", r#"{"argv":["make"]}"#));
-        let body = view.body(Ok(exec_reply(0, &output).as_bytes()), &theme, 80);
+        let body = view.body(Ok(exec_reply(0, &output).as_bytes()), &theme);
         assert_eq!(
             rendered(&body),
             vec![
@@ -564,11 +519,11 @@ mod tests {
         let theme = theme();
         let view = OpView::from_request(&op(OP_EXEC, "exec", "", r#"{"argv":["make"]}"#));
         assert_eq!(
-            rendered(&view.body(Ok(exec_reply(2, "boom\n").as_bytes()), &theme, 80)),
+            rendered(&view.body(Ok(exec_reply(2, "boom\n").as_bytes()), &theme)),
             vec!["  boom", "  exit 2"]
         );
         assert!(view
-            .body(Ok(exec_reply(0, "").as_bytes()), &theme, 80)
+            .body(Ok(exec_reply(0, "").as_bytes()), &theme)
             .is_empty());
     }
 
@@ -576,16 +531,16 @@ mod tests {
     fn read_and_write_bodies_stay_empty() {
         let theme = theme();
         let read = OpView::from_request(&op(OP_READ, "read", "/w/a.rs", ""));
-        assert!(read.body(Ok(b"file bytes"), &theme, 80).is_empty());
+        assert!(read.body(Ok(b"file bytes"), &theme).is_empty());
         let write = OpView::from_request(&op(OP_WRITE, "write", "/w/a.rs", ""));
-        assert!(write.body(Ok(b""), &theme, 80).is_empty());
+        assert!(write.body(Ok(b""), &theme).is_empty());
     }
 
     #[test]
     fn failure_body_states_the_refusal() {
         let theme = theme();
         let view = OpView::from_request(&op(OP_WRITE, "write", "/tmp/x", ""));
-        let body = view.body(Err("EIO: could not write /tmp/x"), &theme, 80);
+        let body = view.body(Err("EIO: could not write /tmp/x"), &theme);
         assert_eq!(rendered(&body), vec!["  EIO: could not write /tmp/x"]);
     }
 
@@ -601,19 +556,17 @@ mod tests {
         ];
         for (request, expected) in cases {
             let view = OpView::from_request(&request);
-            assert_eq!(view.header(None, &theme, 80).to_string(), expected);
+            assert_eq!(view.header(None, &theme).to_string(), expected);
         }
         let edit = OpView::from_request(&op(OP_FILE, "edit", "", "{"));
-        assert!(edit.body(Ok(b"{}"), &theme, 80).is_empty());
-        assert!(edit.body(Ok(b"not json"), &theme, 80).is_empty());
+        assert!(edit.body(Ok(b"{}"), &theme).is_empty());
+        assert!(edit.body(Ok(b"not json"), &theme).is_empty());
         let broken = edit_params("/w/a.rs", "old\n", "new\n").replace("old_string_b64", "old_b64");
         let view = OpView::from_request(&op(OP_FILE, "edit", "", &broken));
-        assert_eq!(rendered(&view.body(Ok(b"{}"), &theme, 80)), vec!["  +new"]);
+        assert_eq!(rendered(&view.body(Ok(b"{}"), &theme)), vec!["  +new"]);
         let exec = OpView::from_request(&op(OP_EXEC, "exec", "", r#"{"argv":["make"]}"#));
-        assert!(exec.body(Ok(b"not json"), &theme, 80).is_empty());
-        assert!(exec
-            .body(Ok(br#"{"stdout_b64":"!!"}"#), &theme, 80)
-            .is_empty());
+        assert!(exec.body(Ok(b"not json"), &theme).is_empty());
+        assert!(exec.body(Ok(br#"{"stdout_b64":"!!"}"#), &theme).is_empty());
     }
 
     #[test]
@@ -626,19 +579,8 @@ mod tests {
         );
         let view = OpView::from_request(&op(OP_FILE, "edit", "", &params));
         assert_eq!(
-            rendered(&view.body(Ok(b"{}"), &theme, 80)),
+            rendered(&view.body(Ok(b"{}"), &theme)),
             vec!["  -a?b", "  +a?c"]
-        );
-    }
-
-    #[test]
-    fn diff_lines_clip_to_the_width() {
-        let theme = theme();
-        let params = edit_params("/w/a.rs", "alpha bravo\n", "alpha charlie\n");
-        let view = OpView::from_request(&op(OP_FILE, "edit", "", &params));
-        assert_eq!(
-            rendered(&view.body(Ok(b"{}"), &theme, 10)),
-            vec!["  -alpha b", "  +alpha c"]
         );
     }
 }
