@@ -9,10 +9,12 @@ Dockerfile render also covers what the E2B template bakes."""
 import json
 import sys
 from collections.abc import Iterator
+from functools import partial
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from e2b.exceptions import BuildException, SandboxException, TimeoutException
 from e2b.template.types import BuildInfo
 
 import sandbox.build_template as build_template
@@ -481,27 +483,102 @@ def test_publish_builds_every_tier_and_prints_the_size_map(monkeypatch, capsys) 
     )
 
 
+def _boxed(sandbox: SimpleNamespace, **_: object) -> SimpleNamespace:
+    return sandbox
+
+
 def test_a_verification_box_that_cannot_be_reaped_leaves_the_gate_s_verdict(
     monkeypatch, capsys
 ) -> None:
-    """Handing the box back is the E2B API's to answer, and it can time out. Every sandbox here is
-    created with a `timeout`, so E2B reaps it anyway; a transport failure closing it must not turn a
-    passing gate into a failed deploy, and a failing one must still fail."""
+    """Handing the box back is the E2B API's to answer, and it fails three ways: the transport
+    times out, the service already reaped the box, or the kill itself answers 500. Every sandbox
+    here is created with a `timeout`, so E2B reaps it anyway; none of the three must turn a passing
+    gate into a failed deploy, and a failing gate must still fail."""
     ready = SimpleNamespace(exit_code=0)
-    unreachable = SimpleNamespace(
-        commands=SimpleNamespace(run=lambda *args, **kwargs: ready),
-        kill=lambda: (_ for _ in ()).throw(httpx.ReadTimeout("The read operation timed out")),
-    )
-    monkeypatch.setattr(
-        build_template, "Sandbox", SimpleNamespace(create=lambda **kwargs: unreachable)
-    )
+    faults = [
+        httpx.ReadTimeout("The read operation timed out"),
+        TimeoutException("The sandbox was not found"),
+        SandboxException("500: Error killing sandbox: sandbox operation failed"),
+    ]
+    for fault in faults:
+        unreachable = SimpleNamespace(
+            commands=SimpleNamespace(run=lambda *args, **kwargs: ready),
+            kill=lambda held=fault: (_ for _ in ()).throw(held),
+        )
+        monkeypatch.setattr(
+            build_template,
+            "Sandbox",
+            SimpleNamespace(create=partial(_boxed, unreachable)),
+        )
 
-    build_template.verify_published_template("ufo-sbx-small:build-1")
+        build_template.verify_published_template("ufo-sbx-small:build-1")
 
-    assert "ufo-sbx-small:build-1: sandbox left to expire" in capsys.readouterr().err
+        assert "ufo-sbx-small:build-1: sandbox left to expire" in capsys.readouterr().err
 
     ready.exit_code = 1
     with pytest.raises(RuntimeError, match="missing baked runtime tools"):
+        build_template.verify_published_template("ufo-sbx-small:build-1")
+
+
+def test_a_build_that_cannot_reach_e2b_is_retried_and_a_rejected_one_is_not(
+    monkeypatch, capsys
+) -> None:
+    """Requesting a build is a call to E2B, and a timeout there says nothing about the definition:
+    the same inputs answer on the next attempt, and the whole deploy rides on this step. A fault
+    that is E2B's verdict on the definition, not its reachability, still raises at once."""
+    monkeypatch.setattr(build_template, "sleep", lambda _: None)
+    attempts = []
+
+    def flaky(template, name, **kwargs):
+        attempts.append(name)
+        if len(attempts) < build_template.BUILD_ATTEMPTS:
+            raise httpx.ReadTimeout("The read operation timed out")
+        return BuildInfo(template_id="template-1", build_id="build-1", name=name, alias=name)
+
+    monkeypatch.setattr(build_template, "e2b_template", lambda size: object())
+    monkeypatch.setattr(build_template.Template, "build", flaky)
+
+    info = build_template._built("small", SANDBOX_TIERS["small"])
+
+    assert len(attempts) == build_template.BUILD_ATTEMPTS
+    assert info.build_id == "build-1"
+    assert "did not reach E2B" in capsys.readouterr().err
+
+    def rejected(template, name, **kwargs):
+        raise BuildException("template definition rejected")
+
+    monkeypatch.setattr(build_template.Template, "build", rejected)
+    with pytest.raises(BuildException):
+        build_template._built("small", SANDBOX_TIERS["small"])
+
+
+def test_a_verification_box_that_will_not_boot_is_retried_then_raises(monkeypatch, capsys) -> None:
+    """Booting the box is a call to E2B, and its 500s say nothing about the template under test —
+    a reserve script that could not reach their redis is not a drifted image. A box that never
+    boots still raises, because a gate that cannot run must not report a pass."""
+    monkeypatch.setattr(build_template, "sleep", lambda _: None)
+    boots = []
+    ready = SimpleNamespace(
+        commands=SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(exit_code=0)),
+        kill=lambda: None,
+    )
+
+    def flaky(**kwargs):
+        boots.append(kwargs)
+        if len(boots) < build_template.BUILD_ATTEMPTS:
+            raise SandboxException("500: Failed to create sandbox: redis: connection pool timeout")
+        return ready
+
+    monkeypatch.setattr(build_template, "Sandbox", SimpleNamespace(create=flaky))
+    build_template.verify_published_template("ufo-sbx-small:build-1")
+    assert len(boots) == build_template.BUILD_ATTEMPTS
+    assert "did not reach E2B" in capsys.readouterr().err
+
+    def never(**kwargs):
+        raise SandboxException("500: Failed to create sandbox: redis: connection pool timeout")
+
+    monkeypatch.setattr(build_template, "Sandbox", SimpleNamespace(create=never))
+    with pytest.raises(SandboxException):
         build_template.verify_published_template("ufo-sbx-small:build-1")
 
 

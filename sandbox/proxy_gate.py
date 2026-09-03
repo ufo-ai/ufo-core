@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import sys
 from dataclasses import dataclass
 from time import monotonic, sleep
 from urllib.parse import urlsplit
 
+import httpx
 from e2b import Sandbox
+from e2b.exceptions import SandboxException
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CA_STAGING_PATH,
@@ -67,6 +70,12 @@ class ProxyTlsGate:
     template: str
 
     def run(self) -> None:
+        """Boot a sandbox, install the CA, and prove the proxy answers CONNECT as it must.
+
+        The box is created with a `timeout`, so E2B reaps it whether or not the kill lands. Handing
+        it back early is a courtesy and cannot be allowed to replace the verdict: a transport
+        timeout or the SDK's own fault on the delete would otherwise fail a deploy whose gate had
+        already passed."""
         parsed = urlsplit(self.public_url)
         if parsed.scheme != "https" or parsed.hostname is None:
             raise RuntimeError("sandbox proxy gate requires an HTTPS proxy URL")
@@ -115,7 +124,10 @@ class ProxyTlsGate:
                 f"got {last_status or 'no status'}"
             )
         finally:
-            sandbox.kill()
+            try:
+                sandbox.kill()
+            except (httpx.TransportError, SandboxException) as unreachable:
+                print(f"sandbox left to expire ({unreachable})", file=sys.stderr)
 
 
 def main() -> None:

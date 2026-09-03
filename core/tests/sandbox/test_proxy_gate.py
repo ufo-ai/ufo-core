@@ -1,9 +1,12 @@
 import sys
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from e2b.exceptions import SandboxException, TimeoutException
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CA_STAGING_PATH,
@@ -72,6 +75,14 @@ class _Clock:
         self.now += delay
 
 
+def _boxed(sandbox: _Sandbox, **_: object) -> _Sandbox:
+    return sandbox
+
+
+def _raise(fault: Exception) -> None:
+    raise fault
+
+
 def test_gate_installs_system_trust_then_waits_for_proxy_and_probes_tls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -110,6 +121,29 @@ def test_gate_installs_system_trust_then_waits_for_proxy_and_probes_tls(
     assert all(proxy_gate.PYTHON_PROXY_PROBE in command for command in probes)
     assert clock.sleeps == [proxy_gate.PROBE_DELAY_SECONDS] * 4
     assert sandbox.killed
+
+
+def test_a_gate_that_passed_is_not_undone_by_a_box_it_cannot_hand_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The box carries its own `timeout`, so E2B reaps it either way and the kill is a courtesy.
+    A transport timeout, a box the service already reaped, and a 500 on the kill all leave the
+    verdict the probe reached: this gate passed, and a failed hand-back must not fail the deploy."""
+    for fault in (
+        httpx.ReadTimeout("The read operation timed out"),
+        TimeoutException("The sandbox was not found"),
+        SandboxException("500: Error killing sandbox: sandbox operation failed"),
+    ):
+        sandbox = _Sandbox()
+        sandbox.kill = partial(_raise, fault)  # type: ignore[method-assign]
+        clock = _Clock()
+        monkeypatch.setattr(proxy_gate, "Sandbox", SimpleNamespace(create=partial(_boxed, sandbox)))
+        monkeypatch.setattr(proxy_gate, "monotonic", clock.monotonic)
+        monkeypatch.setattr(proxy_gate, "sleep", clock.sleep)
+
+        proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem", "ufo-sbx:build-1").run()
+
+        assert "sandbox left to expire" in capsys.readouterr().err
 
 
 def test_gate_bounds_pending_transport(monkeypatch: pytest.MonkeyPatch) -> None:

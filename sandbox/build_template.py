@@ -37,11 +37,14 @@ import sys
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from time import sleep
 
 import httpx
 from e2b import Sandbox, Template
+from e2b.exceptions import SandboxException, TimeoutException
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.template.main import TemplateBuilder, TemplateFinal
+from e2b.template.types import BuildInfo
 
 from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.runtime.skills.runtime import SystemSkillBundle, discover_skills
@@ -120,6 +123,8 @@ RUNTIME_USER = "user"
 # The template's readiness probe is the baked-tool check the publish gate enforces: a build that
 # fails to bake a tool never goes READY, so the publish fails instead of drifting silently.
 READY_VERIFY_TIMEOUT_SECONDS = 120
+BUILD_ATTEMPTS = 3
+BUILD_RETRY_BACKOFF_SECONDS = 15
 # The build-definition digest is baked here so --check can read it off the live template and compare
 # to source — the drift gate that keeps publishing opt-in without letting a stale template pass.
 BUILD_DIGEST_PATH = f"{UFO_DIR}/template-digest"
@@ -454,14 +459,36 @@ def build_docker_image() -> None:
     print(DOCKER_IMAGE_TAG)
 
 
+def _booted(name: str) -> Sandbox:
+    """Boot the box a gate checks, standing through the service's own bad minutes. Creating a
+    sandbox is a call to E2B, and its 500s and timeouts — a reserve script that could not reach
+    their redis, an API that did not answer — say nothing about the template under test. A box that
+    will not boot after every attempt raises, because a gate that cannot run must not report a
+    pass."""
+    for attempt in range(1, BUILD_ATTEMPTS + 1):
+        try:
+            return Sandbox.create(template=name, timeout=READY_VERIFY_TIMEOUT_SECONDS)
+        except (httpx.TransportError, SandboxException) as unreachable:
+            if attempt == BUILD_ATTEMPTS:
+                raise
+            print(
+                f"{name}: boot attempt {attempt} did not reach E2B ({unreachable}); retrying",
+                file=sys.stderr,
+            )
+            sleep(BUILD_RETRY_BACKOFF_SECONDS * attempt)
+    raise RuntimeError("unreachable")
+
+
 def _reap(sandbox: Sandbox, name: str) -> None:
     """Hand the verification box back. Every sandbox here is created with a `timeout`, so E2B reaps
-    it on its own and this only returns it sooner — which is why a transport failure closing it
-    cannot be allowed to replace the verdict the gate just computed. It is said on stderr instead,
+    it on its own and this only returns it sooner — which is why a failure closing it cannot be
+    allowed to replace the verdict the gate just computed. The delete times out at the transport or
+    comes back as the SDK's own fault, a `TimeoutException` for a box the service already reaped or
+    a `SandboxException` for a 500 on the kill, so both end here. It is said on stderr instead,
     because a box that outlives its check is worth knowing about even though nothing waits on it."""
     try:
         sandbox.kill()
-    except httpx.TransportError as unreachable:
+    except (httpx.TransportError, SandboxException) as unreachable:
         print(f"{name}: sandbox left to expire ({unreachable})", file=sys.stderr)
 
 
@@ -470,7 +497,7 @@ def verify_published_template(name: str) -> None:
     probe. A template missing a baked tool fails here, so the build cannot report success on a
     drifted image — the same SANDBOX_TEMPLATE_READY_COMMAND the publish path bakes as the ready
     cmd."""
-    sandbox = Sandbox.create(template=name, timeout=READY_VERIFY_TIMEOUT_SECONDS)
+    sandbox = _booted(name)
     try:
         result = sandbox.commands.run(
             SANDBOX_TEMPLATE_READY_COMMAND, timeout=READY_VERIFY_TIMEOUT_SECONDS
@@ -487,7 +514,7 @@ def check_published_template(name: str, expected: str) -> None:
     """Drift gate (never publishes): boot the live template, read its baked build digest, and
     compare to the current source definition. A stale template — built from older inputs, or
     predating the digest — fails here, so CI stays red until someone republishes."""
-    sandbox = Sandbox.create(template=name, timeout=READY_VERIFY_TIMEOUT_SECONDS)
+    sandbox = _booted(name)
     try:
         result = sandbox.commands.run(
             f"cat {BUILD_DIGEST_PATH}", timeout=READY_VERIFY_TIMEOUT_SECONDS
@@ -504,6 +531,31 @@ def check_published_template(name: str, expected: str) -> None:
             f"published template {name} is stale (live {actual or '<none>'} != source {expected}); "
             "republish the sandbox template"
         )
+
+
+def _built(size: str, sizing: Sizing) -> BuildInfo:
+    """Publish one tier's template, standing through the build API's own bad minutes. Requesting a
+    build and staging its layers are calls to E2B, and a timeout there says nothing about the
+    definition — the same inputs answer on the next attempt, and a whole deploy rides on this step.
+    A definition E2B rejects raises on the first attempt like any other fault."""
+    for attempt in range(1, BUILD_ATTEMPTS + 1):
+        try:
+            return Template.build(
+                e2b_template(size),
+                name=template_name(size),
+                cpu_count=sizing.cpu_count,
+                memory_mb=sizing.memory_mb,
+            )
+        except (httpx.TransportError, TimeoutException) as unreachable:
+            if attempt == BUILD_ATTEMPTS:
+                raise
+            print(
+                f"{template_name(size)}: build attempt {attempt} did not reach E2B "
+                f"({unreachable}); retrying",
+                file=sys.stderr,
+            )
+            sleep(BUILD_RETRY_BACKOFF_SECONDS * attempt)
+    raise RuntimeError("unreachable")
 
 
 def main() -> None:
@@ -540,12 +592,7 @@ def main() -> None:
     stage_system_skills()
     references = []
     for size, sizing in SANDBOX_TIERS.items():
-        info = Template.build(
-            e2b_template(size),
-            name=template_name(size),
-            cpu_count=sizing.cpu_count,
-            memory_mb=sizing.memory_mb,
-        )
+        info = _built(size, sizing)
         reference = f"{info.name}:{info.build_id}"
         verify_published_template(reference)
         references.append(f"{size}={reference}")
