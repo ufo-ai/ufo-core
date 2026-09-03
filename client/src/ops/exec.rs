@@ -445,6 +445,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn refuses_a_forced_rm_behind_an_unnamed_wrapper_before_spawn() {
+        let dir = scratch("wrapped-dangerous");
+        let target = dir.join("keep");
+        fs::write(&target, b"keep").unwrap();
+        let command = format!("nohup rm -rf {}", target.display());
+        let params = serde_json::json!({
+            "argv": ["/bin/bash", "-lc", &command],
+            "env": {},
+            "safety_argv": ["/bin/bash", "-lc", &command]
+        })
+        .to_string();
+
+        assert_eq!(
+            run(&params, &dir, Path::new("/tmp"), 30).unwrap_err(),
+            "exec refused dangerous command"
+        );
+        assert!(target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn allows_nonforced_temp_directory_cleanup() {
         let dir = scratch("temp-cleanup");
         let target = dir.join("profile");

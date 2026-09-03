@@ -8,61 +8,46 @@ use tree_sitter::Node;
 use tree_sitter::Parser;
 use tree_sitter_bash::LANGUAGE as BASH;
 
-const MAX_WRAPPER_DEPTH: usize = 8;
+const MAX_NESTING_DEPTH: usize = 8;
+const SHELL_INVOCATION_WORDS: usize = 3;
 
+/// Whether this command line spawns a literal forced `rm`.
+///
+/// A wrapper hands its own tail to `execvp`, and nothing in `nohup rm -rf x` tells it apart from
+/// `git rm -f x` by shape, so no list of wrapper names can be complete. Every argument position is
+/// therefore read as a command start, which judges what a wrapper might exec whether or not this
+/// file knows that wrapper's name, at the price of refusing a `rm` subcommand and an unquoted
+/// `rm -rf` carried as an argument. `trap` and `eval` are the exception the shell grammar itself
+/// makes: their argument is a script, and this file already parses that language.
 pub(super) fn dangerous_command_match(command: &[String]) -> bool {
     dangerous_command_match_with_depth(command, 0)
 }
 
-fn dangerous_command_match_with_depth(command: &[String], wrapper_depth: usize) -> bool {
-    if wrapper_depth > MAX_WRAPPER_DEPTH {
+fn dangerous_command_match_with_depth(command: &[String], nesting_depth: usize) -> bool {
+    if nesting_depth > MAX_NESTING_DEPTH {
         return true;
     }
-    if dangerous_exec_match(command, wrapper_depth) {
-        return true;
-    }
-    literal_shell_commands(command).is_some_and(|commands| {
-        commands
-            .iter()
-            .any(|command| dangerous_command_match_with_depth(command, wrapper_depth + 1))
-    })
+    (0..command.len()).any(|start| dangerous_start_match(&command[start..], nesting_depth))
 }
 
-fn dangerous_exec_match(command: &[String], wrapper_depth: usize) -> bool {
+fn dangerous_start_match(command: &[String], nesting_depth: usize) -> bool {
     match command
         .first()
         .and_then(|command| executable_name(command))
         .as_deref()
     {
         Some("rm") => rm_args_include_force_option(&command[1..]),
-        Some("sudo") => dangerous_command_match_with_depth(&command[1..], wrapper_depth + 1),
-        Some("env") => dangerous_env_match(command, wrapper_depth),
-        Some("trap") => dangerous_trap_match(command, wrapper_depth),
-        _ => false,
+        Some("trap") => dangerous_trap_match(command, nesting_depth),
+        Some("eval") => dangerous_script_match(&command[1..].join(" "), nesting_depth),
+        _ => literal_shell_commands(command).is_some_and(|commands| {
+            commands
+                .iter()
+                .any(|command| dangerous_command_match_with_depth(command, nesting_depth + 1))
+        }),
     }
 }
 
-fn dangerous_env_match(command: &[String], wrapper_depth: usize) -> bool {
-    let mut command_index = 1;
-    while let Some(argument) = command.get(command_index) {
-        if argument == "--" {
-            command_index += 1;
-            break;
-        }
-        if matches!(argument.as_str(), "-i" | "--ignore-environment")
-            || argument
-                .split_once('=')
-                .is_some_and(|(name, _)| !name.is_empty() && !name.starts_with('-'))
-        {
-            command_index += 1;
-            continue;
-        }
-        break;
-    }
-    dangerous_command_match_with_depth(&command[command_index..], wrapper_depth + 1)
-}
-
-fn dangerous_trap_match(command: &[String], wrapper_depth: usize) -> bool {
+fn dangerous_trap_match(command: &[String], nesting_depth: usize) -> bool {
     let mut action_index = 1;
     if command
         .get(action_index)
@@ -76,10 +61,15 @@ fn dangerous_trap_match(command: &[String], wrapper_depth: usize) -> bool {
     else {
         return false;
     };
-    dangerous_command_match_with_depth(
-        &["sh".to_string(), "-c".to_string(), action.clone()],
-        wrapper_depth + 1,
-    )
+    dangerous_script_match(action, nesting_depth)
+}
+
+fn dangerous_script_match(script: &str, nesting_depth: usize) -> bool {
+    !script.is_empty()
+        && dangerous_command_match_with_depth(
+            &["sh".to_string(), "-c".to_string(), script.to_owned()],
+            nesting_depth + 1,
+        )
 }
 
 fn rm_args_include_force_option(args: &[String]) -> bool {
@@ -94,7 +84,7 @@ fn rm_args_include_force_option(args: &[String]) -> bool {
 }
 
 fn literal_shell_commands(command: &[String]) -> Option<Vec<Vec<String>>> {
-    let [shell, flag, script] = command else {
+    let [shell, flag, script] = command.get(..SHELL_INVOCATION_WORDS)? else {
         return None;
     };
     if !matches!(flag.as_str(), "-lc" | "-c")
@@ -258,15 +248,93 @@ mod tests {
         }
     }
 
+    const WRAPPERS: [&str; 14] = [
+        "exec",
+        "command",
+        "nohup",
+        "setsid",
+        "doas",
+        "sudo",
+        "time",
+        "eval",
+        "xargs",
+        "timeout 5",
+        "nice -n 10",
+        "stdbuf -o0",
+        "env TARGET=/tmp/example",
+        "find . -name example -exec",
+    ];
+
     #[test]
-    fn deeply_nested_wrappers_fail_closed() {
-        for (depth, expected) in [(MAX_WRAPPER_DEPTH, true), (MAX_WRAPPER_DEPTH + 1, true)] {
-            let command = std::iter::repeat_n("env", depth)
-                .chain(["rm", "-rf", "/tmp/example"])
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            assert_eq!(dangerous_command_match(&command), expected, "{command:?}");
+    fn every_wrapper_before_a_forced_rm_is_dangerous() {
+        for wrapper in WRAPPERS {
+            let script = format!("{wrapper} rm -rf /tmp/example");
+            assert!(
+                dangerous_command_match(&argv(&["bash", "-lc", &script])),
+                "{script}"
+            );
+            let flat = script.split(' ').collect::<Vec<_>>();
+            assert!(dangerous_command_match(&argv(&flat)), "{flat:?}");
         }
+    }
+
+    #[test]
+    fn every_wrapper_before_a_nested_shell_is_dangerous() {
+        for wrapper in WRAPPERS {
+            for tail in ["", " probe"] {
+                let script = format!("{wrapper} sh -c 'rm -rf /tmp/example'{tail}");
+                assert!(
+                    dangerous_command_match(&argv(&["bash", "-lc", &script])),
+                    "{script}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_wrapper_before_a_benign_command_still_runs() {
+        for wrapper in WRAPPERS {
+            let script = format!("{wrapper} echo /tmp/example");
+            assert!(
+                !dangerous_command_match(&argv(&["bash", "-lc", &script])),
+                "{script}"
+            );
+            let flat = script.split(' ').collect::<Vec<_>>();
+            assert!(!dangerous_command_match(&argv(&flat)), "{flat:?}");
+        }
+    }
+
+    #[test]
+    fn eval_carrying_a_forced_rm_as_one_string_is_dangerous() {
+        for command in [
+            argv(&["eval", "rm -rf /tmp/example"]),
+            argv(&["bash", "-lc", "eval 'rm -rf /tmp/example'"]),
+        ] {
+            assert!(dangerous_command_match(&command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_named_rm_that_is_a_subcommand_is_refused() {
+        for command in [
+            argv(&["git", "rm", "-f", "example"]),
+            argv(&["docker", "rm", "-f", "example"]),
+        ] {
+            assert!(dangerous_command_match(&command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn nesting_beyond_the_bound_fails_closed() {
+        let command = argv(&["rm", "-r", "/tmp/example"]);
+        assert!(!dangerous_command_match_with_depth(
+            &command,
+            MAX_NESTING_DEPTH
+        ));
+        assert!(dangerous_command_match_with_depth(
+            &command,
+            MAX_NESTING_DEPTH + 1
+        ));
     }
 
     #[test]
@@ -290,13 +358,26 @@ mod tests {
         for command in [
             argv(&["rm", "-r", "/tmp/example"]),
             argv(&["rm", "--", "-f"]),
+            argv(&["rm", "--", "-rf", "dist"]),
+            argv(&["bash", "-lc", "rm -- -rf dist"]),
+            argv(&["bash", "-lc", "R=rm; $R -rf dist"]),
             argv(&["bash", "-lc", "echo 'rm -rf /tmp/example'"]),
             argv(&["bash", "-lc", "cmd=rm; $cmd -rf /tmp/example"]),
             argv(&["bash", "-lc", "if then rm -rf /tmp/example"]),
             argv(&["env", "TARGET=/tmp/example", "rm", "-r", "/tmp/example"]),
-            argv(&["bash", "-lc", "trap 'echo rm -rf /tmp/example' EXIT"]),
+            argv(&["bash", "-lc", "trap 'echo \"rm -rf /tmp/example\"' EXIT"]),
         ] {
             assert!(!dangerous_command_match(&command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn an_unquoted_forced_rm_carried_as_an_argument_is_refused() {
+        for command in [
+            argv(&["bash", "-lc", "echo rm -rf /tmp/example"]),
+            argv(&["bash", "-lc", "trap 'echo rm -rf /tmp/example' EXIT"]),
+        ] {
+            assert!(dangerous_command_match(&command), "{command:?}");
         }
     }
 }
