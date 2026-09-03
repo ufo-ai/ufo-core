@@ -67,6 +67,22 @@ const BEDROCK_SLOT = {
   filled: true,
 };
 
+/** Two slots of one provider, each named for a value under it rather than for the provider: the
+ *  mark is Slack's, and not a mark for a provider called `slack_bot`. */
+const SLACK_TOKEN = {
+  name: "slack-bot-token",
+  slot: "slack_bot_token",
+  extension: "slack",
+  description: "the bot user OAuth token",
+  filled: true,
+};
+const SLACK_SECRET = {
+  ...SLACK_TOKEN,
+  name: "slack-signing-secret",
+  slot: "slack_signing_secret",
+  description: "the signing secret",
+};
+
 beforeEach(() => {
   useStreamFake();
 });
@@ -171,7 +187,8 @@ test("credentials group and sort the filled slots, and render their literals", a
 test("a coding provider row and a credential row each lead with their provider's mark", async () => {
   location.hash = "#/workspace/credentials";
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT, DATADOG_HOST, BEDROCK_SLOT] }),
+    "/workspace/credentials": () =>
+      json({ slots: [SLOT, DATADOG_HOST, BEDROCK_SLOT, SLACK_TOKEN] }),
     "/workspace/accounts": () =>
       json({ accounts: [{ provider: "openai", label: "ChatGPT", connected: false }] }),
   });
@@ -193,6 +210,13 @@ test("a coding provider row and a credential row each lead with their provider's
   );
   const bedrock = screen.getByText("BEDROCK_API_KEY").closest("li")!;
   expect(bedrock.querySelector("[data-slot=mark] svg")).toBeTruthy();
+
+  /* A slot named for a value under its provider stands under that provider's mark: the name is
+     read for the longest provider the portal draws, not stripped of an ending. */
+  const slack = screen.getByText("slack_bot_token").closest("li")!;
+  expect(slack.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
+    "--brand-slack",
+  );
 });
 
 /** A family name has to bind down to the cards it heads. Stacked at the band gap it stood the same
@@ -441,7 +465,9 @@ test("an unset slot is set from the act over the rows", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "Set a credential" }));
   await userEvent.click(await screen.findByRole("combobox", { name: "Credential" }));
-  await userEvent.click(await screen.findByRole("option", { name: "APOLLO_API_KEY" }));
+  const option = await screen.findByRole("option", { name: "APOLLO_API_KEY" });
+  expect(option.querySelector("[style*='--brand-apollo']")).toBeTruthy();
+  await userEvent.click(option);
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
   await waitFor(() => expect(intents.length).toBe(1));
@@ -464,6 +490,67 @@ test("a workspace with no credential set still offers the act", async () => {
 
   expect(await screen.findByText("No credential is set.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Set a credential" })).toBeTruthy();
+});
+
+/** A prompt is raised from a row here and from a chat reply elsewhere, so it says whose value a
+ *  member is about to type: the provider's mark stands beside the words, and a request spanning
+ *  two providers draws the words alone. */
+test("a credential prompt is headed by the one provider every slot it asks for belongs to", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLACK_TOKEN, SLACK_SECRET] }),
+    "/actions/credential$": () => json(CREDENTIAL_ACTIONS),
+    "/actions/credential/request_credentials": () =>
+      json({
+        applied: true,
+        message: "",
+        turn_id: TURN_ID,
+        credentials: {
+          sealed: "seal-token",
+          reason: "slack authenticates with these values.",
+          prompts: [
+            { slot: "slack_bot_token", prompt: "the bot user OAuth token" },
+            { slot: "slack_signing_secret", prompt: "the signing secret" },
+          ],
+        },
+      }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
+
+  const head = (await screen.findByText("Set Credentials")).closest("[data-slot=dialog-header]")!;
+  expect(head.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
+    "--brand-slack",
+  );
+});
+
+test("a credential prompt spanning two providers is headed by the words alone", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLACK_TOKEN, SLOT] }),
+    "/actions/credential$": () => json(CREDENTIAL_ACTIONS),
+    "/actions/credential/request_credentials": () =>
+      json({
+        applied: true,
+        message: "",
+        turn_id: TURN_ID,
+        credentials: {
+          sealed: "seal-token",
+          reason: "two extensions authenticate with these values.",
+          prompts: [
+            { slot: "slack_bot_token", prompt: "the bot user OAuth token" },
+            { slot: "OPENAI_API_KEY", prompt: "the key" },
+          ],
+        },
+      }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
+
+  const head = (await screen.findByText("Set Credentials")).closest("[data-slot=dialog-header]")!;
+  expect(head.querySelector("[data-slot=mark]")).toBeNull();
 });
 
 test("the secret field hides what a member types and refuses whitespace", async () => {

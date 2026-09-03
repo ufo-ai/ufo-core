@@ -1,5 +1,5 @@
 import { IconCheck } from "@tabler/icons-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { MarkTile } from "@/components/ui/item";
@@ -24,7 +24,8 @@ import { codeSpans } from "@/kernel/cards";
 import { OutcomeNotice, type NoticeState, QUIET, Section } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
-import { BrandMark } from "@/lib/brandMark";
+import { BrandMark, BRAND_MARKS } from "@/lib/brandMark";
+import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
 import type { ActionView, CredentialPrompt } from "@/lib/types";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import {
@@ -98,15 +99,29 @@ function extensionTitle(extension: string) {
     .join(" ");
 }
 
-/** The provider a slot's value authenticates with, off the slot's own name: the marks are keyed by
- *  provider, so `DATADOG_API_KEY` and `DATADOG_APPLICATION_KEY` stand under one logo and a provider
- *  nobody vendored a mark for takes its glyph. */
-const SLOT_SUFFIXES = ["_api_key", "_application_key", "_api_host", "_servers", "_key", "_token"];
+/** The provider a slot's value authenticates with: the longest provider the portal draws, that the
+ *  slot's own name starts with. A slot named for its provider (`slack`) and every slot naming a
+ *  value under one (`DATADOG_API_KEY`, `DATADOG_APPLICATION_KEY`) land on that provider's one mark;
+ *  a slot the portal draws nothing for keeps the name it has, and takes the connector glyph.
+ *
+ *  Read off the two sets that answer for a mark rather than off a table of endings — a table would
+ *  be a second list to keep, and it read `SLACK_BOT_TOKEN` as a provider called `slack_bot`. */
+const SLOT_PROVIDERS = [...BRAND_MARKS, ...Object.keys(PROVIDER_GLYPHS)].sort(
+  (left, right) => right.length - left.length,
+);
 
 function slotProvider(slot: string) {
   const name = slot.toLowerCase();
-  const suffix = SLOT_SUFFIXES.find((entry) => name.endsWith(entry));
-  return suffix ? name.slice(0, -suffix.length) : name;
+  return (
+    SLOT_PROVIDERS.find((provider) => name === provider || name.startsWith(provider + "_")) ?? name
+  );
+}
+
+/** The mark over a prompt: one provider's, where every slot the request asks for is that
+ *  provider's. A request spanning two providers names none of them here. */
+function askedProvider(prompts: CredentialPrompt[]) {
+  const asked = new Set(prompts.map((prompt) => slotProvider(prompt.slot)));
+  return asked.size === 1 ? [...asked][0] : null;
 }
 
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
@@ -195,7 +210,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   credentials: (request, onStored, close) => (
     <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
       <DialogContent>
-        <DialogHeader>
+        <PromptHeader provider={askedProvider(request.prompts)}>
           <DialogTitle>
             {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
               ? "Save MCP Server"
@@ -208,7 +223,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
               ? "Add or update one server. Saved servers stay in place."
               : request.reason}
           </DialogDescription>
-        </DialogHeader>
+        </PromptHeader>
         <CredentialPromptDialogForm
           sealed={request.sealed}
           prompts={request.prompts}
@@ -219,6 +234,21 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     </Dialog>
   ),
 };
+
+/** The head of a credential prompt: the provider's mark beside what the prompt says, so a member
+ *  reading a dialog raised from chat or from a row sees whose value they are typing. A prompt with
+ *  no one provider draws the words alone. */
+function PromptHeader({ provider, children }: { provider: string | null; children: ReactNode }) {
+  if (provider === null) return <DialogHeader>{children}</DialogHeader>;
+  return (
+    <DialogHeader className="flex-row items-center gap-lg">
+      <MarkTile>
+        <BrandMark provider={provider} className="text-ink" />
+      </MarkTile>
+      <div className="flex min-w-0 flex-col gap-2xs">{children}</div>
+    </DialogHeader>
+  );
+}
 
 const PICKED_SLOT = "credential-slot";
 
@@ -258,7 +288,13 @@ function SetCredential({
               <SelectContent>
                 {slots.map((slot) => (
                   <SelectItem key={slot.slot} value={slot.slot}>
-                    {slot.slot}
+                    <span className="flex min-w-0 items-center gap-sm">
+                      <BrandMark
+                        provider={slotProvider(slot.slot)}
+                        className="size-(--size-icon)"
+                      />
+                      <span className="min-w-0 truncate">{slot.slot}</span>
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
