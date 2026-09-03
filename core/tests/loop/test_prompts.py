@@ -44,6 +44,29 @@ def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
     assert "{{" not in rendered.content
 
 
+def test_shell_routes_around_a_constraint_instead_of_ending_the_turn() -> None:
+    prose = " ".join(SHELL.split("<refusals>")[1].split("</refusals>")[0].split())
+    assert "blocks that route, not the goal behind it" in prose
+    assert (
+        "name the specific substitute available to you and the ground on which you may use it"
+        in prose
+    )
+    assert "why it is the closest fit to what they wanted" in prose
+    assert "what the one you chose has, never what the rest lack" in prose
+    assert "Pick the substitute on what you already know or can see in a step or two" in prose
+    assert "do the member's work with it and refine only if rounds remain" in prose
+    assert "Something the member has already rejected is not a substitute" in prose
+    assert "Never reconstruct the blocked thing to score candidates against it" in prose
+    assert "Lead the answer with the work you did rather than with what you would not do" in prose
+    assert "ride as one sentence inside it rather than as the closing ask" in prose
+
+
+def test_shell_keeps_a_file_rewrite_off_the_shell() -> None:
+    prose = " ".join(SHELL.split())
+    assert "never rides an ad-hoc cat, sed, or echo redirection" in prose
+    assert "nor a script whose purpose is to rewrite a file" in prose
+
+
 def test_shell_requires_message_authority_for_admin_actions() -> None:
     assert "including admin actions" in SHELL
     assert "Omit it only for conversation-common work." in SHELL

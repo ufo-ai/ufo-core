@@ -47,6 +47,7 @@ from evals.suites import (
     member_add_notify,
     monitor_arm,
     new_application,
+    non_refusal,
     object_tools,
     onboarding_help,
     pdf_build,
@@ -87,6 +88,7 @@ VISUAL_JUDGE_MODEL = "claude-sonnet-5"
 DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("basics", basics.CASES),
     capability_task("semantic_quality", semantic_quality.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    capability_task("non_refusal", non_refusal.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task("response_register", response_register.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     slack_silence_task(SLACK_SILENCE_CASES),
     capability_task(
