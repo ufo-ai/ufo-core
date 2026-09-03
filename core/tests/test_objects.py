@@ -307,6 +307,42 @@ async def test_object_list_discovers_instance_actions_without_an_executable_call
     assert "call" not in by_name[sample.POLISH_ACTION]
 
 
+@pytest.mark.parametrize(
+    "narrowing",
+    (
+        {"query": "retention"},
+        {"filters": {"color": "teal"}},
+        {"cursor": "eyJuYW1lIjogInctMDAxIn0="},
+        {"order_by": "created_at"},
+        {"order": "desc"},
+    ),
+)
+async def test_object_list_refuses_to_narrow_the_kind_catalog(
+    db: None, narrowing: dict[str, object]
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    list_tool = tools["object_list"]
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+
+        with pytest.raises(ValueError, match="and no kind was named"):
+            await list_tool.handler(ctx, list_tool.input_model.model_validate(narrowing))
+
+
+async def test_object_list_still_answers_the_kind_catalog_with_no_arguments(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+
+        kinds = json.loads(await _text(tools, "object_list", ctx))["kinds"]
+
+    assert {row["kind"] for row in kinds} >= {sample.WIDGET_KIND, sample.RELIC_KIND}
+
+
 def _widget_manifest(name: str, color: str = "teal", size: int = 1) -> str:
     return f"kind: {sample.WIDGET_KIND}\nname: {name}\nspec:\n  color: {color}\n  size: {size}\n"
 

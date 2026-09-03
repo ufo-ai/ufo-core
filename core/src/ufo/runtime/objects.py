@@ -61,6 +61,8 @@ from ufo.schema import tables
 OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
+ORDER_BY_DEFAULT = "name"
+ORDER_DEFAULT: Literal["asc", "desc"] = "asc"
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
 ENVELOPE_GENERATION_KEY = "generation"
 ACTION_RESERVED_INPUT_FIELDS = (
@@ -895,8 +897,8 @@ class ObjectListInput(BaseModel):
     agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
     query: str = ""
     filters: dict[str, JsonValue] = Field(default_factory=dict)
-    order_by: str = "name"
-    order: Literal["asc", "desc"] = "asc"
+    order_by: str = ORDER_BY_DEFAULT
+    order: Literal["asc", "desc"] = ORDER_DEFAULT
     cursor: str = ""
 
 
@@ -1085,6 +1087,23 @@ class ObjectVerbs:
         if not args.kind:
             if args.agent:
                 raise ValueError("an agent target requires an agent-scoped object kind")
+            narrowed = tuple(
+                name
+                for name, given in (
+                    ("query", bool(args.query)),
+                    ("filters", bool(args.filters)),
+                    ("cursor", bool(args.cursor)),
+                    ("order_by", args.order_by != ORDER_BY_DEFAULT),
+                    ("order", args.order != ORDER_DEFAULT),
+                )
+                if given
+            )
+            if narrowed:
+                raise ValueError(
+                    f"{', '.join(narrowed)} narrows one kind's instances, and no kind was named; "
+                    "call object_list with no arguments for the kind catalog, then again with the "
+                    "kind whose instances you want"
+                )
             kinds: list[dict[str, JsonValue]] = []
             for name, entry in sorted(self.registry.items()):
                 row: dict[str, JsonValue] = {"kind": name, "description": entry.kind.description}
