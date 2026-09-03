@@ -11,7 +11,7 @@ import base64
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -33,6 +33,7 @@ from ufo.harness.sandbox.conversation import (
 )
 from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
+    GIT_IDENTITY_ENV,
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
     _grant_cli_env,
@@ -55,7 +56,7 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
 from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
-from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.access.grants import CommitIdentity, GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
@@ -1092,6 +1093,118 @@ async def test_open_sandbox_configures_the_connector_git_hosts_credential_helper
     }
 
 
+async def test_open_sandbox_exports_the_committer_identity_of_the_pushing_account(
+    db: None, tmp_path: Path
+) -> None:
+    """A container configures no git identity, so a turn that clones and pushes could not commit at
+    all until one is exported. It is the identity the provider attributes to the account the push
+    authenticates as, recorded when that account's consent completed — never the member's own
+    address, which belongs to another namespace and would attribute the commit to nobody. A CLI
+    that clones through no git host exports none, so the identity never outlives the grant that
+    pushes."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="github",
+            account_id="acct-gh",
+            host="api.github.com",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+            account_label="alexg-ufo",
+            commit=CommitIdentity(
+                name="Alex Graveley",
+                email="12345+alexg-ufo@users.noreply.github.com",
+            ),
+        )
+        scoped = await _grant_cli_env(
+            GrantStore(),
+            {"github": GIT_CLI, "hub": HUB_CLI},
+            MemberAuthority(member_id),
+            uuid4(),
+        )
+
+    assert scoped == {
+        "GH_TOKEN": grant_sentinel("acct-gh"),
+        "HUB_TOKEN": grant_sentinel("acct-1"),
+        "GIT_AUTHOR_NAME": "Alex Graveley",
+        "GIT_AUTHOR_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
+        "GIT_COMMITTER_NAME": "Alex Graveley",
+        "GIT_COMMITTER_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
+    }
+    assert set(scoped) - {"GH_TOKEN", "HUB_TOKEN"} == GIT_IDENTITY_ENV
+
+
+async def test_open_sandbox_exports_no_identity_for_a_connection_that_recorded_none(
+    db: None, tmp_path: Path
+) -> None:
+    """A connection carrying no commit identity exports none, so git refuses the commit and says
+    so. The alternative — falling back to the member's ufo address — pushes as the account and
+    attributes the commit to nobody, and writes that address into public history for good."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="github",
+            account_id="acct-gh",
+            host="api.github.com",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+            account_label="alexg-ufo",
+        )
+        scoped = await _grant_cli_env(
+            GrantStore(), {"github": GIT_CLI}, MemberAuthority(member_id), uuid4()
+        )
+
+    assert scoped == {"GH_TOKEN": grant_sentinel("acct-gh")}
+
+
+async def test_reauthorization_drops_the_committer_identity_of_another_authority(
+    db: None,
+) -> None:
+    """Re-authorization rewrites the CLI variables per acting member, and the identity goes with
+    them: a member holding no GitHub grant commits under no identity rather than under the identity
+    the open exported for somebody else."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id, WORKSPACE_AUTHORITY))
+    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
+    base = SandboxSession(
+        carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
+        handle=SandboxHandle(
+            conversation_id=conversation_id,
+            container_id="sbx-1",
+            run_token=common_token,
+            egress_env={
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+                "GH_TOKEN": grant_sentinel("acct-gh"),
+                "GIT_AUTHOR_NAME": "Alex Graveley",
+                "GIT_AUTHOR_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
+                "GIT_COMMITTER_NAME": "Alex Graveley",
+                "GIT_COMMITTER_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
+            },
+        ),
+    )
+
+    with ws(workspace_id), agent(agent_id):
+        authorized = await SandboxAuthorizer(
+            sandbox=base,
+            run_tokens=RUN_TOKENS,
+            grants=GrantStore(),
+            clis={"github": GIT_CLI},
+            turn=turn,
+        ).authorize(MemberAuthority(uuid4()))
+
+    assert "GH_TOKEN" not in authorized.handle.egress_env
+    assert GIT_IDENTITY_ENV.isdisjoint(authorized.handle.egress_env)
+
+
 @dataclass
 class _UniqueIdCarrier:
     """Stands in for a provider that mints a fresh sandbox per create (e2b's shape): each create
@@ -1596,3 +1709,78 @@ async def test_a_terminal_conversation_is_reachable_exactly_while_connected(
         assert isinstance(session.carrier, TerminalCarrier)
         terminals.disconnect(conversation_id)
         assert await sandboxes.existing(conversation_id) is None
+
+
+async def test_open_sandbox_commits_as_the_shared_account_another_member_connected(
+    db: None, tmp_path: Path
+) -> None:
+    """A connection shared with the agent's audience serves a member who connected nothing, and the
+    identity it exports is the shared account's — the account whose token the push authenticates
+    as. Attributing those commits to the acting member instead would name someone GitHub links to
+    nothing, and the sharing member's own login is what the push already discloses."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=True)
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="github",
+            account_id="acct-gh",
+            host="api.github.com",
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=True,
+            account_label="alexg-ufo",
+            commit=CommitIdentity(
+                name="Alex Graveley",
+                email="12345+alexg-ufo@users.noreply.github.com",
+            ),
+        )
+        scoped = await _grant_cli_env(
+            GrantStore(), {"github": GIT_CLI}, MemberAuthority(uuid4()), uuid4()
+        )
+
+    assert scoped == {
+        "GH_TOKEN": grant_sentinel("acct-gh"),
+        "GIT_AUTHOR_NAME": "Alex Graveley",
+        "GIT_AUTHOR_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
+        "GIT_COMMITTER_NAME": "Alex Graveley",
+        "GIT_COMMITTER_EMAIL": "12345+alexg-ufo@users.noreply.github.com",
+    }
+
+
+async def test_open_sandbox_withdraws_the_identity_when_two_clis_claim_it(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """git reads one pair of ident variables however many hosts a turn clones from, so two CLIs
+    declaring a git host cannot both export one. Resolving it by dict order would commit as
+    whichever provider came first and say nothing; the identity is withdrawn and logged instead, so
+    the turn fails visibly at the commit."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    identity = CommitIdentity(
+        name="Alex Graveley", email="12345+alexg-ufo@users.noreply.github.com"
+    )
+    with ws(workspace_id), agent(agent_id):
+        for provider, account in (("github", "acct-gh"), ("gitlab", "acct-gl")):
+            await GrantStore().record(
+                provider=provider,
+                account_id=account,
+                host=f"api.{provider}.test",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+                account_label="alexg-ufo",
+                commit=identity,
+            )
+        with caplog.at_level(logging.INFO):
+            scoped = await _grant_cli_env(
+                GrantStore(),
+                {"github": GIT_CLI, "gitlab": replace(GIT_CLI, env="GITLAB_TOKEN")},
+                MemberAuthority(member_id),
+                uuid4(),
+            )
+
+    assert scoped == {
+        "GH_TOKEN": grant_sentinel("acct-gh"),
+        "GITLAB_TOKEN": grant_sentinel("acct-gl"),
+    }
+    assert [r.getMessage() for r in caplog.records if "git_identity_ambiguous" in r.getMessage()]

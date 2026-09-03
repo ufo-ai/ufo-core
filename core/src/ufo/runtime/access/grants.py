@@ -107,12 +107,30 @@ class ConnectionPermissionDenied(ValueError):
 
 
 @dataclass(frozen=True)
+class CommitIdentity:
+    """The author and committer a sandbox's git stamps a commit with, as the provider attributes it
+    to the connected account the same sandbox clones and pushes as.
+
+    A provider attributes a commit by its author address, so the address is the provider's to name,
+    not this deploy's: the connected account's own is what links the commit to the account whose
+    token pushed it, and the member's ufo login address — a different namespace — links it to
+    nobody. Read once when consent completes and held on the connection, so no sandbox open pays a
+    provider call for it."""
+
+    name: str
+    email: str
+
+
+@dataclass(frozen=True)
 class OAuthAccount:
     """What a completed handoff yields: the broker's stable connected-account id. The account's
-    token stays with the broker (server-side execution), so no secret crosses into the grant."""
+    token stays with the broker (server-side execution), so no secret crosses into the grant.
+    `commit` is the identity the account's own commits carry, for a connector whose token a sandbox
+    clones and pushes with; None for every provider that signs no commits."""
 
     account_id: str
     account_label: str | None = None
+    commit: CommitIdentity | None = None
 
 
 class OAuthProvider(Protocol):
@@ -152,7 +170,9 @@ class OAuthProviderResolver(Protocol):
 
 @dataclass(frozen=True)
 class Grant:
-    """One agent's usable view of a connection."""
+    """One agent's usable view of a connection. `account_label` is the broker's own name for the
+    connected account, empty for an account the broker named nothing; `commit` is the identity its
+    commits carry, None for a connection that signs none."""
 
     id: UUID
     connection_id: UUID
@@ -162,6 +182,8 @@ class Grant:
     owner_member_id: UUID
     owner_email: str
     connection_shared: bool
+    account_label: str = ""
+    commit: CommitIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +358,7 @@ class GrantStore:
         conversation_id: UUID,
         shared: bool,
         account_label: str | None = None,
+        commit: CommitIdentity | None = None,
         landed_turn_id: UUID | None = None,
     ) -> UUID:
         """Create or reuse the member's connection, grant the bound agent, and answer the connection
@@ -344,6 +367,12 @@ class GrantStore:
         account, its sources, and every existing edge. Reconnecting only widens sharing: a
         `shared=False` reconnect keeps a workspace-shared connection shared, so a per-agent
         connect never revokes other members' access — narrowing is `set_shared`'s act alone.
+
+        `commit` is written on the reused row as it is on the new one: the identity comes from the
+        exchange that just completed, and a row recorded before this connector read one — or under
+        an account whose display name has since changed — carries a stale identity until a connect
+        replaces it. This connect is the only writer of those columns, so a reconnect is the
+        member's whole remedy for a sandbox git that refuses the commit.
 
         `landed_turn_id` stamps the turn whose request this connect answered, in the same
         transaction as the grant: the surfaces draw a settled control off that stamp, and one
@@ -423,6 +452,8 @@ class GrantStore:
                     conversation_id=conversation_id,
                     shared=shared,
                     account_label=account_label,
+                    commit_name=None if commit is None else commit.name,
+                    commit_email=None if commit is None else commit.email,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -458,6 +489,8 @@ class GrantStore:
                     host=host,
                     shared=sa.or_(tables.connection.c.shared, sa.literal(shared)),
                     account_label=account_label,
+                    commit_name=None if commit is None else commit.name,
+                    commit_email=None if commit is None else commit.email,
                     updated_at=sa.func.now(),
                 )
                 .where(tables.connection.c.id == existing.id)
@@ -533,6 +566,9 @@ class GrantStore:
                         tables.connection.c.owner_member_id,
                         tables.member.c.email.label("owner_email"),
                         tables.connection.c.shared,
+                        tables.connection.c.account_label,
+                        tables.connection.c.commit_name,
+                        tables.connection.c.commit_email,
                     )
                     .select_from(
                         tables.connector_grant.join(
@@ -562,6 +598,12 @@ class GrantStore:
                 owner_member_id=row.owner_member_id,
                 owner_email=row.owner_email,
                 connection_shared=row.shared,
+                account_label=row.account_label or "",
+                commit=(
+                    CommitIdentity(name=row.commit_name, email=row.commit_email)
+                    if row.commit_name and row.commit_email
+                    else None
+                ),
             )
             for row in rows
         )
@@ -894,6 +936,7 @@ class ConnectFlow:
                 conversation_id=claims.conversation_id,
                 shared=claims.shared,
                 account_label=account.account_label,
+                commit=account.commit,
                 landed_turn_id=claims.turn_id,
             )
             if self.connections is not None:

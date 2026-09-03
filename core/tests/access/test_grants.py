@@ -26,6 +26,7 @@ from ufo.runtime.access.egress_rules import (
     ScopeRule,
 )
 from ufo.runtime.access.grants import (
+    CommitIdentity,
     ConnectFlow,
     ConnectHandoff,
     ConnectionOwnedByAnotherMember,
@@ -142,6 +143,7 @@ async def _record(
     grantor_member_id: UUID,
     conversation_id: UUID,
     shared: bool,
+    commit: CommitIdentity | None = None,
 ) -> None:
     with ws(workspace_id), agent(agent_id):
         await store.record(
@@ -151,6 +153,7 @@ async def _record(
             grantor_member_id=grantor_member_id,
             conversation_id=conversation_id,
             shared=shared,
+            commit=commit,
         )
 
 
@@ -291,6 +294,39 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
     assert (connection_count, grant_count) == (1, 1)
     grants = await _active(store, workspace_id, agent_id)
     assert grants[0].host == HOST_B
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_reconnecting_refreshes_the_commit_identity_on_the_reused_row(db: None) -> None:
+    """Every connection recorded before this deploy read an identity holds none, and a display name
+    changes on the provider. The reconnect is the only act that writes those columns, so it has to
+    land on the row it reuses: a sandbox whose grant carries no identity exports no git ident and
+    cannot commit at all."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    identities = (
+        None,
+        CommitIdentity(name="Alex Graveley", email="12345+alexg@users.noreply.github.test"),
+        CommitIdentity(name="Alex G", email="12345+alexg@users.noreply.github.test"),
+    )
+    seen: list[CommitIdentity | None] = []
+    for commit in identities:
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
+            provider="stub",
+            account_id="acct-42",
+            host=GRANTED_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+            commit=commit,
+        )
+        seen.append((await _active(store, workspace_id, agent_id))[0].commit)
+    assert seen == list(identities)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

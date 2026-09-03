@@ -22,13 +22,18 @@ from ufo.runtime.access.credentials import (
     HostChoice,
     credential_host,
 )
-from ufo.runtime.access.grants import GrantStore, grant_sentinel, usable_cli_accounts
+from ufo.runtime.access.grants import Grant, GrantStore, grant_sentinel, usable_cli_accounts
 from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.ext.manifest import CredentialSlot
 from ufo.runtime.workspace import ws_current
 
 GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
 CONVERSATION_ID_ENV = "UFO_CONVERSATION_ID"
+GIT_IDENTITY_ENV = frozenset(
+    {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+)
+"""The committer variables a git-cloning grant exports. Dropped on every re-authorization beside
+the CLI variables, so an authority holding no such grant commits under no stale identity."""
 
 
 @dataclass(frozen=True)
@@ -163,7 +168,12 @@ async def _grant_cli_env(
     winning tier cannot be disambiguated per request: rather than silently pick one —
     `connector_account` fails loud on the same ambiguity — the export is skipped and logged
     against `run_id`, whichever run this open serves, so the CLI fails visibly to authenticate
-    instead of acting as an unintended account."""
+    instead of acting as an unintended account.
+
+    One sandbox has one git identity, because git reads one pair of variables however many hosts a
+    turn clones from. Two CLIs claiming it would otherwise resolve by dict order, so the second
+    claimant withdraws the identity entirely and logs: a turn that cannot commit says so, where a
+    turn committing as whichever provider happened to be first says nothing."""
     if grants is None or not clis:
         return {}
     member_id = authority_member_id(authority)
@@ -181,4 +191,47 @@ async def _grant_cli_env(
             continue
         if accounts:
             env[cli.env] = grant_sentinel(accounts[0])
+            if cli.git is None:
+                continue
+            identity = _git_identity_env(granted, provider, accounts[0])
+            if identity and GIT_IDENTITY_ENV & set(env):
+                log(
+                    "sandbox.git_identity_ambiguous",
+                    provider=provider,
+                    run_id=str(run_id),
+                )
+                return {name: value for name, value in env.items() if name not in GIT_IDENTITY_ENV}
+            env.update(identity)
     return env
+
+
+def _git_identity_env(granted: tuple[Grant, ...], provider: str, account_id: str) -> dict[str, str]:
+    """The identity git stamps a commit with, taken from the account the sandbox's clone and push
+    authenticate as. A fresh container configures none, so a turn that clones a repository and
+    pushes a branch cannot commit at all — git refuses on an empty ident — and one configured by
+    hand attributes the work to whatever the turn invented.
+
+    The identity is the connected account's own, recorded when its consent completed: a provider
+    links a commit to an account by the author address, so an address from any other namespace —
+    the member's ufo login among them — pushes as the account and is attributed to nobody, while
+    writing that address into public history for good. A connection carrying none exports none, so
+    git refuses the commit and says so rather than attributing the work to the wrong identity.
+
+    Only a git-cloning grant exports it, so a turn commits as the account it pushes as or under no
+    identity at all."""
+    grant = next(
+        (
+            grant
+            for grant in granted
+            if grant.provider == provider and grant.account_id == account_id
+        ),
+        None,
+    )
+    if grant is None or grant.commit is None:
+        return {}
+    return {
+        "GIT_AUTHOR_NAME": grant.commit.name,
+        "GIT_AUTHOR_EMAIL": grant.commit.email,
+        "GIT_COMMITTER_NAME": grant.commit.name,
+        "GIT_COMMITTER_EMAIL": grant.commit.email,
+    }

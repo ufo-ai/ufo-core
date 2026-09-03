@@ -528,6 +528,8 @@ connection = sa.Table(
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("shared", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("account_label", sa.Text, nullable=True),
+    sa.Column("commit_name", sa.Text, nullable=True),
+    sa.Column("commit_email", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "provider", "account_id", name="connection_identity"),

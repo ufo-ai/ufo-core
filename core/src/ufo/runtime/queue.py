@@ -36,6 +36,7 @@ from ufo.harness.sandbox.cache import cache_git_config
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
+    GIT_IDENTITY_ENV,
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
     _grant_cli_env,
@@ -1574,7 +1575,7 @@ class SandboxAuthorizer:
         )
         return self.sandbox.authorize(
             run_token,
-            frozenset(cli.env for cli in self.clis.values()),
+            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
             await _grant_cli_env(
                 self.grants,
                 self.clis,

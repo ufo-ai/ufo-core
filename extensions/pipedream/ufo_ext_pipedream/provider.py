@@ -11,8 +11,16 @@ documents no redirect param carrying
 the account id, so each sealed connect state gets a distinct external user. The success leg resolves
 that user's newest account and hands its id to core; `exchange` retrieves that exact id and
 reasserts the state-scoped owner and app before a grant binds. Overlapping callbacks therefore
-cannot select another flow's account. The flow reads top to bottom: authorize_url → oauth_route
-(start leg, then return leg) → exchange."""
+cannot select another flow's account.
+
+`exchange` reads two things beside the id, and they fail differently on purpose. The account label
+is cosmetic — a connection with no label works — so a failed read leaves it unnamed. The commit
+identity is not: a connector whose token a sandbox commits with is unusable without one, and
+swallowing that read would connect an account whose first commit dies on an empty ident with
+nothing to say why. So it raises, and the member connects again.
+
+The flow reads top to bottom: authorize_url → oauth_route (start leg, then return leg) →
+exchange."""
 
 import os
 from dataclasses import dataclass
@@ -24,6 +32,7 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.http import Request, Response
 from ufo_ext_pipedream import client as pipedream
 from ufo_ext_pipedream.client import CONNECTORS
+from ufo_ext_pipedream.token import commit_identity
 
 OAUTH_ROUTE_PATH = "oauth"
 OAUTH_ROUTE_MOUNT = "/ext/pipedream/oauth"
@@ -68,7 +77,11 @@ class PipedreamOAuthProvider:
             label = await client.account_label(account.account_id)
         except Exception:
             label = None
-        return OAuthAccount(account_id=account.account_id, account_label=label)
+        spec = CONNECTORS.get(self.provider)
+        commit = (
+            None if spec is None else await commit_identity(spec, account.account_id, workspace_id)
+        )
+        return OAuthAccount(account_id=account.account_id, account_label=label, commit=commit)
 
 
 async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:

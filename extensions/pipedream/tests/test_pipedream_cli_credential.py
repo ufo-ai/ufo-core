@@ -12,10 +12,16 @@ import httpx
 import pytest
 import ufo_ext_pipedream.client as pipedream
 import ufo_ext_pipedream.manifest as pipedream_manifest
-from ufo_ext_pipedream.token import PipedreamGrantSecret, cli_credential
+from ufo_ext_pipedream.provider import PipedreamOAuthProvider
+from ufo_ext_pipedream.token import (
+    GITHUB_USER_URL,
+    PipedreamGrantSecret,
+    cli_credential,
+    commit_identity,
+)
 
 from ufo.host.ext.loader import connector_clis
-from ufo.sdk.connectors import CliCredential, GitWire, GrantUnusable
+from ufo.sdk.connectors import CliCredential, CommitIdentity, GitWire, GrantUnusable
 
 ACCOUNT = "apn_github_1"
 OTHER_ACCOUNT = "apn_github_2"
@@ -39,14 +45,26 @@ def _handler(
     healthy: bool = True,
     releases_token: bool = True,
     reads: list[tuple[str, httpx.QueryParams]] | None = None,
+    github_user: object = None,
+    github_status: int = 200,
+    bearers: list[str] | None = None,
+    label: str | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
     """A Pipedream mock: the OAuth token grant and the account read, which reports `owner` as every
     account's `external_id`, carries the account's token under `credentials` only where the account
     was connected on the deploy's own client (`releases_token`), and records each account id read
-    with its query params into `reads`."""
+    with its query params into `reads`.
+
+    It answers GitHub's own `GET /user` on the same transport the identity read rides, with
+    `github_user` under `github_status`, and records the bearer each such call carried into
+    `bearers` — the identity must be read with the account's token, not the project's."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if str(request.url) == GITHUB_USER_URL:
+            if bearers is not None:
+                bearers.append(request.headers.get("authorization", ""))
+            return httpx.Response(github_status, json=github_user)
         if path == "/v1/oauth/token":
             return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
         if request.method == "GET" and "/accounts/" in path:
@@ -59,6 +77,8 @@ def _handler(
                 "healthy": healthy,
                 "app": {"name_slug": "github"},
             }
+            if label is not None:
+                record["name"] = label
             if releases_token:
                 record["credentials"] = {"oauth_access_token": _token(account_id)}
             return httpx.Response(200, json={"data": record})
@@ -163,3 +183,150 @@ async def test_grant_secret_reads_each_account_once_within_the_cache_window(
 
     assert (first, again, other) == (_token(ACCOUNT), _token(ACCOUNT), _token(OTHER_ACCOUNT))
     assert [account for account, _params in reads] == [ACCOUNT, OTHER_ACCOUNT]
+
+
+GITHUB_SPEC = pipedream.CONNECTORS["github"]
+GMAIL_SPEC = pipedream.CONNECTORS["gmail"]
+PROFILE = {"id": 12345, "login": "alexg-ufo", "name": "Alex Graveley"}
+
+
+async def test_commit_identity_is_the_accounts_own_noreply_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub links a commit to an account by its author address, and the address that does it for
+    every account — email privacy on or off — is `<id>+<login>@users.noreply.github.com`. The
+    numeric id is what keeps attribution working for an account that turned privacy on after
+    GitHub's 2017 cutover, so the login alone would not do. It is read with the account's own
+    token."""
+    workspace_id = uuid4()
+    bearers: list[str] = []
+    _install(monkeypatch, _handler(_owner(workspace_id), github_user=PROFILE, bearers=bearers))
+
+    identity = await commit_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
+
+    assert identity == CommitIdentity(
+        name="Alex Graveley", email="12345+alexg-ufo@users.noreply.github.com"
+    )
+    assert bearers == [f"Bearer {_token(ACCOUNT)}"]
+
+
+async def test_commit_identity_names_the_login_when_the_profile_names_nobody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile with no display name still commits under a name git accepts: its login."""
+    workspace_id = uuid4()
+    _install(
+        monkeypatch,
+        _handler(_owner(workspace_id), github_user={"id": 7, "login": "alexg-ufo", "name": None}),
+    )
+
+    identity = await commit_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
+
+    assert identity == CommitIdentity(
+        name="alexg-ufo", email="7+alexg-ufo@users.noreply.github.com"
+    )
+
+
+async def test_commit_identity_raises_when_github_refuses_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector whose token a sandbox commits with is unusable without an identity, so the
+    consent leg fails loud rather than connect an account whose first commit dies on an empty
+    ident."""
+    workspace_id = uuid4()
+    _install(monkeypatch, _handler(_owner(workspace_id), github_user={}, github_status=401))
+
+    with pytest.raises(pipedream.PipedreamError, match="refused the identity read") as raised:
+        await commit_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
+    assert raised.value.status == 401
+
+
+async def test_commit_identity_raises_on_an_answer_naming_no_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity guessed from a partial answer attributes the member's commits to the wrong
+    account or to none, so a missing id or login is a fault rather than a fallback."""
+    workspace_id = uuid4()
+    _install(monkeypatch, _handler(_owner(workspace_id), github_user={"login": "alexg-ufo"}))
+
+    with pytest.raises(pipedream.PipedreamError, match="named no account") as raised:
+        await commit_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
+    assert raised.value.status == 502
+
+
+async def test_commit_identity_is_none_for_a_connector_that_signs_no_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the connector whose token this deploy holds has an identity to read; every other
+    account's token stays with Pipedream, so no provider call is made for it at all."""
+    workspace_id = uuid4()
+    bearers: list[str] = []
+    _install(monkeypatch, _handler(_owner(workspace_id), github_user=PROFILE, bearers=bearers))
+
+    assert await commit_identity(GMAIL_SPEC, ACCOUNT, workspace_id) is None
+    assert bearers == []
+
+
+async def test_exchange_records_the_commit_identity_beside_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connect leg is where the identity is read, so the connection holds it before any sandbox
+    opens. The broker's own label and the commit name are separate facts and stay separate: the
+    label names the connected account in the portal, the identity is what GitHub attributes a
+    commit to."""
+    workspace_id = uuid4()
+    _install(
+        monkeypatch,
+        _handler(_owner(workspace_id), github_user=PROFILE, label="alexg-ufo"),
+    )
+
+    account = await PipedreamOAuthProvider("github", "api.github.com", "github").exchange(
+        ACCOUNT, "https://ufo.example.com/callback", workspace_id, "github"
+    )
+
+    assert account.account_id == ACCOUNT
+    assert account.account_label == "alexg-ufo"
+    assert account.commit == CommitIdentity(
+        name="Alex Graveley", email="12345+alexg-ufo@users.noreply.github.com"
+    )
+
+
+async def test_exchange_fails_when_the_commit_identity_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GitHub connection that cannot commit is not usable, so the consent leg refuses rather than
+    record it — the member connects again. This is the one read `exchange` does not swallow: an
+    unnamed account still works, an uncommittable one does not."""
+    workspace_id = uuid4()
+    _install(
+        monkeypatch,
+        _handler(_owner(workspace_id), github_user={}, github_status=503, label="alexg-ufo"),
+    )
+
+    with pytest.raises(pipedream.PipedreamError, match="refused the identity read"):
+        await PipedreamOAuthProvider("github", "api.github.com", "github").exchange(
+            ACCOUNT, "https://ufo.example.com/callback", workspace_id, "github"
+        )
+
+
+async def test_commit_identity_falls_back_to_the_login_for_a_name_git_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A display name is free text its owner sets, and git strips punctuation from an ident before
+    using it: a name left empty by that strip fails the commit outright, stopping every commit a
+    turn makes. Verified against a standalone repository — `GIT_AUTHOR_NAME='<<>>'` answers `fatal:
+    name consists only of disallowed characters`. The login is bounded to characters git keeps."""
+    workspace_id = uuid4()
+    _install(
+        monkeypatch,
+        _handler(
+            _owner(workspace_id),
+            github_user={"id": 12345, "login": "alexg-ufo", "name": "<<>>"},
+        ),
+    )
+
+    identity = await commit_identity(GITHUB_SPEC, ACCOUNT, workspace_id)
+
+    assert identity == CommitIdentity(
+        name="alexg-ufo", email="12345+alexg-ufo@users.noreply.github.com"
+    )

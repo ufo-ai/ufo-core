@@ -59,6 +59,9 @@ from ufo.runtime.access.connectors import (
     stale_grant_guidance as stale_grant_guidance,
 )
 from ufo.runtime.access.grants import (
+    CommitIdentity as CommitIdentity,
+)
+from ufo.runtime.access.grants import (
     OAuthAccount as OAuthAccount,
 )
 from ufo.runtime.access.grants import (
