@@ -370,7 +370,7 @@ flowchart TD
     L -->|yes| S{"host in a derived rule?"}
     S -->|"credential slot host"| INJ["admit + swap sentinel for the real value + meter"]
     S -->|"granted connector, transfer,<br/>or artifact-store host"| TUN0["admit + meter — opaque tunnel"]
-    S -->|"connector CLI sentinel<br/>in the header"| FWD["forward through the broker<br/>under MemberAuthority's account + meter"]
+    S -->|"connector CLI sentinel<br/>in the header"| CLI["admit + swap sentinel for the account's token<br/>(API header; Basic password on the git host) + meter"]
     S -->|"model host"| MOD["admit + inject model key + meter tokens<br/>(run token only — a probe never resolves it)"]
     S -->|no| I{"an extension declares sandbox_internet<br/>AND the agent's internet_access_allowed?"}
     I -->|no| R3["403"]
@@ -381,11 +381,13 @@ flowchart TD
 
 - **Sentinel swap.** Processes inside the sandbox hold placeholder strings; the proxy swaps the
   real value onto the wire on an exact sentinel match. This is only for declared credential
-  slots — member-filled or deploy-minted (the GitHub App's installation token) — and the
-  deployment model key. A brokered connection injects nothing, because the token never exists on
-  this deploy: a connector that declares a CLI credential exports its sentinel, and a request
-  carrying it forwards through the broker under `MemberAuthority`'s account; every other granted
-  host is an opaque tunnel, admitted and metered, never terminated.
+  slots, the deployment model key, and a connector CLI credential: a connector whose consent rode
+  the deploy's own OAuth client (GitHub, through Pipedream) exports the grant's sentinel as its
+  CLI's variable, and the proxy swaps the account's token in on the API host and, as the Basic
+  password, on the git host — the account `MemberAuthority` selects, the member's own grant before
+  a shared one. Every other brokered connection injects nothing, because its token never reaches
+  this deploy; every other granted host is an opaque tunnel, admitted and metered, never
+  terminated.
 - **Tokens.** Each tool command carries a deployment-signed run token naming its turn and exact
   execution authority; the codec stores workspace authority as a null member claim. Every CONNECT
   requires the named turn to still be running. A probe token names a conversation and exact

@@ -375,17 +375,15 @@ def _check_hosted_proxy_runs_the_ufo_egress_data_plane() -> None:
 def _check_hosted_proxy_is_a_keyless_data_plane() -> None:
     """The ufo-egress data plane holds no provider, broker, or credential keys and no database — it
     verifies the run token locally and calls serve's egress-control RPC for every decision. So every
-    secret the deleted Python proxy carried (the model/provider keys, the Composio broker key, the
-    GitHub App registration, the credential Fernet, the RLS-bypassing owner DSN) is gone from its
-    pod; only the token secret, the control bearer, and the signing CA remain."""
+    secret the deleted Python proxy carried (the model/provider keys, the broker keys, the
+    credential Fernet, the RLS-bypassing owner DSN) is gone from its pod; only the token secret, the
+    control bearer, and the signing CA remain."""
     for absent in (
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "COMPOSIO_API_KEY",
-        "GITHUB_APP_ID",
-        "GITHUB_APP_CLIENT_ID",
-        "GITHUB_APP_CLIENT_SECRET",
-        "GITHUB_APP_PRIVATE_KEY",
+        "PIPEDREAM_CLIENT_SECRET",
+        "PIPEDREAM_GITHUB_OAUTH_APP_ID",
         "UFO_CREDENTIAL_KEY",
         "UFO_OWNER_DSN",
     ):
@@ -408,21 +406,18 @@ def _check_egress_control_token_is_minted_and_projected() -> None:
     )
 
 
-def _check_hosted_github_app_registration_is_projected_for_serve() -> None:
-    """serve loads the coding manifest and mints GitHub installation tokens in-process, so the
-    all-or-none App registration is projected into ufo-platform-secrets, which serve reads whole via
-    envFrom. The keyless ufo-egress data plane never receives it."""
+def _check_hosted_pipedream_github_oauth_app_is_projected_for_serve() -> None:
+    """GitHub rides the `github` connector's grant, whose consent runs on the deploy's own OAuth
+    client registered with Pipedream, so the client's app id is projected into ufo-platform-secrets,
+    which serve reads whole via envFrom. No GitHub App registration is projected anywhere."""
     platform_secrets = CLUSTER_SERVICES_TEMPLATE.read_text()
-    for name, remote_property in (
-        ("GITHUB_APP_ID", "github-app-id"),
-        ("GITHUB_APP_CLIENT_ID", "github-app-client-id"),
-        ("GITHUB_APP_CLIENT_SECRET", "github-app-client-secret"),
-        ("GITHUB_APP_PRIVATE_KEY", "github-app-private-key"),
-    ):
-        assert (
-            f"{{secretKey: {name}, remoteRef: "
-            f"{{key: ${{secret_api_keys}}, property: {remote_property}}}}}" in platform_secrets
-        )
+    assert (
+        "{secretKey: PIPEDREAM_GITHUB_OAUTH_APP_ID, remoteRef: "
+        "{key: ${secret_api_keys}, property: pipedream-github-oauth-app-id}}" in platform_secrets
+    )
+    assert "pipedream-github-oauth-app-id" in API_KEYS_PROPERTIES
+    assert "GITHUB_APP_" not in platform_secrets
+    assert "GITHUB_APP_" not in HOSTED_TEMPLATE.read_text()
 
 
 def _check_hosted_serve_holds_the_fleet_credential_key() -> None:

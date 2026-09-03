@@ -12,7 +12,7 @@ its own work cannot change: whether the issue already carries a comment from thi
 
 from pathlib import Path
 
-from ufo_ext_coding.manifest import GITHUB_CONNECTOR, UFO_GITHUB_APP
+from ufo_ext_coding.manifest import GITHUB_CONNECTOR
 
 from ufo.sdk.manifest import (
     SCHEDULE_KIND,
@@ -118,7 +118,6 @@ ISSUES_APP_AGENT = AgentProvision(
     icon="list-check",
     setup=AgentSetup(
         connectors=(GITHUB_CONNECTOR,),
-        credentials=(UFO_GITHUB_APP,),
         standing=(SCHEDULE_KIND,),
         schedule=ISSUES_APP_SCHEDULE,
         instructions=ISSUES_APP_SETUP_INSTRUCTIONS,

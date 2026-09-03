@@ -145,6 +145,7 @@ impl GitStrategy {
         body: Bytes,
         workspace: &str,
         user: &str,
+        proxy_auth: &str,
     ) -> Response {
         // The git-lfs API rides the same remote URL as the wire protocol, so its calls arrive
         // here: `<repo>.git/info/lfs/...`, JSON both ways. The daemon relays them with the
@@ -154,7 +155,11 @@ impl GitStrategy {
         // verify — relays untouched, and object content is never read from a client-named URL:
         // a miss re-batches against the allowlisted origin itself.
         if let Some((repo, lfs_path)) = split_lfs(tail) {
-            let resolved = match self.creds.resolve(workspace, user, host, &repo).await {
+            let resolved = match self
+                .creds
+                .resolve(workspace, user, proxy_auth, host, &repo)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, host, repo, "credential resolve failed");
@@ -181,7 +186,11 @@ impl GitStrategy {
         let Some((endpoint, repo)) = classify(tail, &body) else {
             return (StatusCode::NOT_FOUND, "unsupported git path").into_response();
         };
-        let resolved = match self.creds.resolve(workspace, user, host, &repo).await {
+        let resolved = match self
+            .creds
+            .resolve(workspace, user, proxy_auth, host, &repo)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, host, repo, "credential resolve failed");

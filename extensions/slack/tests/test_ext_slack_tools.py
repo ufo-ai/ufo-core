@@ -55,7 +55,6 @@ from ufo.host.ext.loader import turn_hooks, turn_tools
 from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
-    CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
     CredentialStore,
     open_credential_request,
@@ -227,9 +226,6 @@ def _context(
             else CredentialRequests(
                 fernet=store.fernet,
                 declared=frozenset(slot.name for slot in slack_manifest().credentials),
-                fillable=frozenset(
-                    slot.name for slot in slack_manifest().credentials if slot.member_filled
-                ),
             )
         ),
     )
@@ -468,9 +464,7 @@ async def test_admin_mints_an_add_to_slack_link_carrying_sealed_state(
     assert query["client_id"] == [CLIENT_ID]
     assert set(query["scope"][0].split(",")) == set(slack.SLACK_BOT_SCOPES)
     assert query["redirect_uri"] == [f"{PUBLIC_BASE_URL}/surface/slack/oauth"]
-    claims = open_credential_request(
-        store.fernet, query["state"][0], purpose=CREDENTIAL_REQUEST_PURPOSE
-    )
+    claims = open_credential_request(store.fernet, query["state"][0])
     assert claims.workspace_id == workspace_id
     assert claims.member_id == owner_id
     assert claims.slots == (SLACK_BOT_TOKEN_SLOT,)

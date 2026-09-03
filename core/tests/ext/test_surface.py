@@ -54,7 +54,6 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
-    CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CREDENTIAL_REQUEST_TTL_SECONDS,
     CredentialRequestInvalid,
@@ -2466,25 +2465,10 @@ async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path
         )
         with pytest.raises(CredentialRequestInvalid, match="not declared"):
             await context.fulfill_credential_request(undeclared, "removed", "value", member_id)
-        machinery = seal_credential_request(
-            context._credentials.fernet,
-            CredentialRequestState(
-                workspace_id=workspace_id, member_id=member_id, slots=("provider",)
-            ),
-        )
         context = replace(
             context,
-            _declared_slots=(
-                DeclaredSlot(
-                    name="provider",
-                    description="",
-                    extension="sample",
-                    member_filled=False,
-                ),
-            ),
+            _declared_slots=(DeclaredSlot(name="provider", description="", extension="sample"),),
         )
-        with pytest.raises(CredentialRequestInvalid, match="never entered"):
-            await context.fulfill_credential_request(machinery, "provider", "value", member_id)
         authorization = seal_credential_request(
             context._credentials.fernet,
             CredentialRequestState(
@@ -2612,11 +2596,7 @@ async def test_credential_request_renewal_requires_the_requesting_admin(db: None
         renewed = await context.renew_credential_request(recently_expired, member_id)
         assert renewed is not None
         assert await context.credential_prompt_pending(renewed, "structured")
-        renewed_state = open_credential_request(
-            context._credentials.fernet,
-            renewed,
-            purpose=CREDENTIAL_REQUEST_PURPOSE,
-        )
+        renewed_state = open_credential_request(context._credentials.fernet, renewed)
         assert renewed_state.issued_at == context._credentials.fernet.extract_timestamp(
             recently_expired.encode()
         )

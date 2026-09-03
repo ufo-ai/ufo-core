@@ -56,21 +56,6 @@ FILE_UPLOADABLE_KEY = "file_uploadable"
 
 
 @dataclass(frozen=True)
-class ConnectorSpec:
-    """One connector whose grant needs a real provider host — the small CLI exception to the open
-    catalog. Every other Composio toolkit is connectable through `ComposioResolver` by its slug
-    alone, its brokered grant admitting no provider host (execution is server-side). Its provider
-    name is the Composio toolkit slug (the key it is registered under). `cli_env` names the env var
-    a provider CLI reads its token from (github's `GH_TOKEN`): the sandbox exports the grant's
-    sentinel there and the proxy forwards the matching request to `host` through proxy-execute, so
-    the CLI authenticates without the token existing on this deploy. `label` is member-facing."""
-
-    label: str
-    host: str
-    cli_env: str | None = None
-
-
-@dataclass(frozen=True)
 class ToolRouterSession:
     """A Composio Tool Router session: its id and the MCP endpoint (`mcp.url`) semantic tool search
     runs against. Minted per (broker user, toolkit) and cached, so a burst of searches on one
@@ -89,11 +74,6 @@ class ComposioUpload:
 
     key: str
     put_url: str | None
-
-
-CONNECTORS: dict[str, ConnectorSpec] = {
-    "github": ConnectorSpec("GitHub", "api.github.com", cli_env="GH_TOKEN"),
-}
 
 
 BANNED: dict[str, str] = {

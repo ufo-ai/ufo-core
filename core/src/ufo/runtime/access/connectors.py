@@ -226,37 +226,41 @@ class ConnectorBroker(Protocol):
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential: ...
 
 
+class GrantSecret(Protocol):
+    """The provider token behind one connected account, read from the broker that holds it — the
+    one broker act that hands a secret to this deploy, so it exists only for a connector whose
+    consent rode the deploy's own OAuth client. The egress proxy swaps it onto the wire for the
+    grant's sentinel; the sandbox never sees it. Confirms the account belongs to `workspace_id`
+    before answering, and raises for an account it cannot authenticate."""
+
+    async def secret(self, workspace_id: UUID, account_id: str) -> str: ...
+
+
 @dataclass(frozen=True)
-class ForwardedResponse:
-    """What a broker answered for one forwarded provider request: the provider's status, headers,
-    and body, reconstructed for the egress proxy to write back to the sandbox verbatim."""
+class GitWire:
+    """The git host a CLI credential's token also authenticates, as smart-HTTP wants it: `host` is
+    the clone and push origin, `helper` the git credential helper the sandbox is configured with
+    for that host — the one that answers git's prompt from the CLI's env var, so a plain `git clone`
+    authenticates exactly as the CLI's own clone does — and `basic_user` the username the git cache
+    daemon fetches with beside the token, where a clone rides the cache instead of the wire."""
 
-    status: int
-    headers: Mapping[str, str]
-    body: bytes
-
-
-class RequestForwarder(Protocol):
-    """Executes one provider HTTP request through the broker under a granted account — the broker
-    injects the account's credential server-side, so no token ever reaches this deploy or the wire
-    the sandbox sees. The egress proxy calls this for a MITM'd request whose auth header carries
-    the grant's sentinel."""
-
-    async def forward(
-        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
-    ) -> ForwardedResponse: ...
+    host: str
+    basic_user: str
+    helper: str
 
 
 @dataclass(frozen=True)
 class CliCredential:
     """A provider CLI authenticated at the egress proxy, declared by the connector that knows the
     provider: `env` is the variable the sandbox exports with the grant's sentinel so the CLI sends
-    it as ordinary auth, `header` is the request header that carries it on the wire, and `forward`
-    executes the matched request through the broker under the granted account."""
+    it as ordinary auth, `header` is the request header that carries it on the wire, `secret`
+    reads the granted account's real token for the proxy to swap in, and `git` names the git host
+    the same token clones and pushes through."""
 
     env: str
     header: str
-    forward: RequestForwarder
+    secret: GrantSecret
+    git: GitWire | None = None
 
 
 @dataclass(frozen=True)

@@ -66,10 +66,11 @@ reference change passes it, and a candidate test cannot replace it.
 ## Run
 
 Needs a running `ufoctl serve` under the `assistant` or `assistant_hosted` pack, and — because this
-repository is private — `github_git_token` filled in the target workspace:
+repository is private — GitHub connected in the target workspace. Ask the agent in chat to connect
+GitHub and open the link it answers with; the account needs read access to the repository. The
+clone, the push, and `gh` all ride that connection.
 
 ```bash
-ufoctl credential set github_git_token   # a fine-grained PAT with Contents: read
 uv run python -m evals --coding-repo --workspace <uuid> --concurrency 4
 ```
 

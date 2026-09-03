@@ -19,7 +19,7 @@ the agent there, and that line is the only thing a member has to add by hand.
 
 from pathlib import Path
 
-from ufo_ext_coding.manifest import GITHUB_CONNECTOR, UFO_GITHUB_APP
+from ufo_ext_coding.manifest import GITHUB_CONNECTOR
 
 from ufo.sdk.manifest import (
     AgentProvision,
@@ -68,12 +68,10 @@ CODE_APP_PROMPT = (Path(__file__).parent / "prompts" / "agent_code.md").read_tex
 
 CODE_APP_SETUP_INSTRUCTIONS = (
     "Connect the GitHub account this workspace reviews under. A connection binds to the agent "
-    "whose conversation it is made in, so make it here, with you. Then ask the member to register "
-    "the pull-request source for that account and share it — only a shared source carries a "
-    "trigger — and apply a source trigger naming it, so a changed pull request wakes this "
-    "conversation. The reviewers also need the ufo GitHub App installed to fetch commits: "
-    "the `github-app-installation` credential object's `connect_github` action hands an admin "
-    "that link once for the whole workspace."
+    "whose conversation it is made in, so make it here, with you; the same account fetches the "
+    "commits the reviewers read. Then ask the member to register the pull-request source for that "
+    "account and share it — only a shared source carries a trigger — and apply a source trigger "
+    "naming it, so a changed pull request wakes this conversation."
 )
 
 CODE_APP_AGENT = AgentProvision(
@@ -90,7 +88,6 @@ CODE_APP_AGENT = AgentProvision(
     icon="git-pull-request",
     setup=AgentSetup(
         connectors=(GITHUB_CONNECTOR,),
-        credentials=(UFO_GITHUB_APP,),
         # A feed wakes this app, so it declares the standing order a feed arms and offers no
         # cadence: a pull request changes when it changes.
         standing=(TRIGGER_KIND,),

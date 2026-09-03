@@ -66,7 +66,6 @@ from ufo.harness.sandbox.ingress_url import mint_ingress_view_url
 from ufo.harness.sandbox.terminal import TerminalOp
 from ufo.runtime.access.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
 from ufo.runtime.access.credentials import (
-    CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CredentialRequestInvalid,
     CredentialRequestState,
@@ -934,18 +933,15 @@ class ConnectionPoolView(BaseModel):
 
 class GithubCoverageView(BaseModel):
     api: bool
-    git_push: bool
     sources: bool
 
 
 class CredentialSlotView(BaseModel):
     """One declared BYOK slot and whether the workspace holds a value for it — never the value.
     Slots come from installed manifests, the same declarations the `credential` object kind
-    projects, minus the slots only the deploy's own code writes (`member_filled=False`, a provider
-    callback's seal): those are machinery a member can neither fill nor rotate, so the panel
-    leaves them out. Deploy config (model keys, signing secrets) is not a slot at all and cannot
-    appear. `name` is the `credential` object kind's name for the slot — the address a prepared
-    intent mutates."""
+    projects. Deploy config (model keys, signing secrets) is not a slot at all and cannot appear.
+    `name` is the `credential` object kind's name for the slot — the address a prepared intent
+    mutates."""
 
     slot: str
     name: str
@@ -1867,11 +1863,7 @@ class SurfaceContext:
         if self._credentials is None:
             return False
         try:
-            state = open_credential_request(
-                self._credentials.fernet,
-                sealed,
-                purpose=CREDENTIAL_REQUEST_PURPOSE,
-            )
+            state = open_credential_request(self._credentials.fernet, sealed)
         except CredentialRequestInvalid:
             return False
         if state.workspace_id != self.workspace_id or slot not in state.slots:
@@ -1897,10 +1889,7 @@ class SurfaceContext:
             return None
         try:
             state = open_credential_request(
-                self._credentials.fernet,
-                sealed,
-                purpose=CREDENTIAL_REQUEST_PURPOSE,
-                ttl=CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
+                self._credentials.fernet, sealed, ttl=CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS
             )
         except CredentialRequestInvalid:
             return None
@@ -1930,9 +1919,7 @@ class SurfaceContext:
         `CredentialRequestInvalid` on a tampered or expired seal."""
         if self._credentials is None:
             raise RuntimeError(f"surface {self.surface!r} opens a seal but holds no store")
-        return open_credential_request(
-            self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
-        )
+        return open_credential_request(self._credentials.fernet, sealed)
 
     async def fulfill_credential_request(
         self, sealed: str, slot: str, value: str, member_id: UUID | None
@@ -1944,9 +1931,7 @@ class SurfaceContext:
         from rendering again."""
         if self._credentials is None:
             raise RuntimeError(f"surface {self.surface!r} stores a credential but holds no store")
-        state = open_credential_request(
-            self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
-        )
+        state = open_credential_request(self._credentials.fernet, sealed)
         if state.workspace_id != self.workspace_id:
             raise CredentialRequestInvalid("credential request was sealed for another workspace")
         if member_id is None or member_id != state.member_id:
@@ -1959,8 +1944,6 @@ class SurfaceContext:
         if declared is None:
             raise CredentialRequestInvalid(f"credential slot {slot!r} is not declared")
         private_prompt = state.payload is None
-        if private_prompt and not declared.member_filled:
-            raise CredentialRequestInvalid(f"credential slot {slot!r} is never entered by a member")
         marker = (
             _fulfilled_marker_key(_credential_request_id(state, sealed), slot)
             if private_prompt
@@ -3303,18 +3286,7 @@ class SurfaceContext:
                     )
                 )
             )
-            slots = await connection.scalars(
-                sa.select(tables.credential.c.slot).where(
-                    tables.credential.c.workspace_id == self.workspace_id,
-                    tables.credential.c.slot.in_(("github_app_installation", "github_git_token")),
-                )
-            )
-        filled_slots = set(slots.all())
-        return GithubCoverageView(
-            api=bool(api),
-            git_push=bool({"github_app_installation", "github_git_token"} & filled_slots),
-            sources=bool(sources),
-        )
+        return GithubCoverageView(api=bool(api), sources=bool(sources))
 
     async def recent_object_changes(self, limit: int) -> tuple[ObjectChange, ...]:
         """The workspace's most recent object-change journal rows, newest first — the admin audit
@@ -3669,10 +3641,7 @@ class SurfaceContext:
             )
 
     async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:
-        """The member-fillable declared slots with their fill state — never a value. The
-        `credential` object kind lists every slot; this read drops `member_filled=False` ones
-        (deploy-written seals a member can neither fill nor rotate), because the panel exists to
-        show a member what they can act on."""
+        """Every declared slot with its fill state — never a value."""
         async with workspace_tx() as connection:
             filled = set(
                 (
@@ -3698,7 +3667,6 @@ class SurfaceContext:
                 filled=slot.name in filled,
             )
             for slot in sorted(self._declared_slots, key=lambda slot: (slot.extension, slot.name))
-            if slot.member_filled
         )
 
     async def workspace_domain(self) -> str | None:
@@ -4572,9 +4540,7 @@ class SurfaceAuth:
         if self._credentials is None:
             return None
         try:
-            return open_credential_request(
-                self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
-            )
+            return open_credential_request(self._credentials.fernet, sealed)
         except CredentialRequestInvalid:
             return None
 

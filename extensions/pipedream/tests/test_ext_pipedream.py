@@ -83,6 +83,8 @@ SECOND_PAGE_CURSOR = "cursor_page_two"
 SECOND_PAGE_ACTION = "gmail-find-email"
 DISCOVERY_QUERY = "find an email from a sender"
 OAUTH_APP_ID = "oa_gmail_custom"
+GITHUB_OAUTH_APP_ENV = "PIPEDREAM_GITHUB_OAUTH_APP_ID"
+GITHUB_OAUTH_APP_ID = "oa_github_custom"
 
 
 @pytest.fixture(autouse=True)
@@ -387,6 +389,37 @@ async def test_oauth_route_start_leg_rides_the_shared_client_when_no_custom_one_
     assert "oauthAppId" not in link_query
 
 
+async def test_oauth_route_start_leg_refuses_github_consent_on_the_shared_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub's token rides the sandbox CLI, and Pipedream releases a token only for an account
+    connected on the deploy's own OAuth client — so an unset custom-client env is a deploy fault the
+    start leg names, never a consent minted on the shared client whose account would release
+    nothing."""
+    monkeypatch.delenv(GITHUB_OAUTH_APP_ENV, raising=False)
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = f"provider=github&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()), pytest.raises(RuntimeError, match=GITHUB_OAUTH_APP_ENV):
+        await provider.oauth_route(ctx, _request(query))
+
+
+async def test_oauth_route_start_leg_pins_github_consent_to_the_deploys_own_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(GITHUB_OAUTH_APP_ENV, GITHUB_OAUTH_APP_ID)
+    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
+    ctx = context_for(pipedream_manifest.NAME, frozenset())
+    query = f"provider=github&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.REDIRECT_STATUS
+    assert response.headers["location"].startswith(CONNECT_LINK)
+    link_query = parse_qs(urlparse(response.headers["location"]).query)
+    assert link_query["app"] == ["github"]
+    assert link_query["oauthAppId"] == [GITHUB_OAUTH_APP_ID]
+
+
 async def test_oauth_route_return_leg_resolves_the_state_scoped_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -421,7 +454,7 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     # The member may have reached consent from anywhere, so the body states the outcome and lets
     # them close the page rather than sending them to a chat that need not exist.
     body = response.body.decode()
-    assert "was not connected" in body and "close this page" in body
+    assert "was not connected" in body and "Close this tab" in body
     assert "chat" not in body and "agent" not in body
 
 
@@ -662,6 +695,22 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
 
 def test_file_outputs_is_empty_without_a_stash() -> None:
     assert PipedreamBroker().file_outputs({"exports": {"$summary": "sent"}, "ret": None}) == ()
+
+
+def test_serve_registers_every_catalog_connector_with_its_provider_host() -> None:
+    """`serve` builds both registries from the manifest: every `CONNECTORS` entry — GitHub among
+    them — lands as an explicit provider carrying its own API host and the shared broker, and no
+    open namespace rides beside them."""
+    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
+    assert flow is not None
+    assert set(flow.providers) == set(pipedream.CONNECTORS) >= {"github", PROVIDER}
+    assert flow.providers["github"].host == "api.github.com"
+    assert flow.providers[PROVIDER].host == PROVIDER_HOST
+    assert flow.resolver is None
+    registry = _registry()
+    assert set(registry.entries) == set(pipedream.CONNECTORS)
+    assert registry.entry("github").label == "GitHub"
+    assert isinstance(registry.entry("github").broker, PipedreamBroker)
 
 
 async def test_call_external_tool_answers_an_unknown_key_with_the_closest_actions(

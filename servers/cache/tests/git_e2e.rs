@@ -42,6 +42,8 @@ async fn clone_via_daemon(url: &str, dest: &Path, cwd: &Path) {
             "http.extraHeader=x-ufo-workspace: w1",
             "-c",
             "http.extraHeader=x-ufo-user: alice",
+            "-c",
+            "http.extraHeader=x-ufo-proxy-auth: Bearer alice",
             "clone",
             "-q",
             url,
@@ -191,6 +193,7 @@ async fn post_upload_pack_with(
         .header("content-type", "application/x-git-upload-pack-request")
         .header("x-ufo-workspace", "w1")
         .header("x-ufo-user", user)
+        .header("x-ufo-proxy-auth", format!("Bearer {user}"))
         .body(body.to_string());
     if let Some(version) = protocol {
         request = request.header("git-protocol", version);
@@ -222,6 +225,7 @@ async fn get_info_refs(daemon: &str, host: &str, user: &str) -> String {
         ))
         .header("x-ufo-workspace", "w1")
         .header("x-ufo-user", user)
+        .header("x-ufo-proxy-auth", format!("Bearer {user}"))
         .send()
         .await
         .unwrap();

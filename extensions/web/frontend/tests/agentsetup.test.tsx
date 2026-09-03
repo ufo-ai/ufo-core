@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -10,8 +10,6 @@ import { AGENT_ID, json, wire } from "./harness";
 
 const SETUP = "/setup$";
 const INTENTS = "/intents";
-const GITHUB_INSTALL =
-  "/agents/" + AGENT_ID + "/actions/credential/github-app-installation/connect_github";
 const TURN = "7f1d9d0e-6d2a-4c53-9d1f-2f4b9a0c1e77";
 
 type FakeStream = {
@@ -32,8 +30,8 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** One app's whole declaration, unwired: an account its member grants, a credential a workspace
- *  install fills, and the standing order that gives it an occasion to run. */
+/** One app's whole declaration, unwired: an account its member grants, a credential the workspace
+ *  fills once, and the standing order that gives it an occasion to run. */
 function owed(over: Record<string, unknown> = {}) {
   return {
     connectors: [{
@@ -43,9 +41,7 @@ function owed(over: Record<string, unknown> = {}) {
         granted: false,
         required: true,
       }],
-    credentials: [
-      { label: "ufo GitHub App", filled: false, provider: "github", required: false },
-    ],
+    credentials: [{ label: "Registry token", filled: false, required: false }],
     standing: [{ kind: "scheduled_task", armed: false, required: false, schedule: null }],
     schedule: {
       name: "meeting-briefs",
@@ -66,10 +62,10 @@ function atOffset(minutes: number) {
   vi.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(minutes);
 }
 
-function mount(admin = true, onBuilt: () => void = () => {}) {
+function mount(onBuilt: () => void = () => {}) {
   render(
     <TooltipProvider>
-      <AgentSetup agent={APP} admin={admin} onBuilt={onBuilt} />
+      <AgentSetup agent={APP} onBuilt={onBuilt} />
     </TooltipProvider>,
   );
 }
@@ -88,8 +84,8 @@ async function actButton(name: string | RegExp) {
   return act;
 }
 
-function applied(handler: ReturnType<typeof wire>["handler"], lane = INTENTS) {
-  const posted = handler.mock.calls.find(([url]) => String(url).endsWith(lane));
+function applied(handler: ReturnType<typeof wire>["handler"]) {
+  const posted = handler.mock.calls.find(([url]) => String(url).endsWith(INTENTS));
   return posted ? JSON.parse(String((posted[1] as RequestInit).body)) : null;
 }
 
@@ -116,8 +112,8 @@ test("the screen states every need the app declares, with the act that settles i
   mount();
 
   expect(await actButton("Connect Google Calendar")).toBeTruthy();
-  await userEvent.click(await stepTrigger("Install the workspace app"));
-  expect(await actButton("Install ufo GitHub App")).toBeTruthy();
+  await userEvent.click(await stepTrigger("Add the workspace credential"));
+  expect(await screen.findByText("Not filled")).toBeTruthy();
   await userEvent.click(await stepTrigger("Choose when it runs"));
   expect(await screen.findByRole("radio", { name: /every weekday at 9:00 AM/ })).toBeTruthy();
   expect(await screen.findByLabelText("Something else")).toBeTruthy();
@@ -142,7 +138,9 @@ test("the first unfinished step is open on arrival", async () => {
   mount();
 
   expect((await stepTrigger(/Choose your account/)).getAttribute("aria-expanded")).toBe("false");
-  expect((await stepTrigger("Install the workspace app")).getAttribute("aria-expanded")).toBe("true");
+  expect((await stepTrigger("Add the workspace credential")).getAttribute("aria-expanded")).toBe(
+    "true",
+  );
 });
 
 test("a done step draws the filled check mark", async () => {
@@ -173,48 +171,43 @@ test("required steps draw an asterisk and optional steps do not", async () => {
   expect((await stepTrigger(/Choose your account/)).textContent).toContain(
     "Choose your account*",
   );
-  expect((await stepTrigger("Install the workspace app")).textContent).not.toContain("*");
+  expect((await stepTrigger("Add the workspace credential")).textContent).not.toContain("*");
 });
 
-test("a workspace install is one press, and its link opens the provider's own page", async () => {
-  /** A credential is filled once for the whole workspace, and the named tool mints the link inside
-   *  its own turn — so unlike a brokered grant the outcome carries the URL straight back. Without
-   *  this the row stated a need whose only settlement was a verb the member had to find in chat. */
-  const opened = { location: { href: "" }, close: vi.fn(), focus: vi.fn() };
-  vi.stubGlobal("open", vi.fn().mockReturnValue(opened));
-  const { handler } = wire({
-    [SETUP]: () => json(owed()),
-    [GITHUB_INSTALL]: () => json({ applied: true, message: "", url: "https://github.test/install" }),
-    "/actions/credential/github-app-installation": () =>
-      json({
-        actions: [
-          {
-            name: "connect_github",
-            description: "Install the ufo GitHub App.",
-            input_schema: { properties: {} },
-            call: {
-              kind: "credential",
-              action: "connect_github",
-              name: "github-app-installation",
-              input: {},
-            },
-            label: "Connect",
-          },
-        ],
-      }),
+test("a credential step states whether the workspace has filled it", async () => {
+  /** The credential is filled once for the whole workspace, outside this screen, so the step states
+   *  the fact and offers no press: a filled one is done, an unfilled one says what is still owed. */
+  wire({ [SETUP]: () => json(owed()) });
+  mount();
+
+  await userEvent.click(await stepTrigger("Add the workspace credential"));
+  expect(
+    await screen.findByText("Registry token is filled once for the whole workspace."),
+  ).toBeTruthy();
+  expect(await screen.findByText("Not filled")).toBeTruthy();
+  expect(screen.queryByText("Filled")).toBeNull();
+  cleanup();
+
+  wire({
+    [SETUP]: () =>
+      json(owed({ credentials: [{ label: "Registry token", filled: true, required: false }] })),
   });
   mount();
 
-  await userEvent.click(await stepTrigger("Install the workspace app"));
-  await userEvent.click(await actButton("Install ufo GitHub App"));
-
-  await waitFor(() => expect(applied(handler, GITHUB_INSTALL)).toEqual({}));
-  expect(opened.location.href).toBe("https://github.test/install");
+  const trigger = await stepTrigger("Add the workspace credential");
+  expect(trigger.querySelector(".tabler-icon-square-rounded-check-filled")).toBeTruthy();
+  await userEvent.click(trigger);
+  expect(await screen.findByText("Filled")).toBeTruthy();
+  expect(screen.queryByText("Not filled")).toBeNull();
 });
 
 test("a completed open step advances to the next step in the payload", async () => {
+  /** The step the member settles closes behind them and the next one opens, so the drawer walks the
+   *  list with them. The connect is the act that re-reads: the grant lands, the re-read says the
+   *  account is held, and the open step moves on to the credential. */
   const opened = { location: { href: "" }, close: vi.fn(), focus: vi.fn() };
   vi.stubGlobal("open", vi.fn().mockReturnValue(opened));
+  const streams = fakeStream();
   let reads = 0;
   wire({
     [SETUP]: () => {
@@ -224,22 +217,30 @@ test("a completed open step advances to the next step in the payload", async () 
           reads === 1
             ? {}
             : {
-                credentials: [
-                  { label: "ufo GitHub App", filled: true, provider: "github", required: false },
-                ],
+                connectors: [{
+                  provider: "googlecalendar",
+                  label: "Google Calendar",
+                  summary: "Brief what is on the calendar.",
+                  granted: true,
+                  required: true,
+                }],
               },
         ),
       );
     },
-    [INTENTS]: () => json({ applied: true, message: "", url: "https://github.test/install" }),
+    [INTENTS]: () => json({ applied: true, message: "", turn_id: TURN }),
   });
   mount();
 
-  await userEvent.click(await stepTrigger("Install the workspace app"));
-  await userEvent.click(await actButton("Install ufo GitHub App"));
+  expect((await stepTrigger(/Choose your account/)).getAttribute("aria-expanded")).toBe("true");
+  await userEvent.click(await actButton("Connect Google Calendar"));
+  await waitFor(() => expect(streams.length).toBe(1));
+  streams[0].listeners.connect(new MessageEvent("connect"));
 
   await waitFor(async () => {
-    expect((await stepTrigger("Choose when it runs")).getAttribute("aria-expanded")).toBe("true");
+    expect((await stepTrigger("Add the workspace credential")).getAttribute("aria-expanded")).toBe(
+      "true",
+    );
   });
 });
 
@@ -360,15 +361,6 @@ test("Build app stands below the todos and hands the ask over unsent", async () 
   // The ask names the skill and stops: the steps live in the skill, and repeating them here would
   // be a second copy of the procedure that drifts the first time either changes.
   expect((handed?.text ?? "").length).toBeLessThan(160);
-});
-
-test("a member who is not an admin is told who installs it, and offered no press", async () => {
-  wire({ [SETUP]: () => json(owed()) });
-  mount(false);
-
-  await userEvent.click(await stepTrigger("Install the workspace app"));
-  expect(await screen.findByText("An admin installs this.")).toBeTruthy();
-  expect(screen.queryAllByRole("button", { name: "Install" })).toHaveLength(0);
 });
 
 test("connect opens the consent window on the press, and points it at the turn's own link", async () => {
@@ -498,7 +490,7 @@ test("the cadence is stored in UTC, converted from the member's own clock", () =
 test("the screen says when the workspace has built the page, and stays quiet until it has", async () => {
   wire({ [SETUP]: () => json(owed()) });
   const built = vi.fn();
-  mount(true, built);
+  mount(built);
 
   expect(await actButton("Connect Google Calendar")).toBeTruthy();
   expect(built).not.toHaveBeenCalled();
@@ -507,7 +499,7 @@ test("the screen says when the workspace has built the page, and stays quiet unt
 test("a page the workspace has built is stated once", async () => {
   wire({ [SETUP]: () => json(owed({ own_page: true })) });
   const built = vi.fn();
-  mount(true, built);
+  mount(built);
 
   await waitFor(() => expect(built).toHaveBeenCalled());
 });

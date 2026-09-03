@@ -6159,12 +6159,11 @@ async def test_the_prompt_states_the_slack_install_this_workspace_made(
     workspace with no install states nothing, which keeps the offer for the workspaces that still
     need it."""
     workspace_id, _member_id = await _seed()
-    store = await _store(workspace_id)
 
     async def stated() -> tuple[str, ...]:
         with ws(workspace_id):
             return await turn_workspace_facts(
-                (slack_manifest(),), store, audience=conversation_audience(None)
+                (slack_manifest(),), audience=conversation_audience(None)
             )
 
     uninstalled = await stated()

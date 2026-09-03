@@ -16,8 +16,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Notice, Panel, QUIET, usePanelRead, type NoticeState } from "@/kernel/panel";
-import { BASE, postIntent, postObjectAction } from "@/lib/api";
-import { ConsentLink, openConsentWindow } from "@/lib/consent";
+import { BASE, postIntent } from "@/lib/api";
+import { openConsentWindow } from "@/lib/consent";
 import { newChatHash } from "@/lib/route";
 import { agentName } from "@/lib/agentName";
 import { setPendingAsk } from "@/lib/pendingAsk";
@@ -25,7 +25,6 @@ import { ProviderGlyph } from "@/lib/providerGlyph";
 import { cn } from "@/lib/cn";
 import { navigate } from "@/lib/router";
 import type { Agent } from "@/lib/types";
-import { CONNECT_INSTALLS } from "@/views/FirstRun";
 
 /** The recurrence an app offers to arm its schedule with. `hour` null is hourly, which names no
  *  wall-clock time; `weekdays` empty is every day. */
@@ -44,7 +43,7 @@ export type SetupState = {
     granted: boolean;
     required: boolean;
   }[];
-  credentials?: { label: string; filled: boolean; provider: string | null; required: boolean }[];
+  credentials?: { label: string; filled: boolean; required: boolean }[];
   standing?: { kind: string; armed: boolean; required: boolean; schedule: string | null }[];
   schedule?: SetupSchedule | null;
   instructions?: string;
@@ -56,13 +55,12 @@ const SCHEDULE_KIND = "scheduled_task";
 const CONNECT = "Connect";
 const CONNECTING = "Connecting";
 const CONNECTED = "Connected";
-const INSTALL = "Install";
 
 /* A step is titled by what it asks of the member and says nothing about which account answers it,
    because the same question is put whatever the app happens to be connected to. The line under it
    is where the provider is named, and the act carries its verb. */
 const ACCOUNT_STEP = "Choose your account";
-const INSTALL_STEP = "Install the workspace app";
+const CREDENTIAL_STEP = "Add the workspace credential";
 const SCHEDULE_STEP = "Choose when it runs";
 const TRIGGER_STEP = "Choose what wakes it";
 
@@ -70,9 +68,9 @@ const SCHEDULE_NOTE = "Pick how often it runs without being asked.";
 const TRIGGER_NOTE = "A change in a source starts a run.";
 const OWN_CADENCE = "Say when, in your own words";
 const CADENCE_ASK = "Run on this cadence:";
-const INSTALLED = "Installed";
 const NOT_INSTALLED = "Not installed";
-const ADMIN_INSTALLS = "An admin installs this.";
+const FILLED = "Filled";
+const NOT_FILLED = "Not filled";
 const ARMED = "Set";
 const CHOOSE_WHEN = "Choose when it runs";
 const SET_UP = "Set up";
@@ -280,8 +278,8 @@ function SetupStepper({ steps }: { steps: SetupStep[] }) {
  *  It is a screen and not a band on the app's own page, and that is the whole of why the acts here
  *  work. A page is framed cross-origin and speaks with the viewer's whole session, so the bridge
  *  fences it by name — and the two acts an unwired app most needs are exactly the ones that cannot
- *  cross: a workspace install is admin-gated, and forking the page is model work. Here they are
- *  ordinary portal acts.
+ *  cross: connecting an account is a consent handoff, and forking the page is model work. Here they
+ *  are ordinary portal acts.
  *
  *  An app arrives at this screen instead of its page, which is what the page is spared: with no
  *  account there is nothing real to draw, and rows of sample data in their place would be showing a
@@ -289,11 +287,9 @@ function SetupStepper({ steps }: { steps: SetupStep[] }) {
  *  done; this screen exists so it never has to draw what it would be. */
 export function AgentSetup({
   agent,
-  admin,
   onBuilt,
 }: {
   agent: Agent;
-  admin: boolean;
   /** Told when this read says the workspace has built the app its page. The boot roster carries that
    *  fact for the shell, and a build lands long after boot — so the roster is read again, and the
    *  app stops being one the workspace is still building. */
@@ -301,11 +297,9 @@ export function AgentSetup({
 }) {
   const [reloads, setReloads] = useState(0);
   const [connecting, setConnecting] = useState<string | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
   const [arming, setArming] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [watching, setWatching] = useState<string | null>(null);
-  const [link, setLink] = useState<string | null>(null);
   const consent = useRef<Window | null>(null);
   const state = usePanelRead<SetupState>("/agents/" + agent.id + "/setup", reloads);
   const built = state.phase === "ready" && state.payload.own_page === true;
@@ -372,24 +366,6 @@ export function AgentSetup({
       return;
     }
     setWatching(outcome.turn_id);
-  }
-
-  /** The workspace-wide install, which is one act and not a brokered grant: the object the first
-   *  run also installs against projects the act, and it mints the link inside its own turn and the
-   *  outcome carries it straight back. */
-  async function install(provider: string) {
-    setNotice(QUIET);
-    const opened = openConsentWindow();
-    setInstalling(provider);
-    const outcome = await postObjectAction(agent.id, CONNECT_INSTALLS[provider], {});
-    setInstalling(null);
-    if (opened && outcome.url) opened.location.href = outcome.url;
-    if (opened && !outcome.url) opened.close();
-    /* The link is kept only for a member whose browser refused the window, so one press is the
-       whole act for everybody else. */
-    setLink(opened ? null : (outcome.url ?? null));
-    setNotice(outcome.url ? QUIET : { text: outcome.message, refused: !outcome.applied });
-    setReloads((count) => count + 1);
   }
 
   /** Build the app's page from its own sources, and watch it happen.
@@ -484,17 +460,14 @@ export function AgentSetup({
               ),
             };
           }),
-          ...credentials.map((credential, index) => {
-            const title = `${INSTALL} ${credential.label}`;
-            return {
-              key: `credential:${credential.label}:${index}`,
-              title: INSTALL_STEP,
-              note: `${credential.label} is filled once for the whole workspace.`,
-              required: credential.required,
-              done: credential.filled,
-              body: installValue(credential, title),
-            };
-          }),
+          ...credentials.map((credential, index) => ({
+            key: `credential:${credential.label}:${index}`,
+            title: CREDENTIAL_STEP,
+            note: `${credential.label} is filled once for the whole workspace.`,
+            required: credential.required,
+            done: credential.filled,
+            body: credential.filled ? FILLED : NOT_FILLED,
+          })),
           ...standing.map((order, index) => {
             const scheduled = order.kind === SCHEDULE_KIND && schedule !== null;
             const title = scheduled ? CHOOSE_WHEN : SET_UP;
@@ -526,11 +499,6 @@ export function AgentSetup({
             {notice.text ? (
               <Notice tone={notice.refused ? "attention" : "quiet"}>{notice.text}</Notice>
             ) : null}
-            {link ? (
-              <Notice>
-                <ConsentLink url={link}>Open the install page</ConsentLink>
-              </Notice>
-            ) : null}
             <Button variant="send" size="bar" className="self-start" onClick={buildApp}>
               {BUILD_APP}
             </Button>
@@ -539,38 +507,6 @@ export function AgentSetup({
       }}
     </Panel>
   );
-
-  /** A credential fills once for the whole workspace. Where its provider takes an install, this is
-   *  the press that hands an admin the link; where it does not, or where the member is not an
-   *  admin, the row states what is true and offers nothing — which is honest, because there is
-   *  nothing they can press. */
-  function installValue(
-    credential: NonNullable<SetupState["credentials"]>[number],
-    title: string,
-  ) {
-    if (credential.filled) return INSTALLED;
-    const target =
-      credential.provider === null ? undefined : CONNECT_INSTALLS[credential.provider];
-    if (target === undefined) return NOT_INSTALLED;
-    if (!admin) {
-      return (
-        <span className="text-ink-soft">{ADMIN_INSTALLS}</span>
-      );
-    }
-    const provider = credential.provider as string;
-    return (
-      <Button
-          variant="outline"
-          size="bar"
-          className="my-sm bg-surface text-ink"
-          busy={installing === provider}
-          disabled={installing !== null && installing !== provider}
-          onClick={() => install(provider)}
-        >
-          {title}
-      </Button>
-    );
-  }
 
   function standingValue(
     order: NonNullable<SetupState["standing"]>[number],

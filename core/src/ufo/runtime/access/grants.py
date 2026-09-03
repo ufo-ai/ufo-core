@@ -48,9 +48,32 @@ CONNECTED_KEY_DIGEST_LENGTH = 32
 
 def grant_sentinel(account_id: str) -> str:
     """The sentinel a grant's CLI credential rides the wire as — deterministic from the connected
-    account, so the engine (exporting it into the sandbox env) and the egress proxy (matching it to
-    forward through the broker) agree without a shared registration."""
+    account, so the engine (exporting it into the sandbox env) and the egress proxy (swapping the
+    account's token in for it) agree without a shared registration."""
     return f"{GRANT_SENTINEL_PREFIX}{account_id}"
+
+
+def usable_cli_accounts(
+    grants: "tuple[Grant, ...]", provider: str, member_id: UUID | None
+) -> tuple[str, ...]:
+    """The connected accounts one provider's CLI may act as under an authority: the member's own
+    private grants, else the grants shared with the agent's audience — sorted, so two accounts in
+    the winning tier read the same everywhere. A static env var names no account, so a caller
+    handed more than one exports nothing rather than silently picking; the egress rules still
+    carry every usable account, since each rides its own sentinel."""
+    private = sorted(
+        grant.account_id
+        for grant in grants
+        if grant.provider == provider
+        and not grant.connection_shared
+        and grant.owner_member_id == member_id
+    )
+    shared = sorted(
+        grant.account_id
+        for grant in grants
+        if grant.provider == provider and grant.connection_shared
+    )
+    return tuple(private or shared)
 
 
 class UnknownProvider(LookupError):

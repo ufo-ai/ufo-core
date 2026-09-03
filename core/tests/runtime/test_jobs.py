@@ -940,7 +940,7 @@ async def test_the_census_names_what_is_attached_without_holding_its_name(
         connector="gmail",
         provisioned_app="wiki",
         surface_installed="imessage",
-        credential_slot="github_app_installation",
+        credential_slot="perplexity_api_key",
     )
     reader = _census_reader(monkeypatch)
 
@@ -955,7 +955,7 @@ async def test_the_census_names_what_is_attached_without_holding_its_name(
         (CONNECTOR_KIND, "gmail"),
         (APP_KIND, "wiki"),
         (SURFACE_KIND, "imessage"),
-        (CREDENTIAL_KIND, "github_app_installation"),
+        (CREDENTIAL_KIND, "perplexity_api_key"),
     }
 
 

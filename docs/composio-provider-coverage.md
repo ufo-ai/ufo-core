@@ -7,14 +7,13 @@ reach the service's core jobs. Audited 2026-07-24 against Composio's live catalo
 
 No Composio provider is registered anywhere. `ComposioResolver` is an open namespace: it claims a
 slug on demand, so **every toolkit in Composio's live catalog is a candidate** and the deploy names
-none of them. The one exception is `client.CONNECTORS`, which holds `github` alone — the CLI
-exception that needs a real provider host for `GH_TOKEN` forwarding.
+none of them. `github` is the one slug it never claims: the `pipedream` extension registers that
+connector explicitly, because the sandbox rides the account's token.
 
 Two other lists are easy to mistake for a provider registry, and neither is one:
 
 | List | What it actually is | Size |
 |---|---|---|
-| `composio.client.CONNECTORS` | the only explicitly registered `ConnectorProvider`s | 1 (`github`) |
 | `sources.registry.CONNECTORS` | hand-written **feed-sync** connectors — a `SourceProvider` + a `CredentialSlot` each, for pulling records into pages. Not connect-time providers; their slugs were merely renamed to match Composio's so the sync runner could route credentials to the broker | 53 |
 | Composio's `/toolkits` | what a member can actually ask to connect | 1052 |
 
@@ -124,7 +123,7 @@ Verdicts rest on tool presence plus, where the scope axis is reliable, reachabil
 | `airtable` | 26 | healthy | — |
 | `asana` | 153 | healthy | — |
 | `calendly` | 56 | healthy | — |
-| `github` | 893 | healthy | `GITHUB_SEARCH_CODE` blocked; `GITHUB_SEARCH_CODE_ALL_PAGES` serves it |
+| `github` | 893 | not offered | `pipedream` registers `github` explicitly, so the open namespace never claims this toolkit |
 | `gmail` | 63 | healthy | cannot *change* filters/vacation/send-as (read only) |
 | `googleads` | 22 | healthy | reporting only via `GOOGLEADS_SEARCH_STREAM_GAQL` (as in the real API) |
 | `googledocs` | 43 | healthy | — |

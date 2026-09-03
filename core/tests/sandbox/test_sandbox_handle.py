@@ -11,7 +11,7 @@ import base64
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -53,7 +53,7 @@ from ufo.harness.sandbox.session import (
     ufo_fs_file_op,
 )
 from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
-from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
@@ -474,14 +474,18 @@ async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrite
 
 
 @dataclass(frozen=True)
-class _NeverForwarder:
-    async def forward(
-        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
-    ) -> ForwardedResponse:
-        raise AssertionError("open_sandbox never forwards")
+class _NeverSecret:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        raise AssertionError("open_sandbox never reads a token")
 
 
-HUB_CLI = CliCredential(env="HUB_TOKEN", header="authorization", forward=_NeverForwarder())
+HUB_CLI = CliCredential(env="HUB_TOKEN", header="authorization", secret=_NeverSecret())
+GIT_CLI = CliCredential(
+    env="GH_TOKEN",
+    header="authorization",
+    secret=_NeverSecret(),
+    git=GitWire(host="github.com", basic_user="x-access-token", helper="!gh auth git-credential"),
+)
 
 
 async def _seed_grant(workspace_id: UUID, conversation_id: UUID, shared: bool) -> tuple[UUID, UUID]:
@@ -933,12 +937,25 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
     assert not any("169.254" in str(entry) for entry in warned)
 
 
-async def test_open_sandbox_survives_a_keyed_slot_whose_source_raises(
+PERPLEXITY_SLOT = CredentialSlot(
+    name="perplexity_api_key",
+    description="api key",
+    injection=InjectionTarget(
+        host="api.perplexity.ai",
+        header="authorization",
+        sentinel="SENTINEL_PPLX",
+        env="PERPLEXITY_API_KEY",
+    ),
+)
+
+
+async def test_open_sandbox_survives_a_keyed_slot_whose_host_will_not_decrypt(
     db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The export half of the isolation the wire already has. A source that cannot answer withholds
-    its own slot and nothing more: the sandbox still opens, so a turn that never touches that
-    provider runs, and the slot's env is simply absent rather than present and unusable.
+    """The export half of the isolation the wire already has. A slot whose host selection this
+    deploy cannot read — a row another key wrote — withholds its own slot and nothing more: the
+    sandbox still opens, so a turn that never touches that provider runs, and the slot's env is
+    simply absent rather than present and unusable.
 
     Isolating here matters as much as at the proxy, because this call is on the path of every
     sandbox open — an escaping fault would fail every turn in the workspace."""
@@ -946,19 +963,9 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_source_raises(
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     await store.put(workspace_id, "datadog_api_key", "dd-api-real")
     await store.put(workspace_id, "datadog_application_key", "dd-app-real")
-
-    class _Unusable:
-        async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
-            raise ValueError("stored binding does not open")
-
-        async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
-            raise ValueError("stored binding does not open")
-
-    slots = (
-        replace(DATADOG_SLOTS[0], source=_Unusable()),
-        DATADOG_SLOTS[1],
-        DATADOG_SLOTS[2],
-    )
+    await store.put(workspace_id, "perplexity_api_key", "pplx-real")
+    foreign = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await foreign.put(workspace_id, "datadog_api_host", "api.datadoghq.com")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
     with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
@@ -969,19 +976,60 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_source_raises(
             None,
             {},
             store,
-            slots,
+            (*DATADOG_SLOTS, PERPLEXITY_SLOT),
         )
 
     env = carrier.specs[0].env
     assert "DD_API_KEY" not in env
-    assert env["DD_APP_KEY"] == "SENTINEL_DD_APP"
+    assert "DD_APP_KEY" not in env
+    assert env["PERPLEXITY_API_KEY"] == "SENTINEL_PPLX"
     withheld = [
         record.ufo
         for record in caplog.records
         if record.getMessage() == "sandbox.credential_slot_failed"
     ]
-    assert [entry["slot"] for entry in withheld] == ["datadog_api_key"]
-    assert withheld[0]["error_class"] == "ValueError"
+    assert [entry["slot"] for entry in withheld] == ["datadog_api_key", "datadog_application_key"]
+    assert {entry["error_class"] for entry in withheld} == {"InvalidToken"}
+
+
+async def test_open_sandbox_survives_a_keyed_slot_whose_secret_will_not_decrypt(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same isolation over the slot's own secret rather than its host selection — the row a key
+    rotation leaves unreadable in every workspace that filled the slot. The open reads it before it
+    resolves the host, so a fault there fails `_open_sandbox` itself: every turn in the workspace
+    would stop, including the ones that touch no keyed provider at all."""
+    workspace_id, conversation_id = await _conversation()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    foreign = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    await foreign.put(workspace_id, "datadog_api_key", "dd-api-real")
+    await foreign.put(workspace_id, "datadog_application_key", "dd-app-real")
+    await store.put(workspace_id, "datadog_api_host", "api.datadoghq.com")
+    await store.put(workspace_id, "perplexity_api_key", "pplx-real")
+    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
+
+    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
+        await _open_sandbox(
+            _sandboxes(carrier, "e2b", tmp_path),
+            RUN_TOKENS,
+            _turn(workspace_id, conversation_id),
+            None,
+            {},
+            store,
+            (*DATADOG_SLOTS, PERPLEXITY_SLOT),
+        )
+
+    env = carrier.specs[0].env
+    assert "DD_API_KEY" not in env
+    assert "DD_APP_KEY" not in env
+    assert env["PERPLEXITY_API_KEY"] == "SENTINEL_PPLX"
+    withheld = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "sandbox.credential_slot_failed"
+    ]
+    assert [entry["slot"] for entry in withheld] == ["datadog_api_key", "datadog_application_key"]
+    assert {entry["error_class"] for entry in withheld} == {"InvalidToken"}
 
 
 async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
@@ -1007,31 +1055,15 @@ async def test_open_sandbox_configures_git_to_authenticate_to_the_proxy(
     }
 
 
-GIT_SLOTS = (
-    CredentialSlot(
-        name="github_git_token",
-        description="git token",
-        injection=InjectionTarget(
-            host="github.com",
-            header="Authorization",
-            sentinel="SENTINEL_GIT",
-            dimension="requests",
-            git_basic_user="x-access-token",
-        ),
-    ),
-)
-
-
-async def test_open_sandbox_configures_git_to_present_the_credential_sentinel(
+async def test_open_sandbox_configures_the_connector_git_hosts_credential_helper(
     db: None, tmp_path: Path
 ) -> None:
-    """A workspace holding a git credential gets the host's `extraheader` alongside the proxy-auth
-    setting, both through git's own config env. The sandbox sees the sentinel — the secret is
-    swapped in at the proxy — and git sends it on every request to that host, which is what makes
-    `git clone` and `git push` of a private repository authenticate."""
+    """A connector whose CLI credential names a git host wires that host to the CLI's own credential
+    helper, after clearing whatever helper the image set, so a plain `git clone` there authenticates
+    exactly as the CLI's clone does: git asks the helper, the helper answers with the sentinel the
+    CLI's variable carries, and the proxy swaps the token in. The config names no account and holds
+    no secret — with no usable grant the variable is absent and the helper answers nothing."""
     workspace_id, conversation_id = await _conversation()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    await store.put(workspace_id, "github_git_token", "ghp-real")
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
 
     with ws(workspace_id):
@@ -1040,167 +1072,20 @@ async def test_open_sandbox_configures_git_to_present_the_credential_sentinel(
             RUN_TOKENS,
             _turn(workspace_id, conversation_id),
             None,
-            {},
-            store,
-            GIT_SLOTS,
+            {"github": GIT_CLI},
+            None,
+            (),
         )
 
     assert _derived_env(carrier.specs[0]) == {
-        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_COUNT": "3",
         "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
         "GIT_CONFIG_VALUE_0": "basic",
-        "GIT_CONFIG_KEY_1": "http.https://github.com/.extraheader",
-        "GIT_CONFIG_VALUE_1": "Authorization: SENTINEL_GIT",
+        "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
+        "GIT_CONFIG_VALUE_1": "",
+        "GIT_CONFIG_KEY_2": "credential.https://github.com.helper",
+        "GIT_CONFIG_VALUE_2": "!gh auth git-credential",
     }
-    assert "ghp-real" not in str(carrier.specs[0].env)
-
-
-async def test_open_sandbox_configures_no_extraheader_without_a_git_credential(
-    db: None, tmp_path: Path
-) -> None:
-    """An unfilled slot configures nothing: the proxy derives no rule for the host either, so git
-    reaches it as an opaque tunnel and an anonymous clone of a public repository still works. A
-    sentinel sent to a host nothing swaps on would fail a request that needs no credential."""
-    workspace_id, conversation_id = await _conversation()
-    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-
-    with ws(workspace_id):
-        await _open_sandbox(
-            _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            None,
-            {},
-            CredentialStore(fernet=Fernet(Fernet.generate_key())),
-            GIT_SLOTS,
-        )
-
-    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
-
-
-GIT_HOST_CHOICE_SLOTS = (
-    CredentialSlot(
-        name="github_git_token",
-        description="git token",
-        injection=InjectionTarget(
-            host=HostChoice(
-                slot="github_git_host",
-                description="GitHub host for this org",
-                hosts=("github.com", "github.example.com"),
-                default="github.com",
-                env="GITHUB_HOST",
-            ),
-            header="Authorization",
-            sentinel="SENTINEL_GIT",
-            dimension="requests",
-            git_basic_user="x-access-token",
-        ),
-    ),
-    CredentialSlot(name="github_git_host", description="GitHub host"),
-)
-
-
-async def test_open_sandbox_configures_no_git_host_the_declaration_does_not_offer(
-    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A git host resolving to nothing configures nothing, and says so. The extraheader names the
-    host in its own config key, so an unresolved one has no key to write — and writing the turn's
-    sentinel under a host the declaration never offered would send it somewhere no proxy rule swaps
-    it, failing a clone that would otherwise have worked anonymously. Warned for the same reason
-    the keyed export warns: the withholding happens when the sandbox opens, not when git runs."""
-    workspace_id, conversation_id = await _conversation()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    await store.put(workspace_id, "github_git_token", "ghp-real")
-    await store.put(workspace_id, "github_git_host", "github.evil.test")
-    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-
-    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
-        await _open_sandbox(
-            _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            None,
-            {},
-            store,
-            GIT_HOST_CHOICE_SLOTS,
-        )
-
-    assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
-    warned = [
-        record.ufo
-        for record in caplog.records
-        if record.getMessage() == "sandbox.git_host_unavailable"
-    ]
-    assert [entry["slot"] for entry in warned] == ["github_git_token"]
-    assert not any("evil" in str(entry) for entry in warned)
-
-
-class _BoundSource:
-    """A minting source that records which question it was asked: presence or value."""
-
-    def __init__(self) -> None:
-        self.mints = 0
-
-    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
-        self.mints += 1
-        return "minted-installation-token"
-
-    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
-        return True
-
-
-async def test_open_sandbox_exports_a_keyed_sentinel_from_a_source_without_minting(
-    db: None, tmp_path: Path
-) -> None:
-    """The keyed-provider export asks the same presence question as the git config, and for the same
-    reason: both run on every sandbox open. A provider whose key is minted rather than stored must
-    reach the sandbox as its sentinel without the export touching the provider to find out."""
-    workspace_id, conversation_id = await _conversation()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    await store.put(workspace_id, "datadog_api_host", "api.datadoghq.com")
-    source = _BoundSource()
-    slots = (replace(DATADOG_SLOTS[0], source=source), DATADOG_SLOTS[2])
-    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-
-    with ws(workspace_id):
-        await _open_sandbox(
-            _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            None,
-            {},
-            store,
-            slots,
-        )
-
-    assert carrier.specs[0].env["DD_API_KEY"] == "SENTINEL_DD_API"
-    assert source.mints == 0
-
-
-async def test_open_sandbox_configures_git_from_a_source_without_minting(
-    db: None, tmp_path: Path
-) -> None:
-    """Every turn in every workspace opens a sandbox, so the question asked here is whether the slot
-    is filled — never what it holds. A source mints against a provider, so asking it for the value
-    would put a network call on sandbox startup for turns that never touch git."""
-    workspace_id, conversation_id = await _conversation()
-    source = _BoundSource()
-    slots = (replace(GIT_SLOTS[0], source=source),)
-    carrier = _ResumeRecordingCarrier(container_id="sbx-1")
-
-    with ws(workspace_id):
-        await _open_sandbox(
-            _sandboxes(carrier, "e2b", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            None,
-            {},
-            CredentialStore(fernet=Fernet(Fernet.generate_key())),
-            slots,
-        )
-
-    assert carrier.specs[0].env["GIT_CONFIG_VALUE_1"] == "Authorization: SENTINEL_GIT"
-    assert source.mints == 0
 
 
 @dataclass

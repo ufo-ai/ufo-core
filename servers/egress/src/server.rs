@@ -1,6 +1,6 @@
 //! The egress proxy wire: accept CONNECTs, verify the token, gate on the control authorize RPC,
-//! resolve rules (cached by generation), and dispatch — opaque tunnel, TLS-terminated MITM (inject
-//! or broker-forward), cache-daemon relay, or live-turn tool bridge — metering off the relay path.
+//! resolve rules (cached by generation), and dispatch — opaque tunnel, TLS-terminated MITM
+//! (inject), cache-daemon relay, or live-turn tool bridge — metering off the relay path.
 //! This is the whole data plane; every policy decision comes from `Control`.
 
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
 use rustls::pki_types::ServerName;
@@ -27,7 +28,7 @@ use crate::meter::MeterSink;
 use crate::tls::{upstream_client_config, LeafStore};
 use crate::token::principal_from_proxy_auth;
 use crate::types::{
-    ForwardedResponse, MeterRecord, Principal, Rule, REQUEST_METER_DIMENSION, TOKENS_DIMENSION,
+    MeterRecord, Principal, Rule, ToolBridgeResponse, REQUEST_METER_DIMENSION, TOKENS_DIMENSION,
 };
 use crate::usage::HttpTokenUsage;
 
@@ -41,7 +42,7 @@ const RELAY_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_HTTPS_PORT: u16 = 443;
 const RULE_CACHE_MAX: usize = 4096;
 const RULE_CACHE_TTL: Duration = Duration::from_secs(240);
-const MAX_FORWARD_BODY_BYTES: usize = 1_048_576;
+const MAX_TOOL_BRIDGE_BODY_BYTES: usize = 1_048_576;
 const MAX_REFUSAL_DRAIN_BYTES: usize = 8 * 1_048_576;
 const REFUSAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const EGRESS_AUTHORIZATION_UNAVAILABLE: &str = "egress authorization unavailable";
@@ -54,19 +55,21 @@ const CACHE_GIT_HOSTS: [&str; 1] = ["github.com"];
 const PREVIEW_HOST: &str = "preview.ufo.internal";
 const TOOL_BRIDGE_HOST: &str = "tools.ufo.internal";
 
-const SERVICE_STRIPPED: [&[u8]; 7] = [
+const SERVICE_STRIPPED: [&[u8]; 8] = [
     b"x-ufo-workspace",
     b"x-ufo-user",
+    b"x-ufo-proxy-auth",
     b"x-forwarded-proto",
     b"connection",
     b"keep-alive",
     b"proxy-connection",
     b"proxy-authorization",
 ];
-const DIRECT_STRIPPED: [&[u8]; 7] = [
+const DIRECT_STRIPPED: [&[u8]; 8] = [
     b"host",
     b"x-ufo-workspace",
     b"x-ufo-user",
+    b"x-ufo-proxy-auth",
     b"connection",
     b"keep-alive",
     b"proxy-connection",
@@ -415,6 +418,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
                 stream,
                 host,
                 principal,
+                &proxy_auth,
                 daemon_prefix,
                 ServiceTarget::Preview(daemon),
                 injections,
@@ -428,6 +432,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
                 stream,
                 host,
                 principal,
+                &proxy_auth,
                 daemon_prefix,
                 ServiceTarget::Cache(daemon),
                 injections,
@@ -482,9 +487,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         metric_dims,
     };
     let injections = injections_for(&rules, &host);
-    let forwards = forwards_for(&rules, &host);
 
-    if injections.is_empty() && forwards.is_empty() {
+    if injections.is_empty() {
         tunnel(
             &shared,
             stream,
@@ -501,9 +505,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
             stream,
             &host,
             port,
-            &proxy_auth,
             &injections,
-            &forwards,
             principal,
             &metering,
         )
@@ -565,17 +567,12 @@ async fn rules_for(
     Ok(rules)
 }
 
-/// One host's injection candidates (header, sentinel, real) and forward candidates
-/// (header, sentinel, account_id), borrowed straight off the resolved rule set.
+/// One host's injection candidates (header, sentinel, real), borrowed straight off the resolved
+/// rule set.
 struct Inj<'a> {
     header: &'a str,
     sentinel: &'a str,
     real: &'a str,
-}
-struct Fwd<'a> {
-    header: &'a str,
-    sentinel: &'a str,
-    account_id: &'a str,
 }
 
 fn injections_for<'a>(rules: &'a [Rule], host: &str) -> Vec<Inj<'a>> {
@@ -591,25 +588,6 @@ fn injections_for<'a>(rules: &'a [Rule], host: &str) -> Vec<Inj<'a>> {
                 header,
                 sentinel,
                 real,
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
-fn forwards_for<'a>(rules: &'a [Rule], host: &str) -> Vec<Fwd<'a>> {
-    rules
-        .iter()
-        .filter_map(|r| match r {
-            Rule::Forward {
-                host: h,
-                header,
-                sentinel,
-                account_id,
-            } if h == host => Some(Fwd {
-                header,
-                sentinel,
-                account_id,
             }),
             _ => None,
         })
@@ -670,15 +648,12 @@ async fn tunnel(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn mitm(
     shared: &Arc<Shared>,
     stream: TcpStream,
     host: &str,
     port: u16,
-    proxy_auth: &str,
     injections: &[Inj<'_>],
-    forwards: &[Fwd<'_>],
     principal: Principal,
     metering: &Metering,
 ) {
@@ -714,26 +689,9 @@ async fn mitm(
         ReadHead::Closed => return,
     };
 
-    // The counter fires once the tunnel is up and the request head is read — before the forward vs
-    // re-originate split, and (for a token-metered host) before any usage is teed off the wire.
+    // The counter fires once the tunnel is up and the request head is read — for a token-metered
+    // host, before any usage is teed off the wire.
     emit_metrics(shared, host, &metering.metric_dims).await;
-
-    if let Some(matched) = forward_match(&headers, forwards) {
-        forward_broker(
-            shared,
-            client,
-            matched,
-            &line,
-            &headers,
-            leftover,
-            host,
-            proxy_auth,
-            principal,
-            metering.egress,
-        )
-        .await;
-        return;
-    }
 
     let tcp = match timeout(CONNECT_UPSTREAM_TIMEOUT, TcpStream::connect((host, port))).await {
         Ok(Ok(sock)) => sock,
@@ -776,66 +734,6 @@ async fn mitm(
     if let Some(usage) = accumulator {
         meter_tokens(shared, host, principal, usage).await;
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn forward_broker(
-    shared: &Arc<Shared>,
-    mut client: tokio_rustls::server::TlsStream<TcpStream>,
-    matched: Fwd<'_>,
-    line: &[u8],
-    headers: &[Vec<u8>],
-    leftover: Vec<u8>,
-    host: &str,
-    proxy_auth: &str,
-    principal: Principal,
-    egress_metered: bool,
-) {
-    let line_text = String::from_utf8_lossy(line);
-    let mut fields = line_text.splitn(2, ' ');
-    let method = fields.next().unwrap_or("").to_string();
-    let path = fields
-        .next()
-        .and_then(|rest| rest.split(' ').next())
-        .unwrap_or("")
-        .to_string();
-    let body = match read_request_body(&mut client, headers, leftover).await {
-        Ok(body) => body,
-        Err(refusal) => {
-            tracing::info!(host = %host, status = refusal.status, "egress.forward_refused");
-            let _ = respond(&mut client, refusal.status, &refusal.message).await;
-            drain_refused(&mut client, refusal.pending).await;
-            let _ = client.shutdown().await;
-            return;
-        }
-    };
-    if egress_metered {
-        enqueue_egress(shared, principal).await;
-    }
-    let url = format!("https://{host}{path}");
-    let forwarded_headers = forward_headers(headers, matched.header);
-    let response = match shared
-        .control
-        .forward(
-            proxy_auth,
-            matched.account_id,
-            &method,
-            &url,
-            &forwarded_headers,
-            &body,
-        )
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::info!(host = %host, error = %error, "egress.forward_failed");
-            let _ = respond(&mut client, 502, "broker forward failed").await;
-            let _ = client.shutdown().await;
-            return;
-        }
-    };
-    let _ = client.write_all(&forward_response_bytes(&response)).await;
-    let _ = client.shutdown().await;
 }
 
 async fn tool_bridge(shared: &Arc<Shared>, stream: TcpStream, host: &str, proxy_auth: &str) {
@@ -893,7 +791,9 @@ async fn tool_bridge(shared: &Arc<Shared>, stream: TcpStream, host: &str, proxy_
             return;
         }
     };
-    let _ = client.write_all(&forward_response_bytes(&response)).await;
+    let _ = client
+        .write_all(&tool_bridge_response_bytes(&response))
+        .await;
     let _ = client.shutdown().await;
 }
 
@@ -902,11 +802,13 @@ enum ServiceTarget {
     Preview(Option<String>),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn service(
     shared: &Arc<Shared>,
     stream: TcpStream,
     host: String,
     principal: Principal,
+    proxy_auth: &str,
     daemon_prefix: Option<String>,
     target: ServiceTarget,
     injections: Vec<Inj<'_>>,
@@ -1004,7 +906,12 @@ async fn service(
     let mut head = Vec::new();
     head.extend_from_slice(&daemon_line);
     head.extend_from_slice(b"\r\n");
-    head.extend_from_slice(&service_headers(&headers, &principal, &injections));
+    head.extend_from_slice(&service_headers(
+        &headers,
+        &principal,
+        proxy_auth,
+        &injections,
+    ));
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(&leftover);
     if daemon_conn.write_all(&head).await.is_err() {
@@ -1200,6 +1107,10 @@ fn proxy_authorization(headers: &[Vec<u8>]) -> String {
 /// The auth schemes a sentinel may ride behind and keep its prefix through the swap. Closed on
 /// purpose: what a request may prefix the real secret with is decided here, never by the sandbox.
 /// `keyed_connectors`' `SWAPPABLE_SCHEMES` declares the same set, and a row may name no other.
+/// `Basic` is not a prefix scheme here: a sentinel rides in it as the password half of the encoded
+/// `user:password`, so it is matched by its decoded password and re-encoded with the same user
+/// around the real secret — the credential keeps its shape on any host, whichever client composed
+/// it.
 const SWAPPABLE_SCHEMES: [&str; 3] = ["bearer", "token", "api-key"];
 
 fn inject(headers: &[Vec<u8>], candidates: &[Inj<'_>]) -> Vec<u8> {
@@ -1215,19 +1126,34 @@ fn inject(headers: &[Vec<u8>], candidates: &[Inj<'_>]) -> Vec<u8> {
         }
         let supplied = btrim(value_raw);
         let parts = split_ws_once(supplied);
+        let basic = basic_credential(&parts);
         let chosen = candidates.iter().find(|c| {
             name == ascii_lower(c.header.as_bytes())
-                && (supplied == c.sentinel.as_bytes()
-                    || (parts.len() == 2
-                        && SWAPPABLE_SCHEMES
-                            .iter()
-                            .any(|scheme| parts[0].eq_ignore_ascii_case(scheme.as_bytes()))
-                        && parts[1] == c.sentinel.as_bytes()))
+                && match &basic {
+                    Some((_, password)) => password == c.sentinel.as_bytes(),
+                    None => {
+                        supplied == c.sentinel.as_bytes()
+                            || (parts.len() == 2
+                                && SWAPPABLE_SCHEMES
+                                    .iter()
+                                    .any(|scheme| parts[0].eq_ignore_ascii_case(scheme.as_bytes()))
+                                && parts[1] == c.sentinel.as_bytes())
+                    }
+                }
         });
         match chosen {
             Some(c) => {
                 let mut real = c.real.as_bytes().to_vec();
-                if parts.len() == 2 && !real.contains(&b' ') {
+                if let Some((user, _)) = &basic {
+                    let mut pair = user.clone();
+                    pair.push(b':');
+                    pair.extend_from_slice(&real);
+                    real = format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD.encode(pair)
+                    )
+                    .into_bytes();
+                } else if parts.len() == 2 && !real.contains(&b' ') {
                     let mut scoped = parts[0].to_vec();
                     scoped.push(b' ');
                     scoped.extend_from_slice(&real);
@@ -1248,64 +1174,20 @@ fn inject(headers: &[Vec<u8>], candidates: &[Inj<'_>]) -> Vec<u8> {
     out
 }
 
-fn forward_match<'a>(headers: &[Vec<u8>], candidates: &[Fwd<'a>]) -> Option<Fwd<'a>> {
-    for line in headers {
-        let (name_raw, value_raw) = match line.iter().position(|&b| b == b':') {
-            Some(colon) => (&line[..colon], &line[colon + 1..]),
-            None => (line.as_slice(), &b""[..]),
-        };
-        let name = ascii_lower(btrim(name_raw));
-        let tokens: Vec<&[u8]> = value_raw
-            .split(|&b| b.is_ascii_whitespace())
-            .filter(|t| !t.is_empty())
-            .collect();
-        if tokens.is_empty() || tokens.len() > 2 {
-            continue;
-        }
-        for rule in candidates {
-            if name == ascii_lower(rule.header.as_bytes())
-                && *tokens.last().unwrap() == rule.sentinel.as_bytes()
-            {
-                return Some(Fwd {
-                    header: rule.header,
-                    sentinel: rule.sentinel,
-                    account_id: rule.account_id,
-                });
-            }
-        }
+/// A `Basic` credential's decoded `(user, password)`; None for any other scheme, for base64 that
+/// does not decode, and for a payload without a colon.
+fn basic_credential(parts: &[&[u8]]) -> Option<(Vec<u8>, Vec<u8>)> {
+    if parts.len() != 2 || !parts[0].eq_ignore_ascii_case(b"basic") {
+        return None;
     }
-    None
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(parts[1])
+        .ok()?;
+    let colon = decoded.iter().position(|&b| b == b':')?;
+    Some((decoded[..colon].to_vec(), decoded[colon + 1..].to_vec()))
 }
 
-fn forward_headers(headers: &[Vec<u8>], sentinel_header: &str) -> Vec<(String, String)> {
-    let dropped: [&[u8]; 4] = [
-        b"connection",
-        b"proxy-connection",
-        b"host",
-        b"content-length",
-    ];
-    let sentinel = ascii_lower(sentinel_header.as_bytes());
-    let mut out = Vec::new();
-    for line in headers {
-        let colon = match line.iter().position(|&b| b == b':') {
-            Some(c) => c,
-            None => continue,
-        };
-        let name = btrim(&line[..colon]);
-        let name_lower = ascii_lower(name);
-        if dropped.contains(&name_lower.as_slice()) || name_lower == sentinel {
-            continue;
-        }
-        let value = btrim(&line[colon + 1..]);
-        out.push((
-            String::from_utf8_lossy(name).to_string(),
-            String::from_utf8_lossy(value).to_string(),
-        ));
-    }
-    out
-}
-
-fn forward_response_bytes(response: &ForwardedResponse) -> Vec<u8> {
+fn tool_bridge_response_bytes(response: &ToolBridgeResponse) -> Vec<u8> {
     let dropped = [
         "content-length",
         "transfer-encoding",
@@ -1334,7 +1216,12 @@ fn forward_response_bytes(response: &ForwardedResponse) -> Vec<u8> {
     out
 }
 
-fn service_headers(headers: &[Vec<u8>], principal: &Principal, candidates: &[Inj<'_>]) -> Vec<u8> {
+fn service_headers(
+    headers: &[Vec<u8>],
+    principal: &Principal,
+    proxy_auth: &str,
+    candidates: &[Inj<'_>],
+) -> Vec<u8> {
     let filtered = headers
         .iter()
         .filter(|line| !SERVICE_STRIPPED.contains(&header_name_lower(line).as_slice()))
@@ -1351,9 +1238,10 @@ fn service_headers(headers: &[Vec<u8>], principal: &Principal, candidates: &[Inj
     out.extend_from_slice(b"x-forwarded-proto: https\r\n");
     out.extend_from_slice(
         format!(
-            "x-ufo-workspace: {}\r\nx-ufo-user: {}\r\n",
+            "x-ufo-workspace: {}\r\nx-ufo-user: {}\r\nx-ufo-proxy-auth: {}\r\n",
             principal.workspace_id(),
             member,
+            proxy_auth,
         )
         .as_bytes(),
     );
@@ -1411,7 +1299,7 @@ fn service_origin(line: &[u8]) -> Option<(String, Vec<u8>)> {
     Some((host.to_string(), origin))
 }
 
-// --- forwarded request body -------------------------------------------------------------------
+// --- tool bridge request body -----------------------------------------------------------------
 
 struct Refusal {
     status: u16,
@@ -1442,7 +1330,7 @@ async fn read_request_body<R: AsyncRead + Unpin>(
                     None => {
                         return Err(Refusal {
                             status: 411,
-                            message: "forwarded request declares an unparseable content-length"
+                            message: "tool bridge request declares an unparseable content-length"
                                 .to_string(),
                             pending: MAX_REFUSAL_DRAIN_BYTES,
                         })
@@ -1453,8 +1341,8 @@ async fn read_request_body<R: AsyncRead + Unpin>(
                 return Err(Refusal {
                     status: 411,
                     message:
-                        "forwarded request body must declare a content-length; chunked is not \
-                              forwarded"
+                        "tool bridge request body must declare a content-length; chunked is not \
+                              accepted"
                             .to_string(),
                     pending: MAX_REFUSAL_DRAIN_BYTES,
                 })
@@ -1468,17 +1356,17 @@ async fn read_request_body<R: AsyncRead + Unpin>(
     if length < 0 {
         return Err(Refusal {
             status: 400,
-            message: format!("forwarded request declares a negative content-length {length}"),
+            message: format!("tool bridge request declares a negative content-length {length}"),
             pending: MAX_REFUSAL_DRAIN_BYTES,
         });
     }
     let length = length as usize;
-    if length > MAX_FORWARD_BODY_BYTES {
+    if length > MAX_TOOL_BRIDGE_BODY_BYTES {
         return Err(Refusal {
             status: 413,
             message: format!(
-                "forwarded request body is {length} bytes, over the {MAX_FORWARD_BODY_BYTES} byte \
-                 limit"
+                "tool bridge request body is {length} bytes, over the \
+                 {MAX_TOOL_BRIDGE_BODY_BYTES} byte limit"
             ),
             pending: length,
         });
@@ -1495,7 +1383,7 @@ async fn read_request_body<R: AsyncRead + Unpin>(
                 return Err(Refusal {
                     status: 400,
                     message: format!(
-                        "forwarded request body ended after {} of {length} bytes",
+                        "tool bridge request body ended after {} of {length} bytes",
                         body.len()
                     ),
                     pending: 0,
@@ -1908,14 +1796,26 @@ mod tests {
 
     #[test]
     fn inject_leaves_an_undeclared_scheme_prefix_unswapped() {
-        let headers = header_lines(&["authorization: Basic SENT"]);
+        let headers = header_lines(&["authorization: Digest SENT"]);
         let candidates = [Inj {
             header: "authorization",
             sentinel: "SENT",
             real: "real-key",
         }];
         let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
-        assert!(text.contains("authorization: Basic SENT"), "{text}");
+        assert!(text.contains("authorization: Digest SENT"), "{text}");
+    }
+
+    #[test]
+    fn inject_keeps_a_token_scheme_prefix() {
+        let headers = header_lines(&["authorization: token SENT"]);
+        let candidates = [Inj {
+            header: "authorization",
+            sentinel: "SENT",
+            real: "real-key",
+        }];
+        let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
+        assert!(text.contains("authorization: token real-key"), "{text}");
     }
 
     #[test]
@@ -1930,21 +1830,69 @@ mod tests {
         assert!(text.contains("x-api-key: raw secret"), "{text}");
     }
 
-    #[test]
-    fn forward_match_selects_by_exact_sentinel() {
-        let headers = header_lines(&["authorization: token GRANT"]);
-        let candidates = [Fwd {
-            header: "authorization",
-            sentinel: "GRANT",
-            account_id: "acct-1",
-        }];
-        assert_eq!(
-            forward_match(&headers, &candidates).unwrap().account_id,
-            "acct-1"
-        );
+    fn basic(credential: &str) -> String {
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(credential)
+        )
+    }
 
-        let miss = header_lines(&["authorization: token OTHER"]);
-        assert!(forward_match(&miss, &candidates).is_none());
+    #[test]
+    fn inject_swaps_a_sentinel_riding_as_a_basic_password() {
+        // `gh auth git-credential` hands git `x-access-token:<token>`, so the sentinel arrives as the
+        // password half of a Basic credential; the swap keeps the user and the scheme around the
+        // real secret, the same rule a `token`/`Bearer` request rides.
+        let headers = header_lines(&[
+            "host: github.com",
+            &format!("authorization: {}", basic("x-access-token:SENT")),
+        ]);
+        let candidates = [Inj {
+            header: "authorization",
+            sentinel: "SENT",
+            real: "real-token",
+        }];
+        let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
+        assert!(
+            text.contains(&format!(
+                "authorization: {}\r\n",
+                basic("x-access-token:real-token")
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("SENT"), "{text}");
+    }
+
+    #[test]
+    fn inject_passes_a_basic_credential_with_another_password_through_untouched() {
+        let supplied = basic("x-access-token:OTHER");
+        let headers = header_lines(&[&format!("authorization: {supplied}")]);
+        let real = basic("x-access-token:real-token");
+        let candidates = [Inj {
+            header: "authorization",
+            sentinel: "SENT",
+            real: &real,
+        }];
+        let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
+        assert!(
+            text.contains(&format!("authorization: {supplied}\r\n")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn inject_leaves_a_basic_value_that_is_not_base64_unswapped() {
+        let headers = header_lines(&["authorization: Basic !!not-base64!!"]);
+        let real = basic("x-access-token:real-token");
+        let candidates = [Inj {
+            header: "authorization",
+            sentinel: "SENT",
+            real: &real,
+        }];
+        let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
+        assert!(
+            text.contains("authorization: Basic !!not-base64!!\r\n"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1973,10 +1921,12 @@ mod tests {
         });
         let headers = header_lines(&[
             "x-ufo-workspace: forged",
+            "x-ufo-proxy-auth: forged",
             "x-forwarded-proto: forged",
             "accept: */*",
         ]);
-        let text = String::from_utf8(service_headers(&headers, &principal, &[])).unwrap();
+        let text =
+            String::from_utf8(service_headers(&headers, &principal, "Basic cnVu", &[])).unwrap();
         assert!(
             !text.contains("forged"),
             "container identity leaked: {text}"
@@ -1989,8 +1939,33 @@ mod tests {
             text.contains(&format!("x-ufo-user: {}", Uuid::from_u128(9))),
             "{text}"
         );
+        assert!(text.contains("x-ufo-proxy-auth: Basic cnVu\r\n"), "{text}");
         assert!(text.contains("x-forwarded-proto: https"), "{text}");
         assert!(text.contains("connection: close"), "{text}");
+    }
+
+    #[test]
+    fn direct_headers_strip_container_claims_and_rewrite_the_origin() {
+        // The cache-down fall-through re-originates at the public host, so the identity stamps a
+        // service relay would carry — and anything the container forged in their place — never
+        // leave the proxy.
+        let headers = header_lines(&[
+            "host: cache.ufo.internal",
+            "x-ufo-workspace: forged",
+            "x-ufo-user: forged",
+            "x-ufo-proxy-auth: forged",
+            "proxy-authorization: Basic forged",
+            "accept: */*",
+        ]);
+        let text = String::from_utf8(direct_headers(&headers, "github.com")).unwrap();
+        assert!(
+            !text.contains("forged"),
+            "container identity leaked: {text}"
+        );
+        assert!(!text.contains("cache.ufo.internal"), "{text}");
+        assert!(text.contains("accept: */*\r\n"), "{text}");
+        assert!(text.contains("host: github.com\r\n"), "{text}");
+        assert!(text.contains("connection: close\r\n"), "{text}");
     }
 
     #[test]
@@ -2015,28 +1990,6 @@ mod tests {
         let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
         assert!(text.contains("authorization: Bearer auth-real"), "{text}");
         assert!(text.contains("x-api-key: key-real"), "{text}");
-    }
-
-    #[test]
-    fn forward_match_two_accounts_on_one_host_each_select_their_own() {
-        let candidates = [
-            Fwd {
-                header: "authorization",
-                sentinel: "GRANT_A",
-                account_id: "acct-a",
-            },
-            Fwd {
-                header: "authorization",
-                sentinel: "GRANT_B",
-                account_id: "acct-b",
-            },
-        ];
-        let a = header_lines(&["authorization: token GRANT_A"]);
-        let b = header_lines(&["authorization: Bearer GRANT_B"]);
-        assert_eq!(forward_match(&a, &candidates).unwrap().account_id, "acct-a");
-        assert_eq!(forward_match(&b, &candidates).unwrap().account_id, "acct-b");
-        let neither = header_lines(&["authorization: token GRANT_C"]);
-        assert!(forward_match(&neither, &candidates).is_none());
     }
 
     #[test]
@@ -2118,8 +2071,8 @@ mod tests {
     }
 
     #[test]
-    fn forward_response_bytes_drops_crlf_bearing_headers() {
-        let response = ForwardedResponse {
+    fn tool_bridge_response_bytes_drops_crlf_bearing_headers() {
+        let response = ToolBridgeResponse {
             status: 200,
             headers: vec![
                 ("x-good".to_string(), "fine".to_string()),
@@ -2127,7 +2080,7 @@ mod tests {
             ],
             body: b"hi".to_vec(),
         };
-        let text = String::from_utf8(forward_response_bytes(&response)).unwrap();
+        let text = String::from_utf8(tool_bridge_response_bytes(&response)).unwrap();
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
         assert!(text.contains("x-good: fine"), "{text}");
         assert!(

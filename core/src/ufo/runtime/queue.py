@@ -37,9 +37,9 @@ from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
-    _git_credential_config,
     _grant_cli_env,
     _keyed_provider_env,
+    cli_git_config,
 )
 from ufo.harness.sandbox.session import (
     RunToken,
@@ -1036,12 +1036,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     declared=frozenset(
                         slot.name for manifest in runtime.manifests for slot in manifest.credentials
                     ),
-                    fillable=frozenset(
-                        slot.name
-                        for manifest in runtime.manifests
-                        for slot in manifest.credentials
-                        if slot.member_filled
-                    ),
                 )
             ),
             models=(AUTO_MODEL, *sorted(runtime.registry.specs)),
@@ -1422,9 +1416,8 @@ async def _open_sandbox(
     `http.proxyAuthMethod=anyauth` waits for a `407` challenge the proxy never sends, so its CONNECT
     arrives unattributed and is rejected before rule resolution. `GIT_PROXY_AUTH_CONFIG` presents
     the signed token on the first CONNECT as every other client already does, and rides every turn
-    whether or not it holds a grant or a key. A workspace holding a git credential adds that host's
-    extraheader to the same config, so `git clone` and `git push` authenticate off the sentinel the
-    proxy swaps.
+    whether or not it holds a grant or a key. Each connector git host's credential helper rides the
+    same config, so `git clone` and `git push` authenticate off the CLI sentinel the proxy swaps.
 
     The run token names the turn to the proxy, and carries the workspace, the turn and the acting
     member but no conversation id, so a process in the container cannot recover the conversation
@@ -1457,13 +1450,7 @@ async def _open_sandbox(
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
                 TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
-                **_git_config_env(
-                    (
-                        *GIT_PROXY_AUTH_CONFIG,
-                        *cache_config,
-                        *await _git_credential_config(credentials, slots, turn.workspace_id),
-                    )
-                ),
+                **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
                 **await _grant_cli_env(grants, clis, WORKSPACE_AUTHORITY, turn.id),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },

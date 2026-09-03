@@ -4,7 +4,7 @@ The one member-facing page that answers with no session behind it. A member reac
 wherever they were talking — a Slack thread, the CLI — and the browser they finish consent in
 carries nothing but the state the connect tool sealed, so the page can address them only by what
 just happened. It says that, and the one thing left to do. Every return leg draws it: the
-connector callback core serves, the Slack install, the GitHub App install.
+connector callback core serves and the Slack install.
 
 `CLOSE_THIS_PAGE` is the line any leg may say, because a return leg is often finished from a browser
 with no conversation behind it at all — an install link opened from an email, a deploy that wires no
@@ -33,8 +33,8 @@ from string import Template
 from ufo.sdk.http import HTMLResponse
 
 CONNECT_LOGO_PATH = "/v1/connect/logo.svg"
-CLOSE_THIS_PAGE = "You can close this page."
-CONVERSATION_CONTINUES = f"{CLOSE_THIS_PAGE} The conversation continues."
+CLOSE_THIS_PAGE = "Close this tab."
+CONVERSATION_CONTINUES = "Close this tab and return to the conversation."
 CALLBACK_PAGE_MAX_BYTES = 1_024
 CLOSE_AFTER_MS = 2_000
 CLOSE_SCRIPT = f"<script>setTimeout(()=>window.close(),{CLOSE_AFTER_MS})</script>"

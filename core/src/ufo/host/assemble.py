@@ -143,7 +143,7 @@ class HostEnvironment:
             for section in manifest.prompt_sections
         )
         held = render_workspace_facts(
-            await turn_workspace_facts(self.manifests, self.credentials, audience=request.audience)
+            await turn_workspace_facts(self.manifests, audience=request.audience)
         )
         if held:
             sections = (*sections, (WORKSPACE_FACTS_SECTION, held))

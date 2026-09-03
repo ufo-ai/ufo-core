@@ -14,7 +14,6 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -78,13 +77,6 @@ class CredentialSlotUnset(KeyError):
     """A slot has no stored secret for this workspace."""
 
 
-class CredentialMintFailed(RuntimeError):
-    """A `CredentialSource` could not mint from its provider: the external uncertainty a provider
-    exchange carries, so the next turn may well succeed. Withheld per slot like every other fault a
-    slot's resolution can raise — `derive_credential_rules` isolates the slot rather than the fault
-    class, so a source is never obliged to translate what went wrong into a tolerated type."""
-
-
 class CredentialRequestInvalid(ValueError):
     """A sealed credential request failed verification: tampered, expired, or claiming a workspace,
     member, or slot it was not sealed for."""
@@ -95,26 +87,16 @@ class CredentialValueInvalid(ValueError):
     provider that read it."""
 
 
-CREDENTIAL_REQUEST_PURPOSE = "credential-request"
-INSTALLATION_BINDING_PURPOSE = "installation-binding"
-
-
 class CredentialRequestState(BaseModel):
     """The claims a member credential action seals: workspace, speaking owner, slots, and optional
-    provider authorization state. The credential Fernet encrypts it and bounds its lifetime.
-
-    `purpose` separates the two things one deploy key seals. Every seal opens under that one key, so
-    without it a request seal — which the member is handed in chat — would open as a binding and
-    stand in for one. `member_id` is absent on a binding, which an organization owns rather than a
-    member: `open_authorization` compares it, so a binding never satisfies a member's request."""
+    provider authorization state. The credential Fernet encrypts it and bounds its lifetime."""
 
     workspace_id: UUID
-    member_id: UUID | None = None
+    member_id: UUID
     slots: tuple[str, ...]
     request_id: UUID | None = None
     issued_at: int | None = None
     payload: str | None = None
-    purpose: str = CREDENTIAL_REQUEST_PURPOSE
 
 
 def seal_credential_request(fernet: Fernet, state: CredentialRequestState) -> str:
@@ -122,60 +104,35 @@ def seal_credential_request(fernet: Fernet, state: CredentialRequestState) -> st
 
 
 def open_credential_request(
-    fernet: Fernet,
-    sealed: str,
-    *,
-    purpose: str,
-    ttl: int | None = CREDENTIAL_REQUEST_TTL_SECONDS,
+    fernet: Fernet, sealed: str, *, ttl: int = CREDENTIAL_REQUEST_TTL_SECONDS
 ) -> CredentialRequestState:
-    """Open a seal this deploy minted for `purpose`. One key seals every credential act, so
-    ciphertext from any of them decrypts under every other — the purpose is what keeps a binding
-    from being opened as an authorization, and asking for it here is what makes that structural
-    rather than a check each caller must remember. `ttl` bounds a request to the prompt it belongs
-    to; a binding passes None, since an installation outlives the request that bound it. Total:
-    anything that is not this deploy's own well-formed seal for this purpose raises
-    `CredentialRequestInvalid`, so a caller never has to guard a decode."""
+    """Open a seal this deploy minted. `ttl` bounds it to the prompt it belongs to, or to the longer
+    renewal window a surface re-offers an unanswered prompt within. Total: anything that is not
+    this deploy's own well-formed, unexpired seal raises `CredentialRequestInvalid`, so a caller
+    never has to guard a decode."""
     try:
         raw = fernet.decrypt(sealed.encode(), ttl=ttl)
     except InvalidToken as error:
         raise CredentialRequestInvalid("credential request is tampered or expired") from error
     try:
-        state = CredentialRequestState.model_validate_json(raw)
+        return CredentialRequestState.model_validate_json(raw)
     except ValidationError as error:
         raise CredentialRequestInvalid("credential request is not a sealed state") from error
-    if state.purpose != purpose:
-        raise CredentialRequestInvalid(
-            f"credential request was sealed for {state.purpose!r}, not {purpose!r}"
-        )
-    return state
 
 
 @dataclass(frozen=True)
 class CredentialRequests:
     """The member-sealed credential arm: the Fernet that guards the slots and the deploy's declared
     slot set, so a private prompt or provider authorization can name only an installed extension's
-    slot. Absent when no credential key is configured.
-
-    `fillable` is the subset a member may type a value into. It gates `seal` alone — the seal a
-    private prompt is fulfilled against — while `authorize` keeps the whole declared set, because a
-    provider callback binding an installation writes a slot the member must never type. Gating at
-    the seal is what makes the refusal total: with no seal minted, no surface holds anything to
-    fulfill against, so an unopenable value never reaches the slot at all."""
+    slot. Absent when no credential key is configured."""
 
     fernet: Fernet
     declared: frozenset[str]
-    fillable: frozenset[str]
 
     def seal(self, workspace_id: UUID, member_id: UUID, slots: tuple[str, ...]) -> str:
         undeclared = [slot for slot in slots if slot not in self.declared]
         if undeclared:
             raise ValueError(f"no installed extension declares credential slot(s) {undeclared}")
-        unfillable = [slot for slot in slots if slot not in self.fillable]
-        if unfillable:
-            raise ValueError(
-                f"credential slot(s) {unfillable} are written by this deploy, never entered — "
-                "the value is a seal a typed one cannot stand in for"
-            )
         return seal_credential_request(
             self.fernet,
             CredentialRequestState(
@@ -205,7 +162,7 @@ class CredentialRequests:
     def open_authorization(
         self, sealed: str, workspace_id: UUID, member_id: UUID, slot: str
     ) -> str:
-        state = open_credential_request(self.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE)
+        state = open_credential_request(self.fernet, sealed)
         if state.workspace_id != workspace_id:
             raise CredentialRequestInvalid("credential authorization belongs to another workspace")
         if state.member_id != member_id:
@@ -217,74 +174,6 @@ class CredentialRequests:
         if state.payload is None:
             raise CredentialRequestInvalid("credential authorization carries no provider state")
         return state.payload
-
-
-def seal_installation(fernet: Fernet, workspace_id: UUID, slot: str, installation_id: str) -> str:
-    """Bind a provider installation to the workspace that authorized it. The stored value is this
-    seal, never the bare id: an installation id is a small integer anyone can guess, so a slot
-    holding one a member typed would let a workspace mint against another organization's install.
-    It is the same sealed state every credential act uses, marked with its own purpose so a request
-    seal cannot stand in for it, and opened without a TTL — an installation outlives its request."""
-    return seal_credential_request(
-        fernet,
-        CredentialRequestState(
-            workspace_id=workspace_id,
-            slots=(slot,),
-            payload=installation_id,
-            purpose=INSTALLATION_BINDING_PURPOSE,
-        ),
-    )
-
-
-def open_installation(fernet: Fernet, workspace_id: UUID, slot: str, sealed: str) -> str:
-    """The installation id this workspace bound, or `CredentialRequestInvalid` for anything else —
-    a forged blob, another workspace's binding, a seal minted for some other purpose, or a bare
-    id typed into the slot by hand."""
-    state = open_credential_request(fernet, sealed, purpose=INSTALLATION_BINDING_PURPOSE, ttl=None)
-    if state.workspace_id != workspace_id:
-        raise CredentialRequestInvalid("installation binding belongs to another workspace")
-    if state.slots != (slot,):
-        raise CredentialRequestInvalid("installation binding names another slot")
-    if state.payload is None:
-        raise CredentialRequestInvalid("installation binding carries no installation")
-    return state.payload
-
-
-_installed_requests: CredentialRequests | None = None
-
-
-def install_credential_requests(requests: CredentialRequests | None) -> None:
-    """The process's single credential-request authority, installed once at serve boot. A provider
-    callback arrives in a browser with no turn and no session, so the route that receives it
-    resolves its workspace from the sealed state alone and needs the Fernet here rather than
-    threaded through a context it does not have."""
-    global _installed_requests
-    _installed_requests = requests
-
-
-def installed_credential_requests() -> CredentialRequests:
-    if _installed_requests is None:
-        raise RuntimeError("credential authorization unavailable: no credential key configured")
-    return _installed_requests
-
-
-def authorized_slot_workspace(sealed: str, slot: str, payload: str) -> UUID | None:
-    """The workspace an authorization seal was minted for, or None for anything that is not this
-    deploy's own seal for exactly this slot and purpose. A provider redirects the member's browser
-    back with no turn and no session, so the route that receives it resolves its workspace from the
-    seal alone — and must pin the slot and purpose here, since a seal minted to authorize one slot
-    would otherwise stand in for another."""
-    if _installed_requests is None:
-        return None
-    try:
-        state = open_credential_request(
-            _installed_requests.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
-        )
-    except CredentialRequestInvalid:
-        return None
-    if state.slots != (slot,) or state.payload != payload:
-        return None
-    return state.workspace_id
 
 
 @dataclass(frozen=True)
@@ -548,63 +437,6 @@ class HostChoice:
         return next((host for host in self.hosts if host.lower() == wanted), None)
 
 
-class CredentialSource(Protocol):
-    """A slot whose secret this deploy mints per workspace rather than the member storing one: the
-    resolution runs at rule derivation, so a short-lived token is minted for the turn that uses it.
-    None means this workspace has nothing to mint from, and the stored value answers instead."""
-
-    async def secret(self, workspace_id: UUID, store: "CredentialStore") -> str | None: ...
-
-    async def bound(self, workspace_id: UUID, store: "CredentialStore") -> bool:
-        """Whether this workspace has something to mint from, answered without minting. Every
-        sandbox open asks whether a slot is filled; only the wire asks for its value, so the
-        question that runs on every turn must not reach the provider.
-
-        Raises for a binding this workspace holds but this deploy cannot use, exactly as `secret`
-        does: the two answer for different roles — the export and the wire — and a `False` here
-        against a raise there is what exports a credential for a host the wire then refuses."""
-        ...
-
-
-async def slot_secret(
-    name: str, source: CredentialSource | None, workspace_id: UUID, store: CredentialStore
-) -> str | None:
-    """The one answer to "what secret does this slot hold for this workspace" — a minted one where
-    the slot declares a source, else the member's stored value, else None. Every consumer resolves
-    through here (proxy rules, the sandbox export, the git config) so no role injects a credential
-    another role never exported. Takes the name and source rather than the slot itself, because the
-    manifest that declares slots already imports this module."""
-    if source is not None:
-        minted = await source.secret(workspace_id, store)
-        if minted is not None:
-            return minted
-    try:
-        return await store.get(workspace_id, name)
-    except CredentialSlotUnset:
-        return None
-
-
-async def slot_is_set(
-    name: str, source: CredentialSource | None, workspace_id: UUID, store: CredentialStore
-) -> bool:
-    """Whether this slot would yield a secret, without producing one. `slot_secret`'s question costs
-    a provider round trip where the slot mints; this one is the DB read every sandbox open needs to
-    decide whether to configure a client at all, so it stays off the wire.
-
-    A source that raises propagates rather than falling through to the stored value, which is what
-    keeps this answer identical to `slot_secret`'s: a workspace holding a binding this deploy cannot
-    use yields nothing to either role, instead of exporting the member's own token into a sandbox
-    whose wire will refuse the host. Callers isolate the raise per slot, as the rule derivation
-    does."""
-    if source is not None and await source.bound(workspace_id, store):
-        return True
-    try:
-        await store.get(workspace_id, name)
-    except CredentialSlotUnset:
-        return False
-    return True
-
-
 async def credential_host(
     store: CredentialStore, workspace_id: UUID, host: str | HostChoice
 ) -> str | None:
@@ -628,14 +460,12 @@ async def credential_host(
 @dataclass(frozen=True)
 class DeclaredSlot:
     """One declared BYOK slot as reads project it: the slot name, its documentation, the extension
-    that declares it, whether a member fills it (`member_filled=False` is deploy machinery — a
-    provider callback's seal, never a typed key), and `host` — the wire target when the slot
-    carries one, either a fixed hostname or the `HostChoice` a member selects within. `merge`
-    updates a structured secret from one private submission at the encrypted store boundary."""
+    that declares it, and `host` — the wire target when the slot carries one, either a fixed
+    hostname or the `HostChoice` a member selects within. `merge` updates a structured secret from
+    one private submission at the encrypted store boundary."""
 
     name: str
     description: str
     extension: str
-    member_filled: bool = True
     host: str | HostChoice | None = None
     merge: Callable[[str | None, str], str] | None = None

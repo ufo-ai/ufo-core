@@ -43,13 +43,6 @@ from ufo.harness.models.pricing import Pricing
 from ufo.harness.o11y import BACKGROUND_PROFILE, emit_histogram, emit_metric, log
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
-from ufo.runtime.access.credentials import (
-    CredentialSource,
-    CredentialStore,
-    installed_credential_requests,
-    seal_installation,
-    slot_secret,
-)
 from ufo.runtime.agent_scope import agent, agent_current
 from ufo.runtime.authority import (
     WORKSPACE_AUTHORITY,
@@ -265,13 +258,10 @@ class ScopedStore:
 class CredentialAccess:
     """The declared-slot gate over the ambient workspace's secrets: a handler reads only the slots
     its manifest declared, and each resolves to the bound workspace's value through
-    `ws_current().credential` or its declared source. Source and store dependencies stay private;
-    workspace and secret both come from the scope the turn or job bound, so a handler can read
-    neither an undeclared slot nor a workspace it did not name."""
+    `ws_current().credential`. Workspace and secret both come from the scope the turn or job
+    bound, so a handler can read neither an undeclared slot nor a workspace it did not name."""
 
     declared: frozenset[str]
-    _sources: tuple[tuple[str, CredentialSource], ...] = ()
-    _store: CredentialStore | None = None
 
     @property
     def workspace_id(self) -> UUID:
@@ -294,42 +284,12 @@ class CredentialAccess:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().credential_is_stored(slot)
 
-    async def resolve(self, slot: str) -> str:
-        """Resolve a declared slot through its manifest source, then its stored or platform
-        value."""
-        if slot not in self.declared:
-            raise UndeclaredCredentialSlot(slot)
-        source = next((source for name, source in self._sources if name == slot), None)
-        if source is None:
-            return await ws_current().credential(slot)
-        if self._store is None:
-            raise RuntimeError(f"credential slot {slot!r} has a source but no credential store")
-        secret = await slot_secret(slot, source, self.workspace_id, self._store)
-        if secret is not None:
-            return secret
-        return await ws_current().credential(slot)
-
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
         cannot create the initial credential: that remains the member-sealed handoff."""
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().rotate_credential(slot, expected, plaintext)
-
-    async def bind_installation(self, slot: str, installation_id: str) -> None:
-        """Record a provider installation the caller has already proved this workspace's member can
-        reach. What lands in the slot is a seal over `(workspace, installation)`, not the id: an id
-        is a small integer, a deploy's app key mints against any installation of it, and the slot is
-        also fillable through the ordinary credential prompt — so only a value sealed here opens
-        when a credential is minted against it."""
-        if slot not in self.declared:
-            raise UndeclaredCredentialSlot(slot)
-        await ws_current().put_credential(
-            slot,
-            seal_installation(
-                installed_credential_requests().fernet, self.workspace_id, slot, installation_id
-            ),
-        )
 
 
 @dataclass(frozen=True)
@@ -2747,8 +2707,6 @@ def context_for(
     model_job: str | None = None,
     surfaces: frozenset[str] = frozenset(),
     addressed_surfaces: frozenset[str] = frozenset(),
-    credential_sources: tuple[tuple[str, CredentialSource], ...] = (),
-    credential_store: CredentialStore | None = None,
     tailer: TurnTailer | None = None,
     probes: ConversationProbes | None = None,
     member_context_read: bool = False,
@@ -2778,11 +2736,7 @@ def context_for(
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     return ExtensionContext(
         store=ScopedStore(extension=extension),
-        credentials=CredentialAccess(
-            declared=declared,
-            _sources=credential_sources,
-            _store=credential_store,
-        ),
+        credentials=CredentialAccess(declared=declared),
         audience=audience,
         installations=SurfaceInstallationAccess(declared=surfaces, addressed=addressed_surfaces),
         index=index,

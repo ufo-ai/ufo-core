@@ -81,7 +81,6 @@ from ufo.host.tools.builtins import (
 )
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
-    CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
     CredentialStore,
     open_credential_request,
@@ -2639,7 +2638,6 @@ async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()),
         declared=frozenset({"sample_api"}),
-        fillable=frozenset({"sample_api"}),
     )
     frame = await _engine(
         turn, object(), tmp_path, member_id=owner, requestable_credentials=requests, actions=True
@@ -2780,9 +2778,7 @@ async def test_a_read_back_frame_never_carries_another_errors_stack(
     owner = await _seeded_member(turn.workspace_id)
     intent = ToolIntent(tool="object_action", input=REQUEST_CALL)
     turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
-    requests = CredentialRequests(
-        fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
-    )
+    requests = CredentialRequests(fernet=Fernet(Fernet.generate_key()), declared=frozenset())
 
     async def failing_persist(*_: object, **__: object) -> None:
         raise OSError("blob store unreachable")
@@ -2812,9 +2808,7 @@ async def test_a_refused_intent_meters_the_refusal_as_the_turn_it_failed(
     owner = await _seeded_member(turn.workspace_id)
     intent = ToolIntent(tool="object_action", input=REQUEST_CALL)
     turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
-    requests = CredentialRequests(
-        fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
-    )
+    requests = CredentialRequests(fernet=Fernet(Fernet.generate_key()), declared=frozenset())
     with caplog.at_level(logging.INFO, logger="ufo"):
         frame = await _engine(
             turn,
@@ -3998,9 +3992,7 @@ async def test_a_prompt_and_a_question_both_stand_when_a_turn_raises_both(
     turn = await _seed_turn("queued", None)
     owner = await _seeded_member(turn.workspace_id)
     fernet = Fernet(Fernet.generate_key())
-    requests = CredentialRequests(
-        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
-    )
+    requests = CredentialRequests(fernet=fernet, declared=frozenset({"sample_api"}))
     engine = _engine(
         turn,
         CollectThenAskModel(turn.id),
@@ -4144,9 +4136,7 @@ async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
     turn = await _seed_turn("queued", None)
     owner = await _seeded_member(turn.workspace_id)
     fernet = Fernet(Fernet.generate_key())
-    requests = CredentialRequests(
-        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
-    )
+    requests = CredentialRequests(fernet=fernet, declared=frozenset({"sample_api"}))
     engine = _engine(
         turn,
         CollectThenEndModel(turn.id),
@@ -4160,9 +4150,7 @@ async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
     assert frame.credential_request is not None
     assert frame.credential_request.reason == REQUEST_INPUT["reason"]
     assert [p.slot for p in frame.credential_request.prompts] == ["sample_api"]
-    state = open_credential_request(
-        fernet, frame.credential_request.sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
-    )
+    state = open_credential_request(fernet, frame.credential_request.sealed)
     assert state.workspace_id == turn.workspace_id
     assert state.member_id == owner
     assert state.slots == ("sample_api",)
@@ -4196,7 +4184,6 @@ async def test_request_credentials_gates_on_admin_key_and_declared_slots(
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()),
         declared=frozenset({"sample_api"}),
-        fillable=frozenset({"sample_api"}),
     )
     args = RequestCredentialsInput.model_validate(REQUEST_INPUT)
     blob = FilesystemBlobStore(root=tmp_path)
@@ -4239,9 +4226,7 @@ async def test_extension_tool_authorizes_its_declared_credential_as_an_admin(
     turn = await _seed_turn("queued", None)
     owner = await _seeded_member(turn.workspace_id)
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    requests = CredentialRequests(
-        fernet=store.fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
-    )
+    requests = CredentialRequests(fernet=store.fernet, declared=frozenset({"sample_api"}))
     context = ToolContext(
         sandbox=SandboxSession(
             carrier=RecordingCarrier(),

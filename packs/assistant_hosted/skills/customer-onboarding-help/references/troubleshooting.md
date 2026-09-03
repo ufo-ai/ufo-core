@@ -43,7 +43,7 @@ second-hand, from an admin asking about someone else.
 
 | Symptom | What to say and do |
 | --- | --- |
-| "You said GitHub is connected but you cannot see our repo" | Two separate things: a GitHub connector account that reads and writes issues and pull requests through the API, and the installed ufo GitHub App that grants git access — clone and push — to the repositories chosen when it was installed. The first is not the second — say which one is missing rather than that GitHub is connected. |
+| "You said GitHub is connected but you cannot see our repo" | One GitHub connection covers the API, clone, and push: issue and pull-request reads and writes, private `git clone`, and `git push` all ride the member's own connected GitHub account. A connection is per member, so a clone that fails for them means they have not connected their own account — start the GitHub authorization handoff for them rather than citing a colleague's connection. |
 | "It can't reach something it used last week" | The connection may have been disconnected or its access revoked. Check the connection, then start a fresh authorization handoff rather than guessing. |
 | "It asked me for a key and I'm not an admin" | Workspace-wide credentials can only be filled by an admin. Say so and offer to ask one. |
 

@@ -107,9 +107,7 @@ from ufo.runtime.access.connectors import (
     SourceCredentialResolver,
 )
 from ufo.runtime.access.credentials import (
-    CredentialRequests,
     CredentialStore,
-    install_credential_requests,
 )
 from ufo.runtime.access.egress_control import EgressControl
 from ufo.runtime.access.egress_resolver import PerAgentRules
@@ -407,22 +405,6 @@ def run() -> None:
     init_runtime(runtime)
     install_connect_flow(
         _connect_flow(credentials, config, manifests, index, embed, ConnectResume(admission))
-    )
-    install_credential_requests(
-        None
-        if credentials is None
-        else CredentialRequests(
-            fernet=credentials.fernet,
-            declared=frozenset(
-                slot.name for manifest in manifests for slot in manifest.credentials
-            ),
-            fillable=frozenset(
-                slot.name
-                for manifest in manifests
-                for slot in manifest.credentials
-                if slot.member_filled
-            ),
-        )
     )
     dbos = DBOS(
         config={
@@ -1152,14 +1134,7 @@ def _mount_shared_surfaces(
             extension=manifest.name,
             provider=provider,
             ext=extension_context_for(
-                manifest.name,
-                frozenset(slot.name for slot in manifest.credentials),
-                credential_sources=tuple(
-                    (slot.name, slot.source)
-                    for slot in manifest.credentials
-                    if slot.source is not None
-                ),
-                credential_store=credentials,
+                manifest.name, frozenset(slot.name for slot in manifest.credentials)
             ),
         )
         for manifest, provider in conversation_slot_declarations(manifests)

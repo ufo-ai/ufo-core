@@ -5,7 +5,9 @@ Pipedream Connect token is an async API call — so `authorize_url` points the m
 this extension's `oauth` route instead. The route (async) mints the token, pinning the success and
 error redirects back to itself, and redirects on to Pipedream's hosted Connect Link scoped to the
 provider's app — riding the deploy's own OAuth client when its env is set, else Pipedream's shared
-one (verified live for Gmail's restricted scopes). Pipedream documents no redirect param carrying
+one (verified live for Gmail's restricted scopes); a connector whose token the sandbox rides refuses
+to mint consent on the shared client, since that account would release no token. Pipedream
+documents no redirect param carrying
 the account id, so each sealed connect state gets a distinct external user. The success leg resolves
 that user's newest account and hands its id to core; `exchange` retrieves that exact id and
 reasserts the state-scoped owner and app before a grant binds. Overlapping callbacks therefore
@@ -41,8 +43,8 @@ class PipedreamOAuthProvider:
     provider's own API host the derived grant admits and meters; `app` is the Pipedream app slug
     the consent leg opens. `authorize_url` is pure — it points the browser at the async `oauth`
     route — and `exchange` binds only the exact account owned by this sealed state's external user.
-    The account's token stays with Pipedream; connector calls execute through it server-side, so no
-    secret is read or stored."""
+    Connector calls execute through Pipedream server-side; the grant stores the account id, never a
+    secret."""
 
     provider: str
     host: str
@@ -99,7 +101,7 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
         return Response(
             status_code=FAILED_CONSENT_STATUS,
             content=f"connector consent did not complete (outcome {outcome!r}) — "
-            "the account was not connected. You can close this page.",
+            "the account was not connected. Close this tab.",
         )
     bridge = f"{_origin(callback)}{OAUTH_ROUTE_MOUNT}"
     ride_through = {"provider": provider, "state": state, "callback": callback}
@@ -115,6 +117,11 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
         f"{urlencode({CONNECT_LINK_APP_PARAM: spec.app, CONNECT_LINK_POPUPS_PARAM: 'false'})}"
     )
     oauth_app_id = os.environ.get(spec.custom_oauth_env) if spec.custom_oauth_env else None
+    if spec.cli_env is not None and not oauth_app_id:
+        raise RuntimeError(
+            f"{spec.custom_oauth_env} must be set to connect {provider!r}: Pipedream releases the "
+            "token its CLI rides only for an account connected on this deploy's own OAuth client"
+        )
     if oauth_app_id:
         link = f"{link}&{urlencode({CONNECT_LINK_OAUTH_APP_PARAM: oauth_app_id})}"
     return Response(status_code=REDIRECT_STATUS, headers={"location": link})

@@ -12,8 +12,8 @@ blocking failure. You get one attempt.
 
 GitHub decides only what the workspace cannot: the head SHA, check runs, statuses, review threads.
 Where a file on disk disagrees with GitHub about those, the file is stale. Read a failing check's
-cause from its check-run annotations. `gh` is not authenticated here, so reach the API with
-`curl -H "Authorization: $UFO_GITHUB_API_AUTH"` against api.github.com.
+cause from its check-run annotations, with `gh api` — it is authenticated as the member's connected
+GitHub account.
 
 ## You are here because the cheap attempts failed
 

@@ -143,6 +143,7 @@ services:
       PIPEDREAM_PROJECT_ID: ${PIPEDREAM_PROJECT_ID:-}
       PIPEDREAM_CLIENT_ID: ${PIPEDREAM_CLIENT_ID:-}
       PIPEDREAM_CLIENT_SECRET: ${PIPEDREAM_CLIENT_SECRET:-}
+      PIPEDREAM_GITHUB_OAUTH_APP_ID: ${PIPEDREAM_GITHUB_OAUTH_APP_ID:-}
       # Billing is opt-in locally: UFO_DEV_PACK=assistant_billing adds the metronome extension, and
       # these three settings are what its tool and shippers read. Point them at a Metronome SANDBOX
       # token and a Stripe TEST-MODE key — the flow creates real objects in the accounts they name.

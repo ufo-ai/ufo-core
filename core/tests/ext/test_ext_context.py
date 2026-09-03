@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -46,7 +46,6 @@ from ufo.harness.sandbox.session import (
     ProxyEndpoint,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
-from ufo.runtime.access.connectors import ForwardedResponse
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.authority import (
     WORKSPACE_AUTHORITY,
@@ -516,30 +515,6 @@ async def test_credential_access_reads_declared_and_rejects_undeclared(db: None)
         assert await access.get("sample_api") == "sk-real"
         with pytest.raises(UndeclaredCredentialSlot, match="undeclared_slot"):
             await access.get("undeclared_slot")
-
-
-@dataclass(frozen=True)
-class MintedCredential:
-    value: str | None
-
-    async def secret(self, workspace_id: UUID, store: CredentialStore) -> str | None:
-        return self.value
-
-    async def bound(self, workspace_id: UUID, store: CredentialStore) -> bool:
-        return self.value is not None
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_credential_access_resolves_manifest_source(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-    access = CredentialAccess(
-        declared=frozenset({"sample_api"}),
-        _sources=(("sample_api", MintedCredential("minted")),),
-        _store=store,
-    )
-    with ws(workspace_id):
-        assert await access.resolve("sample_api") == "minted"
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1036,18 +1011,6 @@ async def test_turn_outcomes_reads_status_and_terminal_text(db: None) -> None:
     assert outcomes[running] == TurnOutcome(status="running", text=None)
 
 
-@dataclass(frozen=True)
-class _UnusedForwarder:
-    """A real `RequestForwarder` the export path never calls — forwarding happens at the proxy, not
-    when the sentinel is written into the environment. It raises rather than recording, so a probe
-    that somehow reached the broker fails loudly instead of passing quietly."""
-
-    async def forward(
-        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
-    ) -> ForwardedResponse:
-        raise AssertionError("the probe environment must not forward through the broker")
-
-
 def _sandboxes(root: Path) -> ConversationSandbox:
     return ConversationSandbox(
         carrier=LocalCarrier(),
@@ -1095,9 +1058,9 @@ async def test_a_probes_authority_reaches_the_environment_and_the_token(
     db: None, tmp_path: Path
 ) -> None:
     """The member a probe acts as has to reach both ends or it buys nothing: the signed token, so
-    the proxy derives that member's forwards, and the environment, so the CLI inside the sandbox has
-    a sentinel to send. This pins the second — the first is the proxy's own test — by recording what
-    the env derivation was asked for."""
+    the proxy derives that member's injections, and the environment, so the CLI inside the sandbox
+    has a sentinel to send. This pins the second — the first is the proxy's own test — by recording
+    what the env derivation was asked for."""
     asked: list[tuple[UUID, ExecutionAuthority]] = []
 
     async def env(

@@ -1,10 +1,7 @@
 name = "workspace-capability-facts"
 base = "HEAD"
-suites = ["github_connections", "surface_setup"]
+suites = ["surface_setup"]
 cases = [
-  "app-installed-asked-if-connected",
-  "git-works-operations-fail",
-  "neither-github-connection",
   "slack-installed-status-question",
   "slack-status-question",
 ]
@@ -24,12 +21,12 @@ pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
-# Each install writes its own leg and no connector grant, so the connector listing — the one
-# connection read the agent has — reports the provider unconnected and the answer offers the install
-# the workspace already made. Each capability states one line, and each arm silences one line's own
-# read rather than its wording, so the arm removes exactly what the extension contributes. The two
-# installed cases are what the lines claim to move; the two uninstalled ones are the control that
-# they change nothing where no install exists.
+# The Slack install writes its own leg and no connector grant, so the connector listing — the one
+# connection read the agent has — reports Slack unconnected and the answer offers the install the
+# workspace already made. The capability states one line, and the arm silences that line's own read
+# rather than its wording, so it removes exactly what the extension contributes. The installed case
+# is what the line claims to move; the uninstalled one is the control that it changes nothing where
+# no install exists.
 
 [[arm]]
 name = "no-slack-block"
@@ -44,21 +41,10 @@ new = """
     return False and await install_is_live(ext)
 """
 
-[[arm]]
-name = "no-github-block"
-[[arm.replacements]]
-path = "extensions/coding/ufo_ext_coding/connect.py"
-old = """
-    return await ext.credentials.stored(GIT_INSTALLATION_SLOT)
-"""
-new = """
-    return False and await ext.credentials.stored(GIT_INSTALLATION_SLOT)
-"""
-
-# The closer is one sentence and every arm above leaves it standing, so this arm empties it. Its two
+# The closer is one sentence and the arm above leaves it standing, so this arm empties it. Its two
 # sentences were ablated apart: neither carried the answer alone, an empty closer regressed, and the
 # connector caveat came out because it holds only where a capability shares a name with a broker
-# provider — which the next capability in this block will not.
+# provider.
 
 [[arm]]
 name = "no-closer"

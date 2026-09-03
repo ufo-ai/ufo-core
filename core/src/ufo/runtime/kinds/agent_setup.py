@@ -70,32 +70,23 @@ class SetupSchedule(BaseModel):
 class SetupCredential(BaseModel):
     """A stored credential a shipped agent needs, named the way a member would name it.
 
-    `slots` is a set any one of which satisfies the need, because a credential often has more than
-    one way in: a GitHub App installation and a fine-grained token reach the same API, and an app
-    naming only the first would report itself unready for a workspace that chose the second.
+    `slots` is a set any one of which satisfies the need, because a credential can have more than
+    one way in, and an app naming only one would report itself unready for a workspace that chose
+    the other.
 
     It sits beside `connectors` rather than inside them because the two are settled by different
     people in different places. A connector is the member's own grant, made in this app's
-    conversation. A credential is filled once for the whole workspace, and for an app installation
-    by an admin."""
+    conversation. A credential is filled once for the whole workspace, by an admin."""
 
     label: str
     slots: tuple[str, ...] = Field(min_length=1)
-    provider: str | None = None
-    """The connector whose workspace-wide install fills this credential, where one does.
-
-    Named rather than inferred, because the surface offering the act has to know which act it is and
-    a label is prose. A credential no install answers states itself and offers nothing, which is
-    honest — there is nothing that member can press — but one that an admin can settle in a single
-    press should say so rather than leaving them to find the verb in chat."""
-
     required: bool = False
     """Whether the app is unusable until this is filled.
 
-    An install is settled once for the whole workspace, and by an admin — a member who is not one
-    reads a row they cannot press. So it is optional by default: the app answers the member it has
+    A credential is settled once for the whole workspace, and by an admin — a member who is not one
+    reads a row they cannot fill. So it is optional by default: the app answers the member it has
     in front of it, thinner, rather than refusing until somebody else acts. An app that genuinely
-    cannot read anything without the install says so here."""
+    cannot read anything without the credential says so here."""
 
 
 class AgentSetup(BaseModel):
@@ -177,12 +168,10 @@ class SetupConnector(BaseModel):
 
 
 class SetupCredentialState(BaseModel):
-    """One declared credential, whether any slot that answers it is filled, and the connector whose
-    workspace install would fill it."""
+    """One declared credential and whether any slot that answers it is filled."""
 
     label: str
     filled: bool
-    provider: str | None = None
     required: bool
 
 
@@ -334,7 +323,6 @@ async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> Setup
         SetupCredentialState(
             label=credential.label,
             filled=bool(set(credential.slots) & filled_slots),
-            provider=credential.provider,
             required=credential.required,
         )
         for credential in wanted.credentials

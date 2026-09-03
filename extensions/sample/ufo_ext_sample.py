@@ -168,9 +168,6 @@ PROVISIONED_AGENT_NAME = "sample-probe-agent"
 PROVISIONED_AGENT_PROMPT = "Probe agent: answer from the workspace's own records."
 PROVISIONED_AGENT_PURPOSE = "Answers questions about what this workspace has recorded."
 API_CREDENTIAL_LABEL = "Sample API key"
-INSTALL_CREDENTIAL_LABEL = "Sample workspace install"
-INSTALL_SLOT = "sample_install"
-INSTALL_PROVIDER = "github"
 PROVISIONED_AGENT_SCHEDULE = SetupSchedule(
     name="sample-sweep",
     prompt="Read what arrived since the last sweep and note anything new.",
@@ -1595,16 +1592,7 @@ def manifest() -> Manifest:
                 tools=(TOOL_NAME, *SETUP_TOOLS),
                 setup=AgentSetup(
                     connectors=(CONNECTOR_PROVIDER,),
-                    credentials=(
-                        SetupCredential(label=API_CREDENTIAL_LABEL, slots=(API_SLOT,)),
-                        # The second half of the seam: a credential a workspace install fills, so
-                        # the read a setup screen draws from has one to answer with here.
-                        SetupCredential(
-                            label=INSTALL_CREDENTIAL_LABEL,
-                            slots=(INSTALL_SLOT,),
-                            provider=INSTALL_PROVIDER,
-                        ),
-                    ),
+                    credentials=(SetupCredential(label=API_CREDENTIAL_LABEL, slots=(API_SLOT,)),),
                     standing=(SCHEDULE_KIND,),
                     schedule=PROVISIONED_AGENT_SCHEDULE,
                     instructions=PROVISIONED_AGENT_SETUP,

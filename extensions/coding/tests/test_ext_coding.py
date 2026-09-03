@@ -1,47 +1,16 @@
 import json
 
-import pytest
 import ufo_ext_coding.manifest as coding
 
 from ufo.host.ext.loader import skill_registry
 
-TOOL_NARRATION = "connecting their GitHub"
-# The escalation prompt is hard-wrapped, so a whole sentence spans a line break.
+# The prompts are hard-wrapped, so a whole sentence spans a line break.
+CODING_PROMPT = " ".join(coding.CODING_PROMPT.split())
 ESCALATION_PROMPT = " ".join(coding.FABLE_ESCALATION_PROMPT.split())
 
 
-def test_empty_github_app_registration_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        coding.GIT_APP_ID_ENV,
-        coding.GIT_APP_CLIENT_ID_ENV,
-        coding.GIT_APP_SECRET_ENV,
-        coding.GIT_APP_KEY_ENV,
-    ):
-        monkeypatch.setenv(name, "")
-    assert coding.github_app_id() is None
-
-
-@pytest.mark.parametrize(
-    "missing",
-    (
-        coding.GIT_APP_ID_ENV,
-        coding.GIT_APP_CLIENT_ID_ENV,
-        coding.GIT_APP_SECRET_ENV,
-        coding.GIT_APP_KEY_ENV,
-    ),
-)
-def test_partial_github_app_registration_fails(
-    monkeypatch: pytest.MonkeyPatch, missing: str
-) -> None:
-    for name in (
-        coding.GIT_APP_ID_ENV,
-        coding.GIT_APP_CLIENT_ID_ENV,
-        coding.GIT_APP_SECRET_ENV,
-        coding.GIT_APP_KEY_ENV,
-    ):
-        monkeypatch.setenv(name, "" if name == missing else "value")
-    with pytest.raises(RuntimeError, match=missing):
-        coding.github_app_id()
+def _skill() -> str:
+    return skill_registry((coding.manifest(),)).named("coding").instructions
 
 
 def test_coding_result_uses_only_the_shared_register_bound() -> None:
@@ -86,7 +55,7 @@ def test_pinned_patch_dependency_repair_is_bounded() -> None:
 
 def test_coding_profile_leaves_member_delivery_to_the_parent() -> None:
     profile = coding.CODING_PROFILE
-    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    instructions = _skill()
     assert "share_file" not in profile.tool_names
     assert "A coding subagent has no `share_file`" in instructions
     assert "under the shared delivery register" in instructions
@@ -104,7 +73,7 @@ def test_the_child_prompt_names_the_shared_workspace_and_checks_before_cloning()
 
 
 def test_the_setup_contract_isolates_parallel_writers() -> None:
-    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    instructions = _skill()
     assert "Never point two live children at one checkout" in instructions
     assert "the cloning child only creates and verifies the canonical checkout" in instructions
     setup = (
@@ -124,7 +93,7 @@ def test_the_setup_contract_isolates_parallel_writers() -> None:
 
 
 def test_both_ends_of_the_setup_only_clone_stop_after_the_checkout() -> None:
-    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    instructions = _skill()
     setup = (
         "verify the checkout, report the checked-out branch as the base, then finish without task "
         "work"
@@ -175,7 +144,8 @@ def test_the_escalation_prompt_bounds_the_reading_without_naming_a_window() -> N
 
 def test_the_escalation_prompt_reads_the_workspace_before_github() -> None:
     """The child shares the parent's workspace, so the checkout and the earlier workers' notes are
-    already on disk. GitHub answers only what no file can hold, and a stale file loses to it."""
+    already on disk. GitHub answers only what no file can hold, and a stale file loses to it — read
+    with `gh api`, which the member's connected GitHub account authenticates."""
     assert "The checkout already in this workspace." in ESCALATION_PROMPT
     assert "Never re-clone a repository that is already on disk." in ESCALATION_PROMPT
     assert "/workspace/pr-babysitter/rules.md" in ESCALATION_PROMPT
@@ -187,8 +157,12 @@ def test_the_escalation_prompt_reads_the_workspace_before_github() -> None:
     assert (
         "Where a file on disk disagrees with GitHub about those, the file is stale."
     ) in ESCALATION_PROMPT
-    assert "`gh` is not authenticated here, so reach the API with" in ESCALATION_PROMPT
-    assert 'curl -H "Authorization: $UFO_GITHUB_API_AUTH"' in ESCALATION_PROMPT
+    assert (
+        "Read a failing check's cause from its check-run annotations, with `gh api` — it is "
+        "authenticated as the member's connected GitHub account."
+    ) in ESCALATION_PROMPT
+    assert "not authenticated" not in ESCALATION_PROMPT
+    assert "curl" not in ESCALATION_PROMPT
 
 
 def test_the_escalation_prompt_bounds_the_rung_to_one_attempt() -> None:
@@ -207,8 +181,9 @@ def test_the_escalation_prompt_bounds_the_rung_to_one_attempt() -> None:
 
 
 def test_the_escalation_prompt_carries_the_coding_write_authority_and_no_more() -> None:
-    """A stronger model gets no wider authority. Merging stays with the parent, and a branch the
-    child did not write alone is adopted rather than overwritten."""
+    """A stronger model gets no wider authority. Merging stays with the parent, a branch the child
+    did not write alone is adopted rather than overwritten, and GitHub is reached as the member's
+    own connected account — no deploy identity, no connector tool, no delivery tool."""
     assert "Commit and push to this pull request's own branch." in ESCALATION_PROMPT
     assert (
         "Adopt a commit you did not create; never force-push and never discard one."
@@ -220,6 +195,8 @@ def test_the_escalation_prompt_carries_the_coding_write_authority_and_no_more() 
     ) in ESCALATION_PROMPT
     assert "Never weaken a test or edit CI to stop a check running." in ESCALATION_PROMPT
     assert "Merging belongs to your parent." in ESCALATION_PROMPT
+    assert "authenticated as the member's connected GitHub account" in ESCALATION_PROMPT
+    assert "UFO_GITHUB_API_AUTH" not in ESCALATION_PROMPT
     assert {"call_external_tool", "describe_external_tools", "share_file"}.isdisjoint(
         coding.FABLE_ESCALATION_PROFILE.tool_names
     )
@@ -230,41 +207,65 @@ def test_extended_context_survives_the_spawn_payload_serialization() -> None:
     assert json.loads(spawned.model_dump_json())["extended_context"] is True
 
 
-def test_private_git_access_does_not_infer_from_the_connector() -> None:
-    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
-
+def test_an_unauthenticated_clone_routes_to_the_connect_account_handoff() -> None:
+    """A private clone that fails to authenticate has one next action: the `connect_account`
+    handoff for `github`. Neither a connector listing without a GitHub row nor a snapshot fetched
+    another way stands in for it."""
+    instructions = _skill()
     assert (
-        "A working connector is never a reason to skip `connect_github` when private git access "
-        "is missing."
+        "A clone that fails to authenticate means GitHub is not connected. Start the "
+        "`connect_account` handoff with `provider: github` — that is the next action, not a "
+        "fallback route."
     ) in instructions
+    assert (
+        "even when a connector listing shows no GitHub row, because the listing is not the verdict"
+    ) in instructions
+    assert "no `gh api` file reads, and no zipball, tarball, or raw-content fetch" in instructions
+    assert "Never accept a token pasted into the conversation." in instructions
+    assert "connect_github" not in instructions
     assert "Composio" not in instructions
 
 
-def test_coding_manifest_declares_the_github_credentials_the_proxy_swaps() -> None:
-    """The Git and API wires get the same credential in their required authentication shapes."""
-    installation, slot, api = coding.manifest().credentials
-    assert installation.name == "github_app_installation"
-    assert installation.injection is None
-    assert installation.member_filled is False
-    assert slot.member_filled is True
-    assert slot.name == "github_git_token"
-    assert slot.injection is not None
-    assert (slot.injection.host, slot.injection.header) == ("github.com", "Authorization")
-    assert slot.injection.git_basic_user == "x-access-token"
-    assert slot.injection.env is None
-    assert api.name == "github_api_auth"
-    assert api.member_filled is False
-    assert api.injection is not None
-    assert (api.injection.host, api.injection.header) == ("api.github.com", "Authorization")
-    assert api.injection.env == "UFO_GITHUB_API_AUTH"
-    assert api.injection.git_basic_user is None
-    assert isinstance(api.source, coding.GitHubAPIAuth)
-    assert api.source.tokens is coding.GITHUB_API_TOKENS
+def test_one_github_connection_covers_clone_push_gh_and_the_api() -> None:
+    """The skill and both prompts describe one GitHub credential: the member's connected account,
+    riding `GH_TOKEN` as a sentinel the sandbox never resolves — no App installation, no separate
+    git token, no deploy-held API identity."""
+    instructions = _skill()
+    assert (
+        "One connection covers GitHub whole: private `git clone` and `git push`, `gh`, and issue "
+        "and pull-request reads and writes through the API all ride the member's connected GitHub "
+        "account."
+    ) in instructions
+    assert (
+        "Inside the sandbox `GH_TOKEN` holds a sentinel, never the token, and `gh`, `git clone`, "
+        "and `git push` authenticate through it."
+    ) in instructions
+    assert (
+        "A push and a GitHub API write both use the member's connected GitHub account."
+    ) in " ".join(instructions.split())
+    assert (
+        "`gh`, `git clone`, and `git push` authenticate as the member's connected GitHub account "
+        "through `GH_TOKEN`. It holds a sentinel the egress proxy swaps for the token; never print "
+        "it."
+    ) in CODING_PROMPT
+    assert (
+        "A clone or API call refused for authentication means GitHub is not connected for this "
+        "member: end your turn and say so."
+    ) in CODING_PROMPT
+    for text in (instructions, CODING_PROMPT, ESCALATION_PROMPT):
+        assert "UFO_GITHUB_API_AUTH" not in text
+        assert "github_app_installation" not in text
+        assert "github_git_token" not in text
 
 
-def test_coding_prompt_and_skill_consume_the_github_api_credential() -> None:
-    command = 'GH_TOKEN="$UFO_GITHUB_API_AUTH"'
-    skill = (coding.SKILLS_ROOT / "coding" / "SKILL.md").read_text()
-
-    assert command in coding.CODING_PROMPT
-    assert command in skill
+def test_the_pack_declares_no_credential_tool_route_or_fact_of_its_own() -> None:
+    """GitHub rides the `github` connector's CLI credential, so the pack holds nothing the proxy
+    would swap and nothing a member would connect through it: two child profiles and one skill."""
+    manifest = coding.manifest()
+    assert manifest.credentials == ()
+    assert manifest.tools == ()
+    assert manifest.routes == ()
+    assert manifest.workspace_facts == ()
+    assert manifest.sandbox_internet is True
+    assert [profile.name for profile in manifest.subagents] == ["coding", "fable_escalation"]
+    assert [skill.path.name for skill in manifest.skills] == ["coding"]

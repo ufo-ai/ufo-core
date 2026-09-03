@@ -17,7 +17,7 @@ fn python_rule_contract_deserializes_to_the_rust_rule_enum() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rule_contract.json");
     let json = std::fs::read_to_string(path).expect("read rule_contract.json");
     let fixture: Fixture = serde_json::from_str(&json).expect("deserialize the rule contract");
-    assert_eq!(fixture.rules.len(), 6, "one of each rule variant");
+    assert_eq!(fixture.rules.len(), 5, "one of each rule variant");
 
     assert!(matches!(
         &fixture.rules[0],
@@ -42,14 +42,6 @@ fn python_rule_contract_deserializes_to_the_rust_rule_enum() {
     ));
     assert!(matches!(
         &fixture.rules[4],
-        Rule::Forward { host, header, sentinel, account_id }
-            if host == "api.github.com"
-                && header == "authorization"
-                && sentinel == "UFO_SENTINEL_GRANT_acct-9f3c"
-                && account_id == "acct-9f3c"
-    ));
-    assert!(matches!(
-        &fixture.rules[5],
         Rule::Service { host, daemon_prefix }
             if host == "registry.npmjs.org"
                 && daemon_prefix.as_deref() == Some("/pkg/registry.npmjs.org")

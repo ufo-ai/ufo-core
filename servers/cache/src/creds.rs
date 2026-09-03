@@ -5,15 +5,16 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 /// The credential and isolation principal the control plane returns for one upstream. The daemon
-/// mints nothing; it can only ask for the credential of the `(workspace, user, host)` the proxy
-/// stamped on the request, so it can never obtain another customer's token.
+/// mints nothing; it can only ask for the credential of the principal the proxy stamped on the
+/// request — workspace, user, and the run or probe token the sandbox presented — so it can never
+/// obtain another customer's token.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     /// Basic-auth username and secret to use upstream. `None` => fetch anonymously.
     pub username: Option<String>,
     pub token: Option<String>,
-    /// Mirror-isolation key. Opaque path segment dictated by the control plane
-    /// (`public`, `w<ws>-org-<org>`, `w<ws>-u<user>`). Never interpreted here.
+    /// Mirror-isolation key. Opaque path segment dictated by the control plane (`public`, or
+    /// `w<ws>-<account>`). Never interpreted here.
     pub principal: String,
 }
 
@@ -26,10 +27,14 @@ struct CallbackBody {
     principal: String,
 }
 
-/// TTL for a cached credential. Installation tokens outlive this comfortably; the principal is
-/// deterministic, so a re-resolve never moves a repo's mirror.
+/// TTL for a cached credential. The control plane is re-asked for the principal's connector OAuth
+/// token once this elapses; the principal is deterministic, so a re-resolve never moves a repo's
+/// mirror.
 const CREDENTIAL_TTL: Duration = Duration::from_secs(240);
 
+/// Asks the control plane's `/internal/git-credential` for the credential of the principal the
+/// proxy stamped — workspace, user, token — and holds each answer for `CREDENTIAL_TTL`. The only
+/// secret the daemon carries itself is the control token this callback authenticates with.
 pub struct CredentialClient {
     http: reqwest::Client,
     endpoint: String,
@@ -54,16 +59,19 @@ impl CredentialClient {
         &self,
         workspace: &str,
         user: &str,
+        proxy_auth: &str,
         host: &str,
         repo_path: &str,
     ) -> Result<Resolved, String> {
-        let key = format!("{workspace}\0{user}\0{host}\0{repo_path}");
+        let key = format!("{workspace}\0{user}\0{proxy_auth}\0{host}\0{repo_path}");
         if let Some((resolved, at)) = self.cache.lock().await.get(&key) {
             if at.elapsed() < CREDENTIAL_TTL {
                 return Ok(resolved.clone());
             }
         }
-        let resolved = self.fetch(workspace, user, host, repo_path).await?;
+        let resolved = self
+            .fetch(workspace, user, proxy_auth, host, repo_path)
+            .await?;
         self.cache
             .lock()
             .await
@@ -75,6 +83,7 @@ impl CredentialClient {
         &self,
         workspace: &str,
         user: &str,
+        proxy_auth: &str,
         host: &str,
         repo_path: &str,
     ) -> Result<Resolved, String> {
@@ -85,6 +94,7 @@ impl CredentialClient {
             .json(&serde_json::json!({
                 "workspace_id": workspace,
                 "user_id": user,
+                "proxy_auth": proxy_auth,
                 "host": host,
                 "repo_path": repo_path,
             }))

@@ -1512,7 +1512,7 @@ async def _declared_files(
 
 ASK_UFO_AGAIN = "Ask ufo to connect Slack again."
 CONTINUE_IN_SLACK = "Continue in Slack"
-TALK_IN_SLACK = "You can close this page. Talk to ufo in Slack."
+TALK_IN_SLACK = "Close this tab. Talk to ufo in Slack."
 
 
 async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response:

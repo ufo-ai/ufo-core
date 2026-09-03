@@ -30,7 +30,7 @@ const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
  *  shortest path to the handoff this file is about. */
 const FIRST_RUN = {
   providers: [{ name: "github", label: "GitHub" }],
-  connectors: [{ name: "github", label: "GitHub", installed: false }],
+  connectors: [],
   imessage: false,
   model_key_held: true,
   actions: { member: [], memory: [RECORD_VIEW], enrichment_profile: [] },

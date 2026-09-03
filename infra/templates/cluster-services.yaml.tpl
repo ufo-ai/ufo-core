@@ -69,6 +69,10 @@ spec:
     - {secretKey: PIPEDREAM_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: pipedream-client-secret}}
     - {secretKey: PIPEDREAM_PROJECT_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-project-id}}
     - {secretKey: PIPEDREAM_GMAIL_OAUTH_APP_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-gmail-oauth-app-id}}
+    # The deploy's own GitHub OAuth client, registered with Pipedream: consent rides it so Pipedream
+    # releases each connected account's token, which the egress proxy swaps in for the sandbox's
+    # GH_TOKEN sentinel on clone, push, and gh.
+    - {secretKey: PIPEDREAM_GITHUB_OAUTH_APP_ID, remoteRef: {key: ${secret_api_keys}, property: pipedream-github-oauth-app-id}}
     - {secretKey: E2B_API_KEY, remoteRef: {key: ${secret_api_keys}, property: e2b-api-key}}
     # The hosted browser every browser subagent run drives over CDP; read in-process by serve to
     # mint and release that run's session, never injected at the proxy.
@@ -91,14 +95,6 @@ spec:
     - {secretKey: SLACK_SIGNING_SECRET, remoteRef: {key: ${secret_api_keys}, property: slack-signing-secret}}
     - {secretKey: SPECTRUM_PROJECT_ID, remoteRef: {key: ${secret_api_keys}, property: spectrum-project-id}}
     - {secretKey: SPECTRUM_PROJECT_SECRET, remoteRef: {key: ${secret_api_keys}, property: spectrum-project-secret}}
-    # This deploy's GitHub App: id and client id name it, the client secret completes the install
-    # OAuth exchange, and the PEM signs the JWT that mints an installation token per turn. All four
-    # or none — serve fails loud on a half-set registration. The PEM is the value, not a path, so it
-    # rides the same secret projection as every other credential and needs no mounted file.
-    - {secretKey: GITHUB_APP_ID, remoteRef: {key: ${secret_api_keys}, property: github-app-id}}
-    - {secretKey: GITHUB_APP_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: github-app-client-id}}
-    - {secretKey: GITHUB_APP_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: github-app-client-secret}}
-    - {secretKey: GITHUB_APP_PRIVATE_KEY, remoteRef: {key: ${secret_api_keys}, property: github-app-private-key}}
     # The Flagship app this deploy reads feature flags from ([flags] backend): the app id and the
     # account name it, the token carries the Flagship Evaluate permission. All three or none — serve
     # builds no flag provider without them and every flag resolves to the default its call site

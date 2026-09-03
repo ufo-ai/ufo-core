@@ -1175,9 +1175,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
         ext_by_tool[sample.TOOL_NAME],
     ):
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
-            "bind_installation",
             "get",
-            "resolve",
             "rotate",
             "stored",
             "workspace_id",
@@ -2112,9 +2110,5 @@ async def test_core_reads_each_declared_workspace_fact_through_its_own_context(
     with ws(workspace_id):
         if held:
             await ScopedStore(extension=sample.NAME).put(sample.WORKSPACE_FACT_KEY, True)
-        lines = await turn_workspace_facts(
-            (_sample_manifest(),),
-            CredentialStore(fernet=Fernet(Fernet.generate_key())),
-            audience=SHARED_AUDIENCE,
-        )
+        lines = await turn_workspace_facts((_sample_manifest(),), audience=SHARED_AUDIENCE)
     assert lines == ((sample.WORKSPACE_FACT_LINE,) if held else ())

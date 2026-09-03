@@ -580,8 +580,8 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-skill",),
     ),
     SkillLoadCase(
-        "coding-github-app-api-identity",
-        "Have a coding agent publish a pull-request review as our installed ufo GitHub App.",
+        "coding-github-connected-review",
+        "Have a coding agent publish a pull-request review through our connected GitHub account.",
         expected="coding",
         forbidden=("create-skill",),
     ),

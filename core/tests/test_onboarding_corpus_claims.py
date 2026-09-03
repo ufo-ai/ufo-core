@@ -705,23 +705,25 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="GitHub issue and pull-request reads/writes ride the connector account, never the"
-        " installed App",
+        claim="one GitHub connection covers API reads and writes, private clone, and push",
         corpus="references/troubleshooting.md",
-        phrase="a GitHub connector account that reads and writes issues and pull requests"
-        " through the API",
+        phrase="One GitHub connection covers the API, clone, and push: issue and pull-request reads"
+        " and writes, private `git clone`, and `git push` all ride the member's own connected"
+        " GitHub account",
         source=CODING_SKILL_MD,
-        pattern=r"Issue and pull-request reads and writes through the API ride the workspace's"
-        r" GitHub connector account",
+        pattern=r"One connection covers GitHub whole: private `git clone` and `git push`, `gh`, and"
+        r" issue and pull-request reads and writes through the API all ride the member's connected"
+        r" GitHub account",
     ),
     Claim(
-        claim="the installed GitHub App grants git clone/push, scoped to the repositories chosen"
-        " at install",
+        claim="a GitHub connection is per member, so a clone that fails for one member means they"
+        " have not connected their own account",
         corpus="references/troubleshooting.md",
-        phrase="the installed ufo GitHub App that grants git access — clone and push — to the"
-        " repositories chosen when it was installed",
+        phrase="A connection is per member, so a clone that fails for them means they have not"
+        " connected their own account",
         source=CODING_SKILL_MD,
-        pattern=r"choose the organization and which repositories the ufo App may reach",
+        pattern=r"A connection is the member's own, so a clone that works for one member and not"
+        r" another means the second member has not connected",
     ),
     Claim(
         claim="bring-your-own-key is not Anthropic-specific — Bedrock is a second provider a"

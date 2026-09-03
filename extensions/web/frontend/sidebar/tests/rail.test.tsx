@@ -1351,7 +1351,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/connections": () => json({ connections: [] }),
     "/workspace/first-run": () => json({ providers: [], connectors: [] }),
-    "/github/coverage": () => json({ api: false, git_push: false, sources: false }),
+    "/github/coverage": () => json({ api: false, sources: false }),
     "/settings": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);

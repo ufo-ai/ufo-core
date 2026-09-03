@@ -63,7 +63,6 @@ MOVED_CANDIDATES = frozenset(
         "revoke_web_access",
         "restore_application",
         "request_credentials",
-        "connect_github",
         "read_private_transcript",
         "skill_search",
         "slack_connect",

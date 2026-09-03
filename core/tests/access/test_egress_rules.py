@@ -1,19 +1,18 @@
-from collections.abc import Mapping
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.egress_rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
     REQUEST_METER_DIMENSION,
     SENTINEL_MODEL_KEY,
     ConnectorTransferHosts,
-    ForwardRule,
     InjectionRule,
     InternetRule,
     MeterRule,
@@ -88,17 +87,29 @@ def test_only_the_provider_host_is_allowed() -> None:
 
 
 @dataclass(frozen=True)
-class _EchoForwarder:
-    async def forward(
-        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
-    ) -> ForwardedResponse:
-        return ForwardedResponse(status=200, headers={}, body=b"")
+class _Tokens:
+    """The broker's token read: deterministic per account, recorded per call, and refused for the
+    accounts in `broken` — the one grant fault the derivation has to survive."""
+
+    broken: frozenset[str] = frozenset()
+    asked: list[tuple[UUID, str]] = field(default_factory=list)
+
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        self.asked.append((workspace_id, account_id))
+        if account_id in self.broken:
+            raise RuntimeError(f"broker cannot authenticate {account_id}")
+        return f"token-{account_id}"
 
 
 CLI_HOST = "api.hub.test"
-CLI = CliCredential(env="HUB_TOKEN", header="authorization", forward=_EchoForwarder())
+GIT = GitWire(host="github.test", basic_user="x-access-token", helper="!hub auth git-credential")
 ACTING = uuid4()
 OTHER = uuid4()
+WORKSPACE = uuid4()
+
+
+def _cli(tokens: _Tokens, git: GitWire | None = None) -> CliCredential:
+    return CliCredential(env="HUB_TOKEN", header="authorization", secret=tokens, git=git)
 
 
 def _grant(account: str = "acct-1", grantor=ACTING, shared: bool = False) -> Grant:
@@ -151,29 +162,110 @@ def test_grant_sentinel_is_deterministic_per_account() -> None:
     assert "acct-1" in grant_sentinel("acct-1")
 
 
-def test_cli_rule_for_the_acting_members_own_grant() -> None:
-    rules = derive_cli_rules((_grant(),), MemberAuthority(ACTING), {"hub": CLI})
-    forward = next(r for r in rules if isinstance(r, ForwardRule))
-    assert forward.host == CLI_HOST
-    assert forward.header == "authorization"
-    assert forward.sentinel == grant_sentinel("acct-1")
-    assert forward.account_id == "acct-1"
-    assert forward.forward is CLI.forward
+async def test_cli_rule_injects_the_acting_members_own_token_on_the_grant_host() -> None:
+    tokens = _Tokens()
+    rules = await derive_cli_rules(
+        (_grant(),), MemberAuthority(ACTING), {"hub": _cli(tokens)}, WORKSPACE
+    )
+    assert rules == (
+        InjectionRule(
+            host=CLI_HOST,
+            header="authorization",
+            sentinel=grant_sentinel("acct-1"),
+            real="token-acct-1",
+        ),
+    )
+    assert tokens.asked == [(WORKSPACE, "acct-1")]
 
 
-def test_no_cli_rule_for_a_foreign_private_grant() -> None:
-    assert derive_cli_rules((_grant(grantor=OTHER),), MemberAuthority(ACTING), {"hub": CLI}) == ()
+async def test_no_cli_rule_for_a_foreign_private_grant() -> None:
+    tokens = _Tokens()
+    rules = await derive_cli_rules(
+        (_grant(grantor=OTHER),), MemberAuthority(ACTING), {"hub": _cli(tokens)}, WORKSPACE
+    )
+    assert rules == ()
+    assert tokens.asked == []
 
 
-def test_no_cli_rule_for_a_provider_without_a_declared_cli() -> None:
-    assert derive_cli_rules((_grant(),), MemberAuthority(ACTING), {}) == ()
+async def test_no_cli_rule_for_a_provider_without_a_declared_cli() -> None:
+    assert await derive_cli_rules((_grant(),), MemberAuthority(ACTING), {}, WORKSPACE) == ()
 
 
-def test_a_memberless_turn_forwards_only_shared_grants() -> None:
+async def test_workspace_authority_injects_shared_grants_and_a_member_adds_its_own() -> None:
+    grants = (
+        _grant(),
+        _grant(account="acct-2", grantor=OTHER, shared=True),
+        _grant(account="acct-3", grantor=OTHER),
+    )
+    clis = {"hub": _cli(_Tokens())}
+
+    memberless = await derive_cli_rules(grants, WORKSPACE_AUTHORITY, clis, WORKSPACE)
+    acting = await derive_cli_rules(grants, MemberAuthority(ACTING), clis, WORKSPACE)
+
+    assert [r.sentinel for r in memberless] == [grant_sentinel("acct-2")]
+    assert [r.sentinel for r in acting] == [grant_sentinel("acct-1"), grant_sentinel("acct-2")]
+
+
+async def test_a_git_wire_scopes_meters_and_injects_basic_on_the_git_host_once() -> None:
+    """The API host takes the raw token as the CLI sends it; the git host takes the same token as
+    the password half of a Basic credential, under the same sentinel. Two usable accounts inject
+    twice on the git host but scope and meter it once — a request is one request however many
+    accounts could authenticate it."""
     grants = (_grant(), _grant(account="acct-2", grantor=OTHER, shared=True))
-    rules = derive_cli_rules(grants, WORKSPACE_AUTHORITY, {"hub": CLI})
-    accounts = [r.account_id for r in rules if isinstance(r, ForwardRule)]
-    assert accounts == ["acct-2"]
+    rules = await derive_cli_rules(
+        grants, MemberAuthority(ACTING), {"hub": _cli(_Tokens(), git=GIT)}, WORKSPACE
+    )
+    assert rules == (
+        InjectionRule(
+            host=CLI_HOST,
+            header="authorization",
+            sentinel=grant_sentinel("acct-1"),
+            real="token-acct-1",
+        ),
+        InjectionRule(
+            host=CLI_HOST,
+            header="authorization",
+            sentinel=grant_sentinel("acct-2"),
+            real="token-acct-2",
+        ),
+        ScopeRule(allowed_hosts=frozenset({GIT.host})),
+        InjectionRule(
+            host=GIT.host,
+            header="authorization",
+            sentinel=grant_sentinel("acct-1"),
+            real="token-acct-1",
+        ),
+        InjectionRule(
+            host=GIT.host,
+            header="authorization",
+            sentinel=grant_sentinel("acct-2"),
+            real="token-acct-2",
+        ),
+        MeterRule(host=GIT.host, dimension=REQUEST_METER_DIMENSION),
+    )
+
+
+async def test_a_grant_whose_token_the_broker_refuses_is_withheld_alone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    grants = (_grant(), _grant(account="acct-2", grantor=OTHER, shared=True))
+    clis = {"hub": _cli(_Tokens(broken=frozenset({"acct-1"})), git=GIT)}
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        rules = await derive_cli_rules(grants, MemberAuthority(ACTING), clis, WORKSPACE)
+
+    assert [r.sentinel for r in rules if isinstance(r, InjectionRule)] == [
+        grant_sentinel("acct-2"),
+        grant_sentinel("acct-2"),
+    ]
+    assert ScopeRule(allowed_hosts=frozenset({GIT.host})) in rules
+    withheld = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "egress.cli_credential_failed"
+    ]
+    assert [(entry["provider"], entry["account_id"]) for entry in withheld] == [("hub", "acct-1")]
+    assert withheld[0]["error_class"] == "RuntimeError"
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Load when asked to inspect or change source code, fix bugs, produce patches or diffs, work in or clone repositories, use pinned commits, check GitHub access, or delegate an installed-App GitHub write. On repository tasks, load coding first and call no other tool until it returns.
+description: Load when asked to inspect or change source code, fix bugs, produce patches or diffs, work in or clone repositories, use pinned commits, or check GitHub access. On repository tasks, load coding first and call no other tool until it returns.
 ---
 # Coding Subagent Routing
 
@@ -47,9 +47,9 @@ For fan-out, the cloning child only creates and verifies the canonical checkout.
 
 Before calling `spawn(target="coding", ...)`, choose exactly one setup mode and state it at the start of the objective:
 
-- **Clone a repo:** Use for the first spawn of the turn that needs the repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, then work inside it.` For fan-out, use: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, verify the checkout, report the checked-out branch as the base, then finish without task work.` Name that path and reuse it below. A public repository clones with no connection; a private one needs the workspace connected to GitHub (below).
+- **Clone a repo:** Use for the first spawn of the turn that needs the repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, then work inside it.` For fan-out, use: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, verify the checkout, report the checked-out branch as the base, then finish without task work.` Name that path and reuse it below. A public repository clones with no connection; a private one needs the member's GitHub account connected (below).
 
-  **A clone that fails to authenticate means the workspace is not connected. Run the `connect_github` action on the `github-app-installation` credential object — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
+  **A clone that fails to authenticate means GitHub is not connected. Start the `connect_account` handoff with `provider: github` — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no zipball, tarball, or raw-content fetch through any tool. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
 - **Pinned commit:** Use when the task names an exact commit. Start the objective with: `Repository setup: fetch commit <sha> from https://github.com/org/repo into /workspace/org-repo with git at depth 1 and check out exactly that commit, then work inside it. The checkout is the only route to the files — no raw.githubusercontent.com, zipball, or tarball fetches.` As with a clone, you never run the fetch — the first child does.
 - **Existing checkout:** Use for any later spawn after the child using that path has finished. Start the objective with: `Repository setup: use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. Do not clone.` The URL is what the child falls back to if the path is not there.
 - **Local checkout:** Use for every spawn that overlaps another child. Start the objective with: `Repository setup: copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, base the work on <base>, keep the source as workspace, use https://github.com/org/repo as origin, then work inside it.` This copies from disk without a fetch, separates the source's branches from GitHub's, and keeps pushes pointed at GitHub.
@@ -59,23 +59,11 @@ A coding subagent should not spend startup time deciding whether to clone.
 
 When the requesting message's `<context>` carries a `source`, put it in the objective too — a subagent never sees the parent's context — so a PR or issue it opens can name where the request came from.
 
-## Connecting GitHub for private repositories
+## Connecting GitHub
 
-A private clone or push needs the workspace connected, and only a workspace admin can do it. Run the `connect_github` action on the `github-app-installation` credential object and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under that admin's authorization that they reach the installation. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.
+One connection covers GitHub whole: private `git clone` and `git push`, `gh`, and issue and pull-request reads and writes through the API all ride the member's connected GitHub account. When a clone fails to authenticate or a GitHub API call is refused, start the handoff with `connect_account` carrying `provider: github` — even when a connector listing shows no GitHub row, because the listing is not the verdict: the call either begins the handoff or names the deploy's actual gap. The member authorizes on GitHub and the connection completes itself; nothing is pasted back and no token is ever typed. Never accept a token pasted into the conversation.
 
-For a repository outside any organization that installed the App, the fallback is an admin's fine-grained personal access token with Contents read and write, collected privately into `github_git_token`. Never accept a token pasted into the conversation itself.
-
-With either in place, `git clone` and `git push` authenticate inside the sandbox — which holds only a sentinel, never the credential.
-
-For a GitHub API write that must appear as the installed ufo GitHub App, tell the coding subagent to
-run `GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api ...`. Keep the assignment on that command and never
-print the variable. An unmodified `gh` command uses the connected GitHub account instead.
-
-**A GitHub connector grant is not git access.** It authenticates `gh` and `call_external_tool` against `api.github.com` only; git reaches `github.com`, which the grant does not cover. A working connector is never a reason to skip `connect_github` when private git access is missing. So when asked whether GitHub is connected, answer for the thing being asked about: a working issue read, a connected-account id, or a `credential` object proves the API works and proves nothing about clone or push. If git has no credential, the honest answer is that git is not connected and an admin needs to run the connect flow — never cite the grant as evidence that a clone should work.
-
-## Connecting GitHub for issues and API operations
-
-The reverse holds too: git access is not API access. Issue and pull-request reads and writes through the API ride the workspace's GitHub connector account, which `connect_github` never grants. When API operations are missing, start the handoff with `connect_account` carrying `provider: github` — even when a connector listing shows no GitHub row, because the listing is not the verdict: the call either begins the handoff or names the deploy's actual gap. A request to set up GitHub for both repositories and issues takes both connects in the same turn. And when only the API side is missing — clone and push already work — `connect_github` has nothing left to grant and re-running it is noise for the admin: the API-side move is the connector handoff, with a privately collected token as the fallback on a deploy without one.
+Inside the sandbox `GH_TOKEN` holds a sentinel, never the token, and `gh`, `git clone`, and `git push` authenticate through it. A connection is the member's own, so a clone that works for one member and not another means the second member has not connected — say so rather than citing the first member's account.
 
 ## Finding the Repository
 
@@ -97,8 +85,8 @@ When a task involves both discovery and coding (e.g., "find tickets and implemen
 ## Returned files
 
 A coding subagent has no `share_file`. Its files remain in the shared `/workspace` for the parent to
-deliver under the shared delivery register. A push uses the workspace's git connection. A GitHub
-API write uses either the installed App assignment above or the GitHub connector.
+deliver under the shared delivery register. A push and a GitHub API write both use the member's
+connected GitHub account.
 
 ## Examples
 

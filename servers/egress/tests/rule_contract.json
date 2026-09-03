@@ -23,13 +23,6 @@
       "dimension": "tokens"
     },
     {
-      "kind": "forward",
-      "host": "api.github.com",
-      "header": "authorization",
-      "sentinel": "UFO_SENTINEL_GRANT_acct-9f3c",
-      "account_id": "acct-9f3c"
-    },
-    {
       "kind": "service",
       "host": "registry.npmjs.org",
       "daemon_prefix": "/pkg/registry.npmjs.org"

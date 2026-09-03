@@ -41,13 +41,13 @@ from ufo.runtime.access.connectors import (
     ConnectorResolver as ConnectorResolver,
 )
 from ufo.runtime.access.connectors import (
-    ForwardedResponse as ForwardedResponse,
+    GitWire as GitWire,
+)
+from ufo.runtime.access.connectors import (
+    GrantSecret as GrantSecret,
 )
 from ufo.runtime.access.connectors import (
     GrantUnusable as GrantUnusable,
-)
-from ufo.runtime.access.connectors import (
-    RequestForwarder as RequestForwarder,
 )
 from ufo.runtime.access.connectors import (
     StagedUpload as StagedUpload,

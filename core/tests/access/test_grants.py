@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
@@ -16,12 +16,11 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import RunToken
 from ufo.host.ext.loader import connection_hooks
 from ufo.host.tools.builtins import ConnectAccountInput, connect_account_handler
-from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
     ConnectorTransferHosts,
-    ForwardRule,
     InjectionRule,
     InternetRule,
     ScopeRule,
@@ -91,11 +90,9 @@ class StubProvider:
         return OAuthAccount(account_id=self.account_id, account_label=self.account_label)
 
 
-class _ForbiddenForwarder:
-    async def forward(
-        self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes
-    ) -> ForwardedResponse:
-        raise AssertionError("cross-agent forwarding")
+class _UnaskedSecret:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        raise AssertionError(f"cross-agent token read for {account_id}")
 
 
 async def _workspace() -> UUID:
@@ -665,9 +662,8 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> None:
     """Per-agent authentication isolation: agent A's resolved rules carry an exact rule for A's
-    provider only — B's host is neither scoped nor forwardable in A's set, so A cannot inject or
-    forward through B's account. A's internet rule may reach B's host opaquely, but with no
-    credential."""
+    provider only — B's host is neither scoped nor injected in A's set, so A cannot authenticate
+    through B's account. A's internet rule may reach B's host opaquely, but with no credential."""
     workspace_id = await _workspace()
     member_id, agent_a = await _member_agent(workspace_id)
     agent_b = await _agent(workspace_id, "assistant-b")
@@ -701,15 +697,13 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
         grants=store,
         internet=(InternetRule(),),
         clis={
-            "stub": CliCredential(
-                env="STUB_TOKEN", header="authorization", forward=_ForbiddenForwarder()
-            )
+            "stub": CliCredential(env="STUB_TOKEN", header="authorization", secret=_UnaskedSecret())
         },
     )
     rules_a = await resolver.resolve(RunToken(workspace_id, turn_a, WORKSPACE_AUTHORITY))
     assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_a)
     assert not any(isinstance(r, ScopeRule) and HOST_B in r.allowed_hosts for r in rules_a)
-    assert not any(isinstance(r, ForwardRule) and r.host == HOST_B for r in rules_a)
+    assert not any(isinstance(r, InjectionRule) and r.host == HOST_B for r in rules_a)
     assert InternetRule() in rules_a
 
 

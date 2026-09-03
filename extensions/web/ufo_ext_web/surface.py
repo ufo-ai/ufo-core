@@ -3796,9 +3796,8 @@ ARTIFACTS_SLOT = ConversationSlotProvider(
 
 
 async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response:
-    """Member-fillable declared BYOK slots and their fill state — never a value, and never the
-    `member_filled=False` seals the `credential` object kind still lists (deploy machinery, not a
-    member's key). Workspace-scoped: the slots are the deploy's, shared across every agent."""
+    """Declared BYOK slots and their fill state — never a value. Workspace-scoped: the slots are the
+    deploy's, shared across every agent."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3867,8 +3866,7 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"installations": [entry.model_dump(mode="json") for entry in visible]})
 
 
-GITHUB_PROVIDER = "github"
-CONNECT_STEP_NAMES = (SURFACE_SLACK, GITHUB_PROVIDER)
+CONNECT_STEP_NAMES = (SURFACE_SLACK,)
 
 """The kind the enrichment extension keeps a member's company and role on, and the act that fills
 it from a confirmed website. A deploy without that kind offers the first run no website step."""
@@ -3896,27 +3894,23 @@ class ConnectorCatalogTile(BaseModel):
 
 async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
     """The connector catalog, read by the first run's selector and the Connect page: the tools a
-    team can say it uses, and the two of them the pages install themselves, beside whether the
-    workspace holds them. The read also states whether the first run offers iMessage — its extension
+    team can say it uses, and the one of them the pages install themselves, beside whether the
+    workspace holds it. The read also states whether the first run offers iMessage — its extension
     is in the deploy and this environment's flag is open — so every member sees that branch after
     the team step only where both hold, and whether the reading member holds a provider key of their
     own under either slot, which is the reader's answer rather than the workspace's: a key is what
-    the member's own turns run on, so the step that offers the door reads the member. Each connector
-    step reads the leg its own Connect act writes: Slack's is the surface installation
-    `slack_connect` binds, GitHub's the `git_push` credential leg `github/coverage` reports — what
-    `connect_github` fills by installing the App, and what a stored token fills where no
-    organization installed it — never the `api` leg, a broker connection row that act neither writes
-    nor needs. Both connector rows are the whole workspace's rather than the reader's audience: the
-    row is stated as a bare boolean, and a step narrowed by audience would tell a member to install
-    what the workspace already has. Both steps carry the catalog's own label, so a tile and the step
-    it reveals never name one connector two ways."""
+    the member's own turns run on, so the step that offers the door reads the member. The Slack step
+    reads the leg its own Connect act writes: the surface installation `slack_connect` binds. That
+    row is the whole workspace's rather than the reader's audience: it is stated as a bare boolean,
+    and a step narrowed by audience would tell a member to install what the workspace already has.
+    The step carries the catalog's own label, so a tile and the step it reveals never name one
+    connector two ways."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    member_id, _email, audience = resolved
+    member_id, _email, _audience = resolved
     surfaces = {entry.surface for entry in await ctx.list_installations()}
-    coverage = await ctx.github_coverage(member_id, admin=audience.admin)
-    held = {SURFACE_SLACK: SURFACE_SLACK in surfaces, GITHUB_PROVIDER: coverage.git_push}
+    held = {SURFACE_SLACK: SURFACE_SLACK in surfaces}
     model_key_held = await ctx.member_holds_own_model_key(member_id)
     return JSONResponse(
         {
@@ -4021,15 +4015,12 @@ class StarterApp:
 
 async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) -> frozenset[str]:
     """The connectors this workspace already reaches, in the catalog's own vocabulary: the broker
-    connections the reader's audience holds, the Slack the workspace installed, and the GitHub
-    `github/coverage` reports. Read live, on every start screen, so an account connected a moment
-    ago is never offered again."""
+    connections the reader's audience holds and the Slack the workspace installed. Read live, on
+    every start screen, so an account connected a moment ago is never offered again."""
     connections = await ctx.list_connections(member_id, admin=admin)
     held = {view.provider for view in connections}
     if SURFACE_SLACK in {entry.surface for entry in await ctx.list_installations()}:
         held.add(SURFACE_SLACK)
-    if (await ctx.github_coverage(member_id, admin=admin)).git_push:
-        held.add(GITHUB_PROVIDER)
     return frozenset(held)
 
 

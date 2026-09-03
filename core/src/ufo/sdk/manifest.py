@@ -4,9 +4,6 @@
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.runtime.access.credentials import (
-    CredentialSource as CredentialSource,
-)
-from ufo.runtime.access.credentials import (
     HostChoice as HostChoice,
 )
 from ufo.runtime.ext.conversation_slots import (

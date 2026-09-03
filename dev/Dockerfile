@@ -50,6 +50,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /usr/local/bin/uv
 COPY --from=control /usr/local/bin/ufo-control /usr/local/bin/ufo-control
 COPY --from=client /usr/local/bin/ufo /usr/local/bin/ufo
+# The same gh the client embeds, on PATH for the local sandbox carrier: git's credential helper
+# for github.com is `gh auth git-credential`, so a private clone from an in-process sandbox needs it.
+COPY --from=gh /go/bin/gh.gz /tmp/gh.gz
+RUN gunzip -c /tmp/gh.gz > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh && rm /tmp/gh.gz \
+    && gh --version
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 

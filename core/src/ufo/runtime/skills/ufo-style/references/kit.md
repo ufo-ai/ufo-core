@@ -41,7 +41,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 - **`ArtifactText`** — A shared text file, read to the fold.
 - **`FileSheet`** — A shared file opened in a Sheet:
 - **`MediaIcon`** — What a file with no picture of its own is drawn as:
-- **`isTextMedia`** — Whether a media type is text the page can show as text — `text/*` and JSON.
+- **`isTextMedia`** — Whether a media type is text the page can show as text — every `text/*` type, and the code and data types `application/*` carries.
 - **`useTextArtifact`** — A shared text file's characters, read to the byte the fold is cut at:
 
 ## audience
@@ -72,7 +72,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 
 ## brandMark
 
-- **`BrandMark`** — A provider's mark where the portal offers it, drawn round:
+- **`BrandMark`** — A provider's mark where the portal offers it, drawn as the square the theme hands over:
 
 ## breakdown
 

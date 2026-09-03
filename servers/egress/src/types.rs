@@ -30,8 +30,10 @@ impl Usage {
 }
 
 /// What egress is allowed for one principal, resolved by core `serve` and returned over the resolve
-/// RPC. `Injection.real` carries the resolved secret the proxy swaps onto the wire; the master key
-/// that produced it never crosses. The `kind`-tagged JSON is the one contract both sides share.
+/// RPC. `Injection.real` carries the resolved secret the proxy swaps onto the wire — a bare secret
+/// the request's scheme prefix stays in front of, or, for a sentinel riding as a Basic password, the
+/// complete `Basic …` header value; the master key that produced it never crosses. The `kind`-tagged
+/// JSON is the one contract both sides share.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Rule {
@@ -49,12 +51,6 @@ pub enum Rule {
     Meter {
         host: String,
         dimension: String,
-    },
-    Forward {
-        host: String,
-        header: String,
-        sentinel: String,
-        account_id: String,
     },
     Service {
         host: String,
@@ -121,9 +117,10 @@ impl Principal {
     }
 }
 
-/// A broker-forwarded provider response, reconstructed core-side and returned over the forward RPC.
+/// One tool-bridge dispatch's answer — core's status and JSON body — written back into the sandbox's
+/// tunnel as a complete HTTP response.
 #[derive(Clone, Debug)]
-pub struct ForwardedResponse {
+pub struct ToolBridgeResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,

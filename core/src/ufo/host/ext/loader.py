@@ -311,8 +311,8 @@ def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, .
 
 def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
     """Each installed connector's declared CLI credential, keyed by provider — the map the engine
-    reads to export each usable grant's sentinel env and the egress proxy's per-turn resolver folds
-    into its forward rules, both live from the current deploy's manifests."""
+    reads to export each usable grant's sentinel env and git helper, and the egress proxy's per-turn
+    resolver folds into its injection rules, both live from the current deploy's manifests."""
     return {
         connector.oauth.provider: connector.cli
         for manifest in manifests
@@ -456,10 +456,6 @@ def turn_tools(
             addressed_surfaces=frozenset(
                 surface.name for surface in manifest.surfaces if surface.addressed
             ),
-            credential_sources=tuple(
-                (slot.name, slot.source) for slot in manifest.credentials if slot.source is not None
-            ),
-            credential_store=credential_store,
             audience=audience,
             public_base_url=public_base_url,
             home_surface=home_surface,
@@ -897,10 +893,7 @@ def validate_ext_tools(
 
 
 async def turn_workspace_facts(
-    manifests: tuple[Manifest, ...],
-    credential_store: CredentialStore | None,
-    *,
-    audience: Audience,
+    manifests: tuple[Manifest, ...], *, audience: Audience
 ) -> tuple[str, ...]:
     """The lines every declared workspace fact says this workspace holds, in manifest order.
 
@@ -920,7 +913,6 @@ async def turn_workspace_facts(
             addressed_surfaces=frozenset(
                 surface.name for surface in manifest.surfaces if surface.addressed
             ),
-            credential_store=credential_store,
             audience=audience,
         )
         for fact in manifest.workspace_facts:

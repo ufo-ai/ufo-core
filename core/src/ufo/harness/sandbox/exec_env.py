@@ -2,8 +2,8 @@
 
 Two callers open a conversation's sandbox to run a command in it: the turn opener, under the turn's
 run token, and an off-turn probe, under its own probe token. Both need the same derivations — git's
-proxy-auth and credential config, the connector CLI sentinels, the conversation's own id — so they
-live here rather than in either caller. What a probe deliberately does not export is the keyed
+proxy-auth and credential-helper config, the connector CLI sentinels, the conversation's own id — so
+they live here rather than in either caller. What a probe deliberately does not export is the keyed
 provider environment: those variables carry a model key's sentinel, and an unattended exec is not
 the workspace's model spend to make.
 
@@ -17,12 +17,12 @@ from uuid import UUID
 from ufo.harness.o11y import log, warn
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import (
+    CredentialSlotUnset,
     CredentialStore,
     HostChoice,
     credential_host,
-    slot_is_set,
 )
-from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.access.grants import GrantStore, grant_sentinel, usable_cli_accounts
 from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.ext.manifest import CredentialSlot
 from ufo.runtime.workspace import ws_current
@@ -66,12 +66,7 @@ class ProbeEnv:
         workspace_id = ws_current().workspace_id
         return {
             CONVERSATION_ID_ENV: str(conversation_id),
-            **_git_config_env(
-                (
-                    *GIT_PROXY_AUTH_CONFIG,
-                    *await _git_credential_config(self.credentials, self.slots, workspace_id),
-                )
-            ),
+            **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(self.clis))),
             **await _grant_cli_env(self.grants, self.clis, authority, probe_id),
             **await _keyed_provider_env(self.credentials, self.slots, workspace_id),
         }
@@ -87,41 +82,21 @@ def _git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]:
     return env
 
 
-async def _git_credential_config(
-    credentials: CredentialStore | None,
-    slots: tuple[CredentialSlot, ...],
-    workspace_id: UUID,
-) -> tuple[tuple[str, str], ...]:
-    """Each git host this workspace holds a credential for, as an `extraheader` carrying the slot's
-    sentinel — never the secret, which the egress proxy swaps for `Basic` on the wire. git has no
-    env var to read auth from, so a header it is; the proxy admits and MITMs the host off the same
-    slot, which is why a slot with nothing stored must configure nothing: the sentinel would reach
-    the provider verbatim over an opaque tunnel, failing a clone anonymous git would serve."""
-    if credentials is None:
-        return ()
+def cli_git_config(clis: Mapping[str, CliCredential]) -> tuple[tuple[str, str], ...]:
+    """Each connector git host wired to the CLI's own credential helper, so a plain `git clone` or
+    `git push` there authenticates exactly as the CLI's clone does: git asks the helper, the helper
+    answers with the sentinel the CLI's env var carries, and the proxy swaps the token in. The
+    config names no account, so it is set once at open and holds across every re-authorization
+    that rewrites the env var — the variable is the whole credential. A turn with no usable grant
+    exports no variable, the helper answers nothing, and an anonymous clone of a public repository
+    proceeds as it would with no helper at all."""
     settings: list[tuple[str, str]] = []
-    for slot in slots:
-        target = slot.injection
-        if target is None or target.git_basic_user is None:
+    for cli in clis.values():
+        if cli.git is None:
             continue
-        try:
-            if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
-                continue
-            host = await credential_host(credentials, workspace_id, target.host)
-        except Exception as error:
-            warn(
-                "sandbox.credential_slot_failed",
-                slot=slot.name,
-                error_class=type(error).__name__,
-                error=str(error),
-            )
-            continue
-        if host is None:
-            warn("sandbox.git_host_unavailable", slot=slot.name)
-            continue
-        settings.append(
-            (f"http.https://{host}/.extraheader", f"{target.header}: {target.sentinel}")
-        )
+        key = f"credential.https://{cli.git.host}.helper"
+        settings.append((key, ""))
+        settings.append((key, cli.git.helper))
     return tuple(settings)
 
 
@@ -137,7 +112,11 @@ async def _keyed_provider_env(
     agent finds no half-usable variable for a provider the member has not keyed yet. A selection the
     declaration does not offer exports nothing and warns here as well as at the proxy, because the
     two roles withhold at different moments — the export when the sandbox opens, the egress when a
-    request is made — and the member would otherwise see a variable that never appeared."""
+    request is made — and the member would otherwise see a variable that never appeared.
+
+    A slot whose stored value this deploy cannot read withholds its own variables and warns. Every
+    sandbox open runs this, so a fault escaping here would fail the open of a turn that touches no
+    keyed provider at all — one unreadable value costs its provider, never the turn."""
     if credentials is None:
         return {}
     env: dict[str, str] = {}
@@ -149,9 +128,10 @@ async def _keyed_provider_env(
         if target.env is None and host_env is None:
             continue
         try:
-            if not await slot_is_set(slot.name, slot.source, workspace_id, credentials):
-                continue
+            await credentials.get(workspace_id, slot.name)
             host = await credential_host(credentials, workspace_id, target.host)
+        except CredentialSlotUnset:
+            continue
         except Exception as error:
             warn(
                 "sandbox.credential_slot_failed",
@@ -178,8 +158,8 @@ async def _grant_cli_env(
 ) -> dict[str, str]:
     """Each connector-declared CLI env var whose provider this process may use — its member's
     own grant preferred, one shared with the agent's audience as the fallback — set to that
-    grant's sentinel, so the CLI inside the sandbox authenticates and the proxy forwards by the
-    same sentinel. A static env var names no account, so two accounts in the
+    grant's sentinel, so the CLI inside the sandbox authenticates and the proxy swaps the account's
+    token in by the same sentinel. A static env var names no account, so two accounts in the
     winning tier cannot be disambiguated per request: rather than silently pick one —
     `connector_account` fails loud on the same ambiguity — the export is skipped and logged
     against `run_id`, whichever run this open serves, so the CLI fails visibly to authenticate
@@ -190,19 +170,7 @@ async def _grant_cli_env(
     granted = await grants.active_grants()
     env: dict[str, str] = {}
     for provider, cli in clis.items():
-        private = sorted(
-            grant.account_id
-            for grant in granted
-            if grant.provider == provider
-            and not grant.connection_shared
-            and grant.owner_member_id == member_id
-        )
-        shared = sorted(
-            grant.account_id
-            for grant in granted
-            if grant.provider == provider and grant.connection_shared
-        )
-        accounts = private or shared
+        accounts = usable_cli_accounts(granted, provider, member_id)
         if len(accounts) > 1:
             log(
                 "sandbox.cli_grant_ambiguous",

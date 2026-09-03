@@ -864,7 +864,7 @@ function RoutedPane({
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <Header crumb={crumb} title={SETUP} pinned />
             <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")}>
-              <AgentSetup agent={app} admin={member.admin} onBuilt={onAgents} />
+              <AgentSetup agent={app} onBuilt={onAgents} />
             </div>
           </div>
         </Pane>

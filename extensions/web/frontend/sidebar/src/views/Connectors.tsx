@@ -94,7 +94,7 @@ type ConnectorCatalogPayload = {
   providers: { name: string; label: string }[];
   after: string | null;
 };
-type GithubCoverage = { api: boolean; git_push: boolean; sources: boolean };
+type GithubCoverage = { api: boolean; sources: boolean };
 
 const PROVIDER = { label: "Provider", fact: true };
 const ACCESS = { label: "Access", fact: true };
@@ -508,7 +508,6 @@ export function WorkspaceConnectors({
     coverage.phase === "ready"
       ? [
           { label: "API", value: coverage.payload.api ? "Connected" : "Not connected" },
-          { label: "Git push", value: coverage.payload.git_push ? "Connected" : "Not connected" },
           { label: "Sources", value: coverage.payload.sources ? "Connected" : "Not connected" },
         ]
       : [];

@@ -2,10 +2,10 @@
 
 Rules are values the proxy reads, not an API extensions call: a credential slot implies its
 sentinel→real injection, a granted host implies its scope, a metered host implies its dimension.
-A live turn adds public internet. A grant injects nothing: the broker holds the account's token
-and executes server-side, so a grant only admits and meters its host."""
+A live turn adds public internet. A grant admits and meters its host; it injects only where its
+connector declares a CLI credential, whose broker hands this deploy the account's token to swap
+in for the grant's sentinel."""
 
-from base64 import b64encode
 from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
@@ -13,12 +13,8 @@ from uuid import UUID
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY
-from ufo.runtime.access.connectors import CliCredential, RequestForwarder
-from ufo.runtime.access.credentials import (
-    CredentialStore,
-    credential_host,
-    slot_secret,
-)
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, credential_host
 from ufo.runtime.access.grants import Grant, grant_sentinel
 from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
@@ -93,21 +89,7 @@ class MeterRule:
     dimension: str
 
 
-@dataclass(frozen=True)
-class ForwardRule:
-    """On the wire to `host`, a request whose `header` carries `sentinel` is not re-originated
-    upstream — it is executed through the broker's `forward` under the granted `account_id`, which
-    injects the real credential server-side. The wire analog of a connector tool call: the token
-    never exists on this deploy, so there is nothing to inject."""
-
-    host: str
-    header: str
-    sentinel: str
-    account_id: str
-    forward: RequestForwarder
-
-
-Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ForwardRule | ServiceRule
+Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ServiceRule
 
 
 def provider_host(model: str) -> str:
@@ -173,19 +155,14 @@ async def derive_credential_rules(
     host is what makes that true — a provider taking two keys reaches one host, so it admits and
     meters it once, and the egress metric counts requests rather than headers.
 
-    A `git_basic_user` slot composes its header value here rather than storing it composed: the
-    secret is one rotatable value, and git's smart-HTTP wants it as the password half of Basic.
-
     **One slot resolves or one slot is withheld — never the turn.** Whatever a slot's secret needs
-    to resolve (a provider exchange, a stored seal this deploy opens, a host selection) is that
-    slot's own uncertainty, so a slot that raises contributes nothing and the derivation continues.
+    to resolve (a stored value this deploy decrypts, a host selection) is that slot's own
+    uncertainty, so a slot that raises contributes nothing and the derivation continues.
     This function is total by construction, and that is what makes the rest of the turn's rules
     safe: the public-internet rule and the grant rules are composed around this call, so a fault
     escaping here takes the workspace's whole egress with it — every host refused but the model
     provider, on every turn, over one slot's unreadable value. `error_class` carries which fault it
-    was, because an unreachable provider clears itself while a value only a rebind repairs does not.
-    A withheld slot never falls through to its stored value — that would authenticate as a different
-    identity than the one the workspace bound."""
+    was."""
     grouped: dict[str, list[InjectionRule]] = {}
     dimensions: dict[str, str] = {}
     for slot in slots:
@@ -193,10 +170,10 @@ async def derive_credential_rules(
         if target is None:
             continue
         try:
-            real = await slot_secret(slot.name, slot.source, workspace_id, store)
-            if real is None:
-                continue
+            real = await store.get(workspace_id, slot.name)
             host = await credential_host(store, workspace_id, target.host)
+        except CredentialSlotUnset:
+            continue
         except Exception as error:
             warn(
                 "egress.credential_slot_failed",
@@ -208,9 +185,6 @@ async def derive_credential_rules(
         if host is None:
             warn("egress.credential_host_unavailable", slot=slot.name)
             continue
-        if target.git_basic_user is not None:
-            encoded = b64encode(f"{target.git_basic_user}:{real}".encode()).decode()
-            real = f"Basic {encoded}"
         grouped.setdefault(host, []).append(
             InjectionRule(host=host, header=target.header, sentinel=target.sentinel, real=real)
         )
@@ -231,10 +205,11 @@ def derive_grant_rules(
     """Each active grant admits its provider's own host — plus the broker file-store hosts
     `transfer_hosts` resolves for it, where the sandbox fetches a tool's presigned file outputs and
     stages its file inputs — and meters every request to each under `requests`, so any egress to a
-    granted host shows in `ufoctl spend`. A grant injects nothing — the broker holds the account's
-    token and runs connector tools server-side, so no secret is on the wire. A brokered grant admits
-    no provider host of its own (its `host` is empty), so only its transfer hosts scope; an
-    ungranted host derives no exact ScopeRule, MeterRule, or authenticated path."""
+    granted host shows in `ufoctl spend`. Nothing is injected here: connector tools run server-side
+    at the broker, and the one grant whose token reaches the wire is a CLI credential's, derived
+    by `derive_cli_rules`. A brokered grant admits no provider host of its own (its `host` is
+    empty), so only its transfer hosts scope; an ungranted host derives no exact ScopeRule,
+    MeterRule, or authenticated path."""
     rules: list[Rule] = []
     for grant in grants:
         extra = transfer_hosts.of(grant.provider) if transfer_hosts is not None else ()
@@ -245,27 +220,54 @@ def derive_grant_rules(
     return tuple(rules)
 
 
-def derive_cli_rules(
+async def derive_cli_rules(
     grants: tuple[Grant, ...],
     authority: ExecutionAuthority,
     clis: Mapping[str, CliCredential],
+    workspace_id: UUID,
 ) -> tuple[Rule, ...]:
     """Each grant whose connector declares a CLI credential and whose account the execution
-    authority may use forwards its sentinel-carrying requests through the broker. Member authority
-    admits its own and shared grants; workspace authority admits shared grants only."""
+    authority may use swaps that account's real token in for the grant's sentinel: on the provider
+    host the CLI sends it as ordinary auth, and on the connector's git host — admitted and metered
+    here, since a grant's own rules scope only the API host — the sandbox's git helper sends it as
+    the password half of a Basic credential, which the proxy re-encodes around the token. Member
+    authority admits its own and shared grants; workspace authority admits shared grants only.
+
+    The token is read from the broker per grant, and one grant's fault withholds that grant alone:
+    an account the broker can no longer authenticate costs the member that account's wire and
+    nothing else, exactly as a credential slot's fault withholds one slot."""
     member_id = authority_member_id(authority)
-    return tuple(
-        ForwardRule(
-            host=grant.host,
-            header=cli.header,
-            sentinel=grant_sentinel(grant.account_id),
-            account_id=grant.account_id,
-            forward=cli.forward,
+    rules: list[Rule] = []
+    git_hosts: dict[str, list[InjectionRule]] = {}
+    for grant in grants:
+        cli = clis.get(grant.provider)
+        if cli is None or not (grant.connection_shared or grant.owner_member_id == member_id):
+            continue
+        try:
+            token = await cli.secret.secret(workspace_id, grant.account_id)
+        except Exception as error:
+            warn(
+                "egress.cli_credential_failed",
+                provider=grant.provider,
+                account_id=grant.account_id,
+                error_class=type(error).__name__,
+                error=str(error),
+            )
+            continue
+        sentinel = grant_sentinel(grant.account_id)
+        rules.append(
+            InjectionRule(host=grant.host, header=cli.header, sentinel=sentinel, real=token)
         )
-        for grant in grants
-        if (cli := clis.get(grant.provider)) is not None
-        and (grant.connection_shared or grant.owner_member_id == member_id)
-    )
+        if cli.git is None:
+            continue
+        git_hosts.setdefault(cli.git.host, []).append(
+            InjectionRule(host=cli.git.host, header=cli.header, sentinel=sentinel, real=token)
+        )
+    for host, injections in sorted(git_hosts.items()):
+        rules.append(ScopeRule(allowed_hosts=frozenset({host})))
+        rules.extend(injections)
+        rules.append(MeterRule(host=host, dimension=REQUEST_METER_DIMENSION))
+    return tuple(rules)
 
 
 @dataclass(frozen=True)

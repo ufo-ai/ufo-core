@@ -71,7 +71,7 @@ const CATALOG = {
   ],
 };
 
-const COVERAGE = { api: true, git_push: false, sources: true };
+const COVERAGE = { api: true, sources: true };
 
 /** The slots the address states, in the order the track stands them. */
 function track(): string[] {
@@ -158,7 +158,7 @@ function connectors() {
           ? [grant("notion", true, "g2")]
           : [grant("github", false, "g1")],
       }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
@@ -210,15 +210,15 @@ test("the connectors workspace address stands the pool on its tab", async () => 
   );
 });
 
-/** The three legs are GitHub's own, so they are read in GitHub's record and stand nowhere on the
+/** The two legs are GitHub's own, so they are read in GitHub's record and stand nowhere on the
  *  page's own ground. */
 test("the GitHub row opens the coverage its install stands on", async () => {
   location.hash = sectionHash("connectors");
-  library({ "/github/coverage": () => json({ api: true, git_push: true, sources: false }) });
+  library({ "/github/coverage": () => json({ api: true, sources: false }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("GitHub connected");
-  expect(screen.queryByText("Git push")).toBeNull();
+  expect(screen.queryByText("API")).toBeNull();
 
   await pressItem("GitHub");
 
@@ -226,8 +226,11 @@ test("the GitHub row opens the coverage its install stands on", async () => {
   const header = sheet.querySelector("[data-slot=sheet-header]");
   expect(header?.firstElementChild).toBe(within(sheet).getByRole("button", { name: "Close" }));
   expect(fact("API")).toBe("Connected");
-  expect(fact("Git push")).toBe("Connected");
   expect(fact("Sources")).toBe("Not connected");
+  expect([...sheet.querySelectorAll("dt")].map((leg) => leg.textContent)).toEqual([
+    "API",
+    "Sources",
+  ]);
 });
 
 /** The library is the root of the path, so a second row leads there instead of piling up beside
@@ -356,7 +359,7 @@ test("the pool narrows on the toolbar's search, which names what it searches", a
   wire({
     "/connections": () =>
       json({ connections: [grant("github", false, "g1"), grant("notion", true, "g2")] }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/transcript": () => json({ messages: [] }),
   });
@@ -401,7 +404,7 @@ test("the pool's record states what the row gave up, and attaches to the agent n
   location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/intents": (url) => {
       posted.push(url);
@@ -441,7 +444,7 @@ test("the pool's record states every stream and the errors for its account once 
       new Promise<Response>((resolve) => {
         answer = resolve;
       }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/transcript": () => json({ messages: [] }),
   });
@@ -491,7 +494,7 @@ test("the pool's record shares and revokes into the lane of the agent already ho
       json({
         connections: [{ ...grant("github", true, "g1"), agents: [{ id: SECOND_ID, name: "second" }] }],
       }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/intents": (url) => {
       posted.push(url);
@@ -622,7 +625,7 @@ test("the account column names the account the member holds, not the broker id",
   location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/transcript": () => json({ messages: [] }),
   });
@@ -637,7 +640,7 @@ test("an empty pool stands the catalog alone, with no connected zone", async () 
   location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [] }),
-    "/github/coverage": () => json({ api: false, git_push: false, sources: false }),
+    "/github/coverage": () => json({ api: false, sources: false }),
     "/workspace/first-run": () => json({ ...CATALOG, connectors: [] }),
     "/transcript": () => json({ messages: [] }),
   });
@@ -732,7 +735,7 @@ test("a connector's consent opens in a window this page owns, so its return page
   location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": () => json({ connections: [] }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
@@ -767,7 +770,7 @@ test("a connector consent the browser refuses still renders the link", async () 
   location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": () => json({ connections: [] }),
-    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),

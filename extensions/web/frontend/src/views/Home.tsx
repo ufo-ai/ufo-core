@@ -608,7 +608,7 @@ function AppLane({
       node={
         agent.stands_on_setup === true ? (
           <div className="min-h-0 flex-1 overflow-y-auto p-2xl">
-            <AgentSetup agent={agent} admin={member.admin} onBuilt={onAgents} />
+            <AgentSetup agent={agent} onBuilt={onAgents} />
           </div>
         ) : home.state === "set" ? (
           <HomepageFrame

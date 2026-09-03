@@ -422,21 +422,6 @@ def test_credential_set_rejects_an_undeclared_slot(cli_home: CliRunner) -> None:
     assert "perplexity_api_key" in result.output
 
 
-def test_credential_set_refuses_a_slot_this_deploy_writes_itself(cli_home: CliRunner) -> None:
-    """The operator half of the rule the member's private prompt follows. The installation slot
-    holds a seal the install callback composes, so a typed value is not a weaker credential — it is
-    one that only refuses when the wire reads it, withholding that host on every turn until someone
-    rebinds. The refusal names the reason rather than reporting the slot as unknown, since it is
-    declared and this deploy's own callback really does fill it."""
-    _init(cli_home)
-    result = cli_home.invoke(
-        cli.main, ["credential", "set", "github_app_installation"], input="149082716\n"
-    )
-    assert result.exit_code != 0
-    assert "written by this deploy" in result.output
-    assert "unknown credential slot" not in result.output
-
-
 def test_credential_list_reports_set_and_unset_without_values(cli_home: CliRunner) -> None:
     _init(cli_home)
     setting = cli_home.invoke(

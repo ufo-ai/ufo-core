@@ -184,9 +184,7 @@ from ufo.host.ext.loader import (
 from ufo.host.spawn_catalog import spawn_catalog_skill, spawn_targets
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV
 from ufo.runtime.access.credentials import (
-    CredentialRequests,
     CredentialStore,
-    install_credential_requests,
 )
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
@@ -962,22 +960,6 @@ async def _run(
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
     init_workspace_credentials(credentials)
-    install_credential_requests(
-        None
-        if credentials is None
-        else CredentialRequests(
-            fernet=credentials.fernet,
-            declared=frozenset(
-                slot.name for manifest in manifests for slot in manifest.credentials
-            ),
-            fillable=frozenset(
-                slot.name
-                for manifest in manifests
-                for slot in manifest.credentials
-                if slot.member_filled
-            ),
-        )
-    )
     try:
         async with AsyncExitStack() as stack:
             if collector is not None:
@@ -1253,7 +1235,6 @@ async def _run(
                 await _task_reports(tasks, targets, slots, finished)
             return tuple(completed[index] for index in sorted(completed)), target_prompt
     finally:
-        install_credential_requests(None)
         init_workspace_credentials(None)
         await dispose_db()
 

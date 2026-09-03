@@ -31,7 +31,7 @@ from ufo.runtime.access.connectors import (
     ConnectorBroker,
     ConnectorResolver,
 )
-from ufo.runtime.access.credentials import CredentialSource, DeclaredSlot, HostChoice
+from ufo.runtime.access.credentials import DeclaredSlot, HostChoice
 from ufo.runtime.access.grants import ConnectionRecorded, OAuthProvider, OAuthProviderResolver
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.runtime.ext.context import CredentialAccess, ExtensionContext
@@ -75,35 +75,19 @@ class InjectionTarget:
     provider that pins its API host per account (a Datadog site, an OpsGenie region): the member
     selects from the closed set the declaration offers, so what reaches the wire is always a literal
     the row wrote. Two slots naming one host each inject their own header, which is how a provider
-    taking more than one key on the wire is expressed.
-
-    `git_basic_user` makes the slot the sandbox git's credential for `host`: the turn configures
-    git to send the sentinel as its `Authorization` header there, and the proxy swaps it for
-    `Basic base64(git_basic_user:secret)`. git is the one sandbox client whose auth is configured
-    rather than read from an env var, and smart-HTTP takes only Basic — a bearer is refused even
-    for a public repository."""
+    taking more than one key on the wire is expressed."""
 
     host: str | HostChoice
     header: str
     sentinel: str
     env: str | None = None
     dimension: str | None = None
-    git_basic_user: str | None = None
 
 
 @dataclass(frozen=True)
 class CredentialSlot:
     """A named secret an extension needs. With an InjectionTarget the proxy swaps it onto the
-    wire so the sandbox never holds it; without one it is readable only in-process. A `source` mints
-    the secret for this workspace instead of the member storing one, falling back to a stored value
-    when it has nothing to mint from — a published GitHub App's installation token, with the
-    member's own token as the slot's stored fallback.
-
-    `member_filled=False` is a slot only this deploy's own code writes: a provider callback binding
-    an installation, where the value is a seal the member could not compose and a typed one is
-    meaningless. `request_credentials` and `ufoctl credential set` refuse it, so the only value it
-    can hold is one that opens. Without that, the sole guard on a typed value is the reader that
-    later refuses it — which withholds the slot's host on every turn until someone rebinds.
+    wire so the sandbox never holds it; without one it is readable only in-process.
 
     `merge` belongs to a structured secret whose private prompt submits one update. Core owns the
     encrypted row and lock, so the extension supplies only the pure value merge."""
@@ -111,8 +95,6 @@ class CredentialSlot:
     name: str
     description: str
     injection: InjectionTarget | None = None
-    source: CredentialSource | None = None
-    member_filled: bool = True
     merge: Callable[[str | None, str], str] | None = None
 
 
@@ -939,7 +921,6 @@ def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:
             name=slot.name,
             description=slot.description,
             extension=manifest.name,
-            member_filled=slot.member_filled,
             host=None if slot.injection is None else slot.injection.host,
             merge=slot.merge,
         )

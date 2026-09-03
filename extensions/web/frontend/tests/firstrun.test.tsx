@@ -144,10 +144,7 @@ const FIRST_RUN = {
     { name: "slack", label: "Slack" },
     { name: "github", label: "GitHub" },
   ],
-  connectors: [
-    { name: "slack", label: "Slack", installed: false },
-    { name: "github", label: "GitHub", installed: false },
-  ],
+  connectors: [{ name: "slack", label: "Slack", installed: false }],
   ...ACTIONS,
 };
 
@@ -207,16 +204,13 @@ const CLEARED_READ: Record<string, Route> = {
 const NO_SLACK = {
   ...FIRST_RUN,
   ...ACTIONS,
-  connectors: [{ name: "github", label: "GitHub", installed: false }],
+  connectors: [],
 };
 
 const HELD_SLACK = {
   ...FIRST_RUN,
   ...ACTIONS,
-  connectors: [
-    { name: "slack", label: "Slack", installed: true },
-    { name: "github", label: "GitHub", installed: false },
-  ],
+  connectors: [{ name: "slack", label: "Slack", installed: true }],
 };
 
 beforeEach(() => {

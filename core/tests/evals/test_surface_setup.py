@@ -167,10 +167,10 @@ async def test_the_installed_status_case_seeds_a_live_install_and_takes_it_away(
     with ws(workspace_id):
         await case.seed(workspace_id, agent_id, blob)
         assert await _installed(workspace_id) == surface_setup.SLACK_INSTALLATION_ID
-        seeded = await turn_workspace_facts((slack_manifest(),), store, audience=SHARED_AUDIENCE)
+        seeded = await turn_workspace_facts((slack_manifest(),), audience=SHARED_AUDIENCE)
         await case.cleanup(workspace_id, agent_id, blob)
         assert await _installed(workspace_id) is None
-        cleaned = await turn_workspace_facts((slack_manifest(),), store, audience=SHARED_AUDIENCE)
+        cleaned = await turn_workspace_facts((slack_manifest(),), audience=SHARED_AUDIENCE)
     assert (seeded, cleaned) == ((SLACK_INSTALLED_LINE,), ())
 
 

@@ -23,13 +23,14 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import JsonObject
 from evals.harness.scorers import combine, exact_scorer, lane_scorer, restraint_scorer
+from evals.suites.github_connections import github_state
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.skills.runtime import LoadedSkill, loaded_context, parse_skill
 from ufo.schema import tables
 
 BACKGROUND_FLAG = TypeAdapter(bool)
-GITHUB_APP_API_COMMAND = 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api'
+GH_CLI = re.compile(r"(?<![\w./-])gh\s+[a-z]")
 ROOT_LAYER = re.compile(r"(?im)^\s*ROOT_LAYER\s*:\s*(.+?)\s*$")
 REJECTED_LAYER = re.compile(r"(?im)^\s*REJECTED_LAYER\s*:\s*(.+?)\s*$")
 SOURCE_FILES = re.compile(r"(?im)^\s*SOURCE_FILES\s*:\s*(.+?)\s*$")
@@ -1402,12 +1403,13 @@ def validation_scope_evidence(*, cross_cutting: bool) -> DecisionEvidence:
     return evidence
 
 
-def github_app_api_scorer() -> Grader:
-    """The command may arrive by either leg: the parent writes it into the objective, or the child
-    knows it from its own prompt and the final answer carries it back. Both prove the member gets
-    the installed-App auth without a connector connection — the connector attempt is the guarded
-    failure. The routing act may be a skill load followed by a spawn or a direct spawn: the outcome
-    is what the case grades, and the verdict names which route ran."""
+def connected_github_api_scorer() -> Grader:
+    """The write rides the connected account through `GH_TOKEN`, so `gh` is the whole answer, and
+    it may arrive by either leg: the parent names it in the objective, or the child knows it from
+    its own prompt and the final answer carries it back. Both prove the connection already covers
+    the API — the connect attempt is the guarded failure. The routing act may be a skill load
+    followed by a spawn or a direct spawn: the outcome is what the case grades, and the verdict
+    names which route ran."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         loaded = False
@@ -1430,19 +1432,15 @@ def github_app_api_scorer() -> Grader:
         route = "loaded coding and" if loaded else "spawned direct and"
         if not objectives:
             return CapabilityVerdict(False, "no successful coding spawn")
-        if any(GITHUB_APP_API_COMMAND in objective for objective in objectives):
-            return CapabilityVerdict(True, f"{route} delegated App API auth")
-        if GITHUB_APP_API_COMMAND in output.response:
-            return CapabilityVerdict(
-                True, f"{route} delegated, and the answer carries the App API command"
-            )
-        return CapabilityVerdict(
-            False, "neither a coding objective nor the answer carries the App API auth command"
-        )
+        if any(GH_CLI.search(objective) for objective in objectives):
+            return CapabilityVerdict(True, f"{route} named gh in the objective")
+        if GH_CLI.search(output.response):
+            return CapabilityVerdict(True, f"{route} delegated, and the answer names gh")
+        return CapabilityVerdict(False, "neither a coding objective nor the answer names gh")
 
     return DescribedGrader(
         "a coding spawn succeeds by either route, no connector connection is attempted, and the "
-        "objective or the final answer carries the installed-App gh command",
+        "objective or the final answer names the gh CLI",
         grade,
     )
 
@@ -1745,12 +1743,13 @@ CASES = (
         digest_tag="delegation:coding-subagent-url-repository:v2",
     ),
     CapabilityCase(
-        "coding-subagent-github-app-api",
-        "The workspace already installed the ufo GitHub App. Delegate to a coding subagent to "
-        "state how it would make a GitHub API write as that App. Do not make the request and do "
-        "not connect another GitHub account.",
-        github_app_api_scorer(),
-        digest_tag="delegation:coding-subagent-github-app-api:answer-or-objective:either-route",
+        "coding-subagent-connected-github-api",
+        "GitHub is connected for this workspace. Delegate to a coding subagent to state how it "
+        "would make a GitHub API write — a pull-request comment, say — as our connected account. "
+        "Do not make the request and do not connect another GitHub account.",
+        connected_github_api_scorer(),
+        seed=github_state(connected=True),
+        digest_tag="delegation:coding-subagent-connected-github-api:answer-or-objective:either-route",
     ),
     CapabilityCase(
         "inline-single-function",
@@ -1768,11 +1767,11 @@ CASES = (
         digest_tag="delegation:inline-vowel-count:no-routing",
     ),
     CapabilityCase(
-        "github-app-write-explanation",
-        "In one sentence, explain what an installed GitHub App can write to. Do not delegate, "
-        "inspect a repository, or access an account.",
-        restraint_scorer(("load_skill", "spawn")),
-        digest_tag="delegation:github-app-write-explanation",
+        "connected-github-write-explanation",
+        "In one sentence, explain what a connected GitHub account lets you write to. Do not "
+        "delegate, inspect a repository, or connect an account.",
+        restraint_scorer(("load_skill", "spawn", "connect_account")),
+        digest_tag="delegation:connected-github-write-explanation",
     ),
     CapabilityCase(
         "coding-subagent-foreground-timeout",

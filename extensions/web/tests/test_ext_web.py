@@ -312,11 +312,7 @@ SLOTTED = Manifest(
     credentials=(
         CredentialSlot(name="acme_api_key", description="ACME API key"),
         CredentialSlot(name="acme_signing_key", description="ACME signing key"),
-        CredentialSlot(
-            name="acme_install_seal",
-            description="ACME install binding",
-            member_filled=False,
-        ),
+        CredentialSlot(name="acme_install_seal", description="ACME install binding"),
     ),
 )
 
@@ -2069,9 +2065,9 @@ async def test_connection_pool_names_no_agent_outside_the_web_audience(
 async def test_credentials_view_reports_slots_and_never_values(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The workspace credentials view: member-fillable declared slots with their fill state — the
-    slots are the deploy's, shared across every agent, and a value never renders. An
-    unauthenticated read is refused before a byte of it."""
+    """The workspace credentials view: every declared slot with its fill state — the slots are the
+    deploy's, shared across every agent, and a value never renders. An unauthenticated read is
+    refused before a byte of it."""
     client, workspace_id, _agent_id = web
     _member, token = await _seed_member(workspace_id, "m@example.com")
     async with workspace_tx() as connection:
@@ -2101,6 +2097,13 @@ async def test_credentials_view_reports_slots_and_never_values(
             "filled": True,
         },
         {
+            "slot": "acme_install_seal",
+            "name": "acme-install-seal",
+            "extension": "stub",
+            "description": "ACME install binding",
+            "filled": False,
+        },
+        {
             "slot": "acme_signing_key",
             "name": "acme-signing-key",
             "extension": "stub",
@@ -2109,7 +2112,6 @@ async def test_credentials_view_reports_slots_and_never_values(
         },
     ]
     assert "sealed" not in listed.text
-    assert "acme_install_seal" not in listed.text
 
 
 @pytest.mark.usefixtures("database_url")
@@ -2177,12 +2179,12 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The first run's projection: the tiles a member picks what their team uses from — Slack and
-    GitHub among them, because a team that uses them says so like any other tool — and the two of
-    those tiles the page can install itself, beside whether the workspace holds them. Each state is
-    the leg that step's own Connect act writes: Slack's surface installation, and GitHub's App
-    installation credential. A broker `github` connection is not that leg, so it leaves the step
-    offering the install; the credential is the whole workspace's, so the step reads connected for a
-    member who owns no connection at all. Refused without a session."""
+    GitHub among them, because a team that uses them says so like any other tool — and the one of
+    those tiles the page installs itself, beside whether the workspace holds it. Slack's state is
+    the leg its own Connect act writes, the surface installation, and it is the whole workspace's,
+    so the step reads installed for every member. GitHub is a broker connection like Gmail or
+    Notion — the member connects it in chat, so it is a tile and never a step, and a `github`
+    connection changes no step. Refused without a session."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "m@example.com")
     other_id, other_token = await _seed_member(workspace_id, "n@example.com")
@@ -2195,10 +2197,7 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     assert {"gmail", "notion", "linear", "slack", "github"} <= {
         tile["name"] for tile in payload["providers"]
     }
-    assert payload["connectors"] == [
-        {"name": "slack", "label": "Slack", "installed": False},
-        {"name": "github", "label": "GitHub", "installed": False},
-    ]
+    assert payload["connectors"] == [{"name": "slack", "label": "Slack", "installed": False}]
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.surface_installation).values(
@@ -2213,32 +2212,9 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
         )
     await _seed_connection(workspace_id, agent_id, other_id, "github", shared=False)
     held = await client.get(path, headers=cookie)
-    assert held.json()["connectors"] == [
-        {"name": "slack", "label": "Slack", "installed": True},
-        {"name": "github", "label": "GitHub", "installed": False},
-    ]
+    assert held.json()["connectors"] == [{"name": "slack", "label": "Slack", "installed": True}]
     owner = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
-    assert owner.json()["connectors"][1] == {
-        "name": "github",
-        "label": "GitHub",
-        "installed": False,
-    }
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.credential).values(
-                workspace_id=workspace_id,
-                slot="github_app_installation",
-                ciphertext=b"sealed",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    connected = await client.get(path, headers=cookie)
-    assert connected.json()["connectors"][1] == {
-        "name": "github",
-        "label": "GitHub",
-        "installed": True,
-    }
+    assert owner.json()["connectors"] == held.json()["connectors"]
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
     assert set(payload) == {
@@ -6967,7 +6943,7 @@ async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_va
     collection's `request_credentials` action with the prompt it authored from the slot it listed,
     the turn's terminal frame carries the server-minted seal and its prompts, and the value crosses
     only in the sealed fulfillment — the intent outcome, the audit turn, and every response body
-    stay secret-free. A deploy-written slot is not a slot the action mints a prompt for."""
+    stay secret-free."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -7003,14 +6979,6 @@ async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_va
     assert audit.status == "done"
     assert "s3cr3t-value" not in audit.inbound
     assert "s3cr3t-value" not in str(audit.terminal)
-    machinery = await client.post(
-        f"/surface/web/agents/{agent_id}/actions/credential/request_credentials",
-        json=_credential_request("acme_install_seal", "ACME install seal"),
-        headers=cookie,
-    )
-    refused = machinery.json()
-    assert refused["applied"] is False
-    assert "credentials" not in refused
 
 
 @pytest.mark.usefixtures("database_url")
@@ -7659,12 +7627,12 @@ async def test_a_credential_is_filled_by_any_slot_that_answers_it(
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     assert (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()[
         "credentials"
-    ] == [{"label": "ACME install", "filled": False, "provider": None, "required": False}]
+    ] == [{"label": "ACME install", "filled": False, "required": False}]
 
     await _fill_slot(workspace_id, "acme_api_key")
     assert (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()[
         "credentials"
-    ] == [{"label": "ACME install", "filled": True, "provider": None, "required": False}]
+    ] == [{"label": "ACME install", "filled": True, "required": False}]
 
 
 @pytest.mark.usefixtures("database_url")

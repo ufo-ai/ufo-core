@@ -1,12 +1,17 @@
 """Pipedream Connect the connector broker: the async client, the provider registry, the errors.
 
 Pipedream brokers managed OAuth (Connect Link hosted consent), pre-built provider actions, and a
-Connect Proxy that injects the account's credential server-side — the token never leaves Pipedream,
-so a grant stores only the connected-account id (`apn_…`), never a secret. Exactly the Composio
-model; this second broker holds an explicit allowlist (`CONNECTORS`) of providers Composio's open
-namespace does not serve: one whose consent Composio's shared client cannot pass (Gmail: Google
-blocks restricted Gmail scopes, so the deploy's own Google OAuth client rides Pipedream Connect via
-`custom_oauth_env`), one Composio withholds by judgment where Pipedream's actions cover the gap
+Connect Proxy that injects the account's credential server-side — a grant stores only the
+connected-account id (`apn_…`), never a secret. Exactly the Composio model, with one addition: for a
+connector whose consent rode the deploy's own OAuth client, Pipedream hands back the account's token
+on request (`account_token`), which is how a sandbox CLI authenticates as the member — GitHub's
+`gh`, `git clone`, and `git push` — with the token swapped in at the egress proxy and never inside
+the sandbox. This second broker holds an explicit allowlist (`CONNECTORS`) of providers Composio's
+open namespace does not serve: one the sandbox needs the real token for (GitHub: git smart-HTTP
+takes a credential, not a proxied call, so the deploy's own GitHub OAuth client rides Pipedream
+Connect via `custom_oauth_env` and the token comes back), one whose consent Composio's shared client
+cannot pass (Gmail: Google blocks restricted Gmail scopes, so the deploy's own Google OAuth client
+rides the same way), one Composio withholds by judgment where Pipedream's actions cover the gap
 (Linear: `linear-search-issues` and `linear-list-workflow-states` reach issue state, which
 Composio's toolkit cannot filter by; Attio: `attio-create-update-record` and the person/task/note
 writes reach what Composio's read-only grant cannot; Discord: the `discord-send-message` family
@@ -22,7 +27,7 @@ extension.
 `newest_account` and `connected_account` correlate its return to the state-scoped external user,
 while `workspace_account` admits execution only for an account connected under that workspace.
 The project token can read any account in the project, so these ownership assertions are the
-confused-deputy guard; no provider token is ever read.
+confused-deputy guard; `account_token` reads a provider token only after the same assertion.
 `list_actions`/`action_definition` are the catalog the dynamic tools search and describe;
 `run_action` executes one server-side with the account bound through its component's app prop
 (`authProvisionId`). The client speaks Pipedream's Connect REST API over httpx, authenticating
@@ -72,12 +77,15 @@ class ConnectorSpec:
     `custom_oauth_env` names the env var that may
     hold the deploy's own OAuth client id (`oa_…`) registered with Pipedream; set, the consent leg
     rides that client instead of Pipedream's shared one (which Google's consent accepts for
-    restricted Gmail scopes — a member org that blocks it connects through the deploy's own)."""
+    restricted Gmail scopes — a member org that blocks it connects through the deploy's own). A
+    connector whose token the sandbox rides (`cli_env` names the variable its CLI reads) requires
+    it: Pipedream releases a token only for an account connected on the deploy's own client."""
 
     label: str
     app: str
     host: str
     custom_oauth_env: str | None = None
+    cli_env: str | None = None
 
 
 CONNECTORS: dict[str, ConnectorSpec] = {
@@ -88,6 +96,13 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     # eu.docusign.net, demo.docusign.net); it publishes no single API host, so the grant admits
     # none and every call runs server-side through Pipedream.
     "docusign": ConnectorSpec("DocuSign", "docusign", ""),
+    "github": ConnectorSpec(
+        "GitHub",
+        "github",
+        "api.github.com",
+        custom_oauth_env="PIPEDREAM_GITHUB_OAUTH_APP_ID",
+        cli_env="GH_TOKEN",
+    ),
     "gmail": ConnectorSpec(
         "Gmail", "gmail", "gmail.googleapis.com", custom_oauth_env="PIPEDREAM_GMAIL_OAUTH_APP_ID"
     ),
@@ -209,6 +224,32 @@ class PipedreamClient:
                 f"connected account {account_id!r} is not owned by workspace {workspace_id}",
             )
         return account
+
+    async def account_token(self, account_id: str, workspace_id: UUID) -> str:
+        """The provider access token behind one of this workspace's connected accounts — the one
+        read that hands a secret to this deploy, answered by Pipedream only for an account connected
+        on the deploy's own OAuth client. Ownership is asserted from the same record before the
+        token is read, so a foreign account id yields nothing; an unhealthy account raises
+        `GrantUnusable` exactly as every other read of it does."""
+        payload = await self._get(
+            f"/connect/{self.project_id}/accounts/{account_id}",
+            params={"include_credentials": "true"},
+        )
+        record = _dict(payload.get("data")) or payload
+        account = _account(record, account_id)
+        if not _workspace_owns_external_user(workspace_id, account.external_user_id):
+            raise PipedreamError(
+                403,
+                f"connected account {account_id!r} is not owned by workspace {workspace_id}",
+            )
+        token = _dict(record.get("credentials")).get("oauth_access_token")
+        if not isinstance(token, str) or not token:
+            raise PipedreamError(
+                502,
+                f"connected account {account_id!r} released no token: it was connected on "
+                "Pipedream's shared OAuth client rather than this deploy's own",
+            )
+        return token
 
     async def newest_account(self, external_user_id: str, app: str) -> ConnectedAccount:
         """The account a just-completed consent produced for one state-scoped external user."""

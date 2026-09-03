@@ -81,13 +81,15 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
             .await;
     }
 
-    // A git request carries the proxy-stamped identity the daemon resolves its upstream credential
-    // by; the package cache is anonymous and needs none.
+    // A git request carries the identity the proxy stamped — workspace, user, and the run or probe
+    // token the sandbox presented as `Proxy-Authorization` — which the daemon resolves its upstream
+    // credential by; the package cache is anonymous and needs none.
     let workspace = trusted(&headers, "x-ufo-workspace");
     if workspace.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing workspace").into_response();
     }
     let user = trusted(&headers, "x-ufo-user");
+    let proxy_auth = trusted(&headers, "x-ufo-proxy-auth");
     state
         .git
         .handle(
@@ -99,6 +101,7 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
             bytes,
             workspace,
             user,
+            proxy_auth,
         )
         .await
 }

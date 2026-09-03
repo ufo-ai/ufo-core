@@ -12,9 +12,10 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
+from ufo.harness.o11y import warn
 from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
 from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY, ProbeToken, RunToken
-from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import (
     ConnectorTransferHosts,
@@ -26,9 +27,14 @@ from ufo.runtime.access.egress_rules import (
     derive_credential_rules,
     derive_grant_rules,
 )
-from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.grants import GrantStore, usable_cli_accounts
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, WorkspaceAuthority
+from ufo.runtime.authority import (
+    ExecutionAuthority,
+    MemberAuthority,
+    WorkspaceAuthority,
+    authority_member_id,
+)
 from ufo.runtime.ext.manifest import CredentialSlot
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST
 from ufo.runtime.workspace import ws
@@ -64,7 +70,7 @@ def _seat_scope(
 @dataclass(frozen=True, slots=True)
 class _Authority:
     """Whose egress a principal carries: the agent whose rules derive, that agent's snapshotted
-    internet policy, and the member whose private grants its CLI forwards may draw on."""
+    internet policy, and the member whose private grants its CLI credentials may draw on."""
 
     agent_id: UUID
     internet_access_allowed: bool
@@ -151,11 +157,62 @@ class PerAgentRules:
                     rules = (
                         *rules,
                         *derive_grant_rules(granted, self.transfer_hosts),
-                        *derive_cli_rules(granted, authority.execution, self.clis),
+                        *await derive_cli_rules(
+                            granted, authority.execution, self.clis, principal.workspace_id
+                        ),
                     )
                 if isinstance(principal, ProbeToken):
                     return self._without_the_model_key(rules)
                 return rules
+
+    async def git_credential(
+        self, principal: EgressPrincipal, host: str
+    ) -> tuple[GitWire, str, str] | None:
+        """The git credential the cache daemon fetches `host` with on this principal's behalf: the
+        connector git wire it rides, the granted account's token, and the account itself — the
+        mirror principal, so two members sharing one connected account share one mirror and a
+        member's private account gets its own. The account is chosen exactly as the sandbox's own
+        env export chooses it (`usable_cli_accounts`), so the daemon fetches as the identity the
+        turn's `GH_TOKEN` names and never as a sibling account the authority also holds. None for a
+        principal that is not live, a host no connector clones through, or an authority with no
+        usable account for it — the daemon then fetches anonymously.
+
+        Reading the account's token is a call to the broker, so one account's fault withholds that
+        account and nothing more, exactly as `derive_cli_rules` withholds one grant. An account the
+        broker will not authenticate and a broker that cannot be reached both end here as an
+        anonymous fetch: the alternative is this call answering 500, the daemon answering 502, and
+        a public clone that needs no credential at all failing with it."""
+        with ws(principal.workspace_id):
+            match principal:
+                case RunToken():
+                    authority = await self._turn_of(principal)
+                case ProbeToken():
+                    authority = await self._conversation_of(principal)
+            if authority is None or self.grants is None:
+                return None
+            with agent(authority.agent_id):
+                granted = await self.grants.active_grants()
+            for provider, cli in self.clis.items():
+                if cli.git is None or cli.git.host != host:
+                    continue
+                accounts = usable_cli_accounts(
+                    granted, provider, authority_member_id(authority.execution)
+                )
+                if len(accounts) != 1:
+                    continue
+                try:
+                    token = await cli.secret.secret(principal.workspace_id, accounts[0])
+                except Exception as error:
+                    warn(
+                        "egress.git_credential_failed",
+                        provider=provider,
+                        account_id=accounts[0],
+                        error_class=type(error).__name__,
+                        error=str(error),
+                    )
+                    continue
+                return cli.git, token, accounts[0]
+        return None
 
     async def _turn_of(self, run: RunToken) -> _Authority | None:
         """The turn's agent and effective internet policy in one indexed read."""

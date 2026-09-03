@@ -27,7 +27,6 @@ from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
 from ufo.sdk.objects import (
     AGENT_ICONS,
-    CREDENTIAL_KIND,
     SURFACE_KIND,
     WORKSPACE_KIND,
     AgentSpec,
@@ -51,7 +50,6 @@ BILLING_PORTAL_LINK_KEY = "portal_url"
 IMESSAGE_STATE_KEY = "state"
 IMESSAGE_INSTRUCTION_KEY = "instruction"
 IMESSAGE_LINK_KEY = "opt_in_link"
-CONNECT_GITHUB_ACTION = "connect_github"
 MANAGE_BILLING_ACTION = "manage_billing"
 BILLING_OPERATION_KEY = "operation"
 BILLING_PORTAL_OPERATION = "portal"
@@ -602,17 +600,6 @@ def _slack_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
 
 
-def _github_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
-    """The install link the GitHub step asked for: the action answers a sentence carrying it, and
-    where it minted none the sentence itself is the answer."""
-    if frame.status != "done":
-        return _outcome(frame, turn_id)
-    found = INSTALL_LINK.search(frame.text)
-    link = found.group() if found else None
-    stated = "" if link else frame.text
-    return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
-
-
 def _imessage_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     if frame.status != "done":
         return _outcome(frame, turn_id)
@@ -667,13 +654,12 @@ def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
 ACTION_OUTCOMES: dict[tuple[str, str], Callable[[TerminalFrame, UUID], Response]] = {
     (SURFACE_KIND, SLACK_CONNECT_ACTION): _slack_outcome,
     (SURFACE_KIND, IMESSAGE_CONNECT_ACTION): _imessage_outcome,
-    (CREDENTIAL_KIND, CONNECT_GITHUB_ACTION): _github_outcome,
     (REPORT_KIND, REBUILD_REPORT_DIGEST_ACTION): _rebuild_outcome,
     (PAGE_KIND, REBUILD_PAGE_FACTS_ACTION): _rebuild_outcome,
 }
 """The actions whose answer says more than done or refused, and how each is read: the install link
-Slack and GitHub mint, the connection state iMessage reports, the queued-work sentence a rebuild
-states. Every other action answers done, or the refusal in its own words."""
+Slack mints, the connection state iMessage reports, the queued-work sentence a rebuild states.
+Every other action answers done, or the refusal in its own words."""
 
 
 def _action_outcome(

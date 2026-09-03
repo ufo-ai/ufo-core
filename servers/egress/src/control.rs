@@ -1,12 +1,11 @@
 //! The client for core `serve`'s internal egress-control RPC. Every policy decision, resolved
-//! secret, ledger write, and broker forward lives behind these calls — the proxy holds none of the
-//! keys or DB access itself. Each request presents the shared control bearer; the run/probe token
-//! rides in the body as the raw `Proxy-Authorization` value core re-verifies and scopes by.
+//! secret, ledger write, and tool-bridge dispatch lives behind these calls — the proxy holds none
+//! of the keys or DB access itself. Each request presents the shared control bearer; the run/probe
+//! token rides in the body as the raw `Proxy-Authorization` value core re-verifies and scopes by.
 
-use base64::Engine;
 use serde::Deserialize;
 
-use crate::types::{ForwardedResponse, MeterRecord, Rule};
+use crate::types::{MeterRecord, Rule, ToolBridgeResponse};
 
 const MAX_TOOL_BRIDGE_RESPONSE_BYTES: usize = 2 * 1_048_576;
 
@@ -29,13 +28,6 @@ struct AuthorizeResponse {
 #[derive(Deserialize)]
 struct ResolveResponse {
     rules: Vec<Rule>,
-}
-
-#[derive(Deserialize)]
-struct ForwardResponse {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body_b64: String,
 }
 
 impl Control {
@@ -75,40 +67,12 @@ impl Control {
         Ok(response.rules)
     }
 
-    /// Execute one sentinel-carrying request through the grant's broker, core-side — the credential
-    /// exists only there, never on this deploy or the wire the sandbox sees.
-    pub async fn forward(
-        &self,
-        proxy_auth: &str,
-        account_id: &str,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: &[u8],
-    ) -> anyhow::Result<ForwardedResponse> {
-        let payload = serde_json::json!({
-            "proxy_auth": proxy_auth,
-            "account_id": account_id,
-            "method": method,
-            "url": url,
-            "headers": headers,
-            "body_b64": base64::engine::general_purpose::STANDARD.encode(body),
-        });
-        let response: ForwardResponse = self.post("/internal/egress/forward", &payload).await?;
-        let body = base64::engine::general_purpose::STANDARD.decode(response.body_b64)?;
-        Ok(ForwardedResponse {
-            status: response.status,
-            headers: response.headers,
-            body,
-        })
-    }
-
     /// Dispatch one authenticated sandbox request through core's live-turn tool bridge.
     pub async fn tool_bridge(
         &self,
         proxy_auth: &str,
         body: &[u8],
-    ) -> anyhow::Result<ForwardedResponse> {
+    ) -> anyhow::Result<ToolBridgeResponse> {
         let request: serde_json::Value = serde_json::from_slice(body)?;
         let response = self
             .http
@@ -131,7 +95,7 @@ impl Control {
         if body.len() > MAX_TOOL_BRIDGE_RESPONSE_BYTES {
             anyhow::bail!("tool bridge response exceeds its body cap");
         }
-        Ok(ForwardedResponse {
+        Ok(ToolBridgeResponse {
             status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body,

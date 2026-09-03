@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,9 +8,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from cryptography.fernet import Fernet
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient, Response
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
@@ -23,12 +23,10 @@ from ufo.harness.sandbox.session import (
     RunToken,
     RunTokenCodec,
 )
-from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
-from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.connectors import CliCredential, GitWire, GrantUnusable
 from ufo.runtime.access.egress_control import EgressControl, rule_json
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
-    ForwardRule,
     InjectionRule,
     InternetRule,
     MeterRule,
@@ -38,7 +36,6 @@ from ufo.runtime.access.egress_rules import (
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
-from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.runtime.tools.bridge import (
     TOOL_BRIDGE_HOST,
     ToolBridgeRequest,
@@ -71,19 +68,24 @@ def _cache_auth() -> dict[str, str]:
     return {"Authorization": f"Bearer {CACHE_TOKEN}"}
 
 
-@dataclass
-class _FakeForwarder:
-    """A real `RequestForwarder` standing in for the broker: it records the request the forward
-    route hands it and answers a fixed provider response the test reads back — never a mock of the
-    thing asserted, the received call and the reconstructed response are."""
+@dataclass(frozen=True)
+class _Tokens:
+    """The broker's token read behind a `CliCredential`: deterministic per account and recorded per
+    call, so a test asserts the token the route answered and which account it was read for. `fault`
+    raises instead, standing for the broker faults this read actually meets — an account the broker
+    will not authenticate, and a broker that cannot be reached."""
 
-    received: list[tuple[str, str, str, dict[str, str], bytes]] = field(default_factory=list)
+    fault: Exception | None = None
+    asked: list[tuple[UUID, str]] = field(default_factory=list)
 
-    async def forward(
-        self, account_id: str, method: str, url: str, headers: dict[str, str], body: bytes
-    ) -> ForwardedResponse:
-        self.received.append((account_id, method, url, dict(headers), body))
-        return ForwardedResponse(status=201, headers={"x-echo": "pong"}, body=b"broker body")
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        self.asked.append((workspace_id, account_id))
+        if self.fault is not None:
+            raise self.fault
+        return f"token-{account_id}"
+
+
+GIT = GitWire(host="github.com", basic_user="x-access-token", helper="!gh auth git-credential")
 
 
 @dataclass
@@ -114,28 +116,6 @@ def _client(control: EgressControl) -> AsyncClient:
     app.include_router(control.router())
     app.include_router(control.git_credential_router())
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://serve")
-
-
-async def _forward(
-    client: AsyncClient,
-    token: str,
-    *,
-    method: str = "POST",
-    headers: list[tuple[str, str]] | None = None,
-    body: bytes = b"",
-) -> Response:
-    return await client.post(
-        "/internal/egress/forward",
-        headers=_auth(),
-        json={
-            "proxy_auth": _basic(token),
-            "account_id": ACCOUNT,
-            "method": method,
-            "url": f"https://{HOST}/v1/thing",
-            "headers": headers or [],
-            "body_b64": base64.b64encode(body).decode(),
-        },
-    )
 
 
 @dataclass(frozen=True)
@@ -243,13 +223,6 @@ def test_rule_json_matches_the_golden_contract() -> None:
             real="sk-ant-real-key",
         ),
         MeterRule(host="api.anthropic.com", dimension="tokens"),
-        ForwardRule(
-            host="api.github.com",
-            header="authorization",
-            sentinel="UFO_SENTINEL_GRANT_acct-9f3c",
-            account_id="acct-9f3c",
-            forward=_FakeForwarder(),
-        ),
         ServiceRule(host="registry.npmjs.org", daemon_prefix="/pkg/registry.npmjs.org"),
     )
     assert json.loads(CONTRACT.read_text()) == {"rules": [rule_json(rule) for rule in rules]}
@@ -411,7 +384,7 @@ async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -
     ]
 
 
-async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> None:
+async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
@@ -423,9 +396,8 @@ async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> N
             conversation_id=seeded.conversation_id,
             shared=True,
         )
-    clis = {
-        PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=_FakeForwarder())
-    }
+    tokens = _Tokens()
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens)}
     resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
     async with _client(_control(resolver)) as client:
         response = await client.post(
@@ -442,14 +414,16 @@ async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> N
     rules = response.json()["rules"]
     assert {"kind": "scope", "hosts": [HOST]} in rules
     assert {"kind": "meter", "host": HOST, "dimension": "requests"} in rules
-    (forward,) = [rule for rule in rules if rule["kind"] == "forward"]
-    assert forward == {
-        "kind": "forward",
-        "host": HOST,
-        "header": CLI_HEADER,
-        "sentinel": grant_sentinel(ACCOUNT),
-        "account_id": ACCOUNT,
-    }
+    assert [rule for rule in rules if rule["kind"] == "injection"] == [
+        {
+            "kind": "injection",
+            "host": HOST,
+            "header": CLI_HEADER,
+            "sentinel": grant_sentinel(ACCOUNT),
+            "real": f"token-{ACCOUNT}",
+        }
+    ]
+    assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
 
 
 async def test_resolve_rechecks_turn_and_probe_liveness(db: None) -> None:
@@ -756,7 +730,9 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(mon
     }
 
 
-async def test_forward_routes_through_the_broker_forwarder(db: None) -> None:
+async def _seed_git_cli(
+    shared: bool = True, fault: Exception | None = None
+) -> tuple[_Seeded, PerAgentRules, _Tokens]:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
@@ -766,227 +742,114 @@ async def test_forward_routes_through_the_broker_forwarder(db: None) -> None:
             host=HOST,
             grantor_member_id=seeded.member_id,
             conversation_id=seeded.conversation_id,
-            shared=True,
+            shared=shared,
         )
-    forwarder = _FakeForwarder()
-    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
+    tokens = _Tokens(fault=fault)
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
+    return seeded, PerAgentRules(base=(), grants=GrantStore(), clis=clis), tokens
+
+
+async def test_git_credential_answers_the_granted_accounts_token_for_the_wired_host(
+    db: None,
+) -> None:
+    """The cache daemon presents the run token the proxy stamped on the relay and gets exactly the
+    credential the proxy would inject for that principal on the host: the wire's Basic username,
+    the granted account's token, and the account as the mirror principal."""
+    seeded, resolver, tokens = await _seed_git_cli()
     token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, WORKSPACE_AUTHORITY))
-    async with _client(_control(resolver)) as client:
-        response = await _forward(
-            client,
-            token,
-            headers=[("content-type", "application/json")],
-            body=b"payload",
-        )
-    body = response.json()
-    assert body["status"] == 201
-    assert ["x-echo", "pong"] in body["headers"]
-    assert base64.b64decode(body["body_b64"]) == b"broker body"
-    assert forwarder.received == [
-        (
-            ACCOUNT,
-            "POST",
-            f"https://{HOST}/v1/thing",
-            {"content-type": "application/json"},
-            b"payload",
-        )
-    ]
-
-
-async def test_forward_refuses_a_grant_revoked_after_the_tunnel_resolved_it(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        grants = GrantStore()
-        await grants.record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            conversation_id=seeded.conversation_id,
-            shared=True,
-        )
-        (grant,) = await grants.active_grants()
-    forwarder = _FakeForwarder()
-    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, WORKSPACE_AUTHORITY))
-    async with _client(_control(resolver)) as client:
-        resolved = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": _basic(token)},
-        )
-        assert any(rule["kind"] == "forward" for rule in resolved.json()["rules"])
-        with ws(seeded.workspace_id), agent(seeded.agent_id):
-            assert await grants.revoke(grant.id, actor_member_id=seeded.member_id)
-        response = await _forward(client, token)
-
-    assert response.status_code == 403
-    assert forwarder.received == []
-
-
-async def test_forward_refuses_a_tunnel_whose_turn_has_ended(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await GrantStore().record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            conversation_id=seeded.conversation_id,
-            shared=True,
-        )
-    forwarder = _FakeForwarder()
-    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, WORKSPACE_AUTHORITY))
-    async with _client(_control(resolver)) as client:
-        resolved = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": _basic(token)},
-        )
-        assert any(rule["kind"] == "forward" for rule in resolved.json()["rules"])
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(status="done", terminal={"status": "done"}, updated_at=sa.func.now())
-                .where(tables.turn.c.id == seeded.turn_id)
-            )
-        response = await _forward(client, token)
-
-    assert response.status_code == 403
-    assert forwarder.received == []
-
-
-async def test_forward_refuses_a_probe_after_its_members_seat_is_revoked(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await GrantStore().record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            conversation_id=seeded.conversation_id,
-            shared=False,
-        )
-    forwarder = _FakeForwarder()
-    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    probe = ProbeToken(
-        seeded.workspace_id,
-        seeded.conversation_id,
-        uuid4(),
-        int(datetime.now(UTC).timestamp()) + 300,
-        MemberAuthority(seeded.member_id),
-    )
-    token = PROBE_TOKENS.encode(probe)
-    async with _client(_control(resolver)) as client:
-        resolved = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": _basic(token)},
-        )
-        assert any(rule["kind"] == "forward" for rule in resolved.json()["rules"])
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.member)
-                .values(seated_at=None, updated_at=sa.func.now())
-                .where(tables.member.c.id == seeded.member_id)
-            )
-        response = await _forward(client, token)
-
-    assert response.status_code == 403
-    assert forwarder.received == []
-
-
-async def test_forward_refuses_a_foreign_private_grant(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await GrantStore().record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            conversation_id=seeded.conversation_id,
-            shared=False,
-        )
-    clis = {
-        PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=_FakeForwarder())
-    }
-    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    stranger_member_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=stranger_member_id,
-                workspace_id=seeded.workspace_id,
-                email="stranger@b.c",
-                seated_at=sa.func.now(),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    stranger = RunToken(seeded.workspace_id, seeded.turn_id, MemberAuthority(stranger_member_id))
-    async with _client(_control(resolver)) as client:
-        response = await _forward(client, RUN_TOKENS.encode(stranger), method="GET")
-    assert response.status_code == 403
-
-
-def _git_slot() -> CredentialSlot:
-    return CredentialSlot(
-        name="github_git_token",
-        description="git token",
-        injection=InjectionTarget(
-            host="github.com",
-            header="authorization",
-            sentinel="SENTINEL_GIT",
-            git_basic_user="x-access-token",
-        ),
-    )
-
-
-async def test_git_credential_resolves_the_matching_git_slot(db: None) -> None:
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    workspace_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.workspace).values(
-                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
-            )
-        )
-    await store.put(workspace_id, "github_git_token", "ghs-installation-token")
-    resolver = PerAgentRules(base=(), grants=None, credentials=store, slots=(_git_slot(),))
     async with _client(_control(resolver)) as client:
         response = await client.post(
             "/internal/git-credential",
             headers=_cache_auth(),
-            json={"workspace_id": str(workspace_id), "host": "github.com"},
+            json={"proxy_auth": _basic(token), "host": GIT.host},
         )
     assert response.status_code == 200
     assert response.json() == {
         "username": "x-access-token",
-        "token": "ghs-installation-token",
-        "principal": f"w{workspace_id}",
+        "token": f"token-{ACCOUNT}",
+        "principal": f"w{seeded.workspace_id}-{ACCOUNT}",
     }
+    assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
 
 
-async def test_git_credential_is_public_without_a_matching_slot(db: None) -> None:
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    resolver = PerAgentRules(base=(), grants=None, credentials=store, slots=(_git_slot(),))
+async def test_git_credential_is_public_without_a_principal(db: None) -> None:
+    _, resolver, tokens = await _seed_git_cli()
+    async with _client(_control(resolver)) as client:
+        response = await client.post(
+            "/internal/git-credential", headers=_cache_auth(), json={"host": GIT.host}
+        )
+    assert response.status_code == 200
+    assert response.json() == {"principal": "public"}
+    assert tokens.asked == []
+
+
+async def test_git_credential_is_public_for_a_host_no_cli_clones_through(db: None) -> None:
+    seeded, resolver, tokens = await _seed_git_cli()
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, WORKSPACE_AUTHORITY))
     async with _client(_control(resolver)) as client:
         response = await client.post(
             "/internal/git-credential",
             headers=_cache_auth(),
-            json={"workspace_id": str(uuid4()), "host": "gitlab.com"},
+            json={"proxy_auth": _basic(token), "host": "gitlab.com"},
         )
     assert response.status_code == 200
     assert response.json() == {"credential": None, "principal": "public"}
+    assert tokens.asked == []
+
+
+async def test_git_credential_is_public_for_a_private_grant_under_workspace_authority(
+    db: None,
+) -> None:
+    """A memberless principal reaches only what is shared with the workspace: a member's private
+    account answers nothing, so the daemon fetches anonymously rather than as that member."""
+    seeded, resolver, tokens = await _seed_git_cli(shared=False)
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, WORKSPACE_AUTHORITY))
+    async with _client(_control(resolver)) as client:
+        response = await client.post(
+            "/internal/git-credential",
+            headers=_cache_auth(),
+            json={"proxy_auth": _basic(token), "host": GIT.host},
+        )
+    assert response.json() == {"credential": None, "principal": "public"}
+    assert tokens.asked == []
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        GrantUnusable("reconnect the account", awaits_grant=True),
+        RuntimeError("broker 503"),
+    ],
+    ids=["unhealthy-account", "unreachable-broker"],
+)
+async def test_git_credential_is_public_when_the_broker_will_not_answer(
+    db: None, fault: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reading the account's token is a call to the broker, so it is uncertain the way every broker
+    call is. Escaping answers 500 here, which the cache daemon turns into a 502 to the sandbox —
+    every clone in the workspace fails, including a public one that needs no credential at all. The
+    fault costs the account its authentication and nothing else: the daemon fetches anonymously,
+    and the warn names the account so the withholding is visible."""
+    seeded, resolver, tokens = await _seed_git_cli(fault=fault)
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, WORKSPACE_AUTHORITY))
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        async with _client(_control(resolver)) as client:
+            response = await client.post(
+                "/internal/git-credential",
+                headers=_cache_auth(),
+                json={"proxy_auth": _basic(token), "host": GIT.host},
+            )
+
+    assert response.status_code == 200
+    assert response.json() == {"credential": None, "principal": "public"}
+    assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
+    withheld = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "egress.git_credential_failed"
+    ]
+    assert [(entry["provider"], entry["account_id"]) for entry in withheld] == [(PROVIDER, ACCOUNT)]
+    assert withheld[0]["error_class"] == type(fault).__name__
 
 
 async def test_git_credential_is_gated_by_the_cache_token_not_the_egress_token() -> None:
@@ -994,7 +857,7 @@ async def test_git_credential_is_gated_by_the_cache_token_not_the_egress_token()
     token — the key to the secrets tier — is not accepted here. Neither token crosses to the other's
     route."""
     resolver = PerAgentRules(base=(), grants=None)
-    body = {"workspace_id": str(uuid4()), "host": "github.com"}
+    body = {"host": GIT.host}
     async with _client(_control(resolver)) as client:
         none = await client.post("/internal/git-credential", json=body)
         egress = await client.post("/internal/git-credential", headers=_auth(), json=body)

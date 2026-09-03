@@ -162,7 +162,7 @@ def _composio_handler(
     (`GET /tools`, `GET /tools/{slug}`), and server-side execute (`POST /tools/execute/{slug}`,
     recording the request body into `executed`). An unknown slug 404s on schema and execute. The
     connected account authenticates `toolkit` and its one catalog tool is `tool_slug`, so the same
-    mock serves an explicit connector (github) or an open-namespace slug (its own toolkit)."""
+    mock serves any open-namespace slug (its own toolkit)."""
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -600,7 +600,7 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     # The member may have reached consent from anywhere, so the body states the outcome and lets
     # them close the page rather than sending them to a chat that need not exist.
     body = response.body.decode()
-    assert "was not connected" in body and "close this page" in body
+    assert "was not connected" in body and "Close this tab" in body
     assert "chat" not in body and "agent" not in body
 
 
@@ -763,10 +763,10 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end across both extensions: connect the account in chat (its owner read through
-    mocked Composio), binding a grant that carries the Composio connected-account id, then the
-    `connectors` extension's `call_external_tool` resolves that grant, routes through the registry
-    to the Composio broker, and POSTs to Composio's server-side execute API with the workspace's
-    broker user id and the bound account — no sandbox, no proxy."""
+    mocked Composio), binding a grant that carries the Composio connected-account id and admits no
+    provider host, then the `connectors` extension's `call_external_tool` resolves that grant,
+    routes through the registry to the Composio broker, and POSTs to Composio's server-side execute
+    API with the workspace's broker user id and the bound account — no sandbox, no proxy."""
     workspace_id = await _workspace()
     owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
     executed: list[dict[str, object]] = []
@@ -812,7 +812,7 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
                 )
             )
         ).one()
-    assert (row.host, row.account_id) == (PROVIDER_HOST, COMPOSIO_ACCOUNT)
+    assert (row.host, row.account_id) == ("", COMPOSIO_ACCOUNT)
 
     tools, ext_by_tool, _ = turn_tools(
         (connectors_manifest.manifest(), composio_manifest.manifest()),
@@ -1151,27 +1151,26 @@ def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
     assert hosts.default == composio.COMPOSIO_TRANSFER_HOSTS
 
 
-def test_serve_registers_the_cli_exception_explicitly_and_opens_the_rest() -> None:
-    """`serve` builds both registries from the manifest: the CLI exception (github) lands as an
-    explicit provider with its real host, and the open `ComposioResolver` serves every other toolkit
-    by its slug alone — resolved to the shared broker and an OAuth descriptor with no provider host,
-    since a brokered grant admits none (execution is server-side)."""
+def test_serve_registers_no_explicit_connector_and_opens_the_namespace() -> None:
+    """`serve` builds both registries from the manifest: it registers no explicit provider, and the
+    open `ComposioResolver` serves every toolkit — `github` like any other slug — resolved to the
+    shared broker and an OAuth descriptor with no provider host, since a brokered grant admits none
+    (execution is server-side)."""
     flow = _connect_flow(_credentials(), _config(), (composio_manifest.manifest(),))
     assert flow is not None
-    assert set(flow.providers) == {PROVIDER}
-    assert flow.providers[PROVIDER].host == PROVIDER_HOST
+    assert set(flow.providers) == set()
     assert flow.redirect_uri == EXPECTED_REDIRECT_URI
     assert flow.resolver is not None
-    descriptor = flow.resolver.descriptor("notion")
-    assert descriptor.provider == "notion"
-    assert descriptor.host == ""
+    for slug in (PROVIDER, "notion"):
+        descriptor = flow.resolver.descriptor(slug)
+        assert descriptor.provider == slug
+        assert descriptor.host == ""
     registry = _registry()
-    assert set(registry.entries) == {PROVIDER}
-    assert registry.entry(PROVIDER).label == "GitHub"
-    opened = registry.entry("notion")
-    assert opened.provider == "notion"
-    assert isinstance(opened.broker, ComposioBroker)
-    assert isinstance(registry.entry(PROVIDER).broker, ComposioBroker)
+    assert set(registry.entries) == set()
+    for slug in (PROVIDER, "notion"):
+        opened = registry.entry(slug)
+        assert opened.provider == slug
+        assert isinstance(opened.broker, ComposioBroker)
 
 
 async def test_open_namespace_slug_connects_describes_searches_and_executes(

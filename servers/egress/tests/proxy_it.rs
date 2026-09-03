@@ -1,7 +1,7 @@
 //! End-to-end wire tests for the egress proxy. Each spins a fake control RPC server and (where the
 //! path needs one) a local origin, all on 127.0.0.1 with no Postgres, then drives a real CONNECT
 //! through `EgressProxy` and asserts the refusal code, the tunnelled/MITM'd bytes, the injected
-//! secret, the broker forward, and the metering the proxy posts back.
+//! secret, and the metering the proxy posts back.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,6 @@ struct ControlState {
     authorize_status: u16,
     generation: i64,
     rules_json: String,
-    forward_json: String,
     bridge_json: String,
     bridge_requests: Mutex<Vec<serde_json::Value>>,
     meter_records: Mutex<Vec<serde_json::Value>>,
@@ -46,7 +45,6 @@ impl ControlState {
             authorize_status: 200,
             generation: 0,
             rules_json: rules_json.to_string(),
-            forward_json: String::new(),
             bridge_json: String::new(),
             bridge_requests: Mutex::new(Vec::new()),
             meter_records: Mutex::new(Vec::new()),
@@ -94,8 +92,6 @@ async fn spawn_control(state: Arc<ControlState>) -> String {
                         }
                     }
                     (200, "{}".to_string())
-                } else if path.ends_with("/forward") {
-                    (200, state.forward_json.clone())
                 } else if path.ends_with("/tool-bridge") {
                     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
                         state.bridge_requests.lock().unwrap().push(value);
@@ -603,43 +599,6 @@ async fn an_injection_host_mitms_and_swaps_the_real_secret_upstream() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_forward_sentinel_request_executes_through_the_broker() {
-    let hello = base64::engine::general_purpose::STANDARD.encode("hello");
-    let state = Arc::new(ControlState {
-        forward_json: format!(
-            "{{\"status\":200,\"headers\":[[\"x-broker\",\"1\"]],\"body_b64\":\"{hello}\"}}"
-        ),
-        ..control_defaults(
-            r#"[{"kind":"scope","hosts":["localhost"]},{"kind":"forward","host":"localhost","header":"authorization","sentinel":"GRANT","account_id":"acct-1"}]"#,
-        )
-    });
-    let proxy = start_proxy(state).await;
-    let auth = basic(&run_token(None));
-    let (sock, head) = connect(&proxy, "localhost:443", Some(&auth)).await;
-    assert_eq!(
-        status_of(&head),
-        200,
-        "forward CONNECT was not accepted: {head}"
-    );
-
-    let request =
-        b"POST /v1/do HTTP/1.1\r\nhost: localhost\r\nauthorization: token GRANT\r\ncontent-length: 0\r\n\r\n";
-    let response = mitm_request(&proxy, sock, "localhost", request).await;
-    assert!(
-        response.contains("200 OK"),
-        "broker response missing: {response}"
-    );
-    assert!(
-        response.contains("x-broker: 1"),
-        "broker header dropped: {response}"
-    );
-    assert!(
-        response.ends_with("hello"),
-        "broker body missing: {response}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_tool_bridge_request_reaches_core_with_the_proxy_run_authority() {
     let state = Arc::new(ControlState {
         bridge_json: r#"{"ok":true,"result":{"objects":[]}}"#.to_string(),
@@ -817,7 +776,6 @@ fn control_defaults(rules_json: &str) -> ControlState {
         authorize_status: 200,
         generation: 0,
         rules_json: rules_json.to_string(),
-        forward_json: String::new(),
         bridge_json: String::new(),
         bridge_requests: Mutex::new(Vec::new()),
         meter_records: Mutex::new(Vec::new()),

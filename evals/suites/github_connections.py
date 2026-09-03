@@ -1,20 +1,16 @@
-"""GitHub connection routing: PR work needs the App while API operations need Composio.
-
-A member who just installed the App and asks whether GitHub is connected is the third state,
-and the one the connector listing alone answers wrongly: it reports connector accounts, the
-install writes none, and the answer that follows offers the install the workspace already has.
-The `<workspace_capability>` block the coding extension states on every turn is what the case
-measures — the answer names the install, and no second install is offered."""
+"""GitHub connection routing. One connection covers private clone, push, `gh`, and the API, and
+`connect_account` with `provider: github` is the one handoff: unconnected, the agent starts it and
+offers no other route to the files; connected, it answers from the connection and offers no second
+one."""
 
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from cryptography.fernet import InvalidToken
-from ufo_ext_coding.connect import GIT_INSTALLATION_SLOT
-from ufo_ext_coding.github_app import GIT_SLOT
+from ufo_ext_pipedream.client import CONNECTORS
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import CapabilityCase, CapabilitySeed
+from evals.harness.harness import JsonObject
 from evals.harness.scorers import (
     attempted_tools_scorer,
     combine,
@@ -23,28 +19,24 @@ from evals.harness.scorers import (
 )
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.access.credentials import (
-    CredentialRequestInvalid,
-    CredentialSlotUnset,
-    installed_credential_requests,
-    open_installation,
-)
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.sdk.context import CredentialAccess
 
-GITHUB_ACCOUNT_ID = "eval-github-account"
-GITHUB_INSTALLATION_ID = "123456"
 GITHUB_PROVIDER = "github"
-CONNECT_GITHUB = "action:credential:connect_github"
+GITHUB_ACCOUNT_ID = "eval-github-account"
+GITHUB_HOST = CONNECTORS[GITHUB_PROVIDER].host
+GITHUB_HANDOFF: tuple[str, JsonObject] = ("connect_account", {"provider": GITHUB_PROVIDER})
+OTHER_ROUTES = ("spawn", "fetch_url", "call_external_tool")
 
 
-def _github_state(*, connector: bool, app: bool) -> CapabilitySeed:
+def github_state(*, connected: bool) -> CapabilitySeed:
+    """Every GitHub connection the workspace holds is disconnected; with `connected`, one shared
+    `github` connection is then recorded for the workspace's first member."""
+
     async def seed(_workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
         workspace = ws_current()
-        conversation_id = uuid4()
         async with workspace_tx() as connection:
             connections = (
                 await connection.execute(
@@ -58,25 +50,6 @@ def _github_state(*, connector: bool, app: bool) -> CapabilitySeed:
                     )
                 )
             ).all()
-            foreign_accounts = tuple(
-                row.account_id for row in connections if row.account_id != GITHUB_ACCOUNT_ID
-            )
-            if foreign_accounts:
-                raise RuntimeError(
-                    "github_connections requires a disposable workspace without GitHub accounts"
-                )
-            slots = frozenset(
-                (
-                    await connection.execute(
-                        sa.select(tables.credential.c.slot).where(
-                            tables.credential.c.workspace_id == workspace.workspace_id,
-                            tables.credential.c.slot.in_((GIT_INSTALLATION_SLOT, GIT_SLOT)),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
             member_id = (
                 await connection.execute(
                     sa.select(tables.member.c.id)
@@ -85,127 +58,89 @@ def _github_state(*, connector: bool, app: bool) -> CapabilitySeed:
                     .limit(1)
                 )
             ).scalar_one()
-        if GIT_SLOT in slots:
+        if any(row.account_id != GITHUB_ACCOUNT_ID for row in connections):
             raise RuntimeError(
-                "github_connections requires a disposable workspace without a GitHub git token"
+                "github_connections requires a disposable workspace without GitHub accounts"
             )
-        if GIT_INSTALLATION_SLOT in slots:
-            try:
-                sealed = await workspace.credential(GIT_INSTALLATION_SLOT)
-                installation_id = open_installation(
-                    installed_credential_requests().fernet,
-                    workspace.workspace_id,
-                    GIT_INSTALLATION_SLOT,
-                    sealed,
-                )
-            except (CredentialRequestInvalid, CredentialSlotUnset, InvalidToken):
-                raise RuntimeError(
-                    "github_connections requires a disposable workspace without a GitHub App"
-                ) from None
-            if installation_id != GITHUB_INSTALLATION_ID:
-                raise RuntimeError(
-                    "github_connections requires a disposable workspace without a GitHub App"
-                )
-        fixture_connection = next(iter(connections), None)
-        if fixture_connection is not None:
-            with agent(agent_id):
-                await GrantStore().disconnect(
-                    fixture_connection.id,
-                    actor_member_id=fixture_connection.owner_member_id,
-                )
+        with agent(agent_id):
+            grants = GrantStore()
+            for row in connections:
+                await grants.disconnect(row.id, actor_member_id=row.owner_member_id)
+        if not connected:
+            return
+        conversation_id = uuid4()
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.delete(tables.credential).where(
-                    tables.credential.c.workspace_id == workspace.workspace_id,
-                    tables.credential.c.slot == GIT_INSTALLATION_SLOT,
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace.workspace_id,
+                    agent_id=agent_id,
+                    surface=EVAL_SURFACE,
+                    queue_key=f"{EVAL_SURFACE}-github-state:{conversation_id}",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
                 )
             )
-            if connector:
-                await connection.execute(
-                    sa.insert(tables.conversation).values(
-                        id=conversation_id,
-                        workspace_id=workspace.workspace_id,
-                        agent_id=agent_id,
-                        surface=EVAL_SURFACE,
-                        queue_key=f"{EVAL_SURFACE}-github-state:{conversation_id}",
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-        if app:
-            await CredentialAccess(frozenset({GIT_INSTALLATION_SLOT})).bind_installation(
-                GIT_INSTALLATION_SLOT,
-                GITHUB_INSTALLATION_ID,
+        with agent(agent_id):
+            await GrantStore().record(
+                provider=GITHUB_PROVIDER,
+                account_id=GITHUB_ACCOUNT_ID,
+                host=GITHUB_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=True,
             )
-        if connector:
-            with agent(agent_id):
-                await GrantStore().record(
-                    provider=GITHUB_PROVIDER,
-                    account_id=GITHUB_ACCOUNT_ID,
-                    host="",
-                    grantor_member_id=member_id,
-                    conversation_id=conversation_id,
-                    shared=True,
-                )
 
     return seed
 
 
 CASES = (
     CapabilityCase(
-        "neither-github-connection",
-        "I haven't connected GitHub to this workspace yet. Set it up so you can work on issues "
-        "and send pull requests for our private repositories.",
+        "github-not-connected-setup",
+        "I haven't connected GitHub to this workspace yet. Set it up so you can clone our private "
+        "repositories, push branches, and open pull requests.",
         combine(
             skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
-                (
-                    (CONNECT_GITHUB, {}),
-                    ("connect_account", {"provider": "github"}),
-                ),
-                ("spawn",),
-                (("load_skill", CONNECT_GITHUB), ("load_skill", "connect_account")),
+                (GITHUB_HANDOFF,), OTHER_ROUTES, (("load_skill", "connect_account"),)
             ),
         ),
-        digest_tag="github-connections:neither:action",
-        seed=_github_state(connector=False, app=False),
+        digest_tag="github-connections:not-connected-setup:action",
+        seed=github_state(connected=False),
     ),
     CapabilityCase(
-        "operations-work-prs-fail",
-        "Our GitHub issues already work here, but private clone and push do not. Connect what's "
-        "missing so pull request work can proceed.",
-        combine(
-            skill_scorer("coding", "create-skill"),
-            attempted_tools_scorer(
-                ((CONNECT_GITHUB, {}),),
-                ("connect_account", "spawn"),
-                (("load_skill", CONNECT_GITHUB),),
-            ),
-        ),
-        digest_tag="github-connections:operations-work-prs-fail:action",
-        seed=_github_state(connector=True, app=False),
+        "github-not-connected-asked-if-connected",
+        "Is GitHub connected for this workspace? I need you to clone a private repo and push a "
+        "branch.",
+        attempted_tools_scorer((GITHUB_HANDOFF,), OTHER_ROUTES, ()),
+        digest_tag="github-connections:not-connected-asked-if-connected:action",
+        seed=github_state(connected=False),
     ),
     CapabilityCase(
-        "git-works-operations-fail",
-        "Private clone and push already work here, but the agent can't read or update our GitHub "
-        "issues. Connect what's missing.",
-        attempted_tools_scorer(
-            (("connect_account", {"provider": "github"}),),
-            (CONNECT_GITHUB, "spawn"),
-            (("load_skill", "connect_account"),),
-        ),
-        digest_tag="github-connections:git-works-operations-fail:action",
-        seed=_github_state(connector=False, app=True),
-    ),
-    CapabilityCase(
-        "app-installed-asked-if-connected",
-        "Is GitHub connected for this workspace?",
-        restraint_scorer((CONNECT_GITHUB, "spawn")),
+        "github-connected-asked-if-connected",
+        "Is GitHub connected for this workspace? Can you clone our private repos and push "
+        "branches?",
+        restraint_scorer(("connect_account", "spawn")),
         rubric=(
-            "The answer states that the ufo GitHub App is already installed for this workspace, "
-            "and that private clone and push work.",
+            "The answer states that GitHub is connected, and that private clone, push, and GitHub "
+            "API reads and writes all work through that one connection; it offers no further "
+            "connection.",
         ),
-        digest_tag="github-connections:app-installed-asked-if-connected:answer",
-        seed=_github_state(connector=False, app=True),
+        digest_tag="github-connections:connected-asked-if-connected:answer",
+        seed=github_state(connected=True),
+    ),
+    CapabilityCase(
+        "github-connected-private-repo-issue",
+        "Fix issue #42 in our private repo github.com/evalco/ledger — the nightly export writes an "
+        "empty CSV — and open a pull request. Stop after the first attempted route; do not retry "
+        "failed tools or delegate substitute workers.",
+        combine(
+            skill_scorer("coding", "create-skill"),
+            attempted_tools_scorer(
+                (("spawn", {}),), ("connect_account", "fetch_url"), (("load_skill", "spawn"),)
+            ),
+        ),
+        digest_tag="github-connections:connected-private-repo-issue:action",
+        seed=github_state(connected=True),
     ),
 )

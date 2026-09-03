@@ -194,13 +194,12 @@ const RECORD_FIRST_RUN_ACTION = "record_first_run";
 export const WATCH_MS = 3_000;
 
 /** The object a workspace install acts on and the action that installs it, keyed by the connector
- *  that takes one: Slack's is the surface object's connect, GitHub's the installation credential's.
- *  The object's detail is read for the act it projects and the act mints the install link inside
- *  the turn, so installing takes no message the member has to send. Every provider outside this map
- *  connects a member's own account through the broker verb instead. */
+ *  that takes one: Slack's is the surface object's connect. The object's detail is read for the act
+ *  it projects and the act mints the install link inside the turn, so installing takes no message
+ *  the member has to send. Every provider outside this map connects a member's own account through
+ *  the broker verb instead. */
 export const CONNECT_INSTALLS: Record<string, ObjectAction> = {
   slack: { kind: "surface", name: "slack", action: "slack_connect" },
-  github: { kind: "credential", name: "github-app-installation", action: "connect_github" },
 };
 
 /** What is top of mind for a member as they start, picked from a grid rather than typed: each pick
