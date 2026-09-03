@@ -1,6 +1,13 @@
 import { Command as CommandPrimitive } from "cmdk";
 import { IconChevronLeft } from "@tabler/icons-react";
-import type { ComponentProps, ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { cn } from "@/lib/cn";
 
@@ -66,13 +73,118 @@ export function CommandInput({
   );
 }
 
-export function CommandList({ className, ...props }: ComponentProps<typeof CommandPrimitive.List>) {
+/** The rows, scrolled, with the heading of every run still below the fold stacked at the foot of the
+ *  list. The stack is what tells a member holding a long run of apps that threads and places stand
+ *  under it. */
+export function CommandList({
+  className,
+  children,
+  ...props
+}: ComponentProps<typeof CommandPrimitive.List>) {
+  const rows = useRef<HTMLDivElement>(null);
   return (
-    <CommandPrimitive.List
-      data-slot="command-list"
-      className={cn("h-(--size-palette) min-h-0 scroll-py-2xs overflow-y-auto p-2xs", className)}
-      {...props}
-    />
+    <div className="relative flex min-h-0 flex-col">
+      <CommandPrimitive.List
+        ref={rows}
+        data-slot="command-list"
+        className={cn("h-(--size-palette) min-h-0 scroll-py-2xs overflow-y-auto p-2xs", className)}
+        {...props}
+      >
+        {children}
+      </CommandPrimitive.List>
+      <CommandStack rows={rows} />
+    </div>
+  );
+}
+
+/** One run the list has not reached yet: what it is called, and where the list scrolls to stand on
+ *  it. */
+type Stacked = { heading: string; top: number };
+
+const GROUP = "[cmdk-group]";
+
+const GROUP_HEADING = "[cmdk-group-heading]";
+
+function same(held: Stacked[], next: Stacked[]): boolean {
+  return (
+    held.length === next.length &&
+    held.every((run, at) => run.heading === next[at].heading && run.top === next[at].top)
+  );
+}
+
+/** Which runs stand below what the list is showing, in the order they stand in it. A run is counted
+ *  from the last one up, and the room the stack itself takes at the foot is taken off the fold as
+ *  each heading joins it: a heading the stack would cover is a heading the member cannot read, so it
+ *  is stacked rather than left under the pile. The walk stops at the first run already in view,
+ *  which is why a heading leaves the stack as its own run scrolls up to meet it. */
+function below(rows: HTMLDivElement): Stacked[] {
+  const fold = rows.clientHeight;
+  /* No layout, no fold: a list that has not been laid out states nothing about what is under it. */
+  if (!fold) return [];
+  const top = rows.getBoundingClientRect().top;
+  const groups = [...rows.querySelectorAll<HTMLElement>(GROUP)];
+  const stack: Stacked[] = [];
+  let taken = 0;
+  for (let at = groups.length - 1; at >= 0; at--) {
+    const heading = groups[at].querySelector<HTMLElement>(GROUP_HEADING);
+    if (!heading) continue;
+    const height = heading.getBoundingClientRect().height;
+    const stands = groups[at].getBoundingClientRect().top - top + rows.scrollTop;
+    if (stands <= rows.scrollTop + fold - taken - height) break;
+    stack.unshift({ heading: heading.textContent ?? "", top: stands });
+    taken += height;
+  }
+  return stack;
+}
+
+/** The headings of the runs still under the fold, stacked at the foot of the list in the order the
+ *  list holds them, each drawn as its own heading is. A press on one carries the list to that run.
+ *  The stack is out of the reading order and out of the tab order: cmdk already names every run to a
+ *  screen reader, and nothing else in the palette is reached by tabbing. */
+function CommandStack({ rows }: { rows: RefObject<HTMLDivElement | null> }) {
+  const [stack, setStack] = useState<Stacked[]>([]);
+  useEffect(() => {
+    const list = rows.current;
+    if (!list) return;
+    const measure = () => {
+      const next = below(list);
+      setStack((held) => (same(held, next) ? held : next));
+    };
+    measure();
+    list.addEventListener("scroll", measure);
+    const resized = new ResizeObserver(measure);
+    resized.observe(list);
+    /* The runs are redrawn as the member types, and a run that came or went moves every fold under
+       it. */
+    const changed = new MutationObserver(measure);
+    changed.observe(list, { childList: true, subtree: true, characterData: true });
+    return () => {
+      list.removeEventListener("scroll", measure);
+      resized.disconnect();
+      changed.disconnect();
+    };
+  }, [rows]);
+  if (!stack.length) return null;
+  return (
+    <div
+      data-slot="command-stack"
+      aria-hidden
+      className="pointer-events-none absolute inset-x-2xs bottom-0 flex flex-col"
+    >
+      {stack.map((run) => (
+        <button
+          key={run.heading}
+          type="button"
+          tabIndex={-1}
+          /* The cursor stays in the box: the press moves the list, it does not take the field. */
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => rows.current?.scrollTo({ top: run.top, behavior: "smooth" })}
+          className="pointer-events-auto flex h-(--size-row) shrink-0 items-center border-0 bg-popover px-lg text-left text-label text-ink-soft hover:text-ink"
+        >
+          {run.heading}
+        </button>
+      ))}
+    </div>
   );
 }
 
