@@ -99,7 +99,7 @@ _OWNER = _Pool(application_name="ufo_owner", size=OWNER_POOL_SIZE, overflow=OWNE
 
 _app_url: str | None = None
 _owner_url: str | None = None
-_disposing: set[asyncio.Task[None]] = set()
+_disposing: dict[asyncio.AbstractEventLoop, set[asyncio.Task[None]]] = {}
 _SQLITE_TRANSACTION_LOCKS: WeakKeyDictionary[AsyncEngine, asyncio.Lock] = WeakKeyDictionary()
 
 current_workspace: ContextVar[UUID | None] = ContextVar("current_workspace", default=None)
@@ -277,10 +277,27 @@ def _dispose_on_this_loop(engine: AsyncEngine) -> None:
     """Runs on the loop that owns `engine`'s connections, which is the only loop that can close
     them. Holding the engine as an argument is what keeps it reachable between `dispose_db` removing
     its registry entry and this running, and `_disposing` is what keeps the task itself from being
-    collected before it finishes."""
+    collected before it finishes.
+
+    A task belongs to the loop that runs it, and awaiting one from another loop raises, so the
+    tasks are held per loop and a loop reaches only its own. What the map holds is exactly the
+    loops with a disposal in flight: the last task to finish takes its loop's entry with it, and a
+    loop that stopped while one was still pending leaves a task that can never finish, dropped at
+    the next handoff since nothing can complete or read it again."""
+    loop = asyncio.get_running_loop()
+    for stopped in list(_disposing):
+        if stopped.is_closed():
+            _disposing.pop(stopped, None)
+    pending = _disposing.setdefault(loop, set())
     task = asyncio.ensure_future(engine.dispose())
-    _disposing.add(task)
-    task.add_done_callback(_disposing.discard)
+    pending.add(task)
+
+    def finished(done: asyncio.Task[None]) -> None:
+        pending.discard(done)
+        if not pending:
+            _disposing.pop(loop, None)
+
+    task.add_done_callback(finished)
 
 
 async def dispose_loop_engines() -> None:

@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
+from weakref import ref
 
 import aiosqlite
 import pytest
@@ -1923,6 +1925,10 @@ def _current_engine() -> AsyncEngine:
     return next(engine for (held, _), engine in ufo.db._APP.engines.items() if held is loop)
 
 
+def _draining() -> list[asyncio.Task[None]]:
+    return list(ufo.db._disposing.get(asyncio.get_running_loop(), ()))
+
+
 async def _touch() -> None:
     async with workspace_tx() as connection:
         await connection.execute(sa.text("select 1"))
@@ -2065,7 +2071,7 @@ async def test_dispose_db_closes_a_live_foreign_loops_engine(db: None) -> None:
         escaped.append((engine, engine.pool))
         ready.set()
         await asyncio.to_thread(release.wait)
-        await asyncio.gather(*list(ufo.db._disposing))
+        await asyncio.gather(*_draining())
 
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=lambda: loop.run_until_complete(hold()))
@@ -2084,6 +2090,58 @@ async def test_dispose_db_closes_a_live_foreign_loops_engine(db: None) -> None:
         loop.close()
     foreign, foreign_pool = escaped[0]
     assert foreign.pool is not foreign_pool
+
+
+def _strand_a_disposal_on_a_loop_that_stops(stranded: list[ref[AsyncEngine]]) -> None:
+    url = ufo.db._app_url
+    assert url is not None
+    engine = ufo.db._build_engine(url, ufo.db._APP)
+    stranded.append(ref(engine))
+    stopped = asyncio.new_event_loop()
+    stopped.call_soon(stopped.stop)
+    ufo.db._hand_off(stopped, engine)
+    stopped.run_forever()
+    stopped.close()
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+async def test_a_closed_loops_disposal_never_reaches_the_loop_disposing_next(db: None) -> None:
+    """A loop that stops with the disposal it was handed still pending leaves a task no loop can
+    ever finish. A task belongs to one loop, so a later loop reading that entry cannot await it —
+    it raises, and the disposal that loop was actually driving never completes. The strand is
+    built the way one arises (a handoff to a loop that stops before the task runs), and what is
+    asserted is the next loop's disposal: unaffected, and the strand released rather than held for
+    the life of the process."""
+    await _touch()
+    stranded: list[ref[AsyncEngine]] = []
+    stranding = threading.Thread(target=_strand_a_disposal_on_a_loop_that_stops, args=(stranded,))
+    stranding.start()
+    stranding.join()
+    ready, release = threading.Event(), threading.Event()
+    escaped: list[tuple[AsyncEngine, object]] = []
+
+    async def hold() -> None:
+        await _touch()
+        engine = _current_engine()
+        escaped.append((engine, engine.pool))
+        ready.set()
+        await asyncio.to_thread(release.wait)
+        await asyncio.gather(*_draining())
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=lambda: loop.run_until_complete(hold()))
+    thread.start()
+    try:
+        ready.wait()
+        await dispose_db()
+    finally:
+        release.set()
+        thread.join()
+        loop.close()
+    foreign, foreign_pool = escaped[0]
+    assert foreign.pool is not foreign_pool
+    gc.collect()
+    assert stranded[0]() is None
 
 
 class _LoopThatClosesInTheWindow:
