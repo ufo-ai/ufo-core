@@ -2062,6 +2062,39 @@ async def test_connection_pool_names_no_agent_outside_the_web_audience(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_connection_pool_hides_another_members_private_connection_from_an_admin(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The connectors page lists a private account to its owner alone. A workspace admin reads
+    their own private account and every shared one, and never another member's private account:
+    admin authority governs acts on a connection, not the sight of one."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    admin_member, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
+    await _seed_connection(workspace_id, agent_id, member_m, "slack", shared=True)
+    await _seed_connection(workspace_id, agent_id, admin_member, "asana", shared=False)
+    admin_pool = await client.get(
+        "/surface/web/connections", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    )
+    assert [
+        (c["provider"], c["owner_email"], c["own"], c["shared"])
+        for c in admin_pool.json()["connections"]
+    ] == [
+        ("asana", "boss@example.com", True, False),
+        ("slack", "m@example.com", True, True),
+    ]
+    member_pool = await client.get(
+        "/surface/web/connections", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert [(c["provider"], c["own"]) for c in member_pool.json()["connections"]] == [
+        ("github", True),
+        ("slack", True),
+    ]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credentials_view_reports_slots_and_never_values(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

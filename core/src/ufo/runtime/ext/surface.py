@@ -3168,11 +3168,13 @@ class SurfaceContext:
     async def list_connections(
         self, member_id: UUID, *, admin: bool
     ) -> tuple[ConnectionPoolView, ...]:
-        """This workspace's connections with the live apps each is attached to. An archived holder
-        is not one: the panel's Revoke posts a detach on every holder it lists, and an archived app
-        refuses the turn that would carry it, which stops the revoke before the live holders after
-        it. The filter rides the join, so a connection whose only holder is archived still lists —
-        held by nobody until a restore."""
+        """The connections this member may see, with the live apps each is attached to — their own
+        plus the workspace-shared ones. A workspace admin reads the same set: an account is private
+        to its owner until it is shared (#327), and admin authority governs acts on a connection,
+        never the sight of one. An archived holder is not a live app: the panel's Revoke posts a
+        detach on every holder it lists, and an archived app refuses the turn that would carry it,
+        which stops the revoke before the live holders after it. The filter rides the join, so a
+        connection whose only holder is archived still lists — held by nobody until a restore."""
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         query = (
             sa.select(
@@ -3208,14 +3210,13 @@ class SurfaceContext:
                 tables.connection.c.account_id,
                 member_name,
             )
-        )
-        if not admin:
-            query = query.where(
+            .where(
                 sa.or_(
                     tables.connection.c.shared,
                     tables.connection.c.owner_member_id == member_id,
                 )
             )
+        )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         grouped: dict[tuple[str, str], list[AttachedAgentView]] = {}
@@ -3229,11 +3230,7 @@ class SurfaceContext:
                     account_id=row.account_id,
                     grant=account_object_name(row.provider, row.account_id),
                     account_label=row.account_label,
-                    owner_email=(
-                        row.email
-                        if admin or row.shared or row.owner_member_id == member_id
-                        else None
-                    ),
+                    owner_email=row.email,
                     own=admin or row.owner_member_id == member_id,
                     shared=row.shared,
                     connected_at=row.created_at,
