@@ -1,6 +1,6 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import { setPendingAsk } from "@/lib/pendingAsk";
-import { framedNavigation, newChatHash, type WorkspacePlace } from "@/lib/route";
+import { framedNavigation, newChatHash, parseHash, type WorkspacePlace } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import type { Crumb } from "@/lib/title";
 import type { Agent, Member } from "@/lib/types";
@@ -165,6 +165,11 @@ export type BridgeConfig = {
    *  without waiting for its next read. The page could only have founded it through this bridge's
    *  own chat call, so the report claims nothing the shell did not broker. */
   onCreated?: (agentId: string, conversationId: string, title: string) => void;
+  /** Where a conversation the page names opens, stated by a shell that stands the frame in a lane:
+   *  the transcript takes a lane of its own beside the page. A press inside one lane cannot spend
+   *  the member's whole track, so the permalink is navigated to only where no lane holds the
+   *  frame. */
+  onConversation?: (conversationId: string) => void;
   onSessionEnded?: () => void;
   /** Whether this frame is the chat surface — the one page whose job is speaking. Only it may
    *  post the chat admit: a send runs a model turn with the viewer's whole authority, and every
@@ -253,6 +258,7 @@ export function attachBridge({
   banded,
   place,
   onCreated,
+  onConversation,
   onSessionEnded,
   chatSurface = false,
 }: BridgeConfig): BridgeHandle {
@@ -473,9 +479,16 @@ export function attachBridge({
       /* A page's navigation is a navigation like any other, so the router writes it: the drawer over
          the page shuts and the arrival lands, where a bare hash write left the shell to catch up a
          task later. */
-      case "navigate":
-        if (typeof message.to === "string" && framedNavigation(message.to)) navigate(message.to);
+      case "navigate": {
+        if (typeof message.to !== "string" || !framedNavigation(message.to)) return;
+        const asked = parseHash(message.to);
+        if (onConversation && asked.kind === "chat" && asked.slot === undefined) {
+          onConversation(asked.conversationId);
+          return;
+        }
+        navigate(message.to);
         return;
+      }
       /* Words handed to the composer of a new chat with this app, unsent — the same act the
          portal's own setup row performs, reached from inside the frame. `send` is false here and
          nowhere passed by the page: a frame may put words in front of the member, never say them.

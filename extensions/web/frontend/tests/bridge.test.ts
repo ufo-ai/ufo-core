@@ -602,6 +602,31 @@ test("heldRoute names the conversation a frame's navigate message asked for", ()
   expect(heldRoute()).toEqual({ kind: "chat", conversationId: CONVERSATION_ID });
 });
 
+/** A frame standing in a lane hands its conversation links to the lane instead: the shell opens the
+ *  transcript in a lane of its own, and the address keeps naming the track the member is holding.
+ *  Every other target the fence admits still moves the shell. */
+test("a lane takes a frame's conversation link instead of the shell moving to it", () => {
+  const { iframe } = fakeFrame();
+  const laned: string[] = [];
+  location.hash = "";
+  bridge = attachBridge({
+    iframe,
+    member: MEMBER,
+    agentId: AGENT_ID,
+    onConversation: (conversationId) => void laned.push(conversationId),
+  });
+
+  deliver({ ufo: "navigate", to: "#/c/" + CONVERSATION_ID }, iframe.contentWindow);
+
+  expect(laned).toEqual([CONVERSATION_ID]);
+  expect(location.hash).toBe("");
+
+  deliver({ ufo: "navigate", to: "#/agents/" + AGENT_ID }, iframe.contentWindow);
+
+  expect(laned).toEqual([CONVERSATION_ID]);
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+});
+
 test("a call with no usable id is dropped without a reply or a throw", async () => {
   const fetchMock = vi.fn<typeof fetch>();
   vi.stubGlobal("fetch", fetchMock);

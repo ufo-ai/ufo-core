@@ -71,6 +71,7 @@ export function HomepageFrame({
   place,
   banded,
   onFounded,
+  onConversation,
 }: {
   agent: Agent;
   member: Member;
@@ -79,6 +80,9 @@ export function HomepageFrame({
   place: WorkspacePlace;
   banded: boolean;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
+  /** Where a conversation the page links to opens. A lane states it, so the transcript stands in a
+   *  lane beside the page; a frame holding the whole screen states none and the permalink stands. */
+  onConversation?: (conversationId: string) => void;
 }) {
   const agents = useAgents();
   const standing = { member, agents, crumb: agentCrumb(agent) };
@@ -135,6 +139,9 @@ export function HomepageFrame({
     const speaking = agents.find((entry) => entry.id === agentId);
     if (speaking) onFounded(speaking, conversationId, title);
   };
+  const conversationRef = useRef(onConversation);
+  conversationRef.current = onConversation;
+  const lanes = onConversation !== undefined;
   useEffect(() => {
     const frame = frameRef.current;
     if (!frame) return;
@@ -147,6 +154,9 @@ export function HomepageFrame({
       chatSurface: agent.app === CHAT_SURFACE,
       onCreated: (agentId, conversationId, title) =>
         foundedRef.current(agentId, conversationId, title),
+      ...(lanes
+        ? { onConversation: (conversationId: string) => conversationRef.current?.(conversationId) }
+        : {}),
       onSessionEnded: () => {
         sessionEnded.current = true;
         if (document.hasFocus()) refreshEndedSession();
@@ -157,7 +167,7 @@ export function HomepageFrame({
       bridgeRef.current = null;
       handle.detach();
     };
-  }, [agent.id, agent.app, url, generation, frameRefresh, banded, refreshEndedSession]);
+  }, [agent.id, agent.app, url, generation, frameRefresh, banded, lanes, refreshEndedSession]);
   useEffect(() => {
     bridgeRef.current?.place(placeRef.current);
   }, [placedAt]);

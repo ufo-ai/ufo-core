@@ -5,11 +5,11 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { attachBridge } from "@/lib/bridge";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { homeHash } from "@/lib/route";
+import { chatHash, homeConversationLane, homeHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 import { HomepageFrame } from "@/views/HomepageFrame";
 
-import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
 
 vi.mock("@/lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/bridge")>();
@@ -63,6 +63,38 @@ function open(routes: Parameters<typeof wire>[0], homepage?: unknown) {
   });
   render(<App agents={[withHome(homepage)]} member={MEMBER} onAgents={() => {}} />);
 }
+
+/** A page pressed inside a lane keeps the member's track: the conversation it names opens in a lane
+ *  of its own beside the page, rather than the transcript taking the whole screen. */
+test("a page's conversation link opens a lane beside the app it was pressed in", async () => {
+  location.hash = homeHash({ opens: [SECOND_ID] });
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json(SET),
+    ...chatsOnWire([CHAT_ROW]),
+  });
+  render(
+    <App
+      agents={[AGENT, { ...SECOND, homepage: SET as Agent["homepage"] }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  const frame = (await screen.findByTitle("Second homepage")) as HTMLIFrameElement;
+  fireEvent.load(frame);
+  const asked = new MessageEvent("message", {
+    data: { ufo: "navigate", to: chatHash(CONVO_ID) },
+  });
+  Object.defineProperty(asked, "source", { value: frame.contentWindow });
+  fireEvent(window, asked);
+
+  await waitFor(() =>
+    expect(location.hash).toBe(
+      homeHash({ opens: [SECOND_ID, homeConversationLane(CONVO_ID)] }),
+    ),
+  );
+});
 
 test("a set homepage frames the bound site beside the conversation", async () => {
   location.hash = "#/agents/" + AGENT_ID;

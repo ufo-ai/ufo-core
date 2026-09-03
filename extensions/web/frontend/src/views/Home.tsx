@@ -21,7 +21,7 @@ import {
 import { PressRow } from "@/components/ui/pressrow";
 import type { Placement } from "@/kernel/pager";
 import { Empty, Waiting } from "@/kernel/panel";
-import { SlotTrack, useSlot, type Seek } from "@/kernel/slots";
+import { SlotTrack, opened, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, origin } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
@@ -622,6 +622,9 @@ function AppLane({
               onFounded(speaking, conversationId, title);
               setSettles((count) => count + 1);
             }}
+            onConversation={(conversationId) =>
+              onOpens(opened(opens, homeConversationLane(conversationId), lane))
+            }
           />
         ) : (
           <Blank />
