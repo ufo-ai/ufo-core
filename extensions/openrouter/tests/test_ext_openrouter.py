@@ -172,6 +172,31 @@ def _status_error(status: int, message: str = "provider error") -> openai.APISta
     )
 
 
+def _routing_error(step: str | None) -> openai.NotFoundError:
+    """OpenRouter's real refusal for a request its `ignore` set left nowhere to route, captured
+    from the live API: the SDK unwraps the `error` envelope, so `metadata` sits on the body."""
+    metadata: dict[str, object] = {
+        "routing_funnel": [
+            {"step": "Initial Endpoints", "endpoint_count": 6},
+            {"step": "Filter by Tier Endpoint Rows", "endpoint_count": 2},
+        ]
+    }
+    if step is not None:
+        metadata["failed_routing_step"] = step
+    return openai.NotFoundError(
+        "All providers have been ignored.",
+        response=httpx.Response(
+            404,
+            request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+        ),
+        body={"message": "All providers have been ignored.", "code": 404, "metadata": metadata},
+    )
+
+
+def _dead_attempt(provider: str) -> list[ChatCompletionChunk]:
+    return [_chunk(finish="stop", provider=provider), _chunk(usage=_usage(1, 0))]
+
+
 def _client(
     create: ScriptedCreate,
     spec: openrouter.ModelSpec = openrouter.OPENROUTER_MODEL_SPECS[0],
@@ -837,6 +862,45 @@ async def test_a_dead_upstream_is_excluded_inside_the_allowlist() -> None:
         "only": ["baseten", "fireworks", "modal", "morph", "together"],
         "ignore": ["Morph"],
     }
+
+
+async def test_exhausted_exclusions_degrade_to_the_empty_result() -> None:
+    """Every Gemini id serves from two providers, so two dead upstreams exhaust the re-route's set
+    before its retries run out and the next call is refused. The refusal is the client's own doing,
+    so the round ends as the empty result the turn loop nudges on — not a 404 that fails the turn.
+    """
+    create = ScriptedCreate(
+        _dead_attempt("Google"),
+        _dead_attempt("Google AI Studio"),
+        _routing_error(openrouter.EXCLUSION_EXHAUSTED_STEP),
+    )
+
+    events = [event async for event in _client(create).complete(REQUEST)]
+
+    assert [event for event in events if isinstance(event, TextDelta)] == []
+    assert events[-1] == Usage(input_tokens=1, output_tokens=0)
+    assert create.calls[2]["extra_body"]["provider"] == {"ignore": ["Google", "Google AI Studio"]}
+
+
+async def test_a_refusal_the_client_did_not_cause_still_fails_loud() -> None:
+    """The same 404 with no exclusion of ours behind it is the account's own routing policy, not a
+    set this client narrowed — nothing to degrade to, so it raises."""
+    create = ScriptedCreate(_routing_error(openrouter.EXCLUSION_EXHAUSTED_STEP))
+
+    with pytest.raises(openai.NotFoundError):
+        async for _ in _client(create).complete(REQUEST):
+            pass
+
+
+@pytest.mark.parametrize("step", [None, "Filter by Tier Endpoint Rows"])
+async def test_a_404_from_another_routing_step_still_fails_loud(step: str | None) -> None:
+    """A 404 that stopped somewhere other than the exclusion filter is not an over-exclusion, even
+    with exclusions held — the step is what identifies it, never the status alone."""
+    create = ScriptedCreate(_dead_attempt("Google"), _routing_error(step))
+
+    with pytest.raises(openai.NotFoundError):
+        async for _ in _client(create).complete(REQUEST):
+            pass
 
 
 def test_google_tool_results_survive_json_parser_value_refusal() -> None:
