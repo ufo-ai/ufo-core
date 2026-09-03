@@ -7,8 +7,10 @@ filter helpers are asserted directly. The Bearer key is read from a real `Creden
 the same `CredentialAccess` core hands the factory, so the both-ends of the slot are exercised: the
 stored secret reaches the request's Authorization header."""
 
+import asyncio
 import hashlib
 import json
+import threading
 from uuid import UUID, uuid4
 
 import httpx
@@ -54,13 +56,6 @@ async def _access(workspace_id: UUID) -> CredentialAccess:
     init_workspace_credentials(store)
     await store.put(workspace_id, tpuf.API_KEY_SLOT, API_KEY)
     return context_for(tpuf.NAME, frozenset({tpuf.API_KEY_SLOT})).credentials
-
-
-def _api(transport: httpx.AsyncBaseTransport) -> httpx.AsyncClient:
-    """The process-lifetime client the boot factory builds, over the test's stub transport."""
-    return httpx.AsyncClient(
-        base_url=tpuf.BASE_URL, timeout=tpuf.TIMEOUT_SECONDS, transport=transport
-    )
 
 
 def _recorder(
@@ -128,7 +123,7 @@ async def test_lexical_bounds_the_query_turbopuffer_rejects_as_malformed(db: Non
     rejects is never built, and a query with no text is no request at all."""
     workspace_id = await _workspace()
     transport, seen = _recorder([])
-    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), transport=transport)
     words = " ".join(f"term{number}" for number in range(500))
     with ws(workspace_id):
         assert await index.lexical(words, frozenset({SHARED}), OWNER_KIND, 10) == ()
@@ -154,7 +149,7 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
         "text": "x",
     }
     transport, seen = _recorder([row])
-    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), transport=transport)
     with ws(workspace_id):
         await index.delete(IndexScope(OWNER_KIND, "m1"))
     query_request, query_body = seen[0]
@@ -171,7 +166,7 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
 async def test_has_chunks_is_false_for_an_empty_scope_or_missing_namespace(db: None) -> None:
     workspace_id = await _workspace()
     transport, _ = _recorder([])
-    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), api=_api(transport))
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id), transport=transport)
     with ws(workspace_id):
         assert not await index.has_chunks(IndexScope(OWNER_KIND, "m1"))
 
@@ -180,7 +175,7 @@ async def test_has_chunks_is_false_for_an_empty_scope_or_missing_namespace(db: N
 
     missing = tpuf.TurbopufferIndex(
         credentials=await _access(workspace_id),
-        api=_api(httpx.MockTransport(handle)),
+        transport=httpx.MockTransport(handle),
     )
     with ws(workspace_id):
         assert not await missing.has_chunks(IndexScope(OWNER_KIND, "m1"))
@@ -194,8 +189,61 @@ async def test_query_on_a_missing_namespace_returns_no_hits(db: None) -> None:
 
     index = tpuf.TurbopufferIndex(
         credentials=await _access(workspace_id),
-        api=_api(httpx.MockTransport(handle)),
+        transport=httpx.MockTransport(handle),
     )
     with ws(workspace_id):
         assert await index.lexical("x", frozenset({SHARED}), OWNER_KIND, 5) == ()
         assert await index.vector((1.0, 0.0), frozenset({SHARED}), OWNER_KIND, 5) == ()
+
+
+async def test_each_event_loop_gets_its_own_client(db: None) -> None:
+    """One boot-built index serves uvicorn's loop, DBOS's, and the heartbeat thread's. A pooled TLS
+    connection carries anyio primitives bound to the loop that opened it, so a client shared across
+    them raises `is bound to a different event loop` on the first reuse from a second loop.
+
+    The sequential case is the one that discriminates: a second loop on the same thread must still
+    get its own client. Keying on the thread returns the first loop's client to every later loop,
+    and keying on `id(loop)` does the same whenever CPython hands the freed loop's address back —
+    both of which are the production fault, and neither of which the threaded case alone catches.
+    The last call sweeps: the closed loops leave the registry, and the live loop keeps its client.
+    """
+    workspace_id = await _workspace()
+    index = tpuf.TurbopufferIndex(
+        credentials=await _access(workspace_id),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"rows": []})),
+    )
+
+    async def client_here() -> httpx.AsyncClient:
+        return index._api()
+
+    here = await client_here()
+    elsewhere: list[httpx.AsyncClient] = []
+
+    def successive_loops() -> None:
+        for _ in range(3):
+            elsewhere.append(asyncio.run(client_here()))
+
+    thread = threading.Thread(target=successive_loops)
+    thread.start()
+    thread.join()
+
+    handed = [here, *elsewhere]
+    assert len({id(client) for client in handed}) == len(handed)
+    assert index._api() is here
+    assert index.clients.keys() == {asyncio.get_running_loop()}
+
+
+async def test_the_client_registry_does_not_decide_index_equality(db: None) -> None:
+    """`clients` is a cache, not identity. It carries `compare=False` so the frozen dataclass stays
+    hashable — a dict field would otherwise make `hash()` raise on the index and on every frozen
+    dataclass holding one, `ExtensionContext` included."""
+    workspace_id = await _workspace()
+    credentials = await _access(workspace_id)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"rows": []}))
+    one = tpuf.TurbopufferIndex(credentials=credentials, transport=transport)
+    two = tpuf.TurbopufferIndex(credentials=credentials, transport=transport)
+    one._api()
+
+    assert one.clients and not two.clients
+    assert one == two
+    assert hash(one) == hash(two)

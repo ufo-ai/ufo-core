@@ -13,10 +13,11 @@ leaves no orphan. This adapts metalcraft's page-based `TurbopufferIndex` to ufo'
 `IndexBackend` protocol (owner_kind/subject filter, `Chunk`/`Hit`/`IndexScope` value objects); the
 base URL is the default region endpoint rather than a per-deploy override."""
 
+import asyncio
 import base64
 import binascii
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -145,13 +146,39 @@ def vector_score(row: dict[str, Any], position: int, total: int) -> float:
 @dataclass(frozen=True)
 class TurbopufferIndex:
     """The `IndexBackend` over Turbopuffer's HTTP API. Holds the credential reader for the BYOK key
-    and the process-lifetime `api` client whose connection pool every operation shares (a test
-    builds one over a stub transport). The Bearer key rides each request, not the client — the
+    and one registry of per-loop clients whose connection pools the operations on that loop share (a
+    test builds them over a stub transport). The Bearer key rides each request, not the client — the
     ambient workspace scopes the key, and one boot-built index serves them all. Its namespace is
     derived from the workspace, so the deploy's one workspace owns one namespace."""
 
     credentials: CredentialAccess
-    api: httpx.AsyncClient
+    transport: httpx.AsyncBaseTransport | None = None
+    clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = field(
+        default_factory=dict, compare=False
+    )
+
+    def _api(self) -> httpx.AsyncClient:
+        """The running loop's client, built on first touch. A pooled TLS connection carries anyio
+        primitives bound to the loop that opened it, and serve drives one boot-built index from
+        three loops — uvicorn's, DBOS's and the heartbeat thread's — so a client shared across them
+        raises `is bound to a different event loop` the moment a second loop reuses a pooled
+        connection. Sync throughout: there is no await between the lookup and the store, so two
+        tasks on one loop cannot interleave here, and two loops write different keys. The key is
+        the loop itself, never its id: CPython hands a freed loop's address straight back, so an
+        id key serves a dead loop's pool to the live loop that replaced it. The sweep drops
+        entries whose loop is gone but cannot close them — the loop that owns those sockets is the
+        only thing that could, and it is already closed — so it only keeps the registry bounded.
+        It snapshots the keys because the serve, DBOS and heartbeat loops insert here from
+        different threads."""
+        loop = asyncio.get_running_loop()
+        for stale in [held for held in list(self.clients) if held.is_closed()]:
+            self.clients.pop(stale, None)
+        client = self.clients.get(loop)
+        if client is None:
+            client = self.clients[loop] = httpx.AsyncClient(
+                base_url=BASE_URL, timeout=TIMEOUT_SECONDS, transport=self.transport
+            )
+        return client
 
     async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
         embeddable = tuple(chunk for chunk in chunks if chunk.embedding)
@@ -159,7 +186,7 @@ class TurbopufferIndex:
             return
         headers = await self._auth()
         for start in range(0, len(embeddable), WRITE_BATCH):
-            response = await self.api.post(
+            response = await self._api().post(
                 self._path(),
                 json=upsert_body(embeddable[start : start + WRITE_BATCH]),
                 headers=headers,
@@ -171,7 +198,7 @@ class TurbopufferIndex:
         chunks = await self._scope_chunks(scope, headers)
         ids = [turbopuffer_id(chunk.chunk_digest) for chunk in chunks]
         for start in range(0, len(ids), WRITE_BATCH):
-            response = await self.api.post(
+            response = await self._api().post(
                 self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}, headers=headers
             )
             response.raise_for_status()
@@ -183,14 +210,16 @@ class TurbopufferIndex:
             turbopuffer_id(chunk.chunk_digest) for chunk in chunks if chunk.chunk_digest not in keep
         ]
         for start in range(0, len(ids), WRITE_BATCH):
-            response = await self.api.post(
+            response = await self._api().post(
                 self._path(), json={"deletes": ids[start : start + WRITE_BATCH]}, headers=headers
             )
             response.raise_for_status()
 
     async def has_chunks(self, scope: IndexScope) -> bool:
         body = {"rank_by": ["id", "asc"], "top_k": 1, "filters": scope_filters(scope, None)}
-        response = await self.api.post(self._path("/query"), json=body, headers=await self._auth())
+        response = await self._api().post(
+            self._path("/query"), json=body, headers=await self._auth()
+        )
         if response.status_code == httpx.codes.NOT_FOUND:
             return False
         response.raise_for_status()
@@ -227,7 +256,9 @@ class TurbopufferIndex:
             "include_attributes": list(ATTRIBUTES),
             "filters": query_filters(owner_kind, subjects),
         }
-        response = await self.api.post(self._path("/query"), json=body, headers=await self._auth())
+        response = await self._api().post(
+            self._path("/query"), json=body, headers=await self._auth()
+        )
         if response.status_code == httpx.codes.NOT_FOUND:
             return []
         response.raise_for_status()
@@ -243,7 +274,7 @@ class TurbopufferIndex:
                 "include_attributes": list(ATTRIBUTES),
                 "filters": scope_filters(scope, after_id),
             }
-            response = await self.api.post(self._path("/query"), json=body, headers=headers)
+            response = await self._api().post(self._path("/query"), json=body, headers=headers)
             if response.status_code == httpx.codes.NOT_FOUND:
                 return chunks
             response.raise_for_status()
@@ -285,10 +316,7 @@ def manifest() -> Manifest:
         indexes=(
             IndexBackendSpec(
                 name=INDEX_BACKEND,
-                factory=lambda ctx: TurbopufferIndex(
-                    credentials=ctx.credentials,
-                    api=httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT_SECONDS),
-                ),
+                factory=lambda ctx: TurbopufferIndex(credentials=ctx.credentials),
             ),
         ),
     )
