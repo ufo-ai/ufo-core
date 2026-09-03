@@ -3351,12 +3351,14 @@ test("the composer names the app it addresses, and the band can be taken away", 
   await screen.findByLabelText("Ask UFO");
 
   // The band wears the mark the sidebar draws this app under, not a category glyph standing in.
-  const band = screen.getByText("Second");
+  // The app's own name stands in the sidebar too, so the band is read on the page alone.
+  const page = within(screen.getByRole("main"));
+  const band = page.getByText("Second");
   expect(band.parentElement!.querySelector("svg")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Stop addressing Second" }));
 
-  expect(screen.queryByText("Second")).toBeNull();
+  expect(page.queryByText("Second")).toBeNull();
   // Taking the band away leaves the words and the acts under it exactly where they were.
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });

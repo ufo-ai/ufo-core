@@ -334,7 +334,6 @@ test("the agents index states a row's name alone, and leaves the address list to
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
   const index = within(await agentIndex());
   expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
@@ -351,7 +350,6 @@ test("a non-admin reads the same index rows", async () => {
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
   const index = within(await agentIndex());
   expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();

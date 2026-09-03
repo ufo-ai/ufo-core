@@ -162,11 +162,13 @@ test("the sidebar names the shell's destinations and states the member at its fo
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
     "Search",
-    "Expand sidebar",
+    "Collapse sidebar",
     "Ask assistant",
     "Apps",
     "New app",
+    /* The sidebar stands open, so the app's row states its name and the pin act every row wears. */
     agentName(AGENT.name),
+    "Pin " + agentName(AGENT.name),
     "Chats",
     "Chats options",
     "Connectors",
@@ -182,7 +184,6 @@ test("a section heading folds its section, and holds its menu behind a mark draw
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
   for (const name of ["Apps", "Chats"]) {
     /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
@@ -210,7 +211,6 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
   const apps = within(sidebar).getByRole("navigation", { name: "Apps" });
 
@@ -231,16 +231,17 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   expect(within(sidebar).getByRole("button", { name: "Workspace" })).toBeTruthy();
 });
 
-test("the shell opens on the rail, and a sidebar the member widened stays widened", async () => {
+test("the shell opens with the sidebar open, and a sidebar the member folded stays folded", async () => {
   wire({});
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
-  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
+  // A browser holding no choice opens on the named rows, not on the glyph rail.
+  await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+  expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeTruthy();
   first.unmount();
 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeTruthy();
 });
 
 /** A desk width draws the mark at the sidebar's head; a phone width keeps it on the bar, centred

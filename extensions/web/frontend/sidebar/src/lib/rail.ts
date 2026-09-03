@@ -135,12 +135,12 @@ export function railShut(held: string[] | null, labels: (string | null)[]): stri
 
 const HELD_SIDEBAR = "sidebar";
 
-/** Whether the sidebar stands folded to its glyph rail. The shell opens on the rail: the sidebar is
- *  a place a member goes to find a conversation by name, not the screen they came for, so the width
- *  it takes belongs to the screen until they ask for it — and once they have asked, that choice is
- *  theirs on every load after. */
+/** Whether the sidebar stands folded to its glyph rail. The shell opens with the sidebar open: a
+ *  member arriving for the first time sees the conversations and apps by name rather than a column
+ *  of glyphs. A browser holding a choice keeps it: once the member has folded the sidebar, that
+ *  choice is theirs on every load after. */
 export function heldSidebar(): boolean {
-  return localStorage.getItem(HELD_SIDEBAR) !== "expanded";
+  return localStorage.getItem(HELD_SIDEBAR) === "collapsed";
 }
 
 export function holdSidebar(collapsed: boolean): void {

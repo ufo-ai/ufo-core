@@ -1235,7 +1235,6 @@ test("an app with nothing in flight states nothing under its name", async () => 
   const purposeful = { ...AGENT, purpose: "Answers from what this workspace has recorded." };
   render(<App agents={[purposeful]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
 
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   const row = await index.findByRole("button", { name: /^Assistant/ });

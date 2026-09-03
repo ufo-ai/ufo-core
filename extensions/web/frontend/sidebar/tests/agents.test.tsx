@@ -489,7 +489,6 @@ test("the act that builds an app stands as the apps list's first row", async () 
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
   const index = await agentIndex();
 
   // The band folds the section and offers nothing else, so it holds no menu to hide the act in.
@@ -508,9 +507,8 @@ test("pressing a section's band folds it away, and the fold holds across a reloa
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   const first = render(<Portal />);
 
-  // The band is only drawn once the sidebar stands open — the glyph rail has no room for it, and
+  // The band is only drawn while the sidebar stands open — the glyph rail has no room for it, and
   // a fold with no head to undo it is a dead end, so the rail ignores one.
-  await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
   const index = await agentIndex();
   expect(within(index).queryByRole("button", { name: /^Research/ })).toBeTruthy();
 
@@ -1233,7 +1231,8 @@ test("a folded rail holds each app's name at the pointer", async () => {
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  // The shell opens folded, so the rows are marks: the name they cannot draw is held at the pointer.
+  // On the folded rail the rows are marks: the name they cannot draw is held at the pointer.
+  await userEvent.click(await screen.findByRole("button", { name: "Collapse sidebar" }));
   const index = await agentIndex();
   const row = within(index).getByRole("button", { name: "Research" });
   expect(row.textContent).toBe("");
