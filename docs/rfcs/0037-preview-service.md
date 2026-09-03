@@ -29,7 +29,7 @@ Settled with the author:
 | Bytes and core | Share and hosted-read bytes bypass core. A connected terminal relays one contained, bounded read through core because it cannot reach the synthetic service host. |
 | Output | PNG for display previews; a ZIP bundle with `manifest.json` and `page-01.png…` for document reads. Page counts are capped at 20. |
 | S3 | The service holds zero AWS credentials. It writes only through a caller-supplied presigned PUT URL (`put_url`); the URL fixes the key, so the service chooses neither key nor bucket. |
-| Composer preview | The composer sends a member's picked file to the service and shows the picture it returns — the service is the one renderer, not a client-side library. A stateless render, storing nothing: no `inbound_file` table, no persistence. Shipped over the `inline` sink (bytes in → PNG out); the ideal upgrades it to a presigned round-trip that reuses the render in the transcript (see Composer preview below). |
+| Composer preview | The composer sends a member's picked file to the service and shows the cover it returns — the service is the one renderer, not a client-side library. The opened file's sheet asks the same route for the rest, a batch of pages at a time (8 a batch, and the member asks for the next), so a long report costs one batch rather than all of it. A stateless render, storing nothing: no `inbound_file` table, no persistence. Shipped over the `inline` sink (bytes in → a PNG or a page bundle out); the ideal upgrades it to a presigned round-trip that reuses the render in the transcript (see Composer preview below). |
 
 ## Architecture
 
@@ -194,18 +194,39 @@ contractual reply. The full sandbox → proxy → service → S3 loop is integra
 The web composer shows a member a picture of a document they have picked but not yet sent, and the
 picture is the service's, not a client-side renderer's — one renderer for every surface. A raster
 image is still drawn straight off the file (the browser does that safely); a document
-(`pdf docx xlsx pptx csv md svg`) or a video (`mp4 mov webm mkv`) goes to the service.
+(`pdf docx xlsx pptx csv md svg`) or a video (`mp4 mov webm mkv`) goes to the service. The composer's
+card stays one cover page; the file's other pages are read in the sheet that opens when a member
+presses the file.
 
-- Core exposes `SurfaceContext.render_preview(kind, data) -> bytes | None`: it posts the bytes to the
-  service's `inline` sink with the deploy's `UFO_PREVIEW_TOKEN` and hands the PNG straight back,
-  storing nothing. It returns `None` — a named card, never a failed compose — when the service is
-  unconfigured or refuses the file. This is the one place core holds the inline bearer.
+- Core exposes `SurfaceContext.render_preview(kind, data, start_page, pages) -> PreviewRender | None`:
+  it posts the bytes to the service's `inline` sink with the deploy's `UFO_PREVIEW_TOKEN` and hands
+  the pictures straight back, storing nothing. One page comes back a PNG and a range a zip of
+  `page-01.png…`, unpacked here so a surface reads pages either way. `PreviewRender` carries the page
+  pictures in page order, the one-based `start_page` the first of them is, and the file's whole
+  `page_count` off the service's `x-preview-page-count` header. `pages` is clamped to
+  `PREVIEW_PAGES_MAX = 20`, the service's own per-render cap, because a request over it renders fewer
+  pages than it asked for and a caller cannot tell that clamp from the file's own end. It returns
+  `None` — a named card, never a failed compose — when the service is unconfigured or refuses the
+  file. This is the one place core holds the inline bearer.
 - The web surface adds `POST /surface/web/preview`: a member session is the whole gate (the render
-  is agent-agnostic), it reads one uploaded file, and answers the PNG. It admits no turn and stores
-  nothing — a **stateless display render**, the endpoint category AGENTS.md names. SVG is safe here
-  precisely because the page draws the service's raster, never the document's own bytes.
-- The composer's `usePickedPicture` posts a document to that route and draws the returned PNG as a
-  `data:` URL (the page's policy admits `data:`, not `blob:`).
+  is agent-agnostic), it reads one uploaded file and an optional `start_page` field, and answers one
+  batch of `PREVIEW_PAGE_BATCH = 8` pages as JSON — `start_page`, `page_count`, and `pages` as base64
+  PNGs. The reply names how many pages the file has, so the composer knows whether asking from a
+  later `start_page` would draw anything. It admits no turn and stores nothing — a **stateless
+  display render**, the endpoint category AGENTS.md names. SVG is safe here precisely because the
+  page draws the service's raster, never the document's own bytes.
+- The composer's `usePickedPicture` posts a document to that route and draws the first page it
+  returns as a `data:` URL (the page's policy admits `data:`, not `blob:`). The card in the composer
+  is unchanged: one cover page, cropped from its top, at the size a row of picked files allows.
+- The pages are read where a member opens the file — the sheet on the right edge, which every
+  screen that draws a shared file opens. `useFilePages` in `kernel/artifact.tsx` fetches the file's
+  own bytes once, posts them to the same route, and stacks the returned pages head to foot down the
+  sheet's scroll, each page whole. A document longer than one batch keeps its remaining pages at the
+  service until the member asks for them: a `+N more` act closes the stack under its last page and
+  renders from the page after the last one drawn, so opening a 200-page report costs eight pages
+  rather than two hundred. A batch the service refuses leaves the pages already drawn and ends the
+  asking, rather than offering an act that fails the same way again. A file of one page is drawn as
+  the one picture the store already rendered, so nothing changes for a cover.
 
 **Ideal (not yet built).** Sending the file uploads it again and the transcript re-renders the same
 content. The upgrade: the browser gets a presigned PUT, uploads the file to the blob store once,

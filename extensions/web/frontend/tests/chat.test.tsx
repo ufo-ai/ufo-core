@@ -2840,6 +2840,35 @@ test("the composer draws a picked image as itself and a picked PDF as a badged c
   expect(sent.getAttribute("src")).toMatch(/^data:image\/gif;base64,/);
 });
 
+/** The card draws one page, so that is what the composer asks the route to render: a batch it would
+ *  drop still costs a rasterize and holds one of the service's render permits while the member is
+ *  still writing. */
+test("the composer asks the preview route for the one page its card draws", async () => {
+  const asked: (string | null)[] = [];
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+    "/surface/web/preview": (_url: string, init?: RequestInit) => {
+      asked.push((init?.body as FormData).get("pages") as string | null);
+      return json({ start_page: 1, page_count: 12, pages: ["cGFnZS0x"] });
+    },
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const composer = document.querySelector("form[data-field-card]") as HTMLElement;
+  fireEvent.drop(composer, {
+    dataTransfer: {
+      types: ["Files"],
+      files: [new File(["pdf-bytes"], "paper.pdf", { type: "application/pdf" })],
+    },
+  });
+
+  const cover = await within(composer).findByRole("img", { name: "paper.pdf" });
+  expect(cover.getAttribute("src")).toBe("data:image/png;base64,cGFnZS0x");
+  expect(asked).toEqual(["1"]);
+});
+
 /** The other half of the same message, read back: the transcript states what the member attached as
  *  files with a picture each, and the note admission wrote at the foot of their words never reads as
  *  words. */

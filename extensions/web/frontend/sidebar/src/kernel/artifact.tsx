@@ -5,11 +5,12 @@ import {
   IconFileTypePdf,
   IconPhoto,
 } from "@tabler/icons-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { buttonVariants } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
 import { Loading } from "@/kernel/panel";
+import { BASE } from "@/lib/api";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
@@ -91,15 +92,117 @@ export type SharedFile = {
   preview_url: string | null;
 };
 
+type FilePages = {
+  /** The pages rendered so far as `data:` URLs, in page order. */
+  pages: string[];
+  /** How many pages the whole file has — 0 until a render lands. */
+  pageCount: number;
+  /** A later batch the member asked for is still rendering. */
+  loadingMore: boolean;
+};
+
+const NO_PAGES: FilePages = { pages: [], pageCount: 0, loadingMore: false };
+
+/** What an opened file is drawn as its own pages rather than as the one picture the store rendered:
+ *  the media the preview route paginates and the sheet has no other way to read. A picture or a
+ *  video renders as a single frame however many pages are asked of it, and text is drawn as its
+ *  characters, so sending those bytes to the route would spend a render on the cover already in
+ *  hand. */
+const PAGED_MEDIA_TYPES = new Set([
+  PDF_MEDIA_TYPE,
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+]);
+
+/** One batch of a file's pages from the page asked for, rendered by the preview service. The page
+ *  draws the PNGs it returns as `data:` URLs — the page's policy admits those and no `blob:` at
+ *  all — so it never draws the document's own bytes. */
+async function renderPages(
+  bytes: Blob,
+  filename: string,
+  startPage: number,
+): Promise<{ pages: string[]; pageCount: number } | null> {
+  const form = new FormData();
+  form.append("file", bytes, filename);
+  form.append("start_page", String(startPage));
+  const answered = await fetch(`${BASE}/preview`, {
+    method: "POST",
+    body: form,
+    credentials: "same-origin",
+  });
+  if (!answered.ok) return null;
+  const body = (await answered.json()) as { pages: string[]; page_count: number };
+  if (!body.pages.length) return null;
+  return {
+    pages: body.pages.map((page) => `data:image/png;base64,${page}`),
+    pageCount: body.page_count,
+  };
+}
+
+/** The pages of an opened document, a batch at a time — the route answers with a batch of its own
+ *  size (`PREVIEW_PAGE_BATCH`), so opening a 200-page report costs eight pages rather than two
+ *  hundred. The file's own bytes are fetched once and held for as long as it is open, because the
+ *  render route is stateless: every batch carries the bytes again. A file the store rendered no
+ *  preview for is one the service will not render either, so nothing is fetched for it. A batch the
+ *  service refuses leaves the pages already drawn and ends the asking, rather than offering an act
+ *  that fails the same way again.
+ *
+ *  The bytes in hand are the open file's identity: a batch commits only while they are still the
+ *  ones held, so pressing another file drops the batch the last one was still rendering rather than
+ *  drawing it under the new file's name. */
+function useFilePages(file: SharedFile): FilePages & { loadMore: () => void } {
+  const [state, setState] = useState<FilePages>(NO_PAGES);
+  const held = useRef<Blob | null>(null);
+  const { filename, media_type: mediaType, preview_url: previewUrl, url } = file;
+  useEffect(() => {
+    let cancelled = false;
+    setState(NO_PAGES);
+    if (url === null || previewUrl === null || !PAGED_MEDIA_TYPES.has(mediaType)) return;
+    (async () => {
+      const source = await fetch(url, { credentials: "same-origin" });
+      if (!source.ok) return;
+      const bytes = await source.blob();
+      if (cancelled) return;
+      held.current = bytes;
+      const batch = await renderPages(bytes, filename, 1);
+      if (!cancelled && batch !== null) setState({ ...NO_PAGES, ...batch });
+    })().catch(() => undefined);
+    return () => {
+      cancelled = true;
+      held.current = null;
+    };
+  }, [filename, mediaType, previewUrl, url]);
+  const loadMore = () => {
+    const bytes = held.current;
+    if (bytes === null || state.loadingMore || state.pages.length >= state.pageCount) return;
+    setState({ ...state, loadingMore: true });
+    renderPages(bytes, filename, state.pages.length + 1)
+      .then((batch) => {
+        if (held.current !== bytes) return;
+        setState((current) => ({
+          loadingMore: false,
+          pages: batch === null ? current.pages : [...current.pages, ...batch.pages],
+          pageCount: batch === null ? current.pages.length : batch.pageCount,
+        }));
+      })
+      .catch(() => {
+        if (held.current !== bytes) return;
+        setState((current) => ({
+          ...current,
+          loadingMore: false,
+          pageCount: current.pages.length,
+        }));
+      });
+  };
+  return { ...state, loadMore };
+}
+
 /** The file itself, drawn once for every screen that reads one: its own picture where it has one,
  *  its characters where it is text, and a plain statement where it is neither — the download is
  *  then the whole of what a member can do with it, and a page that drew nothing there would leave
- *  them waiting on a preview that is never coming.
- *
- *  A picture whose link has expired states that, because the src is a signed URL the listing minted
- *  and the member's answer is to read the listing again. */
+ *  them waiting on a preview that is never coming. */
 function FileBody({ file }: { file: SharedFile }) {
-  const [failed, setFailed] = useState(false);
   if (isTextMedia(file.media_type)) {
     return (
       <ArtifactText
@@ -108,6 +211,51 @@ function FileBody({ file }: { file: SharedFile }) {
         mediaType={file.media_type}
         display="inline"
       />
+    );
+  }
+  return <FilePicture file={file} />;
+}
+
+/** A picture at the size the sheet gives it, and a document as the pages it is: the sheet is where
+ *  a member reads the file rather than recognizes it, so a document longer than one page stands
+ *  here as its pages, head to foot down the sheet's own scroll, with the act that renders the next
+ *  batch under the last of them. A file of one page is drawn as the one picture the store already
+ *  rendered, so nothing changes for a cover.
+ *
+ *  A picture whose link has expired states that, because the src is a signed URL the listing minted
+ *  and the member's answer is to read the listing again. */
+function FilePicture({ file }: { file: SharedFile }) {
+  const [failed, setFailed] = useState(false);
+  const { pages, pageCount, loadingMore, loadMore } = useFilePages(file);
+  const remaining = pageCount - pages.length;
+  if (pages.length > 1 || remaining > 0) {
+    return (
+      <div data-slot="file-pages" className="flex min-w-0 flex-col gap-lg">
+        {pages.map((page, at) => (
+          <img
+            key={at}
+            loading="lazy"
+            alt={at === 0 ? file.filename : `${file.filename} page ${at + 1}`}
+            src={page}
+            className="w-full rounded-panel border border-edge"
+          />
+        ))}
+        {remaining > 0 ? (
+          <button
+            data-slot="file-more-pages"
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            aria-label={`Load more pages of ${file.filename}`}
+            className={cn(
+              "w-full cursor-pointer rounded-panel border border-edge bg-card px-lg py-md",
+              "font-mono text-small text-ink-soft hover:text-ink",
+            )}
+          >
+            {loadingMore ? "Loading pages…" : `+${remaining} more`}
+          </button>
+        ) : null}
+      </div>
     );
   }
   const pictured = file.preview_url ?? (file.media_type.startsWith("image/") ? file.url : null);

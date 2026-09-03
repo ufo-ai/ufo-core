@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, onTestFinished, test, vi } from "vitest";
@@ -70,6 +70,227 @@ test("a file sheet owns the shared title, metadata, preview, and download", () =
   expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
     "/files/report.png",
   );
+});
+
+/** A document opened from the transcript or the artifact shelf is read here, so the sheet draws it
+ *  as the pages it is: the first batch the preview route renders, stacked down the sheet's own
+ *  scroll, and the rest only when the member asks under the last of them. */
+test("a file sheet stacks a document's pages and renders the next batch on request", async () => {
+  const asked: string[] = [];
+  const page = (at: number) => "cGFnZS0" + String(at);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes("/preview")) return new Response("%PDF-1.7");
+      const from = Number(String((init?.body as FormData).get("start_page")));
+      asked.push(String(from));
+      const drawn = from === 1 ? 8 : 4;
+      return Response.json({
+        start_page: from,
+        page_count: 12,
+        pages: Array.from({ length: drawn }, (_at, index) => page(from + index)),
+      });
+    }),
+  );
+
+  render(
+    <FileSheet
+      file={{
+        filename: "report.pdf",
+        subject: "Quarterly report",
+        media_type: "application/pdf",
+        size_bytes: 4096,
+        url: "/files/report.pdf",
+        preview_url: "/previews/report.png",
+      }}
+      onClose={() => {}}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "report.pdf" });
+  const pages = () => within(sheet).queryAllByRole("img");
+  await waitFor(() => expect(pages().length).toBe(8));
+  expect(pages()[0].getAttribute("src")).toBe("data:image/png;base64," + page(1));
+  expect(pages()[0].getAttribute("alt")).toBe("report.pdf");
+  expect(pages()[7].getAttribute("alt")).toBe("report.pdf page 8");
+  const stack = pages()[0].parentElement as HTMLElement;
+  expect(stack.getAttribute("data-slot")).toBe("file-pages");
+  expect(stack.closest("[data-slot=sheet-content]")).toBe(sheet);
+
+  const more = within(sheet).getByRole("button", { name: "Load more pages of report.pdf" });
+  expect(more.textContent).toBe("+4 more");
+  expect(more.previousElementSibling).toBe(pages()[7]);
+
+  await userEvent.click(more);
+  await waitFor(() => expect(pages().length).toBe(12));
+  expect(pages()[11].getAttribute("src")).toBe("data:image/png;base64," + page(12));
+  expect(asked).toEqual(["1", "9"]);
+  expect(
+    within(sheet).queryByRole("button", { name: "Load more pages of report.pdf" }),
+  ).toBeNull();
+});
+
+test("a file sheet draws a one-page document as the picture the store rendered", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) =>
+      String(url).includes("/preview")
+        ? Response.json({ start_page: 1, page_count: 1, pages: ["cGFnZS0x"] })
+        : new Response("%PDF-1.7"),
+    ),
+  );
+
+  render(
+    <FileSheet
+      file={{
+        filename: "note.pdf",
+        subject: "One pager",
+        media_type: "application/pdf",
+        size_bytes: 1024,
+        url: "/files/note.pdf",
+        preview_url: "/previews/note.png",
+      }}
+      onClose={() => {}}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "note.pdf" });
+  const drawn = within(sheet).getByRole("img", { name: "One pager" });
+  expect(drawn.getAttribute("src")).toBe("/previews/note.png");
+  await waitFor(() => expect(within(sheet).getAllByRole("img").length).toBe(1));
+  expect(within(sheet).getByRole("img", { name: "One pager" }).getAttribute("src")).toBe(
+    "/previews/note.png",
+  );
+  expect(sheet.querySelector("[data-slot=file-pages]")).toBeNull();
+  expect(within(sheet).queryByRole("button", { name: /Load more pages/ })).toBeNull();
+});
+
+/** A member who presses a second shared file while a batch is still rendering reads that file, not
+ *  the last one's pages under its name: the sheet leaves the transcript behind it live, so the
+ *  batch the file they left asked for lands after the file they opened is drawn. */
+test("a file sheet drops the batch of a file the member has already left", async () => {
+  let land: () => void = () => {};
+  const held = new Promise<void>((settle) => {
+    land = settle;
+  });
+  const page = (name: string, at: number) => "cGFnZS0" + name + String(at);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes("/preview")) return new Response("%PDF-1.7");
+      const form = init?.body as FormData;
+      const name = (form.get("file") as File).name;
+      const from = Number(String(form.get("start_page")));
+      if (name === "report.pdf" && from > 1) await held;
+      const count = name === "report.pdf" ? 12 : 3;
+      const drawn = from === 1 ? Math.min(8, count) : 4;
+      return Response.json({
+        start_page: from,
+        page_count: count,
+        pages: Array.from({ length: drawn }, (_at, index) => page(name, from + index)),
+      });
+    }),
+  );
+
+  const report = {
+    filename: "report.pdf",
+    subject: null,
+    media_type: "application/pdf",
+    size_bytes: 4096,
+    url: "/files/report.pdf",
+    preview_url: "/previews/report.png",
+  };
+  const notes = {
+    ...report,
+    filename: "notes.pdf",
+    url: "/files/notes.pdf",
+    preview_url: "/previews/notes.png",
+  };
+
+  const { rerender } = render(<FileSheet file={report} onClose={() => {}} />);
+  const pages = () => within(screen.getByRole("dialog")).queryAllByRole("img");
+  await waitFor(() => expect(pages().length).toBe(8));
+  await userEvent.click(screen.getByRole("button", { name: "Load more pages of report.pdf" }));
+
+  rerender(<FileSheet file={notes} onClose={() => {}} />);
+  await waitFor(() => expect(pages().length).toBe(3));
+  await act(async () => {
+    land();
+    await new Promise((settled) => setTimeout(settled, 0));
+  });
+
+  expect(screen.getByRole("dialog", { name: "notes.pdf" })).toBeTruthy();
+  expect(pages().map((drawn) => drawn.getAttribute("src"))).toEqual(
+    [1, 2, 3].map((at) => "data:image/png;base64," + page("notes.pdf", at)),
+  );
+  expect(screen.queryByRole("button", { name: /Load more pages/ })).toBeNull();
+});
+
+/** Only a document is drawn as its pages. A video renders to one frame however many pages are
+ *  asked of it, so rendering an opened one would move its bytes twice — past the route's own
+ *  ceiling for a long recording — to answer with the cover already on screen. */
+test("a file sheet draws a video's cover without rendering the file again", async () => {
+  const asked = vi.fn(async () => new Response("bytes"));
+  vi.stubGlobal("fetch", asked);
+
+  render(
+    <FileSheet
+      file={{
+        filename: "demo.mp4",
+        subject: "Product demo",
+        media_type: "video/mp4",
+        size_bytes: 40 * 1024 * 1024,
+        url: "/files/demo.mp4",
+        preview_url: "/previews/demo.png",
+      }}
+      onClose={() => {}}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "demo.mp4" });
+  await act(async () => {});
+  expect(asked).not.toHaveBeenCalled();
+  expect(within(sheet).getByRole("img", { name: "Product demo" }).getAttribute("src")).toBe(
+    "/previews/demo.png",
+  );
+  expect(sheet.querySelector("[data-slot=file-pages]")).toBeNull();
+});
+
+const OFFICE_DOCUMENTS = [
+  ["brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  ["deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+  ["ledger.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+] as const;
+
+test("a file sheet stacks the pages of every office document the route renders", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) =>
+      String(url).includes("/preview")
+        ? Response.json({ start_page: 1, page_count: 2, pages: ["cGFnZS0x", "cGFnZS0y"] })
+        : new Response("PK"),
+    ),
+  );
+
+  for (const [filename, mediaType] of OFFICE_DOCUMENTS) {
+    render(
+      <FileSheet
+        file={{
+          filename,
+          subject: null,
+          media_type: mediaType,
+          size_bytes: 8192,
+          url: "/files/" + filename,
+          preview_url: "/previews/" + filename + ".png",
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const sheet = screen.getByRole("dialog", { name: filename });
+    await waitFor(() => expect(within(sheet).getAllByRole("img").length).toBe(2));
+    expect(within(sheet).getAllByRole("img")[1].getAttribute("alt")).toBe(filename + " page 2");
+    cleanup();
+  }
 });
 
 test("a file sheet renders a markdown document instead of its image preview", async () => {

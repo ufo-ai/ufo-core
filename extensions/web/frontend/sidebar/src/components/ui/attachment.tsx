@@ -225,11 +225,13 @@ const PICKED_VIDEO_TYPES = /\.(mp4|mov|webm|mkv)$/i;
  *  A raster image is read straight off the file into a `data:` URL — the page's policy admits those
  *  and no `blob:` at all, and a browser draws them safely. A document (pdf, office, csv, md, svg) or
  *  a video (mp4, mov, webm, mkv) is sent to the preview service, which renders its first page — or a
- *  video's first frame — to a PNG and hands it straight back; the page draws that PNG, never the
+ *  video's first frame — and hands it straight back as a PNG; the card draws that page, never the
  *  file's own bytes, so even an SVG — a document that can carry script — is safe here because the
- *  page never draws it, only the raster the service made of it. Anything else, or a file over its
- *  ceiling, is left as a named card. Nothing is stored while the member is still writing the
- *  message. */
+ *  page never draws it, only the raster the service made of it. A document's later pages are read
+ *  where a member opens the file, not here: the card in hand is the cover, at the size a row of
+ *  cards allows, so the route is asked for that one page rather than a batch the card would drop.
+ *  Anything else, or a file over its ceiling, is left as a named card. Nothing is stored while the
+ *  member is still writing the message. */
 type PickedPicture = { preview: string | null; loading: boolean };
 
 function usePickedPicture(file: File): PickedPicture {
@@ -260,12 +262,16 @@ function usePickedPicture(file: File): PickedPicture {
       setState({ preview: null, loading: true });
       const form = new FormData();
       form.append("file", file);
+      form.append("pages", "1");
       fetch(`${BASE}/preview`, { method: "POST", body: form, credentials: "same-origin" })
-        .then((res) => (res.ok ? res.blob() : null))
-        .then((blob) => {
+        .then((res) => (res.ok ? (res.json() as Promise<{ pages: string[] }>) : null))
+        .then((body) => {
           if (cancelled) return;
-          if (blob) draw(blob);
-          else setState({ preview: null, loading: false });
+          const cover = body?.pages[0];
+          setState({
+            preview: cover === undefined ? null : `data:image/png;base64,${cover}`,
+            loading: false,
+          });
         })
         .catch(() => {
           if (!cancelled) setState({ preview: null, loading: false });

@@ -37,11 +37,13 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from io import BytesIO
 from secrets import token_hex
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+from zipfile import BadZipFile, ZipFile
 
 import httpx
 import sqlalchemy as sa
@@ -198,6 +200,9 @@ OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 PREVIEW_THUMBNAIL_MAX_WIDTH = 600
 PREVIEW_THUMBNAIL_MAX_HEIGHT = 800
 PREVIEW_RENDER_TIMEOUT_SECONDS = 330.0
+# The service caps a render at 20 pages (`UFO_PREVIEW_MAX_PAGES`), so a request over that renders
+# fewer pages than it asked for and a caller cannot tell the clamp from the file's own end.
+PREVIEW_PAGES_MAX = 20
 
 
 AMBIENT_CONTEXT_ELEMENT = "channel_context"
@@ -510,6 +515,17 @@ class AgentTurnStatus:
     running_turn_id: UUID | None
     last_active_at: datetime | None
     last_failed: bool
+
+
+@dataclass(frozen=True)
+class PreviewRender:
+    """What the preview service made of one file: the page pictures it rendered, in page order,
+    the one-based page the first of them is, and how many pages the whole file has. A surface reads
+    `page_count` to know whether a member can ask for more pages than it holds."""
+
+    pages: tuple[bytes, ...]
+    start_page: int
+    page_count: int
 
 
 @dataclass(frozen=True)
@@ -2799,20 +2815,26 @@ class SurfaceContext:
                 )
         await self._sandboxes.write(conversation_id, rel, bytes(body))
 
-    async def render_preview(self, kind: str, data: bytes) -> bytes | None:
-        """Render a document `data` of `kind` to a preview PNG through the preview service, so a
-        surface can show a member the file they are about to send. The bytes go to the service's
-        `inline` sink and the PNG comes straight back — nothing is stored and this process never
-        rasterizes. Returns None when the service is unconfigured or refuses the file, so a surface
-        shows a named card rather than failing the compose."""
+    async def render_preview(
+        self, kind: str, data: bytes, start_page: int = 1, pages: int = 1
+    ) -> PreviewRender | None:
+        """Render `pages` pages of a document `data` of `kind`, from `start_page`, to preview PNGs
+        through the preview service, so a surface can show a member the file they are about to send.
+        The bytes go to the service's `inline` sink and the pictures come straight back — nothing is
+        stored and this process never rasterizes. One page comes back as a PNG and a range as a zip
+        of `page-01.png…`, which is unpacked here so a surface reads pages either way. Returns None
+        when the service is unconfigured or refuses the file, so a surface shows a named card rather
+        than failing the compose."""
         if self._preview_url is None or self._preview_token is None:
             return None
+        wanted = max(1, min(pages, PREVIEW_PAGES_MAX))
         request = json.dumps(
             {
                 "kind": kind,
                 "max_width": PREVIEW_THUMBNAIL_MAX_WIDTH,
                 "max_height": PREVIEW_THUMBNAIL_MAX_HEIGHT,
-                "pages": 1,
+                "start_page": max(1, start_page),
+                "pages": wanted,
                 "sink": {"inline": True},
             }
         )
@@ -2825,9 +2847,34 @@ class SurfaceContext:
                 )
         except httpx.HTTPError:
             return None
-        if response.status_code != 200 or response.headers.get("content-type") != "image/png":
+        if response.status_code != 200:
             return None
-        return response.content
+        content_type = response.headers.get("content-type")
+        if content_type == "image/png":
+            rendered: tuple[bytes, ...] = (response.content,)
+        elif content_type == "application/zip":
+            try:
+                with ZipFile(BytesIO(response.content)) as bundle:
+                    rendered = tuple(
+                        bundle.read(name)
+                        for name in sorted(bundle.namelist())
+                        if name.endswith(".png")
+                    )
+            except BadZipFile:
+                return None
+            if not rendered:
+                return None
+        else:
+            return None
+        try:
+            page_count = int(response.headers.get("x-preview-page-count", ""))
+        except ValueError:
+            page_count = len(rendered)
+        return PreviewRender(
+            pages=rendered,
+            start_page=max(1, start_page),
+            page_count=max(page_count, len(rendered)),
+        )
 
     async def list_agents(self) -> tuple[AgentSummary, ...]:
         """Every agent of this workspace, main first then by name — the read a surface whose

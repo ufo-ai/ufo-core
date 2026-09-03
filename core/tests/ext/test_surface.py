@@ -10,9 +10,11 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+from zipfile import ZipFile
 
 import httpx
 import pytest
@@ -70,6 +72,7 @@ from ufo.runtime.ext.surface import (
     CONVERSATION_TITLE_CHARS,
     NOTHING_DELIVERED,
     OPERATOR_EMAIL_DOMAIN,
+    PREVIEW_PAGES_MAX,
     SILENCE_LINE_BREAK,
     SILENCE_SENTINEL,
     WRITEBACK_CLAIMED,
@@ -3307,12 +3310,87 @@ async def test_render_preview_returns_the_service_png(tmp_path, monkeypatch) -> 
         )
 
     _preview_service(handler, monkeypatch)
-    png = await context.render_preview("pdf", b"%PDF-1.7")
-    assert png == b"\x89PNGrendered"
+    rendered = await context.render_preview("pdf", b"%PDF-1.7")
+    assert rendered is not None
+    assert rendered.pages == (b"\x89PNGrendered",)
+    assert rendered.start_page == 1
+    assert rendered.page_count == 1
     assert captured["auth"] == "Bearer preview-token"
     assert str(captured["url"]).endswith("/render")
     assert b'"inline": true' in captured["body"]  # type: ignore[operator]
     assert b'"kind": "pdf"' in captured["body"]  # type: ignore[operator]
+
+
+async def test_render_preview_unpacks_a_page_range_from_the_services_zip(
+    tmp_path, monkeypatch
+) -> None:
+    """A range comes back as a zip of `page-01.png…`, and the pages read out of it in page order.
+    The whole file's length rides the service's own header, so a caller knows there is more to
+    ask for."""
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _preview_url="http://preview.svc:8930",
+        _preview_token="preview-token",
+    )
+    bundle = BytesIO()
+    with ZipFile(bundle, "w") as pages:
+        pages.writestr("page-02.png", b"\x89PNGfourth")
+        pages.writestr("page-01.png", b"\x89PNGthird")
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            content=bundle.getvalue(),
+            headers={"content-type": "application/zip", "x-preview-page-count": "12"},
+        )
+
+    _preview_service(handler, monkeypatch)
+    rendered = await context.render_preview("pdf", b"%PDF-1.7", start_page=3, pages=8)
+    assert rendered is not None
+    assert rendered.pages == (b"\x89PNGthird", b"\x89PNGfourth")
+    assert rendered.start_page == 3
+    assert rendered.page_count == 12
+    assert b'"start_page": 3' in captured["body"]  # type: ignore[operator]
+    assert b'"pages": 8' in captured["body"]  # type: ignore[operator]
+
+
+async def test_render_preview_clamps_a_range_to_what_the_service_renders(
+    tmp_path, monkeypatch
+) -> None:
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _preview_url="http://preview.svc:8930",
+        _preview_token="preview-token",
+    )
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200, content=b"\x89PNGrendered", headers={"content-type": "image/png"}
+        )
+
+    _preview_service(handler, monkeypatch)
+    assert await context.render_preview("pdf", b"%PDF-1.7", start_page=0, pages=99) is not None
+    assert b'"start_page": 1' in captured["body"]  # type: ignore[operator]
+    assert f'"pages": {PREVIEW_PAGES_MAX}'.encode() in captured["body"]  # type: ignore[operator]
+
+
+async def test_render_preview_is_none_on_a_malformed_bundle(tmp_path, monkeypatch) -> None:
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _preview_url="http://preview.svc:8930",
+        _preview_token="preview-token",
+    )
+    _preview_service(
+        lambda request: httpx.Response(
+            200, content=b"not a zip", headers={"content-type": "application/zip"}
+        ),
+        monkeypatch,
+    )
+    assert await context.render_preview("pdf", b"%PDF-1.7", pages=8) is None
 
 
 async def test_render_preview_is_none_when_unconfigured(tmp_path) -> None:

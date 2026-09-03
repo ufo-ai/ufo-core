@@ -5174,14 +5174,40 @@ PREVIEW_KINDS = {
     ".webm": "webm",
     ".mkv": "mkv",
 }
+# The most pages one render answers with. A caller names how many it draws and is held to this
+# ceiling here, so a long document costs one batch of pages rather than all of them and a card
+# drawing a cover costs one page rather than a batch.
+PREVIEW_PAGE_BATCH = 8
+
+
+def _preview_start_page(form: FormData) -> int:
+    raw = form.get("start_page")
+    try:
+        return max(1, int(str(raw)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _preview_pages(form: FormData) -> int:
+    raw = form.get("pages")
+    try:
+        return min(max(1, int(str(raw))), PREVIEW_PAGE_BATCH)
+    except (TypeError, ValueError):
+        return PREVIEW_PAGE_BATCH
 
 
 async def preview(ctx: SurfaceContext, request: Request) -> Response:
-    """Render one attached file to a preview PNG so the composer shows the member the document they
-    are about to send. The bytes go to the preview service and the picture comes straight back —
-    nothing is stored and no turn is admitted: this changes nothing, it only renders for display, so
-    it is not a member action the chat transport must carry. A valid member session is the whole
-    gate; the render is agent-agnostic, so the route is not scoped to one."""
+    """Render a batch of one attached file's pages to preview PNGs so the composer shows the member
+    the document they are about to send. The bytes go to the preview service and the pictures come
+    straight back — nothing is stored and no turn is admitted: this changes nothing, it only renders
+    for display, so it is not a member action the chat transport must carry. A valid member session
+    is the whole gate; the render is agent-agnostic, so the route is not scoped to one.
+
+    The reply names how many pages the file has, so a caller knows whether asking from a later
+    `start_page` would draw anything, and the pictures ride as base64 because the page draws them as
+    `data:` URLs — its policy admits those and no `blob:` at all. `pages` is how many the caller
+    draws: it is clamped here to `PREVIEW_PAGE_BATCH` rather than trusted from the form, and a
+    caller naming none is answered with the whole batch."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -5204,10 +5230,19 @@ async def preview(ctx: SurfaceContext, request: Request) -> Response:
     kind = PREVIEW_KINDS.get(PurePosixPath(upload.filename or "").suffix.lower())
     if kind is None:
         return Response("unpreviewable type", status_code=415)
-    png = await ctx.render_preview(kind, await upload.read())
-    if png is None:
+    start_page = _preview_start_page(form)
+    rendered = await ctx.render_preview(
+        kind, await upload.read(), start_page=start_page, pages=_preview_pages(form)
+    )
+    if rendered is None:
         return Response("no preview", status_code=415)
-    return Response(png, media_type="image/png")
+    return JSONResponse(
+        {
+            "start_page": rendered.start_page,
+            "page_count": rendered.page_count,
+            "pages": [base64.b64encode(page).decode() for page in rendered.pages],
+        }
+    )
 
 
 async def upload_start(ctx: SurfaceContext, request: Request) -> Response:

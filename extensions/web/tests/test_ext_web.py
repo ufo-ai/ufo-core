@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import re
 import secrets
@@ -190,6 +191,8 @@ from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
     CONVERSATION_TITLE_CHARS,
+    PreviewRender,
+    SurfaceContext,
     fence_member_message,
     member_message_text,
     mint_marker,
@@ -5096,6 +5099,78 @@ async def test_an_attachment_answers_no_other_member(
     )
     assert refused.status_code == 404
     await _consume(client, token, admitted.json()["turn_id"])
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_preview_answers_a_batch_of_pages_from_the_page_asked_for(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composer draws a document as several pages, so the route renders a batch at a time and
+    says how long the whole file is — the member asks for the next batch by naming the page it
+    starts at."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    asked: dict[str, object] = {}
+
+    async def render(
+        self: SurfaceContext, kind: str, data: bytes, start_page: int = 1, pages: int = 1
+    ) -> PreviewRender:
+        asked.update(kind=kind, start_page=start_page, pages=pages)
+        return PreviewRender(
+            pages=(b"\x89PNG-nine", b"\x89PNG-ten"), start_page=start_page, page_count=10
+        )
+
+    monkeypatch.setattr(SurfaceContext, "render_preview", render)
+    answered = await client.post(
+        "/surface/web/preview",
+        data={"start_page": "9"},
+        files=[("file", ("report.pdf", b"%PDF-1.7", "application/pdf"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert answered.status_code == 200
+    body = answered.json()
+    assert body["start_page"] == 9
+    assert body["page_count"] == 10
+    assert [base64.b64decode(page) for page in body["pages"]] == [
+        b"\x89PNG-nine",
+        b"\x89PNG-ten",
+    ]
+    assert asked == {"kind": "pdf", "start_page": 9, "pages": web_surface.PREVIEW_PAGE_BATCH}
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_preview_renders_the_pages_the_caller_draws_within_the_batch(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The composer's card draws one cover page and asks for one, so a picked file costs one
+    rasterize rather than a batch it drops. The count is the caller's to name and the route's to
+    bound: a form asking past the batch is held to it, and one naming nothing gets the batch."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    asked: list[int] = []
+
+    async def render(
+        self: SurfaceContext, kind: str, data: bytes, start_page: int = 1, pages: int = 1
+    ) -> PreviewRender:
+        asked.append(pages)
+        return PreviewRender(pages=(b"\x89PNG-one",), start_page=start_page, page_count=12)
+
+    monkeypatch.setattr(SurfaceContext, "render_preview", render)
+    for named in ("1", str(web_surface.PREVIEW_PAGE_BATCH + 40), "0", "all of them"):
+        answered = await client.post(
+            "/surface/web/preview",
+            data={"pages": named},
+            files=[("file", ("report.pdf", b"%PDF-1.7", "application/pdf"))],
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert answered.status_code == 200
+        assert [base64.b64decode(page) for page in answered.json()["pages"]] == [b"\x89PNG-one"]
+    batch = web_surface.PREVIEW_PAGE_BATCH
+    assert asked == [1, batch, 1, batch]
 
 
 @pytest.mark.usefixtures("database_url")
