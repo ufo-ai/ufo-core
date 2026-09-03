@@ -95,7 +95,12 @@ protocol; the host layer's assembly consumes this seam from outside the engine.
 Rust `ufo-control` remains the hosted gateway. Its SQL reaches only its `ufo_control` ledgers; it
 calls the runtime's `/internal/onboard/*` routes for workspace choices, membership, seats, and fleet
 state. Rust `ufo-egress` remains the wire proxy; it calls the runtime's `/internal/egress/*` routes
-for policy, credentials, and metering. Neither service links or hosts the agent harness.
+for policy, credentials, and metering. Neither service links or hosts the agent harness. The sandbox
+ingress is the third such process — a reverse proxy with no turn engine — and calls the runtime's
+`/internal/site-not-answering` route so a hosted site whose server has stopped reaches the
+conversation that built it. Its own report token is that route's whole gate: the deploy secret signs
+the workspace, conversation and port the request was already gated by, under a kind neither hop of a
+visit accepts.
 
 ## Workspace model
 

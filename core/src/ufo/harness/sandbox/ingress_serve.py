@@ -66,6 +66,7 @@ from ufo.harness.sandbox.session import (
     sandbox_handle_backend,
     sandbox_handle_id,
 )
+from ufo.harness.sandbox.site_report import SiteReporter
 from ufo.host.ext.loader import load_manifests
 from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
 from ufo.runtime.ext.manifest import CarrierSpec
@@ -211,9 +212,72 @@ SESSION_ENDED_PAGE = (
 )
 SITE_GONE = "This site is no longer hosted. Ask the agent that built it to put it back up."
 SITE_NOT_ANSWERING = "This site is not answering."
+SITE_WAITING_RELOAD_SECONDS = 30
+FETCH_DESTINATION_HEADER = "sec-fetch-dest"
+DOCUMENT_DESTINATIONS = frozenset({"document", "iframe", "frame"})
+"""The `sec-fetch-dest` values a page is read at, and the only requests answered with one.
+
+A site's own script, stylesheet or image asking for a page would render nothing and would report a
+site the member never opened, so a sub-resource keeps the one sentence as text; one page load must
+not report itself once per asset it names. A request carrying no Fetch Metadata is no browser
+reading a page either. `embed` and `object` are left out: neither renders a hosted site anywhere in
+the product."""
+SITE_WAITING_PAGE = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{SITE_WAITING_RELOAD_SECONDS}">
+<title>{SITE_NOT_ANSWERING.rstrip(".")}</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{
+    margin: 0; min-height: 100vh; display: grid; place-content: center;
+    padding: 2rem; gap: 0.5rem; text-align: center;
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+  }}
+  p {{ margin: 0; }}
+  .waiting {{ opacity: 0.6; }}
+</style>
+</head>
+<body>
+<p>{SITE_NOT_ANSWERING}</p>
+<p class="waiting">The agent that built it has been asked to bring it back up.
+This page reloads every {SITE_WAITING_RELOAD_SECONDS} seconds.</p>
+</body>
+</html>
+"""
+"""What a member reads in the frame while the site is down, and the whole of the recovery loop: the
+meta refresh reloads this origin on a fixed interval, so the first reload after the server comes
+back serves the site itself. Declarative rather than scripted, so it needs no script in a frame and
+runs under a policy that admits none."""
+SITE_WAITING_POLICY = "default-src 'none'; style-src 'unsafe-inline'"
+"""What the waiting page may reach: nothing but the style in its own head. It is this process's own
+document served at the site's origin, so it carries a policy of its own rather than the latitude a
+site is served under."""
 FOREIGN_ORIGIN = "This connection did not come from the site it addresses."
 NOT_FOUND = "Not found."
 SITE_HAS_NO_SOCKET = "This site is static and speaks no socket protocol."
+EDGE_REPLACED_STATUSES = frozenset({502, 504})
+"""The statuses this origin cannot answer with, because they never reach the viewer.
+
+The sites wildcard is proxied, and the edge discards an origin's 502 or 504 and answers its own
+error page instead — under `x-frame-options: SAMEORIGIN`, which the frame that reads a site is not.
+A site whose server has died would then be refused by the browser rather than told "This site is
+not answering", leaving a refusal no reply can explain, exactly as a site sending that header
+itself does. Measured against the live edge: a 503 carrying this module's own body arrives
+verbatim, a 502 arrives as the edge's page.
+
+An upstream answering inside this set is answered for, which is also the only reading a dialed
+sandbox admits: the carrier's edge answers a port nothing listens on with its own error naming its
+own sandbox, so those bytes are never the site's response to relay.
+
+The mask is unconditional — every request, and every deploy, whether an edge stands in front or
+not. A site proxying onward and answering its own 504, or a `fetch` for an API path under it, reads
+back this module's sentence rather than the origin's own bytes, and a bare `ufoctl ingress` with no
+edge discards bytes that would have arrived. That is the price of one answer: a status that depended
+on what was deployed in front of this process would make a site's failure mean two different things,
+and the one it means behind the proxy is the one members meet."""
 
 
 @dataclass(frozen=True)
@@ -291,6 +355,10 @@ class IngressServe:
     site_port_suffix: str
     """The scheme and rendered `:port` (or empty) of `[sandbox] ingress_public_url` — with
     `base_host`, what `_frame_ancestors` renders a sibling site's origin from."""
+    reporter: SiteReporter
+    """The hop that tells a site's own conversation the site is down. This process runs no turn
+    engine, so a dead site is reported to serve rather than acted on here, and only for a request
+    reading a page — the member's frame is what makes it worth an agent's turn."""
     shipped_manifests: dict[ShippedClaim, dict[str, StoredFile]] = field(default_factory=dict)
     resume_carriers: Mapping[str, tuple[Carrier, CarrierSpec]] = field(default_factory=dict)
     """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
@@ -573,7 +641,15 @@ class IngressServe:
                     conversation_id=str(authorized.conversation_id),
                     error=repr(error),
                 )
-                return Response(SITE_NOT_ANSWERING, status_code=502, media_type="text/plain")
+                return self._not_answering(request, authorized)
+            if upstream.status_code in EDGE_REPLACED_STATUSES:
+                await upstream.aclose()
+                warn(
+                    "ingress.upstream_not_answering",
+                    conversation_id=str(authorized.conversation_id),
+                    status=upstream.status_code,
+                )
+                return self._not_answering(request, authorized)
             try:
                 response = StreamingResponse(
                     self._body(upstream),
@@ -604,6 +680,35 @@ class IngressServe:
                 await upstream.aclose()
                 raise
         return response
+
+    def _not_answering(self, request: HTTPConnection, claims: IngressClaims) -> Response:
+        """The site did not answer, said by this origin under a status the edge delivers. It stands
+        in the served page's place, so it is framed by the same origins the page would have been:
+        the member reads it inside the frame they opened, where the upstream's own answer would
+        have reached them as the edge's error page or as the carrier's JSON.
+
+        A request reading a page is answered with the waiting page, and reports the site to the
+        conversation that owns it — as a background task, so the frame paints on this process's own
+        work and never waits on a hop to serve. Every other request is answered with the sentence
+        as text and reports nothing."""
+        ancestors = f"{FRAME_ANCESTORS_DIRECTIVE} {self._frame_ancestors(claims)}"
+        if request.headers.get(FETCH_DESTINATION_HEADER, "") not in DOCUMENT_DESTINATIONS:
+            return Response(
+                SITE_NOT_ANSWERING,
+                status_code=503,
+                media_type="text/plain",
+                headers={"cache-control": UNCACHEABLE, CONTENT_SECURITY_POLICY: ancestors},
+            )
+        return Response(
+            SITE_WAITING_PAGE,
+            status_code=503,
+            media_type="text/html",
+            headers={
+                "cache-control": UNCACHEABLE,
+                CONTENT_SECURITY_POLICY: f"{SITE_WAITING_POLICY}; {ancestors}",
+            },
+            background=BackgroundTask(self.reporter.report, claims),
+        )
 
     async def _serve_stored(
         self, request: Request, claims: IngressClaims, files: dict[str, StoredFile], path: str
@@ -859,7 +964,7 @@ class IngressServe:
         if isinstance(authorized, SiteRefusal):
             return await self._refuse(websocket, authorized)
         if await self._stored_manifest(authorized) is not None or authorized.shipped is not None:
-            return await self._refuse(websocket, SiteRefusal(502, SITE_HAS_NO_SOCKET))
+            return await self._refuse(websocket, SiteRefusal(501, SITE_HAS_NO_SOCKET))
         dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
             return await self._refuse(websocket, dialed)
@@ -882,7 +987,7 @@ class IngressServe:
                     conversation_id=str(authorized.conversation_id),
                     error=repr(error),
                 )
-                return await self._refuse(websocket, SiteRefusal(502, SITE_NOT_ANSWERING))
+                return await self._refuse(websocket, SiteRefusal(503, SITE_NOT_ANSWERING))
             async with upstream:
                 await websocket.accept(subprotocol=upstream.subprotocol)
                 try:
@@ -920,9 +1025,15 @@ class IngressServe:
         """Refuse the handshake with the very response the proxy would have sent, through the
         Websocket Denial Response extension. One gate, one answer: an unauthorized viewer reads the
         same status and response body whichever protocol it arrived on, where a bare policy close
-        would have supplied neither."""
+        would have supplied neither — down to the cache directive, since `SITE_HAS_NO_SOCKET` is a
+        501 and RFC 9110 lists that status cacheable by default."""
         await websocket.send_denial_response(
-            Response(refusal.message, status_code=refusal.status, media_type=refusal.media_type)
+            Response(
+                refusal.message,
+                status_code=refusal.status,
+                media_type=refusal.media_type,
+                headers={"cache-control": UNCACHEABLE},
+            )
         )
 
     async def _relay(self, viewer: WebSocket, upstream: ClientConnection) -> None:
@@ -1045,14 +1156,16 @@ def run() -> None:
     ingress_secret()
     ingress_base = urlsplit(config.sandbox.ingress_public_url or "")
     selected = select_carriers(config, manifests)
+    client = upstream_client()
     server = IngressServe(
         backend=config.sandbox.backend,
         base_host=ingress_base_host(config.sandbox.ingress_public_url),
         carrier=selected.carrier,
         resume_carriers=selected.resume,
-        client=upstream_client(),
+        client=client,
         blob=blob_store_for(config.blob),
         frame_ancestor=ingress_frame_ancestor(config.connect.public_base_url),
+        reporter=SiteReporter(client=client, serve_base_url=config.connect.public_base_url),
         site_scheme=ingress_base.scheme,
         site_port_suffix=f":{ingress_base.port}" if ingress_base.port else "",
     )

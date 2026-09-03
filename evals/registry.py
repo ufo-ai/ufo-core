@@ -63,6 +63,7 @@ from evals.suites import (
     scope_preservation,
     semantic_quality,
     site_build,
+    site_restart,
     skill_routing,
     skill_tail_search,
     slack_ladder_coherence,
@@ -107,6 +108,12 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
         "bash_waiting", bash_waiting.CASES, wait_seconds=bash_waiting.WORKFLOW_WAIT_SECONDS
     ),
     capability_task("problem_report", problem_report.CASES),
+    capability_task(
+        "site_restart",
+        site_restart.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+        wait_seconds=site_restart.WORKFLOW_WAIT_SECONDS,
+    ),
     capability_task(
         "authority_handoff",
         authority_handoff.CASES,

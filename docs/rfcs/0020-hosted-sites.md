@@ -397,8 +397,10 @@ permanent link again succeeds.
 - **Both ends**: every declared piece ships producer and consumer in its unit — the token with its
   verifying route, the dial seam with the ingress, the column with the selector and the kind.
 - **Fail loud**: no silent fallback from a missing handle to a stale cache; a sandbox that is gone
-  or unroutable is a 503 and an origin that will not answer through a live sandbox is a 502, each
-  naming what the member can do next, never a hung stream.
+  or unroutable and an origin that will not answer through a live sandbox are both a 503, each
+  naming what the member can do next, never a hung stream. The ingress answers no 502 or 504: the
+  proxied wildcard's edge discards those and substitutes an error page under `x-frame-options:
+  SAMEORIGIN`, which the frame reading a site is not.
 
 ## Alternatives
 

@@ -16,6 +16,8 @@ import httpx
 import pytest
 import sqlalchemy as sa
 import uvicorn
+from fastapi import FastAPI
+from ufo_testsupport.invoker import RecordedTurn, RecordingInvoker
 from uvicorn._types import ASGIApplication, ASGIReceiveCallable, ASGISendCallable, Scope
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection, serve
@@ -31,6 +33,9 @@ from ufo.harness.sandbox.ingress_host import serve_port, shipped_anchor, site_la
 from ufo.harness.sandbox.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
     CONTENT_SECURITY_POLICY,
+    DOCUMENT_DESTINATIONS,
+    EDGE_REPLACED_STATUSES,
+    FETCH_DESTINATION_HEADER,
     FOREIGN_ORIGIN,
     FRAME_ANCESTORS_DIRECTIVE,
     INGRESS_SESSION_COOKIE,
@@ -45,6 +50,8 @@ from ufo.harness.sandbox.ingress_serve import (
     SITE_GONE,
     SITE_HAS_NO_SOCKET,
     SITE_NOT_ANSWERING,
+    SITE_WAITING_POLICY,
+    SITE_WAITING_RELOAD_SECONDS,
     STORED_SITE_CACHE,
     UNCACHEABLE,
     WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -73,6 +80,13 @@ from ufo.harness.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
 )
+from ufo.harness.sandbox.site_report import (
+    REPORT_BUCKET_SECONDS,
+    SITE_NOT_ANSWERING_FIRE,
+    SiteReporter,
+    SiteReports,
+)
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.schema import tables
 
@@ -107,12 +121,23 @@ REFUSED_POLICY_KEPT = "default-src 'self'; img-src *"
 REPORT_ONLY_POLICY = "frame-ancestors 'none'"
 FRAMING_ONLY_PATH = "/framing-only"
 FRAMING_ONLY_POLICY = "  frame-ancestors 'self' ;  "
+UPSTREAM_STATUS_PATH = "/upstream-status/"
+CARRIER_ERROR_BODY = '{"sandboxId":"sbx-1","message":"the sandbox is running but port is not open"}'
+"""What a carrier's edge answers when the addressed port is not open: its own error, naming its own
+sandbox, under its own status — never anything the site wrote."""
 pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
     def _respond(self) -> None:
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        if self.path.startswith(UPSTREAM_STATUS_PATH):
+            self.send_response(int(self.path.removeprefix(UPSTREAM_STATUS_PATH)))
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(CARRIER_ERROR_BODY)))
+            self.end_headers()
+            self.wfile.write(CARRIER_ERROR_BODY.encode())
+            return
         payload = json.dumps(
             {
                 "method": self.command,
@@ -353,9 +378,14 @@ def _server(
     resume: Mapping[str, tuple[Carrier, CarrierSpec]] | None = None,
     blob: FilesystemBlobStore = UNREAD_BLOBS,
     site_scheme: str = "https",
+    reporter: SiteReporter | None = None,
 ) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
-    protocol it fakes stops standing in for the dependency, and mypy is what catches the drift."""
+    protocol it fakes stops standing in for the dependency, and mypy is what catches the drift.
+
+    The reporter defaults to the real one holding no address — the deploy with no `[connect]
+    public_base_url`, which reports nothing — so a test asserting what the ingress *answers* posts
+    nowhere. The tests that assert the report supply one pointed at a real `SiteReports`."""
     return IngressServe(
         backend=BACKEND,
         base_host=BASE_HOST,
@@ -363,6 +393,9 @@ def _server(
         client=upstream,
         blob=blob,
         frame_ancestor=frame_ancestor,
+        reporter=reporter
+        if reporter is not None
+        else SiteReporter(client=upstream, serve_base_url=None),
         site_scheme=site_scheme,
         site_port_suffix="",
         resume_carriers=resume if resume is not None else {},
@@ -996,7 +1029,7 @@ async def test_a_tls_target_is_dialed_over_https(db, origin_port, monkeypatch) -
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
             await _open(client, workspace_id, conversation_id)
             answered = await client.get(f"{_origin(conversation_id)}/index.html")
-    assert answered.status_code == 502
+    assert answered.status_code == 503
     assert answered.text == SITE_NOT_ANSWERING
 
 
@@ -1151,9 +1184,12 @@ class _DeadPortCarrier(_StubCarrier):
         return DialTarget(host="127.0.0.1:1", tls=False)
 
 
-async def test_an_unreachable_origin_is_502(db, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A dialable sandbox whose server is not listening is the site not answering, not the site
-    being gone — a different status and a different sentence from the 503 branches."""
+async def test_an_unreachable_origin_is_the_site_not_answering(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dialable sandbox whose server is not listening is the site not answering rather than the
+    site being gone — its own sentence, under the status every unreachable branch answers with,
+    since the edge delivers no other."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     async with upstream_client() as upstream:
@@ -1161,8 +1197,166 @@ async def test_an_unreachable_origin_is_502(db, monkeypatch: pytest.MonkeyPatch)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
             await _open(client, workspace_id, conversation_id)
             got = await client.get(f"{_origin(conversation_id)}/")
-    assert got.status_code == 502
+    assert got.status_code == 503
     assert got.text == SITE_NOT_ANSWERING
+
+
+@pytest.mark.parametrize("status", sorted(EDGE_REPLACED_STATUSES))
+async def test_an_upstream_status_the_edge_replaces_is_answered_here(db, ingress, status) -> None:
+    """The other half of the same failure: the dial reaches a port, and what answers is a gateway
+    error rather than the site — the carrier's own, since e2b answers a closed port itself, or the
+    site's own gateway. The proxy in front of this host discards both statuses and substitutes an
+    error page under `x-frame-options: SAMEORIGIN`, which the frame that reads a site is not, so
+    relaying either delivers a browser refusal instead of an answer. Neither is relayed: the
+    ingress answers its own sentence under a status the edge delivers, framed as the served page
+    would have been, and the carrier's own error — sandbox id and all — reaches no browser."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(ingress, workspace_id, conversation_id)
+
+    got = await ingress.get(f"{_origin(conversation_id)}{UPSTREAM_STATUS_PATH}{status}")
+
+    assert (got.status_code, got.text) == (503, SITE_NOT_ANSWERING)
+    assert _framers(got) == [APP_ORIGIN]
+    assert got.headers["cache-control"] == UNCACHEABLE
+
+
+@dataclass(frozen=True)
+class _Reported:
+    """One ingress wired to one real `SiteReports`, and the turns its reports founded there. Both
+    ends of the hop run — the ingress mints and posts, serve verifies and invokes — so the token's
+    kind, its claims, and the idempotency key are asserted as they arrive rather than as they were
+    built."""
+
+    client: httpx.AsyncClient
+    turns: list[RecordedTurn]
+
+
+@asynccontextmanager
+async def _reporting(carrier: Carrier) -> AsyncIterator[_Reported]:
+    invoker = RecordingInvoker()
+    serve = FastAPI()
+    serve.include_router(SiteReports(invoker_for=lambda _workspace_id: invoker).router())
+    async with upstream_client() as upstream:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=serve)) as to_serve:
+            server = _server(
+                carrier,
+                upstream,
+                reporter=SiteReporter(client=to_serve, serve_base_url=APP_ORIGIN),
+            )
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+                yield _Reported(client=client, turns=invoker.turns)
+
+
+async def _read(
+    client: httpx.AsyncClient, conversation_id: UUID, path: str, destination: str
+) -> httpx.Response:
+    return await client.get(
+        f"{_origin(conversation_id)}{path}", headers={FETCH_DESTINATION_HEADER: destination}
+    )
+
+
+@pytest.mark.parametrize("destination", sorted(DOCUMENT_DESTINATIONS))
+async def test_a_page_read_from_a_site_that_stopped_waits_and_reloads(
+    db, monkeypatch: pytest.MonkeyPatch, destination
+) -> None:
+    """What a member actually meets. The frame holds a page of ours rather than a bare sentence: it
+    says what happened and reloads this origin on a fixed interval, so the first reload after the
+    server comes back serves the site. The refresh is declarative, so it runs with no script
+    admitted at all — and the page still names the app origin, or the frame that would show it is
+    refused by the browser instead of showing anything."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with upstream_client() as upstream:
+        server = _server(_DeadPortCarrier(port=0), upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            await _open(client, workspace_id, conversation_id)
+            got = await _read(client, conversation_id, "/", destination)
+
+    assert got.status_code == 503
+    assert got.headers["content-type"].startswith("text/html")
+    assert SITE_NOT_ANSWERING in got.text
+    assert f'http-equiv="refresh" content="{SITE_WAITING_RELOAD_SECONDS}"' in got.text
+    assert _framers(got) == [APP_ORIGIN]
+    assert got.headers[CONTENT_SECURITY_POLICY].startswith(SITE_WAITING_POLICY)
+    assert got.headers["cache-control"] == UNCACHEABLE
+
+
+async def test_a_sub_resource_of_a_site_that_stopped_is_answered_as_text(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page names its own scripts, styles and images, and each of them meets the same stopped
+    server. A waiting page in place of a script is bytes no browser can use, so a sub-resource keeps
+    the sentence — still under our framing, since it is still this origin answering."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with upstream_client() as upstream:
+        server = _server(_DeadPortCarrier(port=0), upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            await _open(client, workspace_id, conversation_id)
+            got = await _read(client, conversation_id, "/app.js", "script")
+
+    assert (got.status_code, got.text) == (503, SITE_NOT_ANSWERING)
+    assert _framers(got) == [APP_ORIGIN]
+
+
+async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_owns_it(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole hop, end to end: a member opens a site whose server has stopped, and the
+    conversation that built it is told inside the same request that answers the member. The fire
+    restates the port and what was observed, so a report landing after a compaction needs no earlier
+    transcript to act on, and the authority is the workspace's — a site going down is nobody's
+    delegated act."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _reporting(_DeadPortCarrier(port=0)) as reported:
+        await _open(reported.client, workspace_id, conversation_id)
+        got = await _read(reported.client, conversation_id, "/", "iframe")
+
+    assert got.status_code == 503
+    assert [turn.conversation_id for turn in reported.turns] == [conversation_id]
+    assert reported.turns[0].message == SITE_NOT_ANSWERING_FIRE.format(port=8000)
+    assert reported.turns[0].authority == WORKSPACE_AUTHORITY
+
+
+async def test_reloads_of_the_waiting_page_carry_one_idempotency_key(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The waiting page reloads until the site answers, so a site that stays down reports itself
+    again every time. The key's bucket advances on `REPORT_BUCKET_SECONDS` and on nothing else, so
+    every reload inside one bucket carries the same key and admission's own idempotency check
+    collapses them into one turn — the whole of this report's memory, with no row of ours."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _reporting(_DeadPortCarrier(port=0)) as reported:
+        await _open(reported.client, workspace_id, conversation_id)
+        for _ in range(3):
+            assert (await _read(reported.client, conversation_id, "/", "document")).status_code
+
+    bucket = int(datetime.now(UTC).timestamp()) // REPORT_BUCKET_SECONDS
+    assert len(reported.turns) == 3
+    assert {turn.idempotency_key for turn in reported.turns} == {
+        f"site-down:{conversation_id.hex}:8000:{bucket}"
+    }
+
+
+async def test_a_sub_resource_and_a_served_page_report_nothing(
+    db, monkeypatch: pytest.MonkeyPatch, origin_port: int
+) -> None:
+    """Neither end of the ordinary case reaches an agent: a site that answers is nobody's problem,
+    and a sub-resource meeting a stopped server is one page's asset rather than a member opening a
+    site. Reporting either founds turns for a workspace nothing is wrong in."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with _reporting(_DeadPortCarrier(port=0)) as reported:
+        await _open(reported.client, workspace_id, conversation_id)
+        assert (await _read(reported.client, conversation_id, "/app.js", "script")).status_code
+    async with _reporting(_StubCarrier(origin_port)) as answering:
+        await _open(answering.client, workspace_id, conversation_id)
+        assert (await _read(answering.client, conversation_id, "/", "iframe")).status_code == 200
+
+    assert reported.turns == []
+    assert answering.turns == []
 
 
 async def test_dial_failure_is_503(db, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1208,7 +1402,7 @@ ten times the slowest local run, and well below the runner's own kill."""
 OPEN_TIMEOUT_HEADROOM_SECONDS = 5.0
 """What the refusal must beat, and the only thing that distinguishes the timeout being set from it
 being absent: the hung server never answers and never hangs up, so with `open_timeout` deleted the
-WebSocket client's own 10-second default still ends the wait and the refusal is still a 502 — just
+WebSocket client's own 10-second default still ends the wait and the refusal is still a 503 — just
 ten seconds later. Twenty-five times the shortened timeout the test sets, so the bound is a
 measurement rather than a race."""
 TICK_SECONDS = 0.02
@@ -1756,8 +1950,9 @@ async def test_a_site_that_vanishes_without_a_close_frame_ends_as_an_unexpected_
 async def test_a_socket_to_a_site_that_does_not_answer_is_refused_before_it_is_accepted(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing is accepted until the site's own server agrees, so a dial that reaches nothing is a
-    502 on the handshake rather than a socket the viewer holds open and nothing ever answers."""
+    """Nothing is accepted until the site's own server agrees, so a dial that reaches nothing is
+    refused on the handshake rather than leaving the viewer holding a socket nothing ever answers —
+    the proxy's own status and sentence, so one gate answers both protocols alike."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     async with upstream_client() as upstream:
@@ -1771,7 +1966,7 @@ async def test_a_socket_to_a_site_that_does_not_answer_is_refused_before_it_is_a
                     session=_session(workspace_id, conversation_id),
                 ):
                     pass
-    assert refused.value.response.status_code == 502
+    assert refused.value.response.status_code == 503
     assert refused.value.response.body == SITE_NOT_ANSWERING.encode()
 
 
@@ -1786,7 +1981,7 @@ async def test_a_site_that_accepts_and_never_answers_the_handshake_times_out(
 ) -> None:
     """A dead port refuses at once; a hung one would hold the viewer's handshake open forever, and a
     site is agent-authored code that can hang. The open timeout is what makes the wait end, and the
-    refusal is the proxy's own 502 either way."""
+    refusal is the proxy's own 503 either way."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     monkeypatch.setattr(ingress_serve, "WEBSOCKET_OPEN_TIMEOUT_SECONDS", 0.2)
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
@@ -1813,7 +2008,7 @@ async def test_a_site_that_accepts_and_never_answers_the_handshake_times_out(
     finally:
         hung.close()
     assert waited < OPEN_TIMEOUT_HEADROOM_SECONDS, waited
-    assert refused.value.response.status_code == 502
+    assert refused.value.response.status_code == 503
     assert refused.value.response.body == SITE_NOT_ANSWERING.encode()
 
 
@@ -2101,8 +2296,11 @@ async def test_a_socket_to_a_stored_site_is_refused(
             session=_session(workspace_id, conversation_id),
         ):
             pass
-    assert refused.value.response.status_code == 502
+    assert refused.value.response.status_code == 501
     assert refused.value.response.body == SITE_HAS_NO_SOCKET.encode()
+    # 501 is cacheable by default (RFC 9110), and this refusal names one workspace's own site — so
+    # the denial carries the directive every other answer of this origin does.
+    assert refused.value.response.headers["cache-control"] == UNCACHEABLE
     assert socket_origin.handshakes == []
 
 

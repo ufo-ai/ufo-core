@@ -75,6 +75,7 @@ from ufo.harness.sandbox.session import (
     ProxyEndpoint,
     RunTokenCodec,
 )
+from ufo.harness.sandbox.site_report import SiteReports
 from ufo.harness.sandbox.terminal import Terminals, TerminalTransport
 from ufo.host.assemble import HostEnvironment
 from ufo.host.environment import store_environment_document, store_environment_file
@@ -432,6 +433,7 @@ def run() -> None:
     onboard_token = os.environ.get(ONBOARD_CONTROL_TOKEN_ENV, "")
     if onboard_token:
         app.include_router(OnboardControl(control_token=onboard_token).router())
+    app.include_router(SiteReports(invoker_for=invoker_for).router())
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),
         blob=blob,

@@ -13,7 +13,11 @@ afterwards. Neither passes where the other is expected, so a cookie cannot be re
 path to mint itself a successor, and a view token pasted into the cookie jar opens nothing. A view
 token is usable until it expires and may open several sessions in that window — a reload is a
 second one; each session then runs its own TTL from the moment it was minted, and nothing extends
-it."""
+it.
+
+A **report** token is neither hop of a visit but the ingress speaking to serve about a site it
+could not reach, over the same claims and the same secret. It opens nothing, and a visit's own two
+kinds are refused where it is expected, so a session cookie posted as a report founds no turn."""
 
 import json
 import os
@@ -25,9 +29,10 @@ from uuid import UUID
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.auth.token_signing import SignedTokenError, sign_token, verify_token
 
-IngressTokenKind = Literal["sandbox-ingress-view", "sandbox-ingress-session"]
+IngressTokenKind = Literal["sandbox-ingress-view", "sandbox-ingress-session", "sandbox-site-report"]
 INGRESS_VIEW_KIND: IngressTokenKind = "sandbox-ingress-view"
 INGRESS_SESSION_KIND: IngressTokenKind = "sandbox-ingress-session"
+SITE_REPORT_KIND: IngressTokenKind = "sandbox-site-report"
 INGRESS_VIEW_PATH = "/~t"
 INGRESS_VIEW_TTL_SECONDS = 900
 INGRESS_SESSION_ENDED_MESSAGE = "site-session-ended"
