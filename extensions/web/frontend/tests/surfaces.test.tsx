@@ -181,7 +181,7 @@ test("the palette carries no second name for the workspace", async () => {
     />,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Launcher" }));
 
   expect(await screen.findByRole("option", { name: "Apps" })).toBeTruthy();
   expect(screen.queryByRole("option", { name: "Workspace" })).toBeNull();

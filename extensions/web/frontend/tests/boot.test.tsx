@@ -189,10 +189,10 @@ test("a boot whose network fails says so rather than sending a live session to s
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
 
-/** The shell at a desk width is the rail on the left: the mark that leads home, the act that opens a
- *  tab, search, one tile per tab home stands, the act that builds an app, the act that silences the
- *  track, and the workspace at its foot. The column is a glyph's own width, so every tile is a mark
- *  alone and the word it stands for is held at the pointer. */
+/** The shell at a desk width is the rail on the left: the mark that leads home, the launcher, one
+ *  tile per tab home stands, the act that builds an app, the act that silences the track, and the
+ *  workspace at its foot. The column is a glyph's own width, so every tile is a mark alone and the
+ *  word it stands for is held at the pointer. */
 test("the desk shell is a rail of marks, each holding its name at the pointer", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -205,8 +205,7 @@ test("the desk shell is a rail of marks, each holding its name at the pointer", 
   await waitFor(() =>
     expect(names()).toEqual([
       "Home",
-      "New tab",
-      "Search",
+      "Launcher",
       agentName(AGENT.name),
       "New app",
       "Mute sounds",

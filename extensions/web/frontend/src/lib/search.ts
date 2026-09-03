@@ -4,13 +4,14 @@ import {
   IconFile,
   IconMessage,
   IconNote,
+  IconPlug,
   type TablerIcon,
 } from "@tabler/icons-react";
 
 import { slotOf } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
-import { chatHash, workspaceHash, agentHash } from "@/lib/route";
+import { chatHash, workspaceHash, agentHash, sectionHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 /** What one term finds, kind by kind. The bar's search reaches the whole workspace, and the
@@ -27,6 +28,9 @@ export type Hit = {
   primary: string;
   /** The one fact that tells two hits of a kind apart — whose agent, what class, how large. */
   fact: string;
+  /** Whether the record is the member's own, where the read answers whose it is. A kind whose read
+   *  names no owner states nothing. */
+  mine?: boolean;
 };
 
 export type Group = {
@@ -96,6 +100,75 @@ async function group<K extends keyof Found>(
   };
 }
 
+/** What a hit needs of a catalog tile: the provider it connects, and the name the workspace draws
+ *  it under. The catalog read is the term's own filter — the surface matches `q` against the
+ *  provider and the label together — so nothing is narrowed again here. */
+type FoundProvider = { name: string; label: string };
+
+/** What a hit needs of a pooled connection: the grant the panel opens it by, the provider whose
+ *  label names it, the strings a member would search an account by, and who reaches it — the fact
+ *  an account carrying no label of its own falls back to. */
+type FoundConnection = {
+  provider: string;
+  account_id: string | null;
+  account_label: string | null;
+  owner_email: string | null;
+  shared: boolean;
+  grant: string;
+};
+
+/** The slot a connection stands in on the connectors screen, which is what a hit opens it at. */
+const CONNECTION_SLOT = "connection/";
+
+/** What one term reaches of the connectors screen, from the two reads that screen takes: the
+ *  accounts the workspace already holds, then the providers it could still connect. The pool
+ *  carries no query, so an account is matched here on the strings the screen draws it by. A
+ *  provider whose account is already in the pool is not offered a second time — the tile would
+ *  name the thing the row above it names.
+ *
+ *  Neither read's refusal surfaces: the group stands on whatever the other read answered and reads
+ *  as a kind holding nothing. A connector read that refuses — the broker the deploy never keyed,
+ *  the catalog it cannot reach — is not a thing the member can act on from the palette, and a
+ *  workspace whose connectors are simply unreachable would otherwise put that line under every
+ *  term they type. */
+export async function searchConnectors(term: string, signal: AbortSignal): Promise<Group> {
+  const wanted = term.trim();
+  const [catalog, pool] = await Promise.all([
+    getJson<{ providers: FoundProvider[] }>("/connector-catalog" + query(wanted), signal),
+    getJson<{ connections: FoundConnection[] }>("/connections", signal),
+  ]);
+  const providers = catalog.ok ? catalog.payload.providers : [];
+  const labels = new Map(providers.map((row) => [row.name, row.label]));
+  const sought = wanted.toLowerCase();
+  const connections = (pool.ok ? pool.payload.connections : []).filter((entry) =>
+    [entry.provider, entry.account_label, entry.account_id, entry.owner_email].some((held) =>
+      held?.toLowerCase().includes(sought),
+    ),
+  );
+  const connected = new Set(connections.map((entry) => entry.provider));
+  return {
+    label: "Connectors",
+    icon: IconPlug,
+    hits: [
+      ...connections.map((entry) => ({
+        key: entry.grant,
+        hash: sectionHash("connectors", { opens: [CONNECTION_SLOT + entry.grant] }),
+        primary: labels.get(entry.provider) ?? entry.provider,
+        fact: entry.account_label ?? (entry.shared ? "Workspace" : "Only you"),
+      })),
+      ...providers
+        .filter((row) => !connected.has(row.name))
+        .map((row) => ({
+          key: "offer:" + row.name,
+          hash: sectionHash("connectors", { q: wanted }),
+          primary: row.label,
+          fact: "Not connected",
+        })),
+    ],
+    failed: null,
+  };
+}
+
 /** Every kind one term reaches, in the order a member scans them: what they are talking to, what
  *  they said, what came out of it, what is remembered, and what runs on its own. The agents are
  *  matched here rather than read, because the shell already holds the whole list.
@@ -116,7 +189,7 @@ export async function searchEverywhere(
    *  the app has no screen for the kind, so its group is dropped rather than pointed nowhere. */
   const app = (slug: string) => agents.find((agent) => agent.app === slug);
   const artifactsApp = app("artifacts");
-  const [conversations, files, sites, memory, tasks] = await Promise.all([
+  const [conversations, files, sites, memory, tasks, connectors] = await Promise.all([
     group<"conversations">(
       "Conversations",
       IconMessage,
@@ -190,6 +263,7 @@ export async function searchEverywhere(
       },
       signal,
     ),
+    searchConnectors(wanted, signal),
   ]);
   /** Files and sites are two reads of one app, so they stand as one group — the artifacts app is
    *  what a member opens either from. */
@@ -215,5 +289,61 @@ export async function searchEverywhere(
     ...(artifactsApp ? [artifacts] : []),
     memory,
     tasks,
+    connectors,
   ].filter((entry) => entry.hits.length > 0 || entry.failed !== null);
+}
+
+/** Which threads a page stands in. An app holds its own, so its scope names the agent and is read
+ *  under it alone; a connection holds threads across every app it reached, and no read is keyed by
+ *  a surface, so that scope names the surface and the rows are kept by it. */
+export type Scope =
+  | { kind: "app"; agent: Agent }
+  | { kind: "surface"; surface: string; label: string };
+
+/** The threads one term finds inside a scope, from the conversation listing each agent already
+ *  answers — a thread is found by the same search its app's screen runs. A read spanning agents can
+ *  name one conversation twice, so hits are deduped by the conversation they name. */
+export async function searchThreads(
+  scope: Scope,
+  term: string,
+  agents: Agent[],
+  viewer: string | null,
+  signal: AbortSignal,
+): Promise<Group> {
+  const wanted = term.trim();
+  const read = scope.kind === "app" ? [scope.agent] : agents;
+  const answers = await Promise.all(
+    read.map((agent) =>
+      getJson<{ conversations: Conversation[] }>(
+        "/agents/" + agent.id + "/conversations" + query(wanted),
+        signal,
+      ),
+    ),
+  );
+  const failed = answers.find((answer) => !answer.ok);
+  const found = answers.flatMap((answer) =>
+    answer.ok
+      ? answer.payload.conversations.filter(
+          (entry) => scope.kind === "app" || entry.surface === scope.surface,
+        )
+      : [],
+  );
+  const held = new Map(
+    found.map((entry) => [
+      entry.id,
+      {
+        key: entry.id,
+        hash: chatHash(entry.id),
+        primary: entry.description || entry.id,
+        fact: "",
+        mine: entry.member_email !== null && entry.member_email === viewer,
+      },
+    ]),
+  );
+  return {
+    label: "Result threads",
+    icon: IconMessage,
+    hits: [...held.values()],
+    failed: failed && !failed.ok ? failed.message : null,
+  };
 }

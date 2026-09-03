@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PressRow } from "@/components/ui/pressrow";
 import type { Placement } from "@/kernel/pager";
+import { COLUMN } from "@/kernel/pane";
 import { Empty, Waiting } from "@/kernel/panel";
 import { SlotTrack, opened, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, origin } from "@/lib/audience";
@@ -436,7 +437,11 @@ function HistoryLane({
  *  The runs and the menu are the chat app's own: a ladder the rows run in, the surfaces the member
  *  keeps, and the source each row came in on beside its name. Both choices are held in this browser
  *  rather than in the address — a member who asked to see their terminal sessions asked about their
- *  own history, and a lane that forgot would ask them again on every tab they open. */
+ *  own history, and a lane that forgot would ask them again on every tab they open.
+ *
+ *  It stands in the box's own column, at the box's own padding, so a row and the words the member is
+ *  about to write start on one left edge. A list that took the whole pane would sit a hand's width
+ *  outside the box under it, and the lane would read as two screens rather than one. */
 function History({
   lane,
   opens,
@@ -455,7 +460,7 @@ function History({
     [],
   );
   return (
-    <div className="flex min-h-0 flex-1 flex-col py-md">
+    <div className={cn(COLUMN, "flex min-h-0 flex-1 flex-col px-2xl py-md")}>
       <div className="flex shrink-0 items-center justify-between px-lg">
         <h3 className={cn(PICK_LABEL, "px-0")}>{HISTORY}</h3>
         <HistoryOptions ladder={ladder} hidden={hidden} />

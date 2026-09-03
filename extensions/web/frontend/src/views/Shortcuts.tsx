@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
+import { CommandKbd } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CLAIMED, DIALOG, LANE_NEXT, LANE_PRIOR, TYPING } from "@/kernel/slots";
-import { CHORD as SEARCH } from "@/views/Spotlight";
+import { ASK_KEY, CHORD as SEARCH } from "@/views/Spotlight";
 
 /** The key that opens this list, pressed bare, as Linear spends it — so a member arrives already
  *  holding it. Shift is what makes the character, so shift is not a modifier the guard refuses. */
@@ -13,6 +14,10 @@ const CHORD = "?";
 const COMMAND = "⌘";
 
 const LEAVE_FIELD = "Esc";
+
+const ENTER = "↵";
+
+const ROW_RANGE = "1…9";
 
 const TITLE = "Keyboard shortcuts";
 
@@ -27,6 +32,17 @@ const SHORTCUTS: { group: string; rows: { act: string; keys: string[] }[] }[] = 
     rows: [
       { act: "Search", keys: [COMMAND, SEARCH.toUpperCase()] },
       { act: TITLE, keys: [CHORD] },
+    ],
+  },
+  {
+    group: "Launcher",
+    rows: [
+      { act: "Open", keys: [ENTER] },
+      { act: "Open beside", keys: [COMMAND, ENTER] },
+      { act: "Ask", keys: [ASK_KEY] },
+      { act: "Back", keys: [LEAVE_FIELD] },
+      { act: "Row 1–9", keys: [COMMAND, ROW_RANGE] },
+      { act: "Next page", keys: [COMMAND, SEARCH.toUpperCase()] },
     ],
   },
   {
@@ -82,12 +98,7 @@ export function Shortcuts() {
                   <dt className="text-ui">{row.act}</dt>
                   <dd className="m-0 flex items-center gap-2xs">
                     {row.keys.map((key) => (
-                      <kbd
-                        key={key}
-                        className="inline-flex min-w-2xl items-center justify-center rounded-control border border-edge bg-fill px-2xs py-hair font-mono text-mono text-ink"
-                      >
-                        {key}
-                      </kbd>
+                      <CommandKbd key={key}>{key}</CommandKbd>
                     ))}
                   </dd>
                 </div>

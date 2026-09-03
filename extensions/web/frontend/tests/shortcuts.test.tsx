@@ -26,6 +26,21 @@ test("the chord lists every chord the portal answers", async () => {
   expect(keysFor("Leave the message box")).toEqual(["Esc"]);
 });
 
+/** The launcher answers six keys of its own, and each is read from the module that answers it, so
+ *  the sheet cannot state a key the palette does not take. */
+test("the sheet states every key the launcher answers", async () => {
+  render(<Shortcuts />);
+  await userEvent.keyboard("?");
+
+  expect(await screen.findByRole("dialog", { name: TITLE })).toBeTruthy();
+  expect(keysFor("Open")).toEqual(["↵"]);
+  expect(keysFor("Open beside")).toEqual(["⌘", "↵"]);
+  expect(keysFor("Ask")).toEqual(["Tab"]);
+  expect(keysFor("Back")).toEqual(["Esc"]);
+  expect(keysFor("Row 1–9")).toEqual(["⌘", "1…9"]);
+  expect(keysFor("Next page")).toEqual(["⌘", "K"]);
+});
+
 /** A member typing `?` into the composer is typing a character, not pressing a chord. */
 test("the chord typed into a field stays a character", async () => {
   render(

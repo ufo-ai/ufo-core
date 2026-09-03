@@ -5,7 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { BRAND_MARKS } from "@/lib/brandMark";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
-import { HOME_CONNECTORS_LANE, homeHash, parseHash, sectionHash } from "@/lib/route";
+import { HOME_CONNECTORS_LANE, HOME_NEW_LANE, homeHash, parseHash, sectionHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -181,7 +181,8 @@ test("the picker stands the connectors screen in a lane", async () => {
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "New tab" }));
+  location.hash = homeHash({ opens: [HOME_NEW_LANE, AGENT_ID] });
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
   const picker = await screen.findByRole("region", { name: "New tab" });
   await userEvent.click(within(picker).getByRole("button", { name: /^Connectors/ }));
 
@@ -197,7 +198,8 @@ test("a second pick of the connectors screen keeps the one lane", async () => {
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "New tab" }));
+  location.hash = homeHash({ opens: [HOME_NEW_LANE, HOME_CONNECTORS_LANE, AGENT_ID] });
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
   const picker = await screen.findByRole("region", { name: "New tab" });
   await userEvent.click(within(picker).getByRole("button", { name: /^Connectors/ }));
 

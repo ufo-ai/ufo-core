@@ -28,16 +28,17 @@ import { atPhoneWidth } from "./harness";
 vi.mock("@/lib/sound", () => ({ soundMoved: vi.fn(), soundEnded: vi.fn() }));
 
 /** Motion's frame loop needs a browser to run in, so the spring lands at once here and every arm
- *  of it is recorded: what the row does is where each lane comes to rest, and which lanes were
- *  moved at all. */
-const glided = vi.hoisted(() => ({ moves: [] as number[], still: false }));
+ *  of it is recorded: what the row does is where each lane comes to rest, where the spring carrying
+ *  it started, and which lanes were moved at all. */
+const glided = vi.hoisted(() => ({ starts: [] as number[], moves: [] as number[], still: false }));
 
 vi.mock("motion/react", async (whole) => {
   const real = await whole<typeof import("motion/react")>();
   return {
     ...real,
     useReducedMotion: () => glided.still,
-    animate: (value: { jump: (to: number) => void }, to: number) => {
+    animate: (value: { get: () => number; jump: (to: number) => void }, to: number) => {
+      glided.starts.push(value.get());
       glided.moves.push(to);
       value.jump(to);
       return { stop: () => {} };
@@ -1797,6 +1798,12 @@ function Rolled({ opening }: { opening: string[] }) {
       <button type="button" onClick={() => setOpens([opens[1], opens[0], ...opens.slice(2)])}>
         Swap the first two
       </button>
+      <button type="button" onClick={() => setOpens([...opens, LATE])}>
+        Open a lane at the end
+      </button>
+      <button type="button" onClick={() => setOpens(["A", "B", "C"])}>
+        Stand three lanes
+      </button>
       {opens.map((name) => (
         <Standing key={name} name={name} kind="panel">
           <p>{name} body</p>
@@ -1807,6 +1814,9 @@ function Rolled({ opening }: { opening: string[] }) {
 }
 
 const NINE = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
+
+/** The lane a press puts on the row, whatever the row is already standing. */
+const LATE = "J";
 
 /** The pane the laptop leaves, four lanes across at `--size-slot-min`, and the step from one
  *  lane's left edge to the next: the share of the row it takes, and the hairline after it. */
@@ -1830,6 +1840,7 @@ function rolling(names: string[]): () => void {
   const row = track();
   row.style.setProperty("--size-slot-min", token("--size-slot-min") + "px");
   Sizing.made[0].report();
+  glided.starts.length = 0;
   glided.moves.length = 0;
   return () => boxes.mockRestore();
 }
@@ -2046,6 +2057,83 @@ test("a lane the address moved slides to its new place, and a lane that stayed d
     expect(spotted("A")).toBe(0);
     expect(spotted("I")).toBe(1);
   } finally {
+    done();
+  }
+});
+
+/** A lane a press puts on a row every lane fits comes in from off the row's leading edge: it starts
+ *  one lane's width left of the place it will stand and glides to it, and the lanes already
+ *  standing glide to the places the narrower step leaves them. Opening a lane moves the step the
+ *  same way a narrower pane does, and a row that read the step alone would answer the press by
+ *  jumping — the one movement a member reads as nothing having happened. */
+test("a lane joining a fitting row glides in from one step left, and the row glides with it", () => {
+  const done = rolling(["A", "B", "C"]);
+  try {
+    const wide = (ROW_WIDTH - 2) / 3 + 1;
+
+    fireEvent.click(screen.getByRole("button", { name: "Open a lane at the end" }));
+
+    expect(standing()).toEqual(["A", "B", "C", LATE]);
+    expect(glided.starts).toEqual([wide, 2 * wide, 3 * STEP - STEP]);
+    expect(glided.moves).toEqual([STEP, 2 * STEP, 3 * STEP]);
+    expect(spotted("A")).toBe(0);
+    expect(spotted(LATE)).toBe(3);
+  } finally {
+    done();
+  }
+});
+
+/** The same arrival on a row already holding more lanes than fit. The step does not move there, so
+ *  the lanes standing keep their places and the lane that joined is the only one that glides — in
+ *  from one lane's width left of the end of the row, while the row carries to stand it against the
+ *  right edge. */
+test("a lane joining a rolling row glides in from one step left of the row's end", () => {
+  const done = rolling(NINE);
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Open a lane at the end" }));
+
+    expect(glided.starts).toEqual([9 * STEP - STEP, 0]);
+    expect(glided.moves).toEqual([9 * STEP, 6 * STEP]);
+    expect(spotted(LATE)).toBe(3);
+    expect(spotted("A")).toBe(-6);
+  } finally {
+    done();
+  }
+});
+
+/** A screen standing several lanes at once is restating a row the member already arranged, not a
+ *  row they opened a lane on, so every one of them is drawn where it stands and nothing slides. */
+test("a row that stands several lanes at once slides none of them", () => {
+  const done = rolling([]);
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Stand three lanes" }));
+
+    expect(standing()).toEqual(["A", "B", "C"]);
+    expect(glided.moves).toEqual([]);
+    for (const name of ["A", "B", "C"]) {
+      expect(slotFor(name).style.transform).toBe("translateX(0px)");
+    }
+  } finally {
+    done();
+  }
+});
+
+/** A member who asked for stillness gets the arrival seated rather than slid: the lane that joined
+ *  stands in its place from the frame it appears in, the lanes it narrowed are re-seated at the new
+ *  step, and no spring is started for any of them. */
+test("a reduced-motion arrival seats the lane in its place without a glide", () => {
+  glided.still = true;
+  const done = rolling(["A", "B", "C"]);
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Open a lane at the end" }));
+
+    expect(glided.moves).toEqual([]);
+    for (const name of ["A", "B", "C", LATE]) {
+      expect(slotFor(name).style.transform).toBe("translateX(0px)");
+    }
+    expect(spotted(LATE)).toBe(3);
+  } finally {
+    glided.still = false;
     done();
   }
 });

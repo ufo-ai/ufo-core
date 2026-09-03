@@ -181,6 +181,7 @@ export function wire(routes: Record<string, Route>) {
     "/objects/conversation$": () => json({ objects: [] }),
     "/api/agents/status": () => json({ statuses: [] }),
     "/connector-catalog": () => json({ providers: [], after: null }),
+    "/connections": () => json({ connections: [] }),
     "/homepage": () => json({ state: "none" }),
     "/conversations$": () => json({ conversations: [] }),
     ...routes,

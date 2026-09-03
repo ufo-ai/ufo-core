@@ -21,11 +21,9 @@ import {
   HOME_NEW_LANE,
   homeConversationLane,
   homeHash,
-  homeLaneAgent,
   mintHomeLane,
   newChatHash,
 } from "@/lib/route";
-import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 
 import {
   AGENT,
@@ -52,17 +50,9 @@ const FOUNDED_CONVO_ID = "99999999-9999-4999-8999-999999999999";
 const AGENT_INSTANCE = mintHomeLane(AGENT_ID, [AGENT_ID]);
 const CONVERSATION_LANE = homeConversationLane(CONVO_ID);
 
-/** A row at the cap, the two apps standing turn and turn about, each lane its own instance. */
-const FULL_ROW = Array.from({ length: TRACK_MAX_SLOTS }).reduce<string[]>(
-  (row, _, at) => [...row, mintHomeLane(at % 2 ? SECOND_ID : AGENT_ID, row)],
-  [],
-);
-
 /** The sends that founded a conversation, off the wire's own record of what was asked. */
 const foundingSends = (calls: string[]): string[] =>
   calls.filter((url) => url.includes("/chat?conversation=new"));
-
-const laneName = (lane: string): string => (homeLaneAgent(lane) === AGENT_ID ? "Assistant" : "Second");
 
 const standingLanes = (): HTMLElement[] =>
   Array.from(document.querySelectorAll<HTMLElement>("[data-slot=slot-track] > div > section"));
@@ -78,8 +68,12 @@ const drawHome = (opens: string[]) => {
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 };
 
-const openPicker = async (): Promise<HTMLElement> => {
-  await userEvent.click(await screen.findByRole("button", { name: "New tab" }));
+/** The picker lane, which the address stands: closing the last lane a member holds leaves it, and a
+ *  workspace holding no chat app opens on it. Home is already standing when it is asked for here, so
+ *  the arrival is a move of the member's own rather than a boot carrying the lane in. */
+const openPicker = async (beside: string[] = []): Promise<HTMLElement> => {
+  location.hash = homeHash({ opens: [HOME_NEW_LANE, ...beside] });
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
   return await screen.findByRole("region", { name: "New tab" });
 };
 
@@ -119,7 +113,7 @@ test("a fresh home opens one chat lane and keeps the feature apps in the picker"
   await waitFor(() => expect(location.hash).toBe(homeHash({ opens: [CHAT_APP_ID] })));
   expect(laneNames()).toEqual(["Chat"]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([CHAT_APP_ID]);
   expect(within(picker).getByRole("button", { name: "Metrics" })).toBeTruthy();
   expect(within(picker).getByRole("button", { name: "Meetings" })).toBeTruthy();
   expect(within(picker).getByRole("button", { name: "Code" })).toBeTruthy();
@@ -193,19 +187,6 @@ test("double-clicking a lane band expands it and restores the row", async () => 
   expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
 });
 
-test("the rail's new tab leaves an expanded lane and opens the picker", async () => {
-  wire(chatsOnWire([CHAT_ROW]));
-  drawHome([SECOND_ID, AGENT_ID]);
-
-  await screen.findByRole("region", { name: "Assistant" });
-  await userEvent.click(screen.getByRole("button", { name: "Expand Assistant" }));
-  await openPicker();
-
-  expect(screen.queryByRole("button", { name: "Show all lanes" })).toBeNull();
-  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, SECOND_ID, AGENT_ID] }));
-  expect(laneNames()).toEqual(["New tab", "Second", "Assistant"]);
-});
-
 test("a rail app switches the expanded lane and keeps it expanded", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([SECOND_ID, AGENT_ID]);
@@ -264,41 +245,6 @@ test("the rail's home mark keeps the row the member arranged", async () => {
 
   expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
   expect(laneNames()).toEqual(["Second", "Assistant"]);
-});
-
-test("the rail's new tab opens the picker from another screen's rail too", async () => {
-  wire(chatsOnWire([CHAT_ROW]));
-  drawHome([AGENT_ID]);
-  await waitFor(() => expect(laneNames()).toEqual(["Assistant"]));
-  await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
-  await waitFor(() => expect(location.hash).not.toBe(homeHash({ opens: [AGENT_ID] })));
-
-  await openPicker();
-
-  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, AGENT_ID] }));
-  expect(laneNames()).toEqual(["New tab", "Assistant"]);
-});
-
-test("the rail's new tab enters the picker at the left while the row is under the cap", async () => {
-  wire(chatsOnWire([CHAT_ROW]));
-  drawHome([AGENT_ID, SECOND_ID]);
-
-  await openPicker();
-
-  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, AGENT_ID, SECOND_ID] }));
-  expect(laneNames()).toEqual(["New tab", "Assistant", "Second"]);
-});
-
-test("the rail's new tab at the cap drops the lane standing at the right end", async () => {
-  wire(chatsOnWire([CHAT_ROW]));
-  drawHome(FULL_ROW);
-
-  await waitFor(() => expect(laneNames()).toHaveLength(TRACK_MAX_SLOTS));
-  await openPicker();
-
-  const kept = FULL_ROW.slice(0, -1);
-  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, ...kept] }));
-  expect(laneNames()).toEqual(["New tab", ...kept.map(laneName)]);
 });
 
 /** The rail marks the lane the member is standing in, and the bracket walk is what moves it: the
@@ -466,17 +412,6 @@ test("the rail's tile from another screen lands home with that lane in view and 
   }
 });
 
-test("the rail's new tab stands the picker at most once", async () => {
-  wire(chatsOnWire([CHAT_ROW]));
-  drawHome([AGENT_ID]);
-
-  await openPicker();
-  await userEvent.click(screen.getByRole("button", { name: "New tab" }));
-
-  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, AGENT_ID] }));
-  expect(laneNames()).toEqual(["New tab", "Assistant"]);
-});
-
 /** The picker offers the apps and, under them, the conversations the member has had — one list,
  *  one order, wherever they are read. A row takes the lane over as that conversation's lane. The
  *  connectors screen closes the app list: the portal draws it rather than an app, and a member
@@ -485,7 +420,7 @@ test("the picker lane offers the workspace's apps and the member's history", asy
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([AGENT_ID]);
   expect(laneMark(picker)).toBeNull();
 
   const apps = within(picker).getByRole("heading", { name: "Apps", level: 3 });
@@ -519,7 +454,7 @@ test("the picker's history hides put-away surfaces and names no run under recenc
   holdChatHidden(["slack"]);
   drawHome([AGENT_ID]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([AGENT_ID]);
   const chats = within(picker)
     .getByRole("heading", { name: "History", level: 3 })
     .closest("section")!;
@@ -581,7 +516,7 @@ test("the picker's history offers the history menu", async () => {
   );
   drawHome([AGENT_ID]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([AGENT_ID]);
   const chats = within(picker)
     .getByRole("heading", { name: "History", level: 3 })
     .closest("section")!;
@@ -1039,7 +974,7 @@ test("picking an app not yet standing takes the picker lane's place in the addre
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([AGENT_ID]);
   await userEvent.click(within(picker).getByRole("button", { name: "Second" }));
 
   await waitFor(() => expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] })));
@@ -1050,7 +985,7 @@ test("picking an app already standing mints a second instance in the picker lane
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([AGENT_ID]);
   await userEvent.click(within(picker).getByRole("button", { name: "Assistant" }));
 
   await waitFor(() => expect(location.hash).toBe(homeHash({ opens: [AGENT_INSTANCE, AGENT_ID] })));
@@ -1170,7 +1105,7 @@ test("the picker lane's band carries the New tab glyph", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
 
-  const picker = await openPicker();
+  const picker = await openPicker([AGENT_ID]);
   expect(picker.querySelector("[data-slot=header] svg.tabler-icon-plus")).not.toBeNull();
 });
 

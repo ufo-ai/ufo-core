@@ -56,7 +56,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { stampIso } from "@/lib/rail";
+import { stampIso, type ChatRow } from "@/lib/rail";
 import { SurfaceMark } from "@/lib/surfaceMark";
 import {
   pickPinned,
@@ -91,7 +91,6 @@ import type { Seek } from "@/kernel/slots";
 import {
   COMPOSE,
   COMPOSING,
-  HOME_NEW_LANE,
   homeLaneAgent,
   homeLaneConversation,
   mintHomeLane,
@@ -102,7 +101,7 @@ import {
 } from "@/lib/route";
 import { clearChat } from "@/lib/chatStore";
 import { setPendingAsk } from "@/lib/pendingAsk";
-import { TRACK_MAX_SLOTS, heldTrack } from "@/lib/tracks";
+import { heldTrack } from "@/lib/tracks";
 import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
 import { useNarrow } from "@/lib/narrow";
@@ -125,17 +124,6 @@ export type AppProps = {
 function inSetup(route: Route, agents: Agent[]): boolean {
   if (route.kind !== "agent" && route.kind !== "agent-setup") return false;
   return agents.some((agent) => agent.id === route.agentId && agent.stands_on_setup === true);
-}
-
-/** The track a press on the rail's + leaves home standing. The picker is spelled one way, so it
- *  stands at most once and a press while it stands is a press on the tab that is already there.
- *  A new tab enters at the left end, beside the rail the press came from; under the cap the row
- *  slides right to make room, and at the cap the right-hand lane falls off — the row ages
- *  rightward, so the lane a member has read longest is the one that goes. */
-function newTab(opens: string[]): string[] {
-  if (opens.includes(HOME_NEW_LANE)) return opens;
-  if (opens.length < TRACK_MAX_SLOTS) return [HOME_NEW_LANE, ...opens];
-  return [HOME_NEW_LANE, ...opens.slice(0, -1)];
 }
 
 /** Apps the workspace gained after this page loaded. A workspace ships its apps on its first turn,
@@ -178,6 +166,9 @@ export function App({
    *  the apps listing, which is the whole of what hiding one means. `mainAgent` reads the whole set
    *  above, so withholding the assistant costs the composer and the first run nothing. */
   const listed = agents.filter((agent) => !agent.hidden);
+  /** The apps the member pinned, which is the order every list of apps takes — the sidebar's own
+   *  column and the palette's alike. */
+  const pinned = rail.pinned ?? defaultPins(listed);
 
   /** The lanes home stands, for the rail that lists them. The address answers while the member is
    *  standing on home and the row home was left holding answers everywhere else — the two the
@@ -187,11 +178,11 @@ export function App({
    *  was picked off — the rail is where that lane was found and where it is resolved. A lane
    *  resolving to no app this roster holds is not listed: the rail is a way to a lane, and a row it
    *  cannot name is a row nobody can read. */
-  const homePlace: WorkspacePlace = route.kind === "home" ? route.place : {};
-  const homeOpens = useMemo(
-    () => homePlace.opens ?? heldTrack("home"),
-    [homePlace.opens, route],
+  const homePlace = useMemo<WorkspacePlace>(
+    () => (route.kind === "home" ? route.place : {}),
+    [route],
   );
+  const homeOpens = useMemo(() => homePlace.opens ?? heldTrack("home"), [homePlace]);
   const homeLanes = useMemo(
     () =>
       homeOpens
@@ -219,6 +210,18 @@ export function App({
    *  — the walk and the cursor both move it, and neither passes through the address — so it is held
    *  here rather than derived, and the track clears it as home unmounts. */
   const [activeLane, setActiveLane] = useState<string | undefined>(undefined);
+  /** Home standing `opens`, with `lane` brought into view as it lands: the one act every way of
+   *  opening a lane runs — the rail's tiles and every row of the launcher alike — so a lane arrives
+   *  the same whichever of them the member pressed. A lane the row is gaining ends an expansion,
+   *  since a row expanded onto one lane hides the lane that just entered; a lane already standing
+   *  keeps it and the member is carried across to that lane instead. */
+  const enterLane = useCallback(
+    (lane: string, opens: string[]) => {
+      setSeeking({ id: lane, expansion: homeOpens.includes(lane) ? "switch" : "restore" });
+      placeHome({ ...homePlace, opens });
+    },
+    [homeOpens, homePlace],
+  );
 
   /** The router owns the address: it states the boot address in the bar, lands the arrival on the
    *  track the screen was left holding, and follows the browser from there. It starts here rather
@@ -337,7 +340,15 @@ export function App({
                 )}
               >
                 {shell && narrow ? (
-                  <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
+                  <NarrowBar
+                    agents={listed}
+                    chats={rail.rows}
+                    pinned={pinned}
+                    member={member}
+                    menu={menu}
+                    onMenu={setMenu}
+                    onEnterLane={enterLane}
+                  />
                 ) : null}
                 {shell && narrow ? (
                   <WorkspaceSidebar
@@ -358,16 +369,14 @@ export function App({
                     lanes={homeLanes}
                     active={activeLane}
                     agents={listed}
+                    chats={rail.rows}
+                    pinned={pinned}
                     account={<AccountMenu member={member} />}
-                    onNewTab={() => {
-                      setSeeking({ id: HOME_NEW_LANE, expansion: "restore" });
-                      placeHome({ ...homePlace, opens: newTab(homeOpens) });
-                    }}
                     onLane={(lane) => {
                       if (!homeOpens.includes(lane)) return;
-                      setSeeking({ id: lane, expansion: "switch" });
-                      placeHome({ ...homePlace, opens: homeOpens });
+                      enterLane(lane, homeOpens);
                     }}
+                    onEnterLane={enterLane}
                     onBuild={startBuild}
                   />
                 ) : null}
@@ -421,14 +430,20 @@ function founded(agent: Agent, conversationId: string, title: string): void {
  *  — the sidebar is the shell. */
 function NarrowBar({
   agents,
+  chats,
+  pinned,
   member,
   menu,
   onMenu,
+  onEnterLane,
 }: {
   agents: Agent[];
+  chats: ChatRow[];
+  pinned: string[];
   member: Member;
   menu: boolean;
   onMenu: (open: boolean) => void;
+  onEnterLane: (lane: string, opens: string[]) => void;
 }) {
   return (
     <header className="relative flex items-center gap-md border-b border-edge bg-sidebar px-lg py-md">
@@ -456,6 +471,9 @@ function NarrowBar({
       </button>
       <Spotlight
         agents={agents}
+        chats={chats}
+        pinned={pinned}
+        onEnterLane={onEnterLane}
         className="ml-auto flex h-(--size-row) items-center rounded-full border-0 bg-transparent px-md text-inherit hover:bg-fill"
       />
       <AccountMenu member={member} />

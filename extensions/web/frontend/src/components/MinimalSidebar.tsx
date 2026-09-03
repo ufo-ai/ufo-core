@@ -22,12 +22,13 @@ import { agentName } from "@/lib/agentName";
 import { openHome, placeWorkspace } from "@/lib/router";
 import { setMuted, useMuted } from "@/lib/sound";
 import { useOfferedTabs } from "@/lib/surfaces";
+import type { ChatRow } from "@/lib/rail";
 import { Spotlight } from "@/views/Spotlight";
 import type { Agent } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
 
 const HOME = "Home";
-const NEW_TAB = "New tab";
+const LAUNCHER = "Launcher";
 const NEW_APP = "New app";
 const WORKSPACE = "Workspace";
 const MUTE = "Mute sounds";
@@ -92,8 +93,10 @@ export function MinimalSidebar({
   lanes,
   active,
   agents,
+  chats,
+  pinned,
   account,
-  onNewTab,
+  onEnterLane,
   onLane,
   onBuild,
 }: {
@@ -102,10 +105,17 @@ export function MinimalSidebar({
    *  not list — the picker's — leaves the mark off, since there is no tile for it to stand under. */
   active: string | undefined;
   agents: Agent[];
+  /** The member's conversations and their pinned apps, which the palette lists. The rail draws
+   *  neither: it carries the search, so it carries what the search opens on. */
+  chats: ChatRow[];
+  pinned: string[];
+  /** Stand home on `opens` with `lane` brought into view as it lands — what the launcher's rows
+   *  run. The seek and the address both belong to the shell, so the rail hands the panel the same
+   *  act its own tiles are pressed with. */
+  onEnterLane: (lane: string, opens: string[]) => void;
   /** The member's own menu — identity, theme, administration, sign out — drawn at the rail's foot,
    *  because at a desk width this rail is the whole shell and the way out has to stand on it. */
   account: ReactNode;
-  onNewTab: () => void;
   onLane: (lane: string) => void;
   onBuild: () => void;
 }) {
@@ -149,20 +159,19 @@ export function MinimalSidebar({
         </button>
       </RailTip>
       {/* The one act the rail leads with, over the tabs it adds to, in the filled box the picker
-          lane it opens wears — the press and the lane it stands read as one thing. */}
-      <RailTip label={NEW_TAB}>
-        <button
-          type="button"
-          aria-label={NEW_TAB}
-          onClick={onNewTab}
+          lane it opens wears: the launcher, which holds every app and thread the tabs could open
+          and the chord that opens it from anywhere. */}
+      <RailTip label={LAUNCHER}>
+        <Spotlight
+          agents={agents}
+          chats={chats}
+          pinned={pinned}
+          onEnterLane={onEnterLane}
+          glyph={IconPlus}
+          title={LAUNCHER}
           className={cn(TILE, "size-(--size-lede) bg-fill")}
-        >
-          <IconPlus className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
-        </button>
+        />
       </RailTip>
-      {/* Search keeps its one component and its chord: the desk shell has no wide column to carry
-          it, so the rail does. */}
-      <Spotlight agents={agents} className={TILE} />
       {/* The tiles scroll, and a scrolling box clips both axes — so the track carries a gutter the
           width of the dot's overhang, and the mark's own column stays where it stood. Without it the
           rail is 16px wide inside its padding and the dot loses its outer half at every width. */}

@@ -784,6 +784,18 @@ export function SlotTrack({
     const was = paced.current;
     const resized = was !== step;
     paced.current = step;
+    /* Whether the row's lanes changed, told apart from the pane around them changing width. Both
+       move the step — a row divides its width by however many lanes stand on it, so opening one
+       narrows every lane the same way a narrower pane does — and a track that read the step alone
+       would answer the press that opened a lane by jumping the row, which is the one movement a
+       member takes as nothing having happened. The lanes the row held are the spots it holds, so
+       the row is compared against those rather than against a second record of the same ids. */
+    const churned = ids.length !== spots.current.size || ids.some((id) => !spots.current.has(id));
+    /* A lane arrives on a row that already stood, or alone on an empty one — the rule the arrivals
+       set draws for focus, held to here for the same reason: a screen mounting several lanes at
+       once is restating a row the member already arranged, and sliding each of them in would
+       animate a row nobody opened. */
+    const arriving = churned && !fixed && step > 0 && (spots.current.size > 0 || ids.length === 1);
     if (!rolls) {
       aimed.current = 0;
       if (offset.get() !== 0) offset.jump(0);
@@ -803,13 +815,17 @@ export function SlotTrack({
       const to = at * step;
       const spot = spots.current.get(id);
       if (spot === undefined) {
-        const made = motionValue(to);
+        /* A lane enters from off the row's leading edge, one lane's width to the left of where it
+           will stand, and glides to it. What the member pressed put a lane on the row, and a lane
+           drawn straight into its place says only that the screen is different now. */
+        const made = motionValue(arriving ? to - step : to);
         made.on("change", paint);
         spots.current.set(id, made);
         seated.current.set(id, to);
+        if (arriving) settle(animate(made, to, GLIDE));
         continue;
       }
-      if (resized) {
+      if (resized && !churned) {
         spot.jump(to);
         seated.current.set(id, to);
         continue;
