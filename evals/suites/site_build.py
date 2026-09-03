@@ -5,8 +5,7 @@ artifact collection's action and then delivered. The media pair is authored here
 seeded it."""
 
 import shlex
-import struct
-import zlib
+from pathlib import Path
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -26,46 +25,7 @@ from evals.harness.scorers import (
 
 GENERATE_IMAGE = "action:artifact:generate_image"
 GENERATE_VIDEO = "action:artifact:generate_video"
-POSTER_WIDTH = 900
-POSTER_HEIGHT = 1200
-POSTER_GROUND = b"\x12\x20\x36"
-POSTER_TITLE = b"\xe8\xc4\x5c"
-POSTER_PANEL = b"\xf2\xf0\xe8"
-POSTER_TITLE_ROWS = range(120, 300)
-POSTER_PANEL_ROWS = range(420, 1020)
-
-
-def _poster_row(row: int) -> bytes:
-    """One filter-byte-prefixed scanline of the staged poster: a titled band over a panel on a
-    dark ground, so the file the restraint case delivers is a picture and not a placeholder an
-    agent is right to refuse to send."""
-    runs: tuple[tuple[int, bytes], ...]
-    if row in POSTER_TITLE_ROWS:
-        runs = ((80, POSTER_GROUND), (740, POSTER_TITLE), (80, POSTER_GROUND))
-    elif row in POSTER_PANEL_ROWS:
-        runs = ((120, POSTER_GROUND), (660, POSTER_PANEL), (120, POSTER_GROUND))
-    else:
-        runs = ((POSTER_WIDTH, POSTER_GROUND),)
-    return b"\x00" + b"".join(colour * count for count, colour in runs)
-
-
-def _png_chunk(kind: bytes, body: bytes) -> bytes:
-    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
-
-
-def _poster_png() -> bytes:
-    scanlines = b"".join(_poster_row(row) for row in range(POSTER_HEIGHT))
-    return b"".join(
-        (
-            b"\x89PNG\r\n\x1a\n",
-            _png_chunk(b"IHDR", struct.pack(">2I5B", POSTER_WIDTH, POSTER_HEIGHT, 8, 2, 0, 0, 0)),
-            _png_chunk(b"IDAT", zlib.compress(scanlines, 9)),
-            _png_chunk(b"IEND", b""),
-        )
-    )
-
-
-POSTER_PNG = _poster_png()
+POSTER_PNG = (Path(__file__).parent / "site_build_poster.png").read_bytes()
 
 
 INDEX_FILE = "index.html"
