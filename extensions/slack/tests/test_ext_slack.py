@@ -1485,11 +1485,14 @@ def _ambient_transport(
     replies: object = (),
     history: object = (),
     reply_pages: list[list[dict[str, object]]] | None = None,
+    later: object = (),
 ) -> httpx.MockTransport:
     """A transport whose `conversations.replies` / `conversations.history` answer with the given
     messages — or with `ok: false` when the fixture is None, the fetch-failure case. `reply_pages`
     answers `conversations.replies` one page at a time, handing back a cursor until the last, which
-    is how Slack serves a thread longer than one page: earliest first."""
+    is how Slack serves a thread longer than one page: earliest first. `later` answers the history
+    read bounded from below — the channel's messages from beside a thread — and `history` the one
+    bounded from above only."""
 
     def _messages(fixture: object) -> httpx.Response:
         if fixture is None:
@@ -1512,6 +1515,8 @@ def _ambient_transport(
                 return _page(str(request.url.params.get("cursor") or ""))
             return _messages(replies)
         if url == slack.SLACK_CONVERSATIONS_HISTORY_URL:
+            if request.url.params.get("oldest") is not None:
+                return _messages(later)
             return _messages(history)
         if url == slack.SLACK_USERS_INFO_URL:
             email = DEFAULT_TEAM.get(str(request.url.params.get("user")))
@@ -1635,6 +1640,153 @@ async def test_replies_fetch_failure_still_admits(db: None, tmp_path, monkeypatc
         == 1
     )
     assert member_message_text(await _turn_inbound(workspace_id)) == "<@UBOT00000> ping"
+
+
+def _later_fetches(recorder: list[httpx.Request]) -> list[httpx.Request]:
+    return [
+        request
+        for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_HISTORY_URL)
+        if request.url.params.get("oldest") is not None
+    ]
+
+
+AFTER_ROOT = "1700000000.000100"
+AFTER_DROPPED_TS = "1700000180.000400"
+AFTER_DROPPED_TEXT = "nobody has checked the retention page"
+AFTER_FOLLOWUP_TS = "1700000300.000600"
+AFTER_ASKED = "<@UBOT00000> is retention still 30 days?"
+
+
+async def _admit_a_second_mention(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_id: UUID,
+    tmp_path,
+    recorder: list[httpx.Request],
+    later: object,
+) -> str:
+    """Drive a channel thread to its second admission and hand back what that admission stored: the
+    mention that founds the conversation, an un-addressed reply the decision drops, then a second
+    mention. `later` is what the channel says beside the thread while all that runs."""
+    replies = [
+        {"user": "U1", "ts": AFTER_ROOT, "text": "<@UBOT00000> take a look"},
+        {"user": "U2", "ts": AFTER_DROPPED_TS, "text": AFTER_DROPPED_TEXT},
+    ]
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _ambient_transport(recorder, replies=replies, later=later),
+        ambient_reply=AmbientReplyClassifier(model=FixedDecisionModel(decision="NO_REPLY")),
+    )
+    followup = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts=AFTER_FOLLOWUP_TS,
+        thread_ts=AFTER_ROOT,
+        text=AFTER_ASKED,
+    )
+    async with client:
+        await _admit_founding_mention(client, AFTER_ROOT)
+        await _end_the_live_turn()
+        await _ambient_reply(client, AFTER_DROPPED_TS, AFTER_ROOT, AFTER_DROPPED_TEXT)
+        posted = await client.post(
+            EVENTS_PATH, content=followup, headers=_sign(followup, int(time.time()))
+        )
+    assert posted.json() == {"ok": True}
+    return await _admitted_body(workspace_id, f"C1:{AFTER_FOLLOWUP_TS}")
+
+
+async def test_the_channels_later_messages_ride_the_digest_behind_the_thread_ones(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A member who does not thread answers the agent by posting again in the channel, and that
+    message reaches the thread never. So every message this conversation admits after its first
+    carries what the channel said beside the thread: its own element, behind the thread's own
+    dropped replies, under a note that says it came from the channel.
+
+    Bounded at the AMBIENT_CHANNEL_AFTER_LIMIT messages closest below the admitted one, so the
+    oldest stays out however much the channel carried, and the agent's own post inside the window is
+    dropped like it is everywhere else — the transcript already holds what it said."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    later = [
+        {"user": "U2", "ts": "1700000060.000200", "text": "the deploy looked slow"},
+        {"user": "U2", "ts": "1700000120.000300", "text": "it is 30 for logs, 90 for audit"},
+        {"user": BOT_USER_ID, "ts": "1700000150.000350", "text": "my own reply"},
+        {"user": "U3", "ts": "1700000240.000500", "text": "and the alert cleared"},
+    ]
+    admitted = await _admit_a_second_mention(monkeypatch, workspace_id, tmp_path, recorder, later)
+    mark = _marker(admitted)
+    assert admitted == (
+        _background(
+            mark,
+            slack.AMBIENT_UNSEEN_NOTE,
+            f"[2023-11-14 22:16] <@U2>: {AFTER_DROPPED_TEXT}",
+        )
+        + _background(
+            mark,
+            slack.AMBIENT_CHANNEL_AFTER_NOTE,
+            "[2023-11-14 22:15] <@U2>: it is 30 for logs, 90 for audit",
+            "[2023-11-14 22:17] <@U3>: and the alert cleared",
+        )
+        + _fenced(mark, AFTER_ASKED)
+    )
+    [read] = _later_fetches(recorder)
+    assert read.url.params.get("oldest") == AFTER_ROOT
+    assert read.url.params.get("latest") == AFTER_FOLLOWUP_TS
+    assert read.url.params.get("inclusive") == "false"
+    assert read.url.params.get("limit") == str(slack.AMBIENT_CHANNEL_AFTER_LIMIT)
+
+
+async def test_the_founding_mention_reads_no_window_it_could_only_find_empty(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The message that founds the conversation is admitted inside its own ingest, milliseconds
+    after the member posted it, so the channel holds nothing above it yet. That admission reads the
+    traffic from before it and nothing else — an element that could only come back empty costs no
+    call against Slack's three-second event ack."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    trigger = "1700000000.000100"
+    history = [{"user": "U2", "ts": "1699999940.000090", "text": "the deploy looked slow"}]
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _ambient_transport(recorder, history=history),
+    )
+    async with client:
+        await _admit_founding_mention(client, trigger, AFTER_ASKED)
+    inbound = await _turn_inbound(workspace_id)
+    mark = _marker(inbound)
+    assert inbound == (
+        _background(
+            mark, slack.AMBIENT_CHANNEL_NOTE, "[2023-11-14 22:12] <@U2>: the deploy looked slow"
+        )
+        + _fenced(mark, AFTER_ASKED)
+    )
+    assert not _later_fetches(recorder)
+
+
+async def test_a_failed_later_fetch_still_admits_with_the_thread_digest(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The later read is best effort like every other read behind an admission: a fetch Slack
+    refuses costs the message nothing but that element."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    admitted = await _admit_a_second_mention(monkeypatch, workspace_id, tmp_path, recorder, None)
+    mark = _marker(admitted)
+    assert admitted == (
+        _background(
+            mark,
+            slack.AMBIENT_UNSEEN_NOTE,
+            f"[2023-11-14 22:16] <@U2>: {AFTER_DROPPED_TEXT}",
+        )
+        + _fenced(mark, AFTER_ASKED)
+    )
+    assert len(_later_fetches(recorder)) == 1
 
 
 async def _admit_founding_mention(
