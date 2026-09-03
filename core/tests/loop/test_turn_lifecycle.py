@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -44,6 +45,7 @@ from ufo.harness.models.catalog import (
 )
 from ufo.harness.models.grant import Grant
 from ufo.harness.models.interface import (
+    Message,
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
@@ -59,7 +61,11 @@ from ufo.harness.sandbox.conversation import (
     ConversationSandbox,
 )
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import (
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxProviderUnavailable,
+)
 from ufo.host import assemble as host_assemble
 from ufo.host.assemble import HostEnvironment
 from ufo.host.environment import store_environment_document, store_environment_file
@@ -71,6 +77,7 @@ from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.engine import (
     EMPTY_RESPONSE_NUDGE,
     FINISH_TOOL,
+    SANDBOX_PROVIDER_RETRY_SECONDS,
     TRUNCATION_FEEDBACK,
 )
 from ufo.runtime.ext.context import context_for
@@ -86,7 +93,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ACTIVITY_PROMPT
 from ufo.runtime.turns.audience import conversation_audience
-from ufo.runtime.turns.transcript import Conversation
+from ufo.runtime.turns.transcript import Conversation, ParkedTurn
 from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
@@ -2464,6 +2471,184 @@ async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Tur
     assert await asyncio.to_thread(skill_md.read_bytes) == skill.raw_skill_md.encode()
     assert not (runtime.sandboxes.workspace_root / str(child_conversation)).exists()
     assert any(skill.instructions in system for system in SEEN_SYSTEM_PROMPTS)
+
+
+async def _seed_preload_child(seed: Seed, delivers_result: bool) -> tuple[UUID, UUID]:
+    """A queued subagent child of a running parent, preloading the sandbox skill. `delivers_result`
+    is the background spawn: the child hands back its own result, so no parent waits on it."""
+    parent_id, child_conversation, child_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=parent_id,
+                workspace_id=seed.workspace_id,
+                conversation_id=seed.conversation_id,
+                agent_id=seed.agent_id,
+                seq=1,
+                status="running",
+                inbound="parent",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=child_conversation,
+                workspace_id=seed.workspace_id,
+                agent_id=seed.agent_id,
+                surface="subagent",
+                queue_key=str(child_id),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=child_id,
+                workspace_id=seed.workspace_id,
+                conversation_id=child_conversation,
+                agent_id=seed.agent_id,
+                seq=1,
+                status="queued",
+                inbound='{"value": 1, "preload_skills": ["sandbox"]}',
+                parent_turn_id=parent_id,
+                subagent_profile=PRELOAD_PROFILE.name,
+                result_delivery="pending" if delivers_result else None,
+                spawn_delivers_result=delivers_result,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return child_conversation, child_id
+
+
+async def test_a_sandbox_provider_outage_parks_during_skill_setup(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    child_conversation, child_id = await _seed_preload_child(seed, delivers_result=True)
+    absorbed_id, unabsorbed_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.inbound_message),
+            (
+                {
+                    "id": absorbed_id,
+                    "workspace_id": seed.workspace_id,
+                    "conversation_id": child_conversation,
+                    "seq": 1,
+                    "body": "absorbed",
+                    "admission_source": "member",
+                    "admitted_turn_id": child_id,
+                    "consumed_turn_id": child_id,
+                    "created_at": datetime.now(UTC),
+                },
+                {
+                    "id": unabsorbed_id,
+                    "workspace_id": seed.workspace_id,
+                    "conversation_id": child_conversation,
+                    "seq": 2,
+                    "body": "unabsorbed",
+                    "admission_source": "member",
+                    "admitted_turn_id": child_id,
+                    "consumed_turn_id": child_id,
+                    "created_at": datetime.now(UTC),
+                },
+            ),
+        )
+
+    with ws(seed.workspace_id):
+        assert await Transcript(blob=runtime.blob, conversation_id=child_conversation).write(
+            Conversation(
+                seq=1,
+                messages=(Message(role="user", content="absorbed"),),
+                from_run=True,
+                parked=ParkedTurn(absorbed=(absorbed_id,), requesters=()),
+            )
+        )
+
+    async def unavailable(*args: object) -> None:
+        raise SandboxProviderUnavailable("e2b")
+
+    monkeypatch.setattr(loop_queue, "load_skills", unavailable)
+    before = datetime.now(UTC)
+    with ws(seed.workspace_id):
+        assert await loop_queue._run_turn(runtime, str(child_id)) == "parked"
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.retry_at,
+                    tables.turn.c.external_retry_count,
+                    tables.turn.c.terminal,
+                ).where(tables.turn.c.id == child_id)
+            )
+        ).one()
+        arrivals = (
+            await connection.execute(
+                sa.select(
+                    tables.inbound_message.c.id,
+                    tables.inbound_message.c.consumed_turn_id,
+                )
+                .where(tables.inbound_message.c.id.in_((absorbed_id, unabsorbed_id)))
+                .order_by(tables.inbound_message.c.seq)
+            )
+        ).all()
+    assert row.status == "parked"
+    assert row.retry_at is not None
+    assert row.retry_at.replace(tzinfo=UTC) >= before + timedelta(
+        seconds=SANDBOX_PROVIDER_RETRY_SECONDS - 1
+    )
+    assert row.external_retry_count == 1
+    assert row.terminal is None
+    assert [(arrival.id, arrival.consumed_turn_id) for arrival in arrivals] == [
+        (absorbed_id, child_id),
+        (unabsorbed_id, None),
+    ]
+
+
+async def test_a_sandbox_provider_outage_fails_a_child_its_parent_awaits(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parent waiting inline cancels the child that parks, so the retry schedule would never run:
+    the setup fault stays the child's failure, naming the provider the parent can report."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    _, child_id = await _seed_preload_child(seed, delivers_result=False)
+
+    async def unavailable(*args: object) -> None:
+        raise SandboxProviderUnavailable("e2b")
+
+    monkeypatch.setattr(loop_queue, "load_skills", unavailable)
+    with ws(seed.workspace_id):
+        assert await loop_queue._run_turn(runtime, str(child_id)) == "failed"
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.retry_at,
+                    tables.turn.c.external_retry_count,
+                    tables.turn.c.terminal,
+                ).where(tables.turn.c.id == child_id)
+            )
+        ).one()
+    assert row.status == "failed"
+    assert row.retry_at is None
+    assert row.external_retry_count == 0
+    terminal = TerminalFrame.model_validate(row.terminal)
+    assert terminal.error_class == "SandboxProviderUnavailable"
+    assert terminal.error_message == "e2b"
 
 
 async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(

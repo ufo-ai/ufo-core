@@ -257,6 +257,7 @@ turn = sa.Table(
     sa.Column("running_attempt", sa.Text, nullable=True),
     sa.Column("dispatch_enqueued_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("retry_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("external_retry_count", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),
@@ -281,6 +282,7 @@ turn = sa.Table(
         name="turn_connect_authorization",
     ),
     sa.CheckConstraint("result_delivery in ('pending', 'delivered')", name="turn_result_delivery"),
+    sa.CheckConstraint("external_retry_count >= 0", name="turn_external_retry_count"),
     sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
     sa.Index("turn_conversation_activity", "conversation_id", "updated_at"),
     sa.Index(

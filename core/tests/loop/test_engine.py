@@ -67,6 +67,7 @@ from ufo.harness.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
     SandboxHandle,
+    SandboxProviderUnavailable,
     SandboxSession,
     SandboxSpec,
 )
@@ -127,6 +128,8 @@ from ufo.runtime.engine import (
     OFFLOAD_NOTICE,
     PREEMPTED,
     REQUESTED_BY_HINT,
+    SANDBOX_PROVIDER_RETRY_LIMIT,
+    SANDBOX_PROVIDER_RETRY_SECONDS,
     TOOL_IMAGE_EDGE_LIMIT,
     TOOL_RESULT_PREVIEW_CHARS,
     TRUNCATION_FEEDBACK,
@@ -169,6 +172,7 @@ from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from ufo.runtime.queue import (
     _agent_actions,
     _agent_tools,
+    _load_turn,
     _previous_turn_ended_at,
     _with_action_verbs,
 )
@@ -211,6 +215,7 @@ from ufo.runtime.workspace import (
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
+    DELIVERY_PENDING,
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
@@ -507,6 +512,20 @@ class FindCallingModel:
             return
         yield ToolCallStart(id="c1", name="rank")
         yield ToolCallDelta(id="c1", partial_json="{}")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass(frozen=True)
+class SideEffectThenSandboxModel:
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if _tool_results(request):
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="first", name="first")
+        yield ToolCallDelta(id="first", partial_json="{}")
+        yield ToolCallStart(id="sandbox", name="sandbox")
+        yield ToolCallDelta(id="sandbox", partial_json="{}")
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -2060,6 +2079,196 @@ async def test_a_turn_fails_and_releases_arrivals_when_its_parked_window_does_no
         ).one()
     assert row.status == "failed"
     assert row.consumed_turn_id is None
+
+
+@pytest.mark.parametrize("prior_retry_count", (0, SANDBOX_PROVIDER_RETRY_LIMIT - 1))
+async def test_a_sandbox_provider_outage_parks_the_turn_after_the_tool_call(
+    db: None, tmp_path: Path, prior_retry_count: int
+) -> None:
+    turn = await _seed_turn("queued", None)
+    if prior_retry_count:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(external_retry_count=prior_retry_count)
+                .where(tables.turn.c.id == turn.id)
+            )
+        turn = turn.model_copy(update={"external_retry_count": prior_retry_count})
+
+    async def unavailable(context: ToolContext, args: BaseModel) -> ToolResult:
+        raise SandboxProviderUnavailable("e2b")
+
+    engine = replace(
+        _engine(turn, FindCallingModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=unavailable),)
+        ),
+    )
+    before = datetime.now(UTC)
+
+    with pytest.raises(TurnParked) as raised:
+        await engine.run()
+
+    after = datetime.now(UTC)
+    assert raised.value.retry_at is not None
+    assert before + timedelta(seconds=SANDBOX_PROVIDER_RETRY_SECONDS) <= raised.value.retry_at
+    assert raised.value.retry_at <= after + timedelta(seconds=SANDBOX_PROVIDER_RETRY_SECONDS)
+    retry_count = prior_retry_count + 1
+    assert raised.value.external_retry_count == retry_count
+    assert raised.value.message.startswith("The sandbox provider is unavailable.")
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.retry_at,
+                    tables.turn.c.external_retry_count,
+                ).where(tables.turn.c.id == turn.id)
+            )
+        ).one()
+    assert row.status == PARKED
+    assert row.retry_at is not None
+    assert row.retry_at.replace(tzinfo=UTC) == raised.value.retry_at
+    assert row.external_retry_count == retry_count
+    loaded, _, _ = await _load_turn(turn.id)
+    assert loaded.external_retry_count == retry_count
+
+
+async def test_a_sandbox_provider_park_keeps_prior_tool_results(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    effects: list[str] = []
+
+    async def first(context: ToolContext, args: BaseModel) -> ToolResult:
+        effects.append("first")
+        return ToolResult(content=(TextContent(text="complete"),))
+
+    async def unavailable(context: ToolContext, args: BaseModel) -> ToolResult:
+        raise SandboxProviderUnavailable("e2b")
+
+    tools = ToolRegistry(
+        (
+            ToolDef(name="first", description="d", input_model=_NoArgs, handler=first),
+            ToolDef(name="sandbox", description="d", input_model=_NoArgs, handler=unavailable),
+        )
+    )
+    engine = replace(_engine(turn, SideEffectThenSandboxModel(), tmp_path), tools=tools)
+
+    with pytest.raises(TurnParked):
+        await engine.run()
+
+    stored = await engine.transcript.read()
+    assert stored is not None
+    results = [
+        block
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    ]
+    assert [result.tool_use_id for result in results[-2:]] == ["first", "sandbox"]
+    assert results[-1].is_error
+
+    resumed = turn.model_copy(update={"status": "queued", "external_retry_count": 1})
+    frame = await replace(
+        _engine(resumed, SideEffectThenSandboxModel(), tmp_path), tools=tools
+    ).run()
+
+    assert frame is not None and frame.status == "done"
+    assert effects == ["first"]
+
+
+async def test_a_sandbox_provider_outage_fails_after_fifteen_parked_retries(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(external_retry_count=SANDBOX_PROVIDER_RETRY_LIMIT)
+            .where(tables.turn.c.id == turn.id)
+        )
+    turn = turn.model_copy(update={"external_retry_count": SANDBOX_PROVIDER_RETRY_LIMIT})
+
+    async def unavailable(context: ToolContext, args: BaseModel) -> ToolResult:
+        raise SandboxProviderUnavailable("e2b")
+
+    engine = replace(
+        _engine(turn, FindCallingModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=unavailable),)
+        ),
+    )
+
+    with pytest.raises(SandboxProviderUnavailable, match="e2b"):
+        await engine.run()
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.terminal,
+                    tables.turn.c.external_retry_count,
+                ).where(tables.turn.c.id == turn.id)
+            )
+        ).one()
+    assert row.status == "failed"
+    assert TerminalFrame.model_validate(row.terminal).error_class == "SandboxProviderUnavailable"
+    assert row.external_retry_count == SANDBOX_PROVIDER_RETRY_LIMIT
+
+
+@pytest.mark.parametrize("delivers_result", (False, True))
+async def test_a_sandbox_provider_outage_parks_a_child_only_when_nobody_awaits_it(
+    db: None, tmp_path: Path, delivers_result: bool
+) -> None:
+    """A parent waiting inline cancels the child that parks, so the retry schedule would never run
+    and the parent would name a cause that did not happen. The awaited child fails on the provider
+    fault instead; the background child, which hands back its own result, parks and retries."""
+    turn = await _seed_turn("queued", None)
+    parent_id = uuid4()
+    delivery = DELIVERY_PENDING if delivers_result else None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(parent_turn_id=parent_id, result_delivery=delivery)
+            .where(tables.turn.c.id == turn.id)
+        )
+    turn = turn.model_copy(update={"parent_turn_id": parent_id, "result_delivery": delivery})
+
+    async def unavailable(context: ToolContext, args: BaseModel) -> ToolResult:
+        raise SandboxProviderUnavailable("e2b")
+
+    engine = replace(
+        _engine(turn, FindCallingModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=unavailable),)
+        ),
+    )
+
+    with pytest.raises(TurnParked if delivers_result else SandboxProviderUnavailable):
+        await engine.run()
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.retry_at,
+                    tables.turn.c.terminal,
+                    tables.turn.c.external_retry_count,
+                ).where(tables.turn.c.id == turn.id)
+            )
+        ).one()
+    if delivers_result:
+        assert (row.status, row.terminal) == (PARKED, None)
+        assert row.retry_at is not None
+        assert row.external_retry_count == 1
+        return
+    assert row.status == "failed"
+    assert row.retry_at is None
+    assert row.external_retry_count == 0
+    terminal = TerminalFrame.model_validate(row.terminal)
+    assert (terminal.error_class, terminal.error_message) == ("SandboxProviderUnavailable", "e2b")
 
 
 async def test_absorbed_arrivals_from_any_speaker_fold_into_the_one_turn(

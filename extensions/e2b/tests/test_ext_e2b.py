@@ -32,6 +32,7 @@ import pytest
 import ufo_ext_e2b as e2b_ext
 from e2b.exceptions import (
     FileNotFoundException,
+    SandboxException,
     SandboxNotFoundException,
     TimeoutException,
 )
@@ -52,9 +53,9 @@ from ufo_ext_e2b import (
     INSTALL_CA_COMMAND,
     LEASE_MARGIN_SECONDS,
     PREPARE_ATTEMPTS,
+    RESUME_RETRIES,
     RESUME_RETRY_DELAY_SECONDS,
     RESUME_TOTAL_TIMEOUT_SECONDS,
-    RESUME_TRANSPORT_RETRIES,
     SANDBOX_LEASE_SECONDS,
     SILENT_PROBE_CMD,
     WORKLOAD_CAP_TIMEOUT_SECONDS,
@@ -78,6 +79,7 @@ from ufo.harness.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
     SandboxHandle,
+    SandboxProviderUnavailable,
     SandboxSession,
     SandboxSpec,
     SandboxUnreachable,
@@ -686,12 +688,45 @@ async def test_a_resume_the_control_plane_never_answers_is_retried(
     assert [entry["attempt"] for entry in _events(caplog, "sandbox.e2b.resume_retried")] == [1]
 
 
-async def test_a_resume_the_control_plane_keeps_dropping_raises_bounded(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A member waits on this, so the retry is bounded: past the budget the fault is the answer,
-    and it never becomes a fresh box — the paused container the id names holds the workspace."""
-    faults = [httpx.ReadTimeout("timed out")] * (RESUME_TRANSPORT_RETRIES + 1)
+@pytest.mark.parametrize(
+    "fault",
+    (
+        SandboxException("429: Rate limit exceeded"),
+        SandboxException("500: Error when setting sandbox timeout"),
+    ),
+)
+async def test_a_retryable_control_plane_answer_is_retried(fault: SandboxException) -> None:
+    sdk = _Sdk(connect_faults=[fault])
+    carrier = _carrier(
+        api_key="k", templates=_templates("t"), sdk=sdk, resume_retry_delay_seconds=0.0
+    )
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    sdk.connected.clear()
+
+    resumed = await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert resumed.container_id == opened.container_id
+    assert sdk.connected == [opened.container_id, opened.container_id]
+
+
+async def test_a_final_control_plane_answer_is_not_retried() -> None:
+    sdk = _Sdk(connect_faults=[SandboxException("400: invalid timeout")])
+    carrier = _carrier(
+        api_key="k", templates=_templates("t"), sdk=sdk, resume_retry_delay_seconds=0.0
+    )
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    sdk.connected.clear()
+
+    with pytest.raises(SandboxException, match="400: invalid timeout"):
+        await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert sdk.connected == [opened.container_id]
+
+
+async def test_retryable_control_plane_answers_exhaust_to_provider_unavailable() -> None:
+    faults = [SandboxException("500: Error when setting sandbox timeout")] * (RESUME_RETRIES + 1)
     sdk = _Sdk(connect_faults=list(faults))
     carrier = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_retry_delay_seconds=0.0
@@ -700,16 +735,37 @@ async def test_a_resume_the_control_plane_keeps_dropping_raises_bounded(
     opened = await carrier.create(_spec(conversation))
     sdk.connected.clear()
 
-    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(httpx.ReadTimeout):
+    with pytest.raises(SandboxProviderUnavailable) as raised:
+        await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
+
+    assert isinstance(raised.value.__cause__, SandboxException)
+    assert sdk.connected == [opened.container_id] * len(faults)
+
+
+async def test_a_resume_the_control_plane_keeps_dropping_raises_bounded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A member waits on this, so the retry is bounded: past the budget the fault is the answer,
+    and it never becomes a fresh box — the paused container the id names holds the workspace."""
+    faults = [httpx.ReadTimeout("timed out")] * (RESUME_RETRIES + 1)
+    sdk = _Sdk(connect_faults=list(faults))
+    carrier = _carrier(
+        api_key="k", templates=_templates("t"), sdk=sdk, resume_retry_delay_seconds=0.0
+    )
+    conversation = uuid4()
+    opened = await carrier.create(_spec(conversation))
+    sdk.connected.clear()
+
+    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(SandboxProviderUnavailable):
         await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
 
     assert sdk.connected == [opened.container_id] * len(faults)
     assert len(sdk.created) == 1
-    assert _events(caplog, "sandbox.e2b.resume_unanswered") == [
+    assert _events(caplog, "sandbox.e2b.resume_unavailable") == [
         {
             "conversation_id": str(conversation),
             "sandbox_id": opened.container_id,
-            "attempts": RESUME_TRANSPORT_RETRIES + 1,
+            "attempts": RESUME_RETRIES + 1,
             "error_class": "ReadTimeout",
         }
     ]
@@ -726,13 +782,13 @@ async def test_the_resume_backoff_doubles_and_the_whole_retry_is_wall_clock_boun
         slept.append(seconds)
 
     monkeypatch.setattr(e2b_ext.asyncio, "sleep", record)
-    faults = [httpx.ReadTimeout("timed out")] * (RESUME_TRANSPORT_RETRIES + 1)
+    faults = [httpx.ReadTimeout("timed out")] * (RESUME_RETRIES + 1)
     sdk = _Sdk(connect_faults=list(faults))
     carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await carrier.create(_spec(conversation))
 
-    with pytest.raises(httpx.ReadTimeout):
+    with pytest.raises(SandboxProviderUnavailable):
         await carrier.create(replace(_spec(conversation), resume_id=opened.container_id))
 
     assert slept == [RESUME_RETRY_DELAY_SECONDS, RESUME_RETRY_DELAY_SECONDS * 2]

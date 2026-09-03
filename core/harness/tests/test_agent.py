@@ -67,6 +67,9 @@ class Tools:
     ) -> None:
         self.rounds.append((calls, results))
 
+    async def after_checkpoint(self) -> None:
+        return None
+
     def interrupted(self) -> None:
         self.interruptions += 1
 

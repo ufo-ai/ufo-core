@@ -647,6 +647,10 @@ class SandboxUnreachable(RuntimeError):
     """The dial contract's error: a carrier's sandbox is gone or has no external route."""
 
 
+class SandboxProviderUnavailable(RuntimeError):
+    """A sandbox carrier's external control plane did not recover inside its short retry."""
+
+
 class Carrier(Protocol):
     """Create-or-attach a per-conversation container and reach its `/workspace`: run commands in it,
     write bytes in, stream bytes out. `/workspace` is the carrier's own storage and the only copy of

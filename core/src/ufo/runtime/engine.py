@@ -117,7 +117,11 @@ from ufo.harness.o11y import (
 )
 from ufo.harness.replies import MarkedReply, ReplyRedaction
 from ufo.harness.rounds import ModelRoundRunner, RoundEventTypes
-from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME, Sandbox
+from ufo.harness.sandbox.session import (
+    TOOL_OUTPUT_DIRNAME,
+    Sandbox,
+    SandboxProviderUnavailable,
+)
 from ufo.harness.sandbox.terminal import TerminalAbsent, TerminalGone
 from ufo.harness.untrusted import wall
 from ufo.runtime.access.connectors import ConnectorRegistry
@@ -238,6 +242,11 @@ EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
+SANDBOX_PROVIDER_RETRY_NOTICE = (
+    "The sandbox provider is unavailable. This task will retry after {retry_at}."
+)
+SANDBOX_PROVIDER_RETRY_SECONDS = 60
+SANDBOX_PROVIDER_RETRY_LIMIT = 15
 TRUNCATION_FEEDBACK = (
     "Your previous response exceeded the output budget and was cut off. Produce large content "
     "by writing files with sandbox code or by emitting it in small parts across calls; keep any "
@@ -706,10 +715,38 @@ class ModelStreamError(Exception):
 class TurnParked(Exception):
     """A running turn is held non-terminally until its gate clears or its retry time arrives."""
 
-    def __init__(self, message: str, retry_at: datetime | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        retry_at: datetime | None = None,
+        external_retry_count: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.retry_at = retry_at
+        self.external_retry_count = external_retry_count
+
+
+def sandbox_provider_park(turn: Turn) -> TurnParked | None:
+    """The next hold in the sandbox provider's retry schedule, or None when this turn must take the
+    provider fault instead: its retries are spent, or a parent awaits its result inline.
+
+    A child the parent waits on is cancelled the moment it parks — `Subagents._terminal_or_park`
+    reads the parked row, cancels the turn, and raises — so a park there spends no retry, discards
+    the rounds the child already ran, and names a cause that did not happen. The provider fault
+    stands instead, which fails the child on the real error the parent can report. It is the gate
+    `defer_long_retry` puts on the model provider's long retry, which the same turns keep inline."""
+    if turn.spawned and turn.result_delivery != DELIVERY_PENDING:
+        return None
+    retry_count = turn.external_retry_count + 1
+    if retry_count > SANDBOX_PROVIDER_RETRY_LIMIT:
+        return None
+    retry_at = datetime.now(UTC) + timedelta(seconds=SANDBOX_PROVIDER_RETRY_SECONDS)
+    return TurnParked(
+        SANDBOX_PROVIDER_RETRY_NOTICE.format(retry_at=retry_at.isoformat()),
+        retry_at,
+        retry_count,
+    )
 
 
 CRUD_INTENT_TOOLS = frozenset({"object_apply", "object_delete"})
@@ -1101,6 +1138,7 @@ class _RuntimeToolState:
     acts: _OpenActs = field(default_factory=_OpenActs)
     resolutions: dict[str, _Resolution] = field(default_factory=dict)
     bindings: dict[str, _DispatchInput] = field(default_factory=dict)
+    parked: TurnParked | None = None
 
 
 @dataclass(frozen=True)
@@ -1241,6 +1279,8 @@ class _RuntimeTools:
         return self._resolve(call).parallel_safe
 
     async def prepare(self, calls: tuple[HarnessToolCall, ...]) -> None:
+        if self.state.parked is not None:
+            return
         bound_items = await asyncio.gather(
             *(
                 self.engine._bind_or_error(self.context, self._resolve(call), self.requesters)
@@ -1259,8 +1299,14 @@ class _RuntimeTools:
                 )
 
     async def execute(self, call: HarnessToolCall) -> HarnessToolResult:
+        if self.state.parked is not None:
+            return HarnessToolResult(call.id, self.state.parked.message, is_error=True)
         bound = self.state.bindings[call.id]
-        return _to_harness_result(await self.engine._dispatch(bound, self.usage_events))
+        try:
+            return _to_harness_result(await self.engine._dispatch(bound, self.usage_events))
+        except TurnParked as parked:
+            self.state.parked = parked
+            return HarnessToolResult(call.id, parked.message, is_error=True)
 
     async def after_round(
         self,
@@ -1289,6 +1335,12 @@ class _RuntimeTools:
         finally:
             self.state.resolutions.clear()
             self.state.bindings.clear()
+
+    async def after_checkpoint(self) -> None:
+        parked = self.state.parked
+        self.state.parked = None
+        if parked is not None:
+            raise parked
 
     def interrupted(self) -> None:
         self.state.acts = replace(self.state.acts, question=None)
@@ -1796,7 +1848,13 @@ class TurnEngine:
                     await self._publish_terminal(frame)
                 raise error from parked
             meter.exited(PARKED)
-            await self._park(parked.message, usage_events, parked.retry_at, tuple(absorbed_ids))
+            await self._park(
+                parked.message,
+                usage_events,
+                parked.retry_at,
+                tuple(absorbed_ids),
+                external_retry_count=parked.external_retry_count,
+            )
             raise
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
@@ -2047,7 +2105,12 @@ class TurnEngine:
             return frame
         except TurnParked as parked:
             meter.exited(PARKED)
-            await self._park(parked.message, usage_events, parked.retry_at, ())
+            await self._park(
+                parked.message,
+                usage_events,
+                parked.retry_at,
+                external_retry_count=parked.external_retry_count,
+            )
             raise
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
@@ -3478,6 +3541,11 @@ class TurnEngine:
             )
         except TerminalAbsent as error:
             raise TerminalGone(str(error)) from error
+        except SandboxProviderUnavailable as error:
+            parked = sandbox_provider_park(self.turn)
+            if parked is None:
+                raise
+            raise parked from error
         except Exception as error:
             content = f"{type(error).__name__}: {error}"
             if isinstance(error, SpeakerRequired) and bound.member_refs:
@@ -3829,21 +3897,26 @@ class TurnEngine:
         usage_events: list[Usage],
         retry_at: datetime | None = None,
         absorbed: tuple[UUID, ...] = (),
+        external_retry_count: int | None = None,
     ) -> None:
         """Hold the turn at a gate or provider retry time: bill this attempt's consumed tokens,
-        commit the non-terminal parked state (durable, resumable), release the arrivals this
-        attempt claimed (a resume is a fresh workflow with an empty step log, so it must re-drain
-        them), and end the surface's stream with the reason — one transaction.
+        commit the non-terminal parked state (durable, resumable), release only the arrivals this
+        attempt did not absorb, and end the surface's stream with the reason — one transaction.
         Billing at park is what makes a tight cap CONVERGE: the ledger
         reflects the real burn, so the resume sweep re-decides against actual spend and finds no
         headroom until the cap is raised — never an unbilled runaway re-burning tokens the cap
         can't see. Keyed by this attempt's workflow id, so the aborted partial and the eventual
         full run both count."""
         async with workspace_tx() as connection:
+            turn_update = sa.update(tables.turn).values(
+                status=PARKED,
+                retry_at=retry_at,
+                updated_at=sa.func.now(),
+            )
+            if external_retry_count is not None:
+                turn_update = turn_update.values(external_retry_count=external_retry_count)
             updated = await connection.execute(
-                sa.update(tables.turn)
-                .values(status=PARKED, retry_at=retry_at, updated_at=sa.func.now())
-                .where(
+                turn_update.where(
                     tables.turn.c.id == self.turn.id,
                     tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
                 )

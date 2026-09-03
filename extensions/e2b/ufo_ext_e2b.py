@@ -43,6 +43,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shlex
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -52,7 +53,12 @@ from uuid import UUID, uuid4
 
 import httpx
 from e2b import AsyncSandbox as E2BSdkSandbox
-from e2b.exceptions import FileNotFoundException, SandboxNotFoundException, TimeoutException
+from e2b.exceptions import (
+    FileNotFoundException,
+    SandboxException,
+    SandboxNotFoundException,
+    TimeoutException,
+)
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.sandbox.sandbox_api import SandboxLifecycle, SandboxNetworkOpts
 
@@ -68,6 +74,7 @@ from ufo.sdk.sandbox import (
     DialTarget,
     ExecResult,
     SandboxHandle,
+    SandboxProviderUnavailable,
     SandboxSpec,
     SandboxUnreachable,
     client_binary,
@@ -121,7 +128,7 @@ WORKSPACE_ENSURE_TIMEOUT_SECONDS = 30
 RESUME_PREPARE_TIMEOUT_SECONDS = 5
 PREPARE_ATTEMPTS = 3
 PREPARE_RETRY_SECONDS = 1.0
-RESUME_TRANSPORT_RETRIES = 2
+RESUME_RETRIES = 2
 RESUME_RETRY_DELAY_SECONDS = 1.0
 RESUME_TOTAL_TIMEOUT_SECONDS = 90.0
 """The whole retried resume, bounded here rather than left to the SDK's per-request default.
@@ -131,6 +138,7 @@ only by timing out is three times whatever `request_timeout` happens to be, a th
 this repo neither sets nor asserts and which `ConnectionConfig` maps to no timeout at all when a
 caller passes 0. A turn's setup runs before its first round, so the span is the member's whole wait
 with no answer at the end of it."""
+RETRYABLE_CONTROL_STATUS = re.compile(r"^(?:429|5\d\d):")
 ENSURE_WORKSPACE_COMMAND = (
     f"mkdir -p {WORKSPACE_DIR} && chown {SANDBOX_USER}:{SANDBOX_USER} {WORKSPACE_DIR}"
 )
@@ -478,12 +486,11 @@ class E2BCarrier:
                 await asyncio.sleep(self.prepare_retry_seconds)
 
     async def _connected(self, conversation_id: UUID, sandbox_id: str, span: int) -> E2BSandbox:
-        """`connect` on the sandbox `sandbox_id` names, re-issued up to RESUME_TRANSPORT_RETRIES
-        times when the provider's control plane leaves the request unanswered, and bounded whole by
-        RESUME_TOTAL_TIMEOUT_SECONDS. That control plane is a network call off this cluster, so an
-        unanswered one is uncertainty about the provider rather than a fault here — the one case
-        this repo retries. Only a transport error does: a not-found is the provider answering, and
-        the caller decides what that means.
+        """`connect` on the sandbox `sandbox_id` names, re-issued up to RESUME_RETRIES times when
+        the provider's control plane does not answer or answers 429/5xx, and bounded whole by
+        RESUME_TOTAL_TIMEOUT_SECONDS. That control plane is a network call off this cluster, so
+        these answers are external uncertainty. A not-found, authentication failure, or other 4xx
+        is a final provider answer and the caller decides what it means.
 
         Every `connect` in this carrier comes through here, because they are one endpoint and one
         uncertainty: turn setup resuming a conversation's box, the mid-turn lease renewal, and the
@@ -491,11 +498,11 @@ class E2BCarrier:
 
         The ceiling is what makes the retry bounded in the units a member waits in. Attempts bound
         only how many times this asks; the wall clock bounds how long it asks for, and a timeout
-        raises the transport fault the last attempt saw rather than a bare TimeoutError, so the
-        caller reads the provider's failure and not this one's."""
+        raises the carrier's provider-unavailable signal from the last control-plane fault, so the
+        turn can park without losing the provider cause."""
         attempt = 0
         delay = self.resume_retry_delay_seconds
-        last: httpx.TransportError | None = None
+        last: Exception | None = None
         try:
             async with asyncio.timeout(self.resume_total_timeout_seconds):
                 while True:
@@ -503,18 +510,25 @@ class E2BCarrier:
                         return await self.sdk.connect(
                             sandbox_id, timeout=span, api_key=self.api_key
                         )
-                    except httpx.TransportError as error:
+                    except (httpx.TransportError, SandboxException) as error:
+                        match error:
+                            case httpx.TransportError():
+                                pass
+                            case SandboxException() if RETRYABLE_CONTROL_STATUS.match(str(error)):
+                                pass
+                            case _:
+                                raise
                         last = error
                         attempt += 1
-                        if attempt > RESUME_TRANSPORT_RETRIES:
+                        if attempt > RESUME_RETRIES:
                             log(
-                                "sandbox.e2b.resume_unanswered",
+                                "sandbox.e2b.resume_unavailable",
                                 conversation_id=str(conversation_id),
                                 sandbox_id=sandbox_id,
                                 attempts=attempt,
                                 error_class=type(error).__name__,
                             )
-                            raise
+                            raise SandboxProviderUnavailable(CARRIER_NAME) from error
                         log(
                             "sandbox.e2b.resume_retried",
                             conversation_id=str(conversation_id),
@@ -532,14 +546,11 @@ class E2BCarrier:
                 attempts=attempt,
                 seconds=self.resume_total_timeout_seconds,
             )
-            raise (
-                last
-                if last is not None
-                else httpx.ReadTimeout(
-                    f"e2b never answered a resume of {sandbox_id} within "
-                    f"{self.resume_total_timeout_seconds}s"
-                )
-            ) from None
+            fault = last or httpx.ReadTimeout(
+                f"e2b never answered a resume of {sandbox_id} within "
+                f"{self.resume_total_timeout_seconds}s"
+            )
+            raise SandboxProviderUnavailable(CARRIER_NAME) from fault
 
     async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None:
         await self._ensure_client(sandbox)

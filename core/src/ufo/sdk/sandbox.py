@@ -42,6 +42,7 @@ from ufo.harness.sandbox.session import ExecResult as ExecResult
 from ufo.harness.sandbox.session import ProxyEndpoint as ProxyEndpoint
 from ufo.harness.sandbox.session import Sandbox as Sandbox
 from ufo.harness.sandbox.session import SandboxHandle as SandboxHandle
+from ufo.harness.sandbox.session import SandboxProviderUnavailable as SandboxProviderUnavailable
 from ufo.harness.sandbox.session import SandboxSession as SandboxSession
 from ufo.harness.sandbox.session import SandboxSpec as SandboxSpec
 from ufo.harness.sandbox.session import SandboxUnreachable as SandboxUnreachable

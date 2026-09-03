@@ -47,6 +47,7 @@ from ufo.harness.sandbox.session import (
     RunToken,
     RunTokenCodec,
     Sandbox,
+    SandboxProviderUnavailable,
     SandboxSession,
     SystemSkillSeeding,
     _LateSandbox,
@@ -73,12 +74,13 @@ from ufo.runtime.engine import (
     TurnEngine,
     TurnParked,
     _claim_turn,
+    sandbox_provider_park,
 )
 from ufo.runtime.ext.context import ExtensionContext, ModelAccess, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.runtime.ext.surface import TurnTailer
-from ufo.runtime.hub import Hub, Terminal
+from ufo.runtime.hub import Hub, Parked, Terminal
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.media.site_previewer import SitePreviewer
@@ -892,6 +894,84 @@ async def _deliver_to_parent(runtime: Runtime, turn_id: UUID) -> None:
         )
 
 
+@dataclass(frozen=True)
+class _SandboxSetup:
+    hub: Hub
+    blob: WorkspaceBlobStore
+    turn: Turn
+    attempt: str
+
+    async def run(
+        self,
+        sandbox: Sandbox,
+        preload: tuple[LoadedSkill, ...],
+        files: tuple[EnvironmentFile, ...],
+    ) -> None:
+        try:
+            if preload:
+                with span("skills.mount", count=len(preload)):
+                    await load_skills(sandbox, preload)
+            if files:
+                with span("environment.files", count=len(files)):
+                    for seeded in files:
+                        await sandbox.write_file(seeded.path, seeded.content)
+        except SandboxProviderUnavailable as error:
+            parked = sandbox_provider_park(self.turn)
+            if parked is None:
+                raise
+            stored = await Transcript(
+                blob=self.blob, conversation_id=self.turn.conversation_id
+            ).read()
+            absorbed = (
+                stored.parked.absorbed
+                if stored is not None and stored.seq == self.turn.seq and stored.parked is not None
+                else ()
+            )
+            await self._park(parked, absorbed)
+            raise parked from error
+
+    async def _park(self, parked: TurnParked, absorbed: tuple[UUID, ...]) -> None:
+        async with workspace_tx() as connection:
+            updated = await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="parked",
+                    retry_at=parked.retry_at,
+                    external_retry_count=parked.external_retry_count,
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.turn.c.id == self.turn.id,
+                    tables.turn.c.status == "running",
+                    tables.turn.c.running_attempt == self.attempt,
+                )
+            )
+            if updated.rowcount == 1:
+                await connection.execute(
+                    sa.update(tables.inbound_message)
+                    .values(consumed_turn_id=None)
+                    .where(
+                        tables.inbound_message.c.consumed_turn_id == self.turn.id,
+                        ~tables.inbound_message.c.id.in_(absorbed),
+                    )
+                )
+        if updated.rowcount != 1:
+            return
+        try:
+            await self.hub.publish(self.turn.id, Parked(message=parked.message))
+        except Exception as error:
+            log(
+                "hub.publish_failed",
+                turn_id=str(self.turn.id),
+                error_class=type(error).__name__,
+            )
+        emit_metric(
+            "turn_parked_total",
+            profile=turn_profile(self.turn.subagent_profile, self.turn.spawned),
+        )
+        log("turn.parked", turn_id=str(self.turn.id))
+
+
 async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     attempt = DBOS.workflow_id or turn_id
     try:
@@ -1084,13 +1164,9 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             clis=clis,
             turn=turn,
         )
-        if preload:
-            with span("skills.mount", count=len(preload)):
-                await load_skills(sandbox, preload)
-        if assembled.files:
-            with span("environment.files", count=len(assembled.files)):
-                for seeded in assembled.files:
-                    await sandbox.write_file(seeded.path, seeded.content)
+        await _SandboxSetup(runtime.hub, runtime.blob, turn, attempt).run(
+            sandbox, preload, assembled.files
+        )
         engine = TurnEngine(
             turn=turn,
             agent=resolved,
@@ -1285,6 +1361,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.subagent_profile,
                     tables.turn.c.subagent_name,
                     tables.turn.c.result_delivery,
+                    tables.turn.c.external_retry_count,
                     tables.conversation.c.sandbox_conversation_id,
                     tables.turn.c.runtime_config,
                     tables.turn.c.traceparent,
@@ -1330,6 +1407,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         subagent_profile=row.subagent_profile,
         subagent_name=row.subagent_name,
         result_delivery=row.result_delivery,
+        external_retry_count=row.external_retry_count,
         sandbox_conversation_id=row.sandbox_conversation_id,
         traceparent=row.traceparent,
         runtime_config=(

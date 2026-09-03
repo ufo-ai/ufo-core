@@ -151,6 +151,8 @@ class AgentTools(Protocol):
         self, calls: tuple[ToolCall, ...], results: tuple[ToolResult, ...]
     ) -> None: ...
 
+    async def after_checkpoint(self) -> None: ...
+
     def interrupted(self) -> None: ...
 
 
@@ -245,6 +247,7 @@ class AgentEngine:
                     return outcome
                 messages = outcome
                 await self.conversation.checkpoint(messages)
+                await self.tools.after_checkpoint()
                 continue
             if streamed.text.strip():
                 return await self._close(streamed, spoken, round_index)

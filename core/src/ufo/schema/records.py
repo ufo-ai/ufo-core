@@ -577,6 +577,7 @@ class Turn(BaseModel):
     provider, and may reconnect from another conversation entirely."""
     result_delivery: ResultDelivery | None = None
     retry_at: datetime | None = None
+    external_retry_count: int = Field(default=0, ge=0)
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
     runtime_config: TurnRuntimeConfig | None = None
