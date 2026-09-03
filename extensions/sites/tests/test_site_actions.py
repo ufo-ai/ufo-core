@@ -15,6 +15,7 @@ from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
+from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -295,12 +296,11 @@ def _engine(turn: Turn, model: object, tmp_path: Path, spawn=_unavailable_spawn)
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         byok=False,
         system_prompt=rendered_prompt("p"),
-        model=model,
+        serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model, model="claude-opus-4-8", blob=blob, conversation_id=turn.conversation_id
+            serving=serving_model(model), blob=blob, conversation_id=turn.conversation_id
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=_StubCarrier(), handle=handle),

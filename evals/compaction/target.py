@@ -8,11 +8,11 @@ from pathlib import Path
 from uuid import UUID
 
 from ufo.blob import WorkspaceBlobStore
-from ufo.harness.models.interface import Message, ModelClient
+from ufo.harness.models.interface import Message
+from ufo.harness.models.registry import ServingModel
 from ufo.runtime.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
     COMPACTION_SUMMARY_MAX_TOKENS,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
     Compaction,
 )
 from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
@@ -22,16 +22,19 @@ WORKSPACE_PREFIX = "/workspace/"
 
 @dataclass(frozen=True)
 class CompactionTarget:
-    """`context_window` is the declared window of the model the live leaves' probe turns run on —
-    the same number `queue.py` hands the engine's `Compaction`. Artifact leaves override the trigger
-    to the snapshot's own scale, so they never consult it; behavior and real leaves cannot, and
-    their windows have to clear the model's real trigger to compact at all."""
+    """`serving` is the model the live leaves' probe turns run on — the same holder `queue.py` hands
+    the engine's `Compaction`, whose spec declares the window the trigger derives from. Artifact
+    leaves override the trigger to the snapshot's own scale, so they never consult it; behavior and
+    real leaves cannot, and their windows have to clear the model's real trigger to compact at
+    all."""
 
-    client: ModelClient
-    model: str
+    serving: ServingModel
     blob: WorkspaceBlobStore
     workspace_root: Path
-    context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS
+
+    @property
+    def context_window(self) -> int:
+        return self.serving.spec.context_window
 
     @property
     def live_trigger_tokens(self) -> int:
@@ -42,8 +45,7 @@ class CompactionTarget:
 
     def compactor(self, conversation_id: UUID, trigger_tokens: int | None = None) -> Compaction:
         return Compaction(
-            client=self.client,
-            model=self.model,
+            serving=self.serving,
             blob=self.blob,
             conversation_id=conversation_id,
             trigger_tokens=trigger_tokens,

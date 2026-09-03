@@ -31,6 +31,7 @@ from PIL import Image
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
@@ -85,7 +86,7 @@ from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
-    ModelClient,
+    ModelAccountRateLimited,
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
@@ -102,7 +103,8 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
 )
 from ufo.harness.models.pricing import Pricing
-from ufo.harness.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.models.registry import ServingModel
+from ufo.harness.models.spec import ModelSpec
 from ufo.harness.o11y import (
     emit_histogram,
     emit_metric,
@@ -584,6 +586,42 @@ class _RoundWindow:
     messages: tuple[Message, ...] = ()
     ran: bool = False
     denied: str | None = None
+
+
+@dataclass(frozen=True)
+class _Segment:
+    """One account's share of an attempt's burn: the model that served it, the ledger series it
+    bills under, and the usage it consumed."""
+
+    model: str
+    attempt: str
+    usage: Usage
+
+
+@dataclass
+class _Burn:
+    """Where an attempt's usage was burned when its rounds moved between the member's accounts:
+    each model the turn left, with the index in the attempt's usage events where it stopped
+    serving. `segments` cuts the events at those marks, one per account, so each account bills
+    under its own model at its own rate.
+
+    The account the attempt began on keeps the attempt's own ledger series: a rolling deploy's
+    recovery must advance the row the outgoing image wrote at shutdown rather than open a second
+    one. An account the attempt moved onto has no such row, so its series is keyed by the attempt
+    and its model."""
+
+    left: list[tuple[str, int]] = field(default_factory=list)
+
+    def segments(
+        self, serving: str, attempt: str, usage_events: Sequence[Usage]
+    ) -> tuple[_Segment, ...]:
+        cut: list[_Segment] = []
+        start = 0
+        for index, (model, end) in enumerate((*self.left, (serving, len(usage_events)))):
+            series = attempt if index == 0 else f"{attempt}/{model}"
+            cut.append(_Segment(model, series, _total_usage(usage_events[start:end])))
+            start = end
+        return tuple(cut)
 
 
 @dataclass
@@ -1502,9 +1540,8 @@ class TurnEngine:
     agent: Agent
     byok: bool
     system_prompt: RenderedPrompt
-    model: ModelClient
+    serving: ServingModel
     activity_summarizer: ActivitySummarizer
-    provider: str
     transcript: Transcript
     compaction: Compaction
     hub: Hub
@@ -1537,9 +1574,6 @@ class TurnEngine:
     auto_model: str = AUTO_MODEL
     pricing: Pricing = CORE_PRICING
     subagents: SubagentControl | None = None
-    reasoning: ReasoningSupport = field(
-        default_factory=lambda: ReasoningSupport(supported=True, tools_with_reasoning=True)
-    )
     attempt: str = ""
     max_rounds: int = MAIN_ROUND_LIMIT
     skills: SkillRegistry = CORE_SKILL_REGISTRY
@@ -1551,6 +1585,7 @@ class TurnEngine:
     granted_actions: frozenset[str] = frozenset()
     _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
     _window: _RoundWindow = field(default_factory=_RoundWindow, init=False, repr=False)
+    _burn: _Burn = field(default_factory=_Burn, init=False, repr=False)
     _find_usages: ContextVar[list[Usage] | None] = field(
         default_factory=lambda: ContextVar("find_usages", default=None),
         init=False,
@@ -1731,16 +1766,16 @@ class TurnEngine:
 
     async def _rank_find(self, usage_events: list[Usage], system: str, user: str) -> str:
         request = ModelRequest(
-            model=self.agent.model,
+            model=self.serving.model,
             system=system,
             messages=(Message(role="user", content=user),),
             max_tokens=FIND_MAX_TOKENS,
             conversation_cache_ttl="5m",
             session_id=str(self.turn.conversation_id),
-            reasoning=self.reasoning.internal_effort(),
+            reasoning=self.serving.spec.reasoning.internal_effort(),
         )
         parts: list[str] = []
-        async for event in self.model.complete(request):
+        async for event in self.serving.client.complete(request):
             match event:
                 case TextDelta(text=text):
                     parts.append(text)
@@ -2455,23 +2490,52 @@ class TurnEngine:
         while True:
             result = await self._stream_once(round_input)
             usage_events.extend(result.usages)
+            if result.error_class == ModelAccountRateLimited.__name__ and await self._move_account(
+                usage_events
+            ):
+                continue
             if result.error_kind is None or interruptions >= MAX_MIDSTREAM_ROUND_RETRIES:
                 return result
             interruptions += 1
             emit_metric(
                 "model_provider_retry_total",
-                provider=self.provider,
-                model=self.agent.model,
+                provider=self.serving.spec.provider,
+                model=self.serving.model,
                 kind=result.error_kind,
             )
             log(
                 "model.round_interrupted_retry",
                 turn_id=str(self.turn.id),
-                provider=self.provider,
-                model=self.agent.model,
+                provider=self.serving.spec.provider,
+                model=self.serving.model,
                 kind=result.error_kind,
                 attempt=interruptions,
             )
+
+    async def _move_account(self, usage_events: list[Usage]) -> bool:
+        """Move the turn onto the member's next account after the provider rate-limited the one
+        serving it, closing that account's share of the burn where its rounds stopped. The round
+        re-runs on the new account. False when this turn holds no account to move to, so the
+        rate-limited round fails the way any provider fault does."""
+        left = self.serving.model
+        if not await self.serving.move():
+            return False
+        self._burn.left.append((left, len(usage_events)))
+        log(
+            "model.member_account_failover",
+            turn_id=str(self.turn.id),
+            model=left,
+            moved_to=self.serving.model,
+        )
+        return True
+
+    def _priced(self, usage_events: Sequence[Usage]) -> int:
+        """This attempt's burn in micro-USD, each account's share at the rate of the model that
+        served it."""
+        return sum(
+            self.pricing.micro_usd(segment.model, segment.usage)
+            for segment in self._burn.segments(self.serving.model, self.attempt, usage_events)
+        )
 
     async def _enforce_spend(
         self,
@@ -2498,9 +2562,7 @@ class TurnEngine:
         untouched, let the dispatcher resume it, and park it again at the same point forever."""
         await self._enforce_seats(requesters)
         member_id = audience_member(self.audience)
-        pending = (
-            0 if self.byok else self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
-        )
+        pending = 0 if self.byok else self._priced(usage_events)
         if not balance_absent(self.turn.workspace_id):
             async with workspace_tx() as connection:
                 sustained = await BalanceGate(self.turn.workspace_id, self.billing_url).sustains(
@@ -2513,9 +2575,7 @@ class TurnEngine:
         async with workspace_tx() as connection:
             decision = await SpendEvaluator(
                 self.turn.workspace_id, member_id, self.turn.agent_id
-            ).decide(
-                connection, self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
-            )
+            ).decide(connection, self._priced(usage_events))
         if decision.outcome != ALLOW:
             raise TurnParked(decision.message)
 
@@ -2575,7 +2635,7 @@ class TurnEngine:
             else:
                 tool_schemas = ()
         request = ModelRequest(
-            model=self.agent.model,
+            model=self.serving.model,
             system=round_input.system,
             messages=round_input.messages,
             max_tokens=MAX_OUTPUT_TOKENS,
@@ -2584,11 +2644,12 @@ class TurnEngine:
             tools=tool_schemas,
             tool_choice=tool_choice,
             reasoning=(
-                self.reasoning.internal_effort()
+                self.serving.spec.reasoning.internal_effort()
                 if round_input.force_finish
                 else self.agent.reasoning
             ),
         )
+        provider = self.serving.spec.provider
         if not round_input.first_round:
             gap = "within_turn"
         elif self.previous_turn_ended_at is None:
@@ -2603,7 +2664,7 @@ class TurnEngine:
                 gap = "gt_1h"
         cache_dimensions = {
             "model": request.model,
-            "provider": self.provider,
+            "provider": provider,
             "profile": self.profile,
             "conversation_ttl": request.conversation_cache_ttl,
             "round": "first" if round_input.first_round else "later",
@@ -2611,7 +2672,7 @@ class TurnEngine:
         }
         active_dimensions = {
             "model": request.model,
-            "provider": self.provider,
+            "provider": provider,
             "profile": self.profile,
         }
         emit_up_down_metric("model_round_active", 1, **active_dimensions)
@@ -2619,12 +2680,12 @@ class TurnEngine:
             with span(
                 "model.round",
                 model=request.model,
-                provider=self.provider,
+                provider=provider,
                 round=round_input.round_index,
             ) as round_span:
                 runner: ModelRoundRunner[ModelRequest, ToolUseBlock, ReasoningBlock, Usage] = (
                     ModelRoundRunner(
-                        complete=self.model.complete,
+                        complete=self.serving.client.complete,
                         events=RoundEventTypes(
                             stream_start=ModelStreamStart,
                             text=TextDelta,
@@ -2648,7 +2709,7 @@ class TurnEngine:
             "model_round_ms",
             result.wall_ms,
             model=request.model,
-            provider=self.provider,
+            provider=provider,
             profile=self.profile,
             **({} if result.error_class is None else {"error_class": result.error_class}),
         )
@@ -2694,7 +2755,7 @@ class TurnEngine:
                     "model_round_tokens_total",
                     amount,
                     model=request.model,
-                    provider=self.provider,
+                    provider=provider,
                     kind=kind,
                     profile=self.profile,
                 )
@@ -2722,9 +2783,7 @@ class TurnEngine:
             + usage.cache_write_30m_tokens
             + usage.cache_write_1h_tokens
         )
-        await self._publish(
-            CostTick(cost_micro_usd=self.pricing.micro_usd(self.agent.model, usage), tokens=tokens)
-        )
+        await self._publish(CostTick(cost_micro_usd=self._priced(usage_events), tokens=tokens))
 
     def _reseed_loaded_skills(self, messages: tuple[Message, ...]) -> None:
         """Re-derive which skills' workflows the window holds, for the tracker the turn's
@@ -3577,7 +3636,6 @@ class TurnEngine:
         absorbed: tuple[UUID, ...],
         incomplete_reason: IncompleteReason | None,
     ) -> tuple[TerminalFrame | None, bool]:
-        usage = _total_usage(usage_events)
         async with workspace_tx() as connection:
             if unless_arrivals:
                 await connection.execute(
@@ -3611,16 +3669,7 @@ class TurnEngine:
                     )
                     return None, False
             try:
-                await record_turn_usage(
-                    connection,
-                    self.turn.workspace_id,
-                    self.turn.id,
-                    self.agent.model,
-                    usage,
-                    self.attempt,
-                    pricing=self.pricing,
-                    byok=self.byok,
-                )
+                await self._record_usage(connection, usage_events)
             except TurnUsageConflict as conflict:
                 log_error(
                     "turn.billing_conflict",
@@ -3704,16 +3753,7 @@ class TurnEngine:
                 )
             )
             if updated.rowcount == 1:
-                await record_turn_usage(
-                    connection,
-                    self.turn.workspace_id,
-                    self.turn.id,
-                    self.agent.model,
-                    _total_usage(usage_events),
-                    self.attempt,
-                    pricing=self.pricing,
-                    byok=self.byok,
-                )
+                await self._record_usage(connection, usage_events)
                 await connection.execute(
                     sa.update(tables.inbound_message)
                     .values(consumed_turn_id=None)
@@ -3777,21 +3817,28 @@ class TurnEngine:
                 error_class=type(error).__name__,
             )
 
+    async def _record_usage(
+        self, connection: AsyncConnection, usage_events: Sequence[Usage]
+    ) -> None:
+        """Bill this attempt's burn: one cumulative ledger row per account that served it, each
+        under the model that burned the tokens and at that model's rate."""
+        for segment in self._burn.segments(self.serving.model, self.attempt, usage_events):
+            await record_turn_usage(
+                connection,
+                self.turn.workspace_id,
+                self.turn.id,
+                segment.model,
+                segment.usage,
+                segment.attempt,
+                pricing=self.pricing,
+                byok=self.byok,
+            )
+
     async def _bill_cancelled(self, usage_events: list[Usage]) -> None:
         """Best-effort: cancellation must not stall on billing, but consumed tokens count."""
-        usage = _total_usage(usage_events)
         try:
             async with workspace_tx() as connection:
-                await record_turn_usage(
-                    connection,
-                    self.turn.workspace_id,
-                    self.turn.id,
-                    self.agent.model,
-                    usage,
-                    self.attempt,
-                    pricing=self.pricing,
-                    byok=self.byok,
-                )
+                await self._record_usage(connection, usage_events)
         except Exception as error:
             log(
                 "turn.cancel_billing_failed",

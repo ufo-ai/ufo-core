@@ -1,19 +1,22 @@
 import functools
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
+from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
 from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
+    ModelClient,
     ModelEvent,
     ModelRequest,
     ReasoningItemBlock,
@@ -184,8 +187,7 @@ class RawTextModel:
 
 def _compaction(tmp_path: Path, model: object = None, **overrides: object) -> Compaction:
     return Compaction(
-        client=model or SummaryModel(),
-        model="claude-opus-4-8",
+        serving=serving_model(cast(ModelClient, model or SummaryModel())),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=uuid4(),
         **overrides,
@@ -427,13 +429,25 @@ async def test_summarizer_requests_the_5m_conversation_cache_ttl(tmp_path: Path)
     assert model.seen_conversation_cache_ttl == ["5m"]
 
 
+def test_the_window_is_the_serving_models_window(tmp_path: Path) -> None:
+    """A turn that moved onto the member's other account compacts against that model's real
+    window: the trigger reads the serving spec at each use rather than the window of the model
+    the turn began on."""
+    compaction = _compaction(tmp_path)
+    assert compaction.window.trigger == (
+        DEFAULT_CONTEXT_WINDOW_TOKENS - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+    )
+    compaction.serving.spec = replace(compaction.serving.spec, context_window=1_000_000)
+    assert compaction.window.trigger == (
+        1_000_000 - compaction.summary_max_tokens - AUTOCOMPACT_BUFFER_TOKENS
+    )
+
+
 async def test_summarizer_uses_required_reasoning_minimum(tmp_path: Path) -> None:
     model = CapturingSummaryModel()
-    compaction = _compaction(
-        tmp_path,
-        model=model,
-        trigger_tokens=1,
-        keep_messages=2,
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    compaction.serving.spec = replace(
+        compaction.serving.spec,
         reasoning=ReasoningSupport(
             supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
         ),

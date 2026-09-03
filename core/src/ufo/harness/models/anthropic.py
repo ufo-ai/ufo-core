@@ -31,7 +31,7 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
     trim_images,
 )
-from ufo.harness.models.spec import KEY_REJECTED_STATUS, ModelSpec
+from ufo.harness.models.spec import KEY_REJECTED_STATUS, RATE_LIMITED_STATUS, ModelSpec
 from ufo.harness.o11y import emit_metric, log
 from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.schema.records import Usage
@@ -184,7 +184,9 @@ class _AnthropicRetry:
             )
             raise self.spec.key_rejected() from error
         attempt = self.attempt + 1
-        deterministic_client_error = 400 <= error.status_code < 500 and error.status_code != 429
+        deterministic_client_error = (
+            400 <= error.status_code < 500 and error.status_code != RATE_LIMITED_STATUS
+        )
         if yielded or deterministic_client_error or attempt > MAX_PROVIDER_RETRIES:
             log(
                 "model.provider_status_error",
@@ -198,6 +200,8 @@ class _AnthropicRetry:
                     "stream_error",
                     f"Anthropic errored the stream mid-round ({error.status_code}): {error}",
                 ) from error
+            if error.status_code == RATE_LIMITED_STATUS:
+                raise self.spec.rate_limited() from error
             raise error
         header = error.response.headers.get("retry-after")
         try:
@@ -402,6 +406,9 @@ class AnthropicClient:
         error event (overloaded, or a transient api_error) arrives on the already-200 stream
         response and so carries status_code 200 — keying retry off the single non-retryable case
         (a deterministic 4xx) catches it where a 5xx allowlist would let a 200-coded fault through.
+        A 429 that outlives the retry budget raises that spec's rate-limit fault instead of the
+        SDK's status error, so a caller holding a second account of the member's can move the work
+        onto it.
         A 401 is the provider refusing the key this spec resolved, so it raises that spec's
         credential fault instead of the SDK's auth error — the round says which slot or env to
         replace, and the verdict is deterministic per key, so nothing retries it.

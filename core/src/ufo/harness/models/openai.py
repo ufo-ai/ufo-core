@@ -81,7 +81,7 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
     trim_images,
 )
-from ufo.harness.models.spec import KEY_REJECTED_STATUS, ModelSpec
+from ufo.harness.models.spec import KEY_REJECTED_STATUS, RATE_LIMITED_STATUS, ModelSpec
 from ufo.harness.o11y import emit_metric, log
 from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.schema.records import Usage
@@ -503,7 +503,7 @@ class _OpenAIRetry:
             )
             raise self.spec.key_rejected() from error
         attempt = self.attempt + 1
-        retryable = error.status_code == 429 or error.status_code >= 500
+        retryable = error.status_code == RATE_LIMITED_STATUS or error.status_code >= 500
         if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
             log(
                 "model.provider_status_error",
@@ -517,6 +517,8 @@ class _OpenAIRetry:
                     "stream_error",
                     f"OpenAI errored the stream mid-round ({error.status_code}): {error}",
                 ) from error
+            if error.status_code == RATE_LIMITED_STATUS:
+                raise self.spec.rate_limited() from error
             raise error
         wait = _status_retry_wait(error, self.delay)
         log(
@@ -762,7 +764,10 @@ class OpenAIClient:
         that raises ModelStreamInterrupted so the engine discards the partial round and re-runs it
         once. An error frame injected into the live SSE stream surfaces as the exact APIError class
         and interrupts the round the same way, since the stream is already 200 and the fault is the
-        upstream's, not the request's. A 401 is the provider refusing the key this spec resolved:
+        upstream's, not the request's. A 429 that outlives the retry budget raises that spec's
+        rate-limit fault instead of the SDK's status error, so a caller holding a second account of
+        the member's can move the work onto it. A 401 is the provider refusing the key this spec
+        resolved:
         it raises that spec's credential fault instead of the SDK's auth error — the round says
         which slot or env to replace, and the verdict is deterministic per key, so nothing retries
         it.

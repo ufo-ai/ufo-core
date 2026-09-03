@@ -9,6 +9,7 @@ from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -51,7 +52,7 @@ from ufo.harness.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.models.registry import ModelRegistry, ServingModel
 from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     UNSIGNED_RUN_TOKEN,
@@ -845,7 +846,7 @@ async def test_turn_compaction_uses_the_models_context_window(
     compaction = loop_queue.Compaction
 
     def capture_context_window(**kwargs: object) -> object:
-        windows.append(int(kwargs["context_window"]))
+        windows.append(cast(ServingModel, kwargs["serving"]).spec.context_window)
         return compaction(**kwargs)
 
     monkeypatch.setattr(loop_queue, "Compaction", capture_context_window)
@@ -864,7 +865,7 @@ async def test_a_turn_reads_its_provider_from_the_spec_registered_for_its_model(
     engine = loop_queue.TurnEngine
 
     def capture_provider(**kwargs: object) -> object:
-        providers.append(str(kwargs["provider"]))
+        providers.append(cast(ServingModel, kwargs["serving"]).spec.provider)
         return engine(**kwargs)
 
     monkeypatch.setattr(loop_queue, "TurnEngine", capture_provider)
@@ -2624,6 +2625,92 @@ def test_a_withdrawn_account_hands_over_the_same_address_the_spawn_refusal_does(
     assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in named
     assert "ChatGPT or Claude" in named
     assert OWN_ACCOUNT_PROFILE.name in named
+
+
+def test_a_rate_limited_turn_moves_onto_every_other_account_the_member_connected() -> None:
+    """A member who connected two accounts bought two subscriptions, so the limit of the one the
+    turn started on is not the end of the work. The models it moves onto are the other accounts',
+    in the declaration order the first was chosen by, and the account in hand is never listed
+    twice. A member with one account has none to move to, and the turn still runs on theirs."""
+    runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
+    both = replace(
+        OWN_ACCOUNT_PROFILE,
+        own_key_models={"openai": OWN_ACCOUNT_MODEL, "anthropic": "claude-opus-5"},
+    )
+
+    assert loop_queue._own_account_alternates(
+        both, ("openai", "anthropic"), OWN_ACCOUNT_MODEL, None, runtime
+    ) == ("claude-opus-5",)
+    assert loop_queue._own_account_alternates(
+        both, ("anthropic", "openai"), "claude-opus-5", None, runtime
+    ) == (OWN_ACCOUNT_MODEL,)
+    assert (
+        loop_queue._own_account_alternates(both, ("openai",), OWN_ACCOUNT_MODEL, None, runtime)
+        == ()
+    )
+
+
+def test_a_turn_the_workspace_pays_for_runs_on_no_member_account() -> None:
+    """An environment document is the workspace's own spend choice and an ordinary profile runs on
+    the deploy's key: neither asked for an account of the member's, so neither holds any to move
+    onto."""
+    runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
+    both = replace(
+        OWN_ACCOUNT_PROFILE,
+        own_key_models={"openai": OWN_ACCOUNT_MODEL, "anthropic": "claude-opus-5"},
+    )
+    ordinary = replace(both, needs_own_model_key=False, own_key_models={})
+
+    assert (
+        loop_queue._own_account_alternates(
+            both, ("openai", "anthropic"), "document-model", "document-model", runtime
+        )
+        is None
+    )
+    assert (
+        loop_queue._own_account_alternates(
+            ordinary, ("openai", "anthropic"), "workspace-model", None, runtime
+        )
+        is None
+    )
+
+
+def test_a_profile_run_on_the_deploys_key_holds_no_member_account() -> None:
+    """A deploy with no extension that connects an account runs the profile on its own declared pin
+    and the deploy's key, with no account of the member's behind it. That turn is not on a member
+    account with none left to move to — it is on no member account at all — so it holds no
+    accounts, and a rate limit on it fails as the provider's fault rather than sending the member
+    to connect an account no deploy of theirs could hold."""
+    runtime = SimpleNamespace(registry=SimpleNamespace(resolve=lambda model: model))
+    pinned_profile = replace(OWN_ACCOUNT_PROFILE, model="profile-pin")
+
+    assert (
+        loop_queue._own_account_alternates(pinned_profile, (), "profile-pin", None, runtime) is None
+    )
+    assert (
+        loop_queue._own_account_alternates(
+            pinned_profile, ("openai",), OWN_ACCOUNT_MODEL, None, runtime
+        )
+        == ()
+    )
+
+
+def test_an_exhausted_account_names_the_limit_rather_than_a_missing_connection() -> None:
+    """A member whose accounts are all rate limited did not disconnect anything: telling them to
+    reconnect sends them to a screen that shows the account already there. Both arms hand over the
+    same address, and the cause names what to fix."""
+    limited = loop_queue.SubagentKeyWithdrawn(
+        OWN_ACCOUNT_PROFILE.name, "https://ufo.example/", rate_limited=True
+    )
+    withdrawn = loop_queue.SubagentKeyWithdrawn(OWN_ACCOUNT_PROFILE.name, "https://ufo.example/")
+
+    assert limited.rate_limited
+    assert "every account they connected is rate limited right now" in str(limited)
+    assert "no longer connected" not in str(limited)
+    assert not withdrawn.rate_limited
+    assert "that account is no longer connected" in str(withdrawn)
+    for fault in (limited, withdrawn):
+        assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in str(fault)
 
 
 async def test_spawned_children_run_outside_the_turns_queue_claim(

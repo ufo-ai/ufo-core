@@ -205,6 +205,13 @@ class ModelRefusal(RuntimeError):
     deterministic per request, so retrying or degrading would only mislabel the failure."""
 
 
+class ModelAccountRateLimited(RuntimeError):
+    """The provider rate-limited the account serving this call, and the client's own backoff did
+    not outlast the limit. Typed rather than left as the provider SDK's status error because the
+    verdict is about the account and not the request: a turn that holds a second account of the
+    member's moves onto it, and a turn that holds none names the account the member must fix."""
+
+
 class ModelClient(Protocol):
     def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]: ...
 

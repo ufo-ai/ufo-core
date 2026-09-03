@@ -539,7 +539,7 @@ def _unreachable_trigger(
     a longer-window model moves the trigger out of reach and every probe would otherwise report a
     compaction that never fired. Refuse before a turn is spent, and name both numbers."""
     reason = (
-        f"snapshot window is {window_tokens:,} estimated tokens but {lab.model} declares a "
+        f"snapshot window is {window_tokens:,} estimated tokens but {lab.serving.model} declares a "
         f"{lab.context_window:,}-token context window, so compaction triggers at "
         f"{lab.live_trigger_tokens:,} — {lab.live_trigger_tokens - window_tokens:,} beyond the "
         f"window. Point --agent at an agent whose model declares a "

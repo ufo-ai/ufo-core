@@ -34,6 +34,7 @@ from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
+    ModelAccountRateLimited,
     ModelEvent,
     ModelRefusal,
     ModelRequest,
@@ -61,7 +62,7 @@ from ufo.harness.models.openai import (
 from ufo.harness.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from ufo.harness.models.pricing import ModelPrice
-from ufo.harness.models.registry import model_registry
+from ufo.harness.models.registry import ServingModel, model_registry
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport
 from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.runtime.access.credentials import CredentialValueInvalid
@@ -856,12 +857,44 @@ async def test_rejected_key_names_the_slot_and_env_it_came_from(
 async def test_retries_exhaust_after_max(
     harness: ProviderHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A 429 the backoff cannot outlast is the account's limit, not the request's: the round raises
+    the typed account fault, so a caller holding the member's other account moves the work onto it
+    where the SDK's own status class named only the wire code."""
     zero_backoff(monkeypatch)
     errors = [provider_error(harness.error_type, 429) for _ in range(harness.max_retries + 1)]
+    create = ScriptedCreate(*errors)
+    with pytest.raises(ModelAccountRateLimited, match="no capacity left"):
+        await collect(harness.build(create))
+    assert create.calls == harness.max_retries + 1
+
+
+@pytest.mark.parametrize("harness", PROVIDERS)
+async def test_server_error_exhaustion_stays_the_providers_own_fault(
+    harness: ProviderHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a 429 names the account. A 5xx that outlives the retries is the provider's own outage,
+    so moving the work onto the member's other account would spend it on a fault that account
+    cannot fix."""
+    zero_backoff(monkeypatch)
+    errors = [provider_error(harness.error_type, 503) for _ in range(harness.max_retries + 1)]
     create = ScriptedCreate(*errors)
     with pytest.raises(harness.error_type):
         await collect(harness.build(create))
     assert create.calls == harness.max_retries + 1
+
+
+async def test_a_turn_with_no_account_of_the_members_never_moves() -> None:
+    """A turn the workspace or the deploy pays for holds no accounts to move between: a rate-limited
+    round is the provider's fault like any other, and the holder stays on the model it began on."""
+    client = SimpleNamespace()
+    serving = ServingModel(model=ANTHROPIC_SPEC.id, spec=ANTHROPIC_SPEC, client=client)
+
+    assert await serving.move() is False
+    assert (serving.model, serving.spec, serving.client) == (
+        ANTHROPIC_SPEC.id,
+        ANTHROPIC_SPEC,
+        client,
+    )
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)

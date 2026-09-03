@@ -35,6 +35,7 @@ from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
+    ModelAccountRateLimited,
     ModelRefusal,
     ModelRequest,
     ModelResponseTruncated,
@@ -528,13 +529,22 @@ async def test_responses_path_does_not_retry_client_error() -> None:
     assert scripted.calls == 1
 
 
-@pytest.mark.parametrize("error", [_provider_error(429), _provider_timeout()])
+@pytest.mark.parametrize(
+    ("error", "raises"),
+    [
+        (_provider_error(429), ModelAccountRateLimited),
+        (_provider_timeout(), openai.APITimeoutError),
+    ],
+)
 async def test_responses_path_exhausts_retries(
-    error: Exception, monkeypatch: pytest.MonkeyPatch
+    error: Exception, raises: type[Exception], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A 429 the backoff cannot outlast is the account's limit rather than the request's, so this
+    surface raises the typed account fault the chat surface does. Every other exhausted retry stays
+    the provider SDK's own class."""
     monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(*([error] * (MAX_PROVIDER_RETRIES + 1)))
-    with pytest.raises(type(error)):
+    with pytest.raises(raises):
         [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == MAX_PROVIDER_RETRIES + 1
 

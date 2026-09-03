@@ -16,7 +16,7 @@ from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
 from ufo.harness.models.grant import Grant, read_grant
 from ufo.harness.models.pricing import Pricing
-from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.models.registry import MemberAccounts, ModelRegistry, ServingModel
 from ufo.host.ext.loader import injecting_slots
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.product import PRODUCT_ATTACH_METRIC, product_census
@@ -51,7 +51,14 @@ from ufo.runtime.ext.manifest import (
     Manifest,
 )
 from ufo.runtime.seats import create_member
-from ufo.runtime.workspace import init_workspace_credentials, model_authority, ws, ws_current
+from ufo.runtime.workspace import (
+    PLAN_FUNDED,
+    ModelFundingChanged,
+    init_workspace_credentials,
+    model_authority,
+    ws,
+    ws_current,
+)
 from ufo.schema import tables
 
 DATADOG_HOST = "api.datadoghq.com"
@@ -1082,6 +1089,145 @@ async def test_a_rejected_member_token_cannot_retry_on_another_payer(db: None) -
             [event async for event in client.complete(object())]
 
     assert served == ["member-key"]
+
+
+OTHER_ACCOUNT_MODEL = "claude-opus-5"
+
+
+def _two_account_registry(served: list[str]) -> ModelRegistry:
+    class Wire:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        async def complete(self, request: object) -> AsyncIterator[str]:
+            served.append(self.key)
+            yield "round"
+
+    return ModelRegistry(
+        specs={
+            OWN_ACCOUNT_MODEL: SimpleNamespace(
+                id=OWN_ACCOUNT_MODEL,
+                key_slot=OPENAI_KEY_SLOT,
+                key_env=None,
+                client=lambda _spec, key: Wire(key),
+            ),
+            OTHER_ACCOUNT_MODEL: SimpleNamespace(
+                id=OTHER_ACCOUNT_MODEL,
+                key_slot=ANTHROPIC_KEY_SLOT,
+                key_env=None,
+                client=lambda _spec, key: Wire(key),
+            ),
+        },
+        pricing=Pricing(prices={}, digest="test"),
+        auto_model=OWN_ACCOUNT_MODEL,
+    )
+
+
+async def _serving_on_own_account(registry: ModelRegistry, *alternates: str) -> ServingModel:
+    first = await registry.client_for(OWN_ACCOUNT_MODEL)
+    return ServingModel(
+        model=OWN_ACCOUNT_MODEL,
+        spec=registry.spec(OWN_ACCOUNT_MODEL),
+        client=first.client,
+        accounts=MemberAccounts(
+            registry=registry,
+            funding=first.funding,
+            alternates=alternates,
+            exhausted=lambda: RuntimeError("every account they connected is rate limited"),
+        ),
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_rate_limited_turn_moves_onto_the_members_other_connected_account(
+    db: None,
+) -> None:
+    """A member who connected both accounts bought two subscriptions: the move resolves the other
+    account's grant under the same funding class, and the rounds after it run on that client under
+    that model. With no account left, the turn raises the fault its caller named."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    for slot, access in ((OPENAI_KEY_SLOT, "openai"), (ANTHROPIC_KEY_SLOT, "anthropic")):
+        await store.put(
+            workspace_id,
+            member_slot(slot, member),
+            Grant(access=access, refresh="refresh", expires_at=time.time() + 3600).stored(),
+        )
+    served: list[str] = []
+    registry = _two_account_registry(served)
+    both = frozenset({OWN_ACCOUNT_MODEL, OTHER_ACCOUNT_MODEL})
+
+    with ws(workspace_id), model_authority(MemberAuthority(member), both):
+        serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
+        assert await serving.move() is True
+        assert (serving.model, serving.spec) == (
+            OTHER_ACCOUNT_MODEL,
+            registry.spec(OTHER_ACCOUNT_MODEL),
+        )
+        assert [event async for event in serving.client.complete(object())] == ["round"]
+        with pytest.raises(RuntimeError, match="every account they connected is rate limited"):
+            await serving.move()
+
+    assert served == ["anthropic"]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_move_never_lands_on_the_workspaces_row_or_the_deploys_key(db: None) -> None:
+    """The member's other slot is unset, so resolving the other model falls through to the
+    workspace's own row — a grant here, so the funding class even matches. The payer is not the
+    member's, and that spend is what a profile on the member's account exists to prevent, so the
+    move is refused rather than billed as the member's."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    live = Grant(access="openai", refresh="refresh", expires_at=time.time() + 3600)
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), live.stored())
+    await store.put(
+        workspace_id,
+        ANTHROPIC_KEY_SLOT,
+        Grant(access="workspace", refresh="refresh", expires_at=time.time() + 3600).stored(),
+    )
+    served: list[str] = []
+    registry = _two_account_registry(served)
+    both = frozenset({OWN_ACCOUNT_MODEL, OTHER_ACCOUNT_MODEL})
+
+    with ws(workspace_id), model_authority(MemberAuthority(member), both):
+        serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
+        assert serving.accounts is not None and serving.accounts.funding == PLAN_FUNDED
+        with pytest.raises(ModelFundingChanged, match="payer changed during account failover"):
+            await serving.move()
+
+    assert (serving.model, served) == (OWN_ACCOUNT_MODEL, [])
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_move_holds_the_funding_class_the_attempt_froze(db: None) -> None:
+    """The attempt began on a plan-funded grant and froze the plan rate card. The member's other
+    slot holds a raw key, whose tokens the provider bills its holder for, so continuing there
+    under the frozen card would record a real spend as costing nothing."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    live = Grant(access="openai", refresh="refresh", expires_at=time.time() + 3600)
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), live.stored())
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member), "sk-ant-member")
+    served: list[str] = []
+    registry = _two_account_registry(served)
+    both = frozenset({OWN_ACCOUNT_MODEL, OTHER_ACCOUNT_MODEL})
+
+    with ws(workspace_id), model_authority(MemberAuthority(member), both):
+        serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
+        with pytest.raises(ModelFundingChanged, match="payer changed during account failover"):
+            await serving.move()
+
+    assert (serving.model, served) == (OWN_ACCOUNT_MODEL, [])
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

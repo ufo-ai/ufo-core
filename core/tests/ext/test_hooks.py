@@ -26,6 +26,7 @@ import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
+from ufo_testsupport.models import serving_model
 
 import ufo.runtime.ext.hooks as hooks_module
 from ufo.blob import FilesystemBlobStore
@@ -542,13 +543,11 @@ def _engine(
         agent=agent,
         byok=False,
         system_prompt=rendered_prompt("p"),
-        model=model,
+        serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model,
-            model="claude-opus-4-8",
+            serving=serving_model(model),
             blob=blob,
             conversation_id=turn.conversation_id,
             trigger_tokens=compaction_trigger,

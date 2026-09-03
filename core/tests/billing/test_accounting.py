@@ -39,6 +39,8 @@ from ufo.runtime.billing.accounting import (
 from ufo.runtime.billing.balance import credit
 from ufo.runtime.workspace import (
     KEY_FUNDED,
+    PLAN_FUNDED,
+    Funding,
     ModelFundingChanged,
     ResolvedModelClient,
 )
@@ -1648,6 +1650,67 @@ async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None
     )
     assert first_registry.requested == ["claude-opus-4-8"]
     assert recovered_registry.requested == ["claude-opus-4-8"]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_attempt_freezes_a_rate_for_every_account_it_may_move_onto(db: None) -> None:
+    """A turn on the member's own account may move onto their other account mid-attempt. The rates
+    of every model it may serve on are frozen with the identity, read off one card, so a moved
+    round bills at the rate of the model that served it and a recovery re-prices nothing. Under a
+    plan-funded grant that card is zero for every candidate, and the same identity resolves again
+    on recovery."""
+    async with workspace_tx() as connection:
+        _, keyed_turn = await _seed_turn(connection)
+        _, plan_turn = await _seed_turn(connection)
+
+    class Registry:
+        pricing = CORE_PRICING
+
+        def __init__(self, funding: str) -> None:
+            self.funding = funding
+
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            return ResolvedModelClient(
+                cast(ModelClient, object()),
+                cast(Funding, self.funding),
+                "openai_api_key:member:first",
+            )
+
+    keyed, _, keyed_byok = await loop_queue._TurnBilling(
+        registry=cast(ModelRegistry, Registry(KEY_FUNDED)),
+        turn_id=keyed_turn,
+        attempt="attempt-1",
+        candidate_model="gpt-5.6-sol",
+        alternates=("claude-opus-5",),
+    ).resolve()
+    plan_registry = cast(ModelRegistry, Registry(PLAN_FUNDED))
+    plan, _, plan_byok = await loop_queue._TurnBilling(
+        registry=plan_registry,
+        turn_id=plan_turn,
+        attempt="attempt-1",
+        candidate_model="gpt-5.6-sol",
+        alternates=("claude-opus-5",),
+    ).resolve()
+    recovered, _, _ = await loop_queue._TurnBilling(
+        registry=plan_registry,
+        turn_id=plan_turn,
+        attempt="attempt-1",
+        candidate_model="gpt-5.6-sol",
+        alternates=("claude-opus-5",),
+    ).resolve()
+
+    assert keyed.pricing().prices == {
+        "gpt-5.6-sol": CORE_PRICES["gpt-5.6-sol"],
+        "claude-opus-5": CORE_PRICES["claude-opus-5"],
+    }
+    assert keyed.pricing().digest == PRICE_DIGEST
+    assert plan.pricing().prices == {
+        "gpt-5.6-sol": loop_queue.PLAN_SERVED_PRICE,
+        "claude-opus-5": loop_queue.PLAN_SERVED_PRICE,
+    }
+    assert plan.pricing().digest != keyed.pricing().digest
+    assert recovered == plan
+    assert (keyed_byok, plan_byok) == (True, True)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

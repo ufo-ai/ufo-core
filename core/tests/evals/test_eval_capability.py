@@ -9,7 +9,7 @@ from evals.harness.capability import (
     EvalTrajectory,
     ToolInvocation,
 )
-from evals.harness.harness import WAIT_EXPIRED, infra_owned_fault
+from evals.harness.harness import WAIT_EXPIRED, infra_owned_fault, is_transient_fault
 from evals.harness.target import CapabilityTarget, TargetResult
 from ufo.schema.records import TurnStatus
 
@@ -67,6 +67,22 @@ def test_a_wait_expired_before_model_output_is_excluded_a_started_loop_is_not() 
     assert harness_capability._unclean_verdict(provider).excluded
     assert infra_owned_fault(None, WAIT_EXPIRED, "parked")
     assert not infra_owned_fault(None, WAIT_EXPIRED, "done")
+
+
+def test_a_provider_rate_limit_is_the_providers_fault_under_either_name() -> None:
+    """A 429 the client's retries could not outlast reaches the terminal as the repo's own typed
+    class, where the SDK's status class used to surface. Both name the same external limit, so a
+    run that met one is excluded from scoring rather than counted against the model."""
+    for error_class in ("ModelAccountRateLimited", "RateLimitError"):
+        assert is_transient_fault(error_class)
+        assert infra_owned_fault(error_class, "model call failed", None)
+        limited = TargetResult(
+            CapabilityOutput("", ()),
+            clean=False,
+            failure_reason="model call failed",
+            error_class=error_class,
+        )
+        assert harness_capability._unclean_verdict(limited).excluded
 
 
 async def test_a_followup_wait_ignores_tool_calls_from_the_completed_first_turn() -> None:

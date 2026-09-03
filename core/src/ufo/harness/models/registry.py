@@ -5,7 +5,7 @@ fails loud at `spec`, rather than across a mid-turn 400, a render crash, and a s
 provider resolves its own api key when the turn selects it, so a serve missing one key runs fine
 until an agent pinned to that backend actually runs. See RFC 0018."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from ufo.config import Config
@@ -70,6 +70,71 @@ class _RebuiltOnRejection:
         once = rebuilt.client.built if isinstance(rebuilt.client, _RebuiltOnRejection) else rebuilt
         async for event in once.complete(request):
             yield event
+
+
+@dataclass
+class MemberAccounts:
+    """The member's own connected accounts behind one turn: the funding class the attempt's billing
+    froze against the account it began on, the models the other accounts serve in the order the
+    first was chosen by, and the fault the turn raises once every account is spent.
+
+    A member who connected both a Claude and a ChatGPT account bought two subscriptions, so the
+    provider rate-limiting the one in hand is not the end of the work: `next` resolves the account
+    the work moves onto. It holds the move to the rule `_RebuiltOnRejection` holds a rebuild to. The
+    funding class must be the one the attempt froze, and the payer must be the member's own slot
+    for the moved model — never the workspace's row or the deploy's key that `client_for` falls
+    through to when the member's slot is unset, because that spend is exactly what a profile on the
+    member's account exists to prevent, and the frozen `byok` verdict and rate card would record it
+    as costing nothing."""
+
+    registry: "ModelRegistry"
+    funding: Funding
+    alternates: tuple[str, ...]
+    exhausted: Callable[[], Exception]
+
+    async def next(self) -> tuple[ModelSpec, ModelClient]:
+        if not self.alternates:
+            raise self.exhausted()
+        model, self.alternates = self.alternates[0], self.alternates[1:]
+        spec = self.registry.spec(model)
+        resolved = await self.registry.client_for(model)
+        if resolved.funding != self.funding or resolved.payer != ws_current().member_payer(
+            spec.key_slot, model
+        ):
+            raise ModelFundingChanged("model payer changed during account failover")
+        return spec, resolved.client
+
+
+@dataclass
+class ServingModel:
+    """The model a turn's rounds run on, held in one place: the id its requests name, the spec whose
+    provider, reasoning and context window the turn reads, and the client the rounds call. Every
+    fact the turn derives from a model id reads off this holder, so a move leaves nothing keyed to
+    the model the turn began on.
+
+    A turn on the member's own account also holds `accounts`; `move` swaps the holder onto the next
+    of them when the provider rate-limits the one in hand. The engine moves only on a round the
+    provider refused before its first event — the one shape a rate-limit fault takes, since a
+    stream that already delivered fails as an interrupted stream instead — so the moved round
+    replays the same canonical messages under the new model id, and a crash-recovery replay of the
+    recorded rounds moves at the same round the first run did. A transcript carries one thing the
+    second provider cannot read — the first one's reasoning blocks — and each client drops the
+    other's. A turn the workspace or the deploy pays for holds no accounts and never moves: its
+    rate-limited round is the provider's fault like any other."""
+
+    model: str
+    spec: ModelSpec
+    client: ModelClient
+    accounts: MemberAccounts | None = None
+
+    async def move(self) -> bool:
+        """Move onto the member's next account, or say that this turn has none to move to. With
+        accounts but none left, raises the fault their caller named."""
+        if self.accounts is None:
+            return False
+        self.spec, self.client = await self.accounts.next()
+        self.model = self.spec.id
+        return True
 
 
 @dataclass(frozen=True)

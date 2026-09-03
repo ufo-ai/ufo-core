@@ -8,6 +8,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
+from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -246,12 +247,11 @@ def _engine(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         byok=False,
         system_prompt=rendered_prompt("p"),
-        model=model,
+        serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model, model="claude-opus-4-8", blob=blob, conversation_id=turn.conversation_id
+            serving=serving_model(model), blob=blob, conversation_id=turn.conversation_id
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=StubCarrier(), handle=handle),

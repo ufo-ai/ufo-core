@@ -28,15 +28,19 @@ from opentelemetry.sdk.metrics.export import (
 )
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
+from ufo_testsupport.models import CORE_SPECS, serving_model
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.agent import ToolCall as HarnessToolCall
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_PRICING
 from ufo.harness.models.interface import (
     ConversationCacheTtl,
     ImageBlock,
     Message,
+    ModelAccountRateLimited,
+    ModelClient,
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
@@ -52,7 +56,8 @@ from ufo.harness.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
-from ufo.harness.models.spec import ReasoningSupport
+from ufo.harness.models.registry import MemberAccounts, ModelRegistry
+from ufo.harness.models.spec import ModelSpec
 from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.harness.sandbox.session import (
     RUNTIME_DIRNAME,
@@ -83,6 +88,7 @@ from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
     CredentialRequests,
     CredentialStore,
+    member_slot,
     open_credential_request,
 )
 from ufo.runtime.access.grants import (
@@ -99,7 +105,7 @@ from ufo.runtime.authority import (
     MemberAuthority,
     authority_member_id,
 )
-from ufo.runtime.billing.accounting import TurnUsageConflict, record_turn_usage
+from ufo.runtime.billing.accounting import TOKENS_DIMENSION, TurnUsageConflict, record_turn_usage
 from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.compaction import (
     COMPACTED_CONTEXT_PREFIX,
@@ -195,7 +201,13 @@ from ufo.runtime.turns.workspace_changes import (
     WorkspaceChanges,
     recorded_workspace_changes,
 )
-from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.runtime.workspace import (
+    PLAN_FUNDED,
+    ResolvedModelClient,
+    init_workspace_credentials,
+    model_authority,
+    ws,
+)
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -211,6 +223,7 @@ from ufo.schema.records import (
     TurnAdmissionSource,
     TurnContext,
     Usage,
+    ledger_id_for,
 )
 
 pytestmark = [
@@ -1142,11 +1155,9 @@ def _engine(
     requestable_credentials: CredentialRequests | None = None,
     memory: MemorySearch | None = None,
     skills: SkillRegistry = CORE_SKILL_REGISTRY,
-    provider: str = "anthropic",
     model_id: str = "claude-opus-4-8",
     handle: SandboxHandle | None = None,
     byok: bool = False,
-    reasoning: ReasoningSupport | None = None,
     actions: bool = False,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
@@ -1163,20 +1174,17 @@ def _engine(
                 _agent_tools(all_tools, None, MEMBER_ADMISSION), all_tools, granted_actions
             )
         )
+    serving = serving_model(cast(ModelClient, model), model_id)
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model=model_id),
         byok=byok,
         system_prompt=rendered_prompt("p"),
-        model=model,
+        serving=serving,
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider=provider,
-        reasoning=reasoning or ReasoningSupport(supported=True, tools_with_reasoning=True),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=compaction
-        or Compaction(
-            client=model, model="claude-opus-4-8", blob=blob, conversation_id=turn.conversation_id
-        ),
+        or Compaction(serving=serving, blob=blob, conversation_id=turn.conversation_id),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         cdp_provider=None,
@@ -3333,8 +3341,7 @@ async def test_a_write_survives_mid_turn_compaction_into_the_changes_scan(
         )
     )
     compaction = Compaction(
-        client=EchoModel(),
-        model="claude-opus-4-8",
+        serving=serving_model(EchoModel()),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=turn.conversation_id,
         trigger_tokens=1,
@@ -4512,8 +4519,7 @@ async def test_engine_compacts_history_before_the_round_and_bills_the_summary(
         )
     )
     compaction = Compaction(
-        client=EchoModel(),
-        model="claude-opus-4-8",
+        serving=serving_model(EchoModel()),
         blob=blob,
         conversation_id=turn.conversation_id,
         trigger_tokens=10,
@@ -4551,8 +4557,7 @@ async def test_context_overflow_forces_a_compaction_then_completes(
         )
     )
     compaction = Compaction(
-        client=EchoModel(),
-        model="claude-opus-4-8",
+        serving=serving_model(EchoModel()),
         blob=blob,
         conversation_id=turn.conversation_id,
         trigger_tokens=1_000_000,
@@ -4648,8 +4653,7 @@ async def test_forced_compaction_keeps_each_request_bound_to_its_message_ref(
 
     model = OverflowThenChooseRequest()
     compaction = Compaction(
-        client=EchoModel(),
-        model="claude-opus-4-8",
+        serving=serving_model(EchoModel()),
         blob=blob,
         conversation_id=turn.conversation_id,
         trigger_tokens=1_000_000,
@@ -4713,6 +4717,161 @@ async def test_a_truncation_salvages_the_partial_to_a_workspace_file_and_feeds_t
     assert stored.messages[-1] == Message(role="assistant", content="recovered")
     salvaged = 'Writing the report now.\n\n[tool call: write_report]\n{"content": "chapter one'
     assert carrier.writes == [(actual, salvaged.encode())]
+
+
+@dataclass
+class LimitedAfterOneRoundModel:
+    """The member's first account: serves the first round with a tool call, then the provider
+    rate-limits it before the next round's first event."""
+
+    seen: list[str] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.model)
+        if len(self.seen) > 1:
+            raise ModelAccountRateLimited("the account serving it has no capacity left right now.")
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class OtherAccountModel:
+    seen: list[str] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.model)
+        yield TextDelta(text="done")
+        yield Usage(input_tokens=5, output_tokens=7)
+
+
+def _other_account(client: object, member: UUID) -> ModelRegistry:
+    class Registry:
+        def spec(self, model: str) -> ModelSpec:
+            return CORE_SPECS[model]
+
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            return ResolvedModelClient(
+                cast(ModelClient, client), PLAN_FUNDED, member_slot(ANTHROPIC_KEY_SLOT, member)
+            )
+
+    return cast(ModelRegistry, Registry())
+
+
+async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_account(
+    db: None, tmp_path: Path
+) -> None:
+    """The first account serves one round and the provider rate-limits it before the next. The
+    turn moves onto the member's other account and every fact keyed to the model follows: the
+    round re-runs under the other model's id, the window compaction reads is that model's, and each
+    account's burn lands on the ledger under its own model at its own rate — the account the
+    attempt began on under the attempt's series, the one it moved onto under the attempt and its
+    model."""
+    turn = await _seed_turn("queued", None)
+    first, other = LimitedAfterOneRoundModel(), OtherAccountModel()
+    member = uuid4()
+    engine = replace(_engine(turn, first, tmp_path, model_id="gpt-5.6-sol"), attempt="attempt-1")
+    engine.serving.accounts = MemberAccounts(
+        registry=_other_account(other, member),
+        funding=PLAN_FUNDED,
+        alternates=("claude-opus-5",),
+        exhausted=lambda: RuntimeError("every account they connected is rate limited"),
+    )
+    assert engine.compaction.window.context_tokens == CORE_SPECS["gpt-5.6-sol"].context_window
+
+    both = frozenset({"gpt-5.6-sol", "claude-opus-5"})
+    with ws(turn.workspace_id), model_authority(MemberAuthority(member), both):
+        frame = await engine.run()
+
+    assert frame is not None and (frame.status, frame.text) == ("done", "done")
+    assert first.seen == ["gpt-5.6-sol", "gpt-5.6-sol"]
+    assert other.seen == ["claude-opus-5"]
+    assert engine.serving.model == "claude-opus-5"
+    assert engine.compaction.window.context_tokens == CORE_SPECS["claude-opus-5"].context_window
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.id,
+                    tables.ledger.c.model,
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.priced_micro_usd,
+                )
+                .where(tables.ledger.c.turn_id == turn.id)
+                .order_by(tables.ledger.c.model)
+            )
+        ).all()
+    first_burn = Usage(input_tokens=2, output_tokens=2)
+    other_burn = Usage(input_tokens=5, output_tokens=7)
+    assert [tuple(row) for row in rows] == [
+        (
+            ledger_id_for(turn.workspace_id, turn.id, TOKENS_DIMENSION, "attempt-1/claude-opus-5"),
+            "claude-opus-5",
+            5,
+            7,
+            CORE_PRICING.micro_usd("claude-opus-5", other_burn),
+        ),
+        (
+            ledger_id_for(turn.workspace_id, turn.id, TOKENS_DIMENSION, "attempt-1"),
+            "gpt-5.6-sol",
+            2,
+            2,
+            CORE_PRICING.micro_usd("gpt-5.6-sol", first_burn),
+        ),
+    ]
+    assert frame.tokens == 16
+    assert frame.cost_micro_usd == CORE_PRICING.micro_usd(
+        "claude-opus-5", other_burn
+    ) + CORE_PRICING.micro_usd("gpt-5.6-sol", first_burn)
+
+
+async def test_a_member_with_no_account_left_reads_the_fault_the_caller_named(
+    db: None, tmp_path: Path
+) -> None:
+    """A rate limit on a turn whose member holds no other account ends the turn on the fault the
+    caller named — the one that tells the member which screen fixes it."""
+    turn = await _seed_turn("queued", None)
+    first = LimitedAfterOneRoundModel()
+    first.seen.append("gpt-5.6-sol")
+    engine = _engine(turn, first, tmp_path, model_id="gpt-5.6-sol")
+    engine.serving.accounts = MemberAccounts(
+        registry=_other_account(object(), uuid4()),
+        funding=PLAN_FUNDED,
+        alternates=(),
+        exhausted=lambda: RuntimeError("every account they connected is rate limited"),
+    )
+    with pytest.raises(RuntimeError, match="every account they connected is rate limited"):
+        await engine.run()
+
+
+async def test_a_turn_on_no_member_account_fails_a_rate_limit_as_the_providers_fault(
+    db: None, tmp_path: Path
+) -> None:
+    """A turn the workspace or the deploy pays for holds no accounts, so a typed rate limit on it
+    is a provider fault like any other: the round's own error class reaches the terminal, and no
+    message sends the member to connect an account that never served the turn."""
+    turn = await _seed_turn("queued", None)
+    limited = LimitedAfterOneRoundModel()
+    limited.seen.append("gpt-5.6-sol")
+    engine = _engine(turn, limited, tmp_path, model_id="gpt-5.6-sol")
+    assert engine.serving.accounts is None
+
+    with pytest.raises(ModelStreamError) as caught:
+        await engine.run()
+
+    assert caught.value.model_error_class == "ModelAccountRateLimited"
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn.id
+                )
+            )
+        ).one()
+    frame = TerminalFrame.model_validate(row.terminal)
+    assert (row.status, frame.error_class) == ("failed", "ModelAccountRateLimited")
+    assert frame.error_message is not None and "connect" not in frame.error_message
 
 
 async def test_a_turn_that_keeps_truncating_exhausts_its_rounds_and_fails(
@@ -5845,8 +6004,7 @@ async def test_the_active_request_carries_the_member_text_without_the_injection(
     turn = await _seed_turn("queued", None)
     model = CapturingModel()
     compaction = _RequestCapturingCompaction(
-        client=model,
-        model="claude-opus-4-8",
+        serving=serving_model(model),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=turn.conversation_id,
     )

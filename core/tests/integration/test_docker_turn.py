@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from ufo_ext_docker import DockerCarrier
+from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -176,18 +177,17 @@ async def test_turn_execs_bash_in_a_live_container(
     turn = await _seed_turn(live_container.conversation_id)
     blob = FilesystemBlobStore(root=tmp_path / "blobs")
     model = BashThenAnswerModel()
+    serving = serving_model(model)
     engine = TurnEngine(
         turn=turn,
         agent=Agent(prompt="run the marker", model="claude-opus-4-8"),
         byok=False,
         system_prompt=rendered_prompt("run the marker"),
-        model=model,
+        serving=serving,
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model,
-            model="claude-opus-4-8",
+            serving=serving,
             blob=blob,
             conversation_id=turn.conversation_id,
         ),

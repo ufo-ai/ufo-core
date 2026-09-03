@@ -28,7 +28,6 @@ from ufo.harness.context import CompactionHarness, ContextWindow
 from ufo.harness.models.interface import (
     ImageBlock,
     Message,
-    ModelClient,
     ModelRequest,
     ReasoningItemBlock,
     RedactedThinkingBlock,
@@ -38,7 +37,7 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.harness.models.spec import ReasoningSupport
+from ufo.harness.models.registry import ServingModel
 from ufo.harness.o11y import emit_metric, log, log_error, warn
 from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME, UFO_HOME_ENV
 from ufo.runtime.ext.hooks import HookChain
@@ -210,12 +209,10 @@ class Compaction:
     drops the workflow bodies the head held, so this flow drains the tracker into the summary and
     leaves it empty — the one summary field the pipeline knows and the model does not."""
 
-    client: ModelClient
-    model: str
+    serving: ServingModel
     blob: WorkspaceBlobStore
     conversation_id: UUID
     summary_max_tokens: int = COMPACTION_SUMMARY_MAX_TOKENS
-    context_window: int = DEFAULT_CONTEXT_WINDOW_TOKENS
     trigger_tokens: int | None = None
     keep_messages: int = COMPACTION_KEEP_MESSAGES
     max_ptl_retries: int = MAX_PTL_RETRIES
@@ -223,34 +220,29 @@ class Compaction:
     loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
     turn: Turn | None = None
     agent: Agent | None = None
-    reasoning: ReasoningSupport = field(
-        default_factory=lambda: ReasoningSupport(supported=True, tools_with_reasoning=True)
-    )
     _state: _CompactionState = field(default_factory=_CompactionState, init=False, compare=False)
-    window: ContextWindow[Message] = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "window",
-            ContextWindow(
-                role=lambda message: message.role,
-                text=self._text,
-                opaque_chars=self._opaque_chars,
-                image_count=self._image_count,
-                context_tokens=self.context_window,
-                summary_tokens=self.summary_max_tokens,
-                buffer_tokens=AUTOCOMPACT_BUFFER_TOKENS,
-                keep_messages=self.keep_messages,
-                chars_per_token=CHARS_PER_TOKEN,
-                image_tokens=IMAGE_TOKEN_ESTIMATE,
-                trigger_tokens=self.trigger_tokens,
-                head_drop_denominator=PTL_DROP_DENOMINATOR,
-            ),
+    @property
+    def window(self) -> ContextWindow[Message]:
+        """The window of the model serving the turn right now — read off `serving` at each use, so
+        a turn that moved onto another account compacts against that model's real window."""
+        return ContextWindow(
+            role=lambda message: message.role,
+            text=self._text,
+            opaque_chars=self._opaque_chars,
+            image_count=self._image_count,
+            context_tokens=self.serving.spec.context_window,
+            summary_tokens=self.summary_max_tokens,
+            buffer_tokens=AUTOCOMPACT_BUFFER_TOKENS,
+            keep_messages=self.keep_messages,
+            chars_per_token=CHARS_PER_TOKEN,
+            image_tokens=IMAGE_TOKEN_ESTIMATE,
+            trigger_tokens=self.trigger_tokens,
+            head_drop_denominator=PTL_DROP_DENOMINATOR,
         )
 
     def __repr__(self) -> str:
-        return f"Compaction(conversation_id={self.conversation_id}, model={self.model})"
+        return f"Compaction(conversation_id={self.conversation_id}, model={self.serving.model})"
 
     async def maybe_compact(
         self,
@@ -402,17 +394,17 @@ class Compaction:
         self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]
     ) -> tuple[CompactionSummary, Usage]:
         request = ModelRequest(
-            model=self.model,
+            model=self.serving.model,
             system=COMPACTION_SYSTEM_PROMPT,
             messages=(Message(role="user", content=self._prepare(rounds, missed)),),
             max_tokens=self.summary_max_tokens,
             conversation_cache_ttl="5m",
             session_id=str(self.conversation_id),
-            reasoning=self.reasoning.internal_effort(),
+            reasoning=self.serving.spec.reasoning.internal_effort(),
         )
         parts: list[str] = []
         usage: Usage | None = None
-        async for event in self.client.complete(request):
+        async for event in self.serving.client.complete(request):
             match event:
                 case TextDelta(text=chunk):
                     parts.append(chunk)

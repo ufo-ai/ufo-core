@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -20,7 +21,7 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
 from ufo.harness.models.pricing import ModelPrice, Pricing, pricing_from
-from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.models.registry import MemberAccounts, ModelRegistry, ServingModel
 from ufo.harness.o11y import (
     emit_histogram,
     emit_metric,
@@ -185,18 +186,61 @@ PLAN_SERVED_PRICE = ModelPrice(
 )
 
 
-class _BillingIdentity(BaseModel):
-    attempt: str
-    model: str
-    price_digest: str
+class _Rates(BaseModel):
     input: int
     output: int
     cache_read: int
     cache_write_5m: int
     cache_write_30m: int
     cache_write_1h: int
+
+    @classmethod
+    def of(cls, price: ModelPrice) -> "_Rates":
+        return cls(
+            input=price.input,
+            output=price.output,
+            cache_read=price.cache_read,
+            cache_write_5m=price.cache_write_5m,
+            cache_write_30m=price.cache_write_30m,
+            cache_write_1h=price.cache_write_1h,
+        )
+
+    def price(self) -> ModelPrice:
+        return ModelPrice(
+            input=self.input,
+            output=self.output,
+            cache_read=self.cache_read,
+            cache_write_5m=self.cache_write_5m,
+            cache_write_30m=self.cache_write_30m,
+            cache_write_1h=self.cache_write_1h,
+        )
+
+
+class _BillingIdentity(_Rates):
+    """The rate card one turn attempt bills against, frozen on the turn row: the model the attempt
+    began on with its rates, and — for a turn on the member's own account — the rates of every other
+    account's model the attempt may move onto, read off the same card, so a moved round bills at
+    the rate of the model that served it and a recovery re-prices nothing."""
+
+    attempt: str
+    model: str
+    price_digest: str
     funding: Funding | None = None
     payer: str | None = None
+    alternates: dict[str, _Rates] = {}
+
+    def pricing(self) -> Pricing:
+        return Pricing(
+            prices={
+                self.model: self.price(),
+                **{model: rates.price() for model, rates in self.alternates.items()},
+            },
+            digest=self.price_digest,
+        )
+
+
+def _plan_pricing(models: tuple[str, ...]) -> Pricing:
+    return pricing_from(dict.fromkeys(models, PLAN_SERVED_PRICE))
 
 
 @dataclass(frozen=True)
@@ -205,6 +249,7 @@ class _TurnBilling:
     turn_id: UUID
     attempt: str
     candidate_model: str
+    alternates: tuple[str, ...] = ()
 
     async def resolve(self) -> tuple[_BillingIdentity, ResolvedModelClient, bool]:
         billing = await _stored_billing_identity(self.turn_id, self.attempt)
@@ -224,23 +269,20 @@ class _TurnBilling:
 
     def _identity(self, model: str, resolved: ResolvedModelClient) -> _BillingIdentity:
         card = (
-            pricing_from({model: PLAN_SERVED_PRICE})
+            _plan_pricing((model, *self.alternates))
             if resolved.funding == PLAN_FUNDED
             else self.registry.pricing
         )
-        current = card.prices[model]
         return _BillingIdentity(
+            **_Rates.of(card.prices[model]).model_dump(),
             attempt=self.attempt,
             model=model,
             price_digest=card.digest,
-            input=current.input,
-            output=current.output,
-            cache_read=current.cache_read,
-            cache_write_5m=current.cache_write_5m,
-            cache_write_30m=current.cache_write_30m,
-            cache_write_1h=current.cache_write_1h,
             funding=resolved.funding,
             payer=resolved.payer,
+            alternates={
+                alternate: _Rates.of(card.prices[alternate]) for alternate in self.alternates
+            },
         )
 
     @staticmethod
@@ -249,7 +291,7 @@ class _TurnBilling:
             raise ModelFundingChanged("model funding changed during turn attempt")
         if billing.payer is not None and billing.payer != model.payer:
             raise ModelFundingChanged("model payer changed during turn attempt")
-        plan_digest = pricing_from({billing.model: PLAN_SERVED_PRICE}).digest
+        plan_digest = _plan_pricing((billing.model, *billing.alternates)).digest
         if (billing.price_digest == plan_digest) != (model.funding == PLAN_FUNDED):
             raise ModelFundingChanged("model funding changed during turn attempt")
 
@@ -367,21 +409,32 @@ def _agent_actions(
 
 class SubagentKeyWithdrawn(Exception):
     """A profile that runs on the speaking member's own provider account reached execution with no
-    account behind it. The spawn gate refuses this at admission, so the turn in hand was admitted
-    while the member held one and they disconnected before it ran. There is no second model to fall
-    back to: the deploy's key is exactly what this profile exists not to spend.
+    account able to serve it. Either the member disconnected the account after the spawn gate
+    admitted the turn, or every account they connected is rate limited and the work has nowhere
+    left to move. The deploy's key is not a fallback for either: it is exactly what this profile
+    exists not to spend.
 
-    It carries the same address the spawn refusal does, because the member reading it is in the
-    same position — the account is gone, and the screen that connects one is what they need."""
+    Both arms carry the same address the spawn refusal does, because the member reading either is
+    in the same position — no account of theirs can run the work, and the screen that connects or
+    replaces one is what they need. `rate_limited` names which arm they landed on, so the message
+    tells them what to fix without sending them to a second screen."""
 
-    def __init__(self, profile: str, connect_url: str | None = None) -> None:
+    def __init__(
+        self, profile: str, connect_url: str | None = None, rate_limited: bool = False
+    ) -> None:
         connect = f"{connect_url.rstrip('/')}{SPAWN_CONNECT_PATH}" if connect_url else "the portal"
+        cause = (
+            "every account they connected is rate limited right now"
+            if rate_limited
+            else "that account is no longer connected"
+        )
         super().__init__(
             f"subagent profile {profile!r} runs the coding agent on the member's own ChatGPT or "
-            "Claude account, and that account is no longer connected, so this task cannot run. "
+            f"Claude account, and {cause}, so this task cannot run. "
             f"Send them to {connect}"
         )
         self.profile = profile
+        self.rate_limited = rate_limited
 
 
 def _member_accounts_connectable(runtime: "Runtime") -> bool:
@@ -421,6 +474,36 @@ def _subagent_model(
     if pinned is not None:
         return pinned
     return runtime.registry.resolve(profile.model or agent.model)
+
+
+def _own_account_alternates(
+    profile: SubagentProfile,
+    connected: tuple[str, ...],
+    chosen: str,
+    document: str | None,
+    runtime: "Runtime",
+) -> tuple[str, ...] | None:
+    """The models a turn on the member's own account moves onto when the provider rate-limits the
+    account it started on — one per other account the member connected, in the same declaration
+    order the first was chosen by — or None for a turn that runs on no account of theirs.
+
+    A member who connected both a Claude and a ChatGPT account bought two subscriptions, and the
+    coding work they asked for should spend the one still serving rather than stop at the limit of
+    the one it happened to start on. A turn running a model the environment document names spends
+    the workspace, not the member, so it moves nowhere: the document is the choice, and no account
+    of the member's was asked for. A deploy that can hold no member account runs the profile on its
+    own key, so the model `_subagent_model` chose there is none the member's accounts serve: that
+    turn holds no accounts either, and a rate limit on it is the provider's fault like any other."""
+    if not profile.needs_own_model_key or document is not None:
+        return None
+    own = tuple(
+        runtime.registry.resolve(model)
+        for provider in connected
+        if (model := profile.own_key_models.get(provider)) is not None
+    )
+    if chosen not in own:
+        return None
+    return tuple(model for model in own if model != chosen)
 
 
 def _subagent_actions(
@@ -869,21 +952,55 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             if document_model is not None:
                 runtime.registry.spec(document_model)
                 pinned_model = document_model
+        connected: tuple[str, ...] = ()
         if profile is None:
             resolved_model = (
                 pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model)
             )
         else:
-            connected = await ws_current().member_model_provider(turn.authority)
+            connected = await ws_current().member_model_providers(turn.authority)
             resolved_model = _subagent_model(
-                profile, connected, agent, runtime, pinned_model, document_model
+                profile,
+                connected[0] if connected else None,
+                agent,
+                runtime,
+                pinned_model,
+                document_model,
             )
+        alternates = (
+            None
+            if profile is None
+            else _own_account_alternates(
+                profile, connected, resolved_model, document_model, runtime
+            )
+        )
         billing, model, byok = await _TurnBilling(
             registry=runtime.registry,
             turn_id=turn.id,
             attempt=attempt,
             candidate_model=resolved_model,
+            alternates=alternates or (),
         ).resolve()
+        serving = ServingModel(
+            model=billing.model,
+            spec=runtime.registry.spec(billing.model),
+            client=model.client,
+            accounts=(
+                None
+                if profile is None or alternates is None
+                else MemberAccounts(
+                    registry=runtime.registry,
+                    funding=model.funding,
+                    alternates=tuple(billing.alternates),
+                    exhausted=partial(
+                        SubagentKeyWithdrawn,
+                        profile.name,
+                        runtime.config.connect.public_base_url,
+                        rate_limited=True,
+                    ),
+                )
+            ),
+        )
         with span("environment.assemble"):
             assembled = await runtime.environment.assemble(
                 AssembleRequest(
@@ -937,19 +1054,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model
             connector_read_only = profile.connector_read_only
-        pricing = Pricing(
-            prices={
-                billing.model: ModelPrice(
-                    input=billing.input,
-                    output=billing.output,
-                    cache_read=billing.cache_read,
-                    cache_write_5m=billing.cache_write_5m,
-                    cache_write_30m=billing.cache_write_30m,
-                    cache_write_1h=billing.cache_write_1h,
-                )
-            },
-            digest=billing.price_digest,
-        )
         grants = GrantStore() if runtime.credentials is not None else None
         clis = runtime.environment.clis()
         sandbox = _LateSandbox(
@@ -991,7 +1095,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             agent=resolved,
             byok=byok,
             system_prompt=system_prompt,
-            model=model,
+            serving=serving,
             activity_summarizer=ActivitySummarizer(
                 ModelAccess(
                     replace(
@@ -1001,19 +1105,14 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     ACTIVITY_JOB,
                 )
             ),
-            provider=runtime.registry.spec(resolved.model).provider,
-            reasoning=runtime.registry.spec(resolved.model).reasoning,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
             compaction=Compaction(
-                client=model,
-                model=resolved.model,
-                context_window=runtime.registry.spec(resolved.model).context_window,
+                serving=serving,
                 blob=runtime.blob,
                 conversation_id=turn.conversation_id,
                 hooks=hooks,
                 turn=turn,
                 agent=resolved,
-                reasoning=runtime.registry.spec(resolved.model).reasoning,
             ),
             hub=runtime.hub,
             lineage=lineage,
@@ -1053,7 +1152,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             site_previewer=runtime.site_previewer,
             grants=grants,
             previous_turn_ended_at=previous_turn_ended_at,
-            pricing=pricing,
+            pricing=billing.pricing(),
             attempt=attempt,
             max_rounds=max_rounds,
             skills=assembled.skills,

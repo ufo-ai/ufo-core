@@ -10,13 +10,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ufo.harness.models.interface import ModelClient, ToolSchema
+from ufo.harness.models.interface import ModelAccountRateLimited, ModelClient, ToolSchema
 from ufo.harness.models.pricing import ModelPrice
 from ufo.runtime.access.credentials import CredentialValueInvalid
 from ufo.schema.records import ReasoningEffort
 
 KNOWLEDGE_CUTOFF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 KEY_REJECTED_STATUS = 401
+RATE_LIMITED_STATUS = 429
 
 ApiSurface = Literal["chat", "responses"]
 
@@ -86,6 +87,16 @@ class ModelSpec:
             f"model {self.id!r} key was rejected by the provider: env UFO_{needed} (or {needed}) "
             f"or the workspace's {self.key_slot!r} BYOK slot holds a key {self.provider} does not "
             "accept. Replace it."
+        )
+
+    def rate_limited(self) -> ModelAccountRateLimited:
+        """The account fault a provider's 429 is once this client's own retries are spent: the
+        account the credential resolved has no capacity left right now. Typed here beside
+        `key_rejected` so every caller reads one verdict per model rather than each provider SDK's
+        own status class."""
+        return ModelAccountRateLimited(
+            f"model {self.id!r} was rate limited by {self.provider}: the account serving it has no "
+            "capacity left right now."
         )
 
     def wire_reasoning(

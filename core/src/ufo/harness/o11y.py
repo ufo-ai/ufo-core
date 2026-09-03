@@ -206,6 +206,7 @@ ERROR_CLASSES = frozenset(
         "IsADirectoryError",
         "KeyError",
         "LocalProtocolError",
+        "ModelAccountRateLimited",
         "ModelRefusal",
         "ModelResponseTruncated",
         "NetworkError",

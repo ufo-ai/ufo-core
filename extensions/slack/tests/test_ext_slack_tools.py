@@ -39,6 +39,7 @@ from ufo_ext_slack.tools import (
     SlackConnectInput,
     SlackManifestInput,
 )
+from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
@@ -350,13 +351,11 @@ async def _dispatch(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         byok=False,
         system_prompt=rendered_prompt("p"),
-        model=model,
+        serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
         transcript=Transcript(blob=workspace_blob, conversation_id=turn.conversation_id),
         compaction=Compaction(
-            client=model,
-            model="claude-opus-4-8",
+            serving=serving_model(model),
             blob=workspace_blob,
             conversation_id=turn.conversation_id,
         ),

@@ -173,7 +173,7 @@ from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog_skill import model_catalog_skill
 from ufo.harness.models.pricing import MICRO_USD_PER_USD
-from ufo.harness.models.registry import ModelRegistry, model_registry
+from ufo.harness.models.registry import ModelRegistry, ServingModel, model_registry
 from ufo.host.ext.loader import (
     embed_backend,
     index_backend,
@@ -1087,11 +1087,13 @@ async def _run(
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
                     compaction = CompactionTarget(
-                        client=await registry.client_for(resolved_agent_model),
-                        model=resolved_agent_model,
+                        serving=ServingModel(
+                            model=resolved_agent_model,
+                            spec=registry.spec(resolved_agent_model),
+                            client=(await registry.client_for(resolved_agent_model)).client,
+                        ),
                         blob=blob,
                         workspace_root=config.sandbox.workspace_root,
-                        context_window=registry.spec(resolved_agent_model).context_window,
                     )
                 target = InProcessTarget(
                     ctx=ctx,

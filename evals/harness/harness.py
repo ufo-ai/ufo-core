@@ -248,6 +248,7 @@ def infra_error(errors: Sequence[str]) -> str:
 TRANSIENT_ERROR_CLASSES = frozenset(
     {
         "RateLimitError",
+        "ModelAccountRateLimited",
         "InternalServerError",
         "ServiceUnavailableError",
         "OverloadedError",
@@ -277,7 +278,9 @@ def is_transient_fault(error_class: str | None) -> bool:
     SDK / httpx transient set, never a substring: the terminal `error_class` also carries the class
     of an internal fault (a DB or DBOS wedge the backstop commits as `type(error).__name__`), and a
     builtin `TimeoutError` or `ConnectionError` there is an internal wedge that must surface as a
-    failure, never be masked as external."""
+    failure, never be masked as external. `ModelAccountRateLimited` is the repo's own name for a
+    provider 429 that outlived the client's retries — the class a terminal frame carries where the
+    SDK's `RateLimitError` used to surface — and is the same external limit."""
     return error_class in TRANSIENT_ERROR_CLASSES
 
 

@@ -240,6 +240,14 @@ class WorkspaceScope:
         can hold a grant, and so the only one whose credential a refresh can replace."""
         return len(self._slot_order(slot, model)) > 1
 
+    def member_payer(self, slot: str, model: str) -> str | None:
+        """The payer a call on `model` bills when the speaking member's own account serves it —
+        their own row under `slot`, the first `model_credential` reads — or None when the call is
+        not routed through the member at all. A resolved payer that differs is the workspace's row
+        or the deploy's key, reached by falling through a member slot that is unset."""
+        order = self._slot_order(slot, model)
+        return order[0] if len(order) > 1 else None
+
     def _slot_order(self, slot: str, model: str | None) -> list[str]:
         bound = _current_model_authority.get()
         if slot not in MEMBER_ROUTED_SLOTS or bound is None:
@@ -263,16 +271,24 @@ class WorkspaceScope:
         A member who skipped that step in onboarding holds no key of their own, and the workspace's
         own is not theirs: this asks about the person, not the deploy, so it never reads the admin
         or platform fallbacks. Declaration order decides for a member who connected both."""
+        connected = await self.member_model_providers(authority)
+        return connected[0] if connected else None
+
+    async def member_model_providers(self, authority: ExecutionAuthority) -> tuple[str, ...]:
+        """Every provider the authority's member signed in with, in declaration order — the first
+        is the account their coding work runs on, and the rest are what that work moves to when the
+        provider rate-limits the first. Empty when they connected none."""
         member_id = authority_member_id(authority)
         if _store is None or member_id is None:
-            return None
+            return ()
+        connected: list[str] = []
         for slot, provider in MEMBER_ROUTED_SLOTS.items():
             try:
                 await _store.get(self.workspace_id, member_slot(slot, member_id))
             except CredentialSlotUnset:
                 continue
-            return provider
-        return None
+            connected.append(provider)
+        return tuple(connected)
 
     async def credential_is_stored(self, slot: str, model: str | None = None) -> bool:
         """Whether this workspace holds its own value for `slot` rather than running on the platform

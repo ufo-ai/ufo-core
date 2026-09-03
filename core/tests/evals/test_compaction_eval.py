@@ -1,11 +1,12 @@
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from ufo_testsupport.models import serving_model
 
 from evals.compaction.build import REAL_SKELETONS, SKELETON_SUFFIX, SnapshotBuild
 from evals.compaction.models import CompactionCase, PlantedFact, estimate_tokens, message_text
@@ -114,12 +115,12 @@ def _lab(
 ) -> CompactionTarget:
     """The default window puts the live trigger exactly at `TEST_TRIGGER_TOKENS`, so a probe-model
     window built at `TEST_TARGET_TOKENS` clears it just as a full-scale one clears production's."""
+    serving = serving_model(ScriptedSummaryModel(summary))
+    serving.spec = replace(serving.spec, context_window=context_window)
     return CompactionTarget(
-        client=ScriptedSummaryModel(summary),
-        model="claude-opus-4-8",
+        serving=serving,
         blob=FilesystemBlobStore(root=blob_root),
         workspace_root=blob_root / "workspaces",
-        context_window=context_window,
     )
 
 
@@ -170,8 +171,7 @@ async def test_the_estimator_mirror_matches_the_live_compaction(tmp_path: Path) 
         ),
     )
     live = Compaction(
-        client=ScriptedSummaryModel(_summary()),
-        model="claude-opus-4-8",
+        serving=serving_model(ScriptedSummaryModel(_summary())),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=uuid4(),
     )

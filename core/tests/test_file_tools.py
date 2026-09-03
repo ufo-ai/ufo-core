@@ -25,6 +25,7 @@ import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
 from ufo_ext_docker import DockerCarrier
+from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
@@ -935,13 +936,11 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
         agent=ctx.agent,
         byok=False,
         system_prompt=rendered_prompt("p"),
-        model=_QuietModel(),
+        serving=serving_model(_QuietModel()),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
         transcript=Transcript(blob=ctx.blob, conversation_id=ctx.turn.conversation_id),
         compaction=Compaction(
-            client=_QuietModel(),
-            model="claude-opus-4-8",
+            serving=serving_model(_QuietModel()),
             blob=ctx.blob,
             conversation_id=ctx.turn.conversation_id,
         ),
