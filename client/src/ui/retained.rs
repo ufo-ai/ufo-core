@@ -33,6 +33,15 @@ pub enum Entry {
     Masthead,
 }
 
+impl Entry {
+    /// Whether the transcript's blank-row rules govern this entry. Prose reads better with two
+    /// adjacent blanks collapsed and none at the very top; the mark is a drawing that stands in
+    /// its own air, so the blank rows it draws are its own.
+    fn keeps_its_blanks(&self) -> bool {
+        matches!(self, Entry::Masthead)
+    }
+}
+
 /// One step of a turn: a thought the agent wrote between its calls, the one line a call or a
 /// skill load narrated, or a subagent run.
 pub enum Step {
@@ -464,7 +473,8 @@ impl Retained {
         let mut tail_blank = true;
         for index in 0..self.entries.len() {
             let shape = self.shape(index, theme);
-            let from = usize::from(shape.starts_blank && tail_blank);
+            let held = self.entries[index].keeps_its_blanks();
+            let from = usize::from(shape.starts_blank && tail_blank && !held);
             let kept = shape.lines - from;
             places.push(Place { start: at, from });
             at += kept;
@@ -483,11 +493,21 @@ impl Retained {
         self.scroll_back = (self.scroll_back + added).min(self.total.saturating_sub(1));
     }
 
+    /// One entry's lines: prose with its adjacent blanks collapsed, the mark with its air kept.
+    fn rendered(&self, at: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let entry = &self.entries[at];
+        let lines = render(entry, theme, self.width);
+        match entry.keeps_its_blanks() {
+            true => lines,
+            false => collapse(lines, |line| line),
+        }
+    }
+
     fn shape(&mut self, at: usize, theme: &Theme) -> Shape {
         if let Some(shape) = self.shapes[at] {
             return shape;
         }
-        let lines = collapse(render(&self.entries[at], theme, self.width), |line| line);
+        let lines = self.rendered(at, theme);
         let shape = Shape::of(&lines);
         self.shapes[at] = Some(shape);
         shape
@@ -495,7 +515,7 @@ impl Retained {
 
     fn draw(&mut self, at: usize, theme: &Theme) -> &[Line<'static>] {
         if self.drawn[at].is_none() {
-            let lines = collapse(render(&self.entries[at], theme, self.width), |line| line);
+            let lines = self.rendered(at, theme);
             self.shapes[at] = Some(Shape::of(&lines));
             self.drawn[at] = Some(lines);
         }
@@ -1045,7 +1065,7 @@ mod tests {
                 .any(|row| row.contains(env!("CARGO_PKG_VERSION"))),
             "{wide:?}"
         );
-        retained.set_width(45);
+        retained.set_width(70);
         let narrow = texts(&retained.document(&theme));
         assert_eq!(narrow.len(), wide.len());
         assert!(

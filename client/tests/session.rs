@@ -513,9 +513,9 @@ const SCREEN: (u16, u16) = (80, 24);
 /// Two terminals the mark answers differently: one with room for the drawing but not the version,
 /// and one with room for neither.
 #[cfg(unix)]
-const MARK_ONLY: (u16, u16) = (45, 24);
+const MARK_ONLY: (u16, u16) = (70, 24);
 #[cfg(unix)]
-const NARROW: (u16, u16) = (40, 24);
+const NARROW: (u16, u16) = (60, 24);
 
 /// Type a terminal's size onto the pty. Before the client starts this is the size it reads; after,
 /// the kernel raises SIGWINCH on the foreground group and the client repaints at the new one.
@@ -1291,12 +1291,16 @@ fn a_conversation_opens_under_the_mark() {
     let _ = session.child.wait();
     served.gateway.done();
     assert_eq!(
-        screen.matches("(o)").count(),
+        screen
+            .matches("\u{2597}\u{259F}\u{2588}\u{2599}\u{2596}")
+            .count(),
         3,
         "the mark draws the logo's three discs: {screen}"
     );
     assert!(
-        screen.contains("\\_____/") && screen.contains("`---'"),
+        screen.contains(
+            "\u{2580}\u{259C}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{259B}\u{2580}"
+        ),
         "the wordmark stands beside them: {screen}"
     );
     let _ = std::fs::remove_dir_all(&home);
@@ -1333,7 +1337,7 @@ fn a_terminal_too_narrow_for_the_mark_opens_bare() {
     let _ = session.child.wait();
     served.gateway.done();
     assert!(
-        !screen.contains("(o)") && !screen.contains("\\_____/"),
+        !screen.contains("\u{2597}\u{259F}\u{2588}\u{2599}\u{2596}"),
         "no part of the drawing is painted at {} columns: {screen}",
         NARROW.0
     );
@@ -1369,7 +1373,12 @@ fn the_mark_is_redrawn_when_the_terminal_resizes() {
         .expect("the launch message reaches the gateway");
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while session.screen().matches("(o)").count() != 3 {
+    while session
+        .screen()
+        .matches("\u{2597}\u{259F}\u{2588}\u{2599}\u{2596}")
+        .count()
+        != 3
+    {
         assert!(
             std::time::Instant::now() < deadline,
             "the mark never painted at {} columns: {}",
@@ -1398,7 +1407,9 @@ fn the_mark_is_redrawn_when_the_terminal_resizes() {
     let _ = session.child.wait();
     served.gateway.done();
     assert_eq!(
-        screen.matches("(o)").count(),
+        screen
+            .matches("\u{2597}\u{259F}\u{2588}\u{2599}\u{2596}")
+            .count(),
         3,
         "the drawing stands whole at the new width: {screen}"
     );
@@ -2980,7 +2991,8 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         "the answer is no row of the run: {run_opened}"
     );
 
-    session.press(click(run_row, run_col).as_bytes());
+    let (open_row, open_col) = locate(&run_opened, "reviewer \u{25be}");
+    session.press(click(open_row, open_col).as_bytes());
     assert!(
         !session.screen().contains("Reading the diff."),
         "a second click closes the run: {}",
