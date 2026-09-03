@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
+import { ScheduledTaskPane } from "@/kernel/task";
 import type { Placement } from "@/kernel/pager";
 import { Header, PageToolbar } from "@/kernel/pane";
 import { appended, beside, closed, opened } from "@/kernel/slots";
@@ -34,8 +35,8 @@ import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
+import { ConversationLink } from "@/lib/conversationLink";
 import { Moment, isMoment } from "@/lib/moments";
-import { chatHash } from "@/lib/route";
 import type { Agent, SpecSchema } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
@@ -56,6 +57,11 @@ const LEADING_FIELDS = 1;
 /** How many a kind carrying no prose leads with instead. The width the prose column would have
  *  taken goes to one more of the kind's own facts, rather than to a column of blank. */
 const FACT_LED_FIELDS = 2;
+
+/** The kind whose record has a pane of its own: a scheduled task is read and changed on one screen
+ *  — an editable prompt, a pill per choice, no submit — so its record draws that pane in place of
+ *  the spec-and-status column every other kind reads. */
+const SCHEDULED_TASK_KIND = "scheduled_task";
 
 /** The one field no index reads down. A scheduled task's prompt is a whole instruction: every row
  *  cut it mid-word, and a cut arrives at the reader indistinguishable from a prompt that ended. So
@@ -166,18 +172,8 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null): Rea
   if (typeof value === "number") return String(value);
   if (isMoment(value)) return <Moment at={value} />;
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
-  /* The conversation stands on a screen this cell never draws, so the address is the whole link: the
-     portal's router reads it, and inside a framed app page the shell takes it over the bridge — which
-     a press answered here would stop, moving the frame's own address and nothing the member sees. */
   if (field === CONVERSATION_FIELD && typeof value === "string")
-    return (
-      <a
-        href={chatHash(value)}
-        className="text-inherit underline-offset-2 hover:underline focus-visible:underline"
-      >
-        {value}
-      </a>
-    );
+    return <ConversationLink id={value} />;
   if (typeof value === "string" && ADDRESS.test(value))
     return (
       <a
@@ -666,39 +662,6 @@ export function ObjectDetail({
   onOpen: (at: ObjectAddress, aside: boolean) => void;
   onBack: () => void;
 }) {
-  return (
-    <ObjectRecord
-      agentId={agentId}
-      kind={kind}
-      name={name}
-      lead={lead}
-      actions={actions}
-      onOpen={onOpen}
-      onBack={onBack}
-    />
-  );
-}
-
-function ObjectRecord({
-  agentId,
-  kind,
-  name,
-  lead,
-  actions,
-  onOpen,
-  onBack,
-}: {
-  agentId: string;
-  kind: string;
-  name: string;
-  lead?: ReactNode;
-  actions?: (
-    status: Record<string, ObjectValue> | null,
-    apply: (spec: Record<string, SpecValue>) => Promise<NoticeState>,
-  ) => ReactNode;
-  onOpen: (at: ObjectAddress, aside: boolean) => void;
-  onBack: () => void;
-}) {
   const viewer = useViewer();
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -754,62 +717,24 @@ function ObjectRecord({
             {(record) => (
               <>
                 <OutcomeNotice state={notice} />
-                <Section title="Spec">
-                  {record.spec ? (
-                    <Facts
-                      rows={Object.entries(record.spec).flatMap(([field, value]) => {
-                        const fact = specFact(field, value, record.spec_schema);
-                        return fact ? [fact] : [];
-                      })}
-                    />
-                  ) : (
-                    <p className="m-0">{record.summary}</p>
-                  )}
-                </Section>
-                <Section title="Status">
-                  <Facts
-                    rows={record.fields.filter((field) => field !== ID_FIELD).map((field) =>
-                      field === OWNER_FIELD
-                        ? { label: OWNER_HEADING, value: creator(record.status[field], viewer) }
-                        : {
-                            label: heading(field, record.spec_schema),
-                            value: cell(field, record.status[field] ?? null, record.spec_schema),
-                          },
-                    )}
+                {record.kind === SCHEDULED_TASK_KIND ? (
+                  <ScheduledTaskPane
+                    agentId={agentId}
+                    spec={record.spec}
+                    status={record.status}
+                    summary={record.summary}
+                    links={record.links}
+                    onApply={apply}
+                    onOpen={onOpen}
                   />
-                </Section>
-                <Section title="Links">
-                  {record.links.length ? (
-                    <ul className="m-0 list-none p-0">
-                      {record.links.map((link) => {
-                        const at = { agent: agentId, kind: link.kind, name: link.name };
-                        const said = link.relation + " " + noun(link.kind) + " " + link.name;
-                        return (
-                          <li key={link.relation + link.kind + link.name} className="py-2xs">
-                            {link.opens ? (
-                              <button
-                                type="button"
-                                data-part="link"
-                                onClick={(event) => onOpen(at, beside(event))}
-                                onAuxClick={(event) => {
-                                  if (!beside(event)) return;
-                                  onOpen(at, true);
-                                }}
-                                className="border-0 bg-transparent p-0 text-left font-strong text-inherit"
-                              >
-                                {said}
-                              </button>
-                            ) : (
-                              <span data-part="link">{said}</span>
-                            )}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  ) : (
-                    <p className="m-0 text-ink-soft">Nothing links out of this one.</p>
-                  )}
-                </Section>
+                ) : (
+                  <SpecAndStatus
+                    agentId={agentId}
+                    record={record}
+                    viewer={viewer}
+                    onOpen={onOpen}
+                  />
+                )}
                 <div className="mb-2xl text-small text-ink-soft">
                   {record.created_at ? (
                     <span>
@@ -825,7 +750,13 @@ function ObjectRecord({
                 </div>
                 {record.deletes ? (
                   <div className="flex flex-wrap gap-sm">
-                    {record.applies && record.spec_schema && record.spec ? (
+                    {/* A kind with a pane of its own is edited in that pane, where every control
+                        commits itself; a form behind an Edit act would be a second way to say the
+                        same thing, with a submit the pane deliberately has not got. */}
+                    {record.kind !== SCHEDULED_TASK_KIND &&
+                    record.applies &&
+                    record.spec_schema &&
+                    record.spec ? (
                       <Button variant="send" onClick={() => setEditing(record)}>
                         Edit
                       </Button>
@@ -839,6 +770,83 @@ function ObjectRecord({
         </>
       )}
     </Sheet>
+  );
+}
+
+/** The record every kind is read by: what it was applied with, what the workspace made of it, and
+ *  what it points at. A kind whose record is a screen of its own draws that instead. */
+function SpecAndStatus({
+  agentId,
+  record,
+  viewer,
+  onOpen,
+}: {
+  agentId: string;
+  record: DetailPayload;
+  viewer: string | null;
+  onOpen: (at: ObjectAddress, aside: boolean) => void;
+}) {
+  return (
+    <>
+      <Section title="Spec">
+        {record.spec ? (
+          <Facts
+            rows={Object.entries(record.spec).flatMap(([field, value]) => {
+              const fact = specFact(field, value, record.spec_schema);
+              return fact ? [fact] : [];
+            })}
+          />
+        ) : (
+          <p className="m-0">{record.summary}</p>
+        )}
+      </Section>
+      <Section title="Status">
+        <Facts
+          rows={record.fields
+            .filter((field) => field !== ID_FIELD)
+            .map((field) =>
+              field === OWNER_FIELD
+                ? { label: OWNER_HEADING, value: creator(record.status[field], viewer) }
+                : {
+                    label: heading(field, record.spec_schema),
+                    value: cell(field, record.status[field] ?? null, record.spec_schema),
+                  },
+            )}
+        />
+      </Section>
+      <Section title="Links">
+        {record.links.length ? (
+          <ul className="m-0 list-none p-0">
+            {record.links.map((link) => {
+              const at = { agent: agentId, kind: link.kind, name: link.name };
+              const said = link.relation + " " + noun(link.kind) + " " + link.name;
+              return (
+                <li key={link.relation + link.kind + link.name} className="py-2xs">
+                  {link.opens ? (
+                    <button
+                      type="button"
+                      data-part="link"
+                      onClick={(event) => onOpen(at, beside(event))}
+                      onAuxClick={(event) => {
+                        if (!beside(event)) return;
+                        onOpen(at, true);
+                      }}
+                      className="border-0 bg-transparent p-0 text-left font-strong text-inherit"
+                    >
+                      {said}
+                    </button>
+                  ) : (
+                    <span data-part="link">{said}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="m-0 text-ink-soft">Nothing links out of this one.</p>
+        )}
+      </Section>
+    </>
   );
 }
 

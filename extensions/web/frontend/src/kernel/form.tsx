@@ -10,7 +10,10 @@ import {
 import { cn } from "@/lib/cn";
 import type { SchemaProperty, SpecSchema } from "@/lib/types";
 
-export type SpecValue = string | boolean;
+/** One field of a mutation, as the wire carries it. `null` is how a spec clears a field the kind
+ *  holds — an expiry a member removed — which an empty string cannot say: a kind reads that as the
+ *  empty value rather than as no value at all. */
+export type SpecValue = string | boolean | null;
 
 function specType(prop: SchemaProperty): string {
   if (prop.type) return prop.type;
@@ -45,14 +48,14 @@ export function initialSpecValue(prop: SchemaProperty, value: unknown): SpecValu
 const LOCAL_MOMENT_LENGTH = 16;
 const MILLISECONDS_PER_MINUTE = 60_000;
 
-function localMoment(wire: string): string {
+export function localMoment(wire: string): string {
   const moment = new Date(wire);
   if (Number.isNaN(moment.getTime())) return "";
   const offset = moment.getTimezoneOffset() * MILLISECONDS_PER_MINUTE;
   return new Date(moment.getTime() - offset).toISOString().slice(0, LOCAL_MOMENT_LENGTH);
 }
 
-function wireMoment(local: string): string {
+export function wireMoment(local: string): string {
   const moment = new Date(local);
   return Number.isNaN(moment.getTime()) ? "" : moment.toISOString();
 }

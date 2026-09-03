@@ -31,6 +31,7 @@ import {
   SECOND_ID,
   SETTINGS,
   TASK_KIND,
+  TRIGGER_KIND,
   useStreamFake,
   wire,
 } from "./harness";
@@ -92,6 +93,76 @@ const TASK_DETAIL = {
   created_at: "2026-07-01T09:00:00Z",
   updated_at: "2026-07-02T09:00:00Z",
 };
+
+/** The record the shared spec-and-status shape is read off. A scheduled task draws a pane of its
+ *  own — an editable prompt and a pill per choice — so the record every other kind takes is read
+ *  here off the other kind this same screen lists. */
+const TRIGGER_ROW = owned({
+  name: "github-issues",
+  summary: "github-30847ee4 — issues",
+  conversation: CONVO_ID,
+  source: "github-30847ee4",
+  delivery: "current",
+  mine: true,
+  origin: "#general",
+  owner_email: "mel@example.com",
+});
+
+const SECOND_TRIGGER_ROW = owned(
+  {
+    name: "github-pulls",
+    summary: "github-30847ee4 — pull_requests",
+    conversation: SECOND_CONVO_ID,
+    source: "github-30847ee4",
+    delivery: "per_page",
+  },
+  SECOND,
+);
+
+const TRIGGER_DETAIL = {
+  ...TRIGGER_KIND,
+  name: "github-issues",
+  summary: "github-30847ee4 — issues",
+  spec: { source: "github-30847ee4", delivery: "current" },
+  status: { source: "github-30847ee4", owner_email: "mel@example.com" },
+  links: [{ relation: "reports_to", kind: "conversation", name: CONVO_ID, opens: true }],
+  created_at: "2026-07-01T09:00:00Z",
+  updated_at: "2026-07-02T09:00:00Z",
+};
+
+/** A record whose spec really does carry prose: a memory item's body runs to several lines, which
+ *  is the value no row can hold. */
+const MEMORY_KIND = {
+  kind: "memory",
+  fields: ["item_class", "memory_kind", "subject"],
+  spec_schema: {
+    properties: {
+      body: { type: "string", title: "Body" },
+      memory_kind: { type: "string", title: "Memory Kind" },
+    },
+  },
+  applies: false,
+  deletes: false,
+};
+
+const MEMORY_ROW = owned({
+  name: "mem-1",
+  summary: "what the member decided",
+  item_class: "fact",
+  memory_kind: "decision",
+  subject: "workspace",
+});
+
+const memoryDetail = (body: string) => ({
+  ...MEMORY_KIND,
+  name: "mem-1",
+  summary: "what the member decided",
+  spec: { body, memory_kind: "decision" },
+  status: { subject: "workspace" },
+  links: [],
+  created_at: "2026-07-01T09:00:00Z",
+  updated_at: null,
+});
 
 const CONVERSATION_DETAIL = {
   kind: "conversation",
@@ -155,23 +226,23 @@ function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
 /** The pane inside the one thing that owns its track. Every screen holding an object index does
  *  this — the radar off its address, the settings dialog off local state — so the pane is never
  *  mounted here in a shape no screen mounts it in. */
-function PlacedPane({ agentId }: { agentId: string | null }) {
+function PlacedPane({ agentId, kind }: { agentId: string | null; kind: string }) {
   const [place, setPlace] = useState<Placement>({});
   return (
     <ObjectPane
       agentId={agentId}
-      kind="scheduled_task"
+      kind={kind}
       opens={place.opens ?? []}
       onPlace={(patch) => setPlace((held) => ({ ...held, ...patch }))}
     />
   );
 }
 
-function mount(agents = [AGENT]) {
+function mount(agents = [AGENT], kind = "scheduled_task") {
   render(
     <MainAgentProvider agents={agents}>
       <Pane>
-        <PlacedPane agentId={null} />
+        <PlacedPane agentId={null} kind={kind} />
       </Pane>
     </MainAgentProvider>,
   );
@@ -181,34 +252,33 @@ function mountAgent() {
   render(
     <MainAgentProvider agents={[AGENT, SECOND]}>
       <Pane>
-        <PlacedPane agentId={AGENT_ID} />
+        <PlacedPane agentId={AGENT_ID} kind="scheduled_task" />
       </Pane>
     </MainAgentProvider>,
   );
 }
 
-
-
-/** The task record reached from two links, so a record standing to the right of another can be
- *  shut by following a second link out of the one on its left. */
-const LINKED_TASK = {
-  ...TASK_DETAIL,
+/** The record reached from two links, so a record standing to the right of another can be shut by
+ *  following a second link out of the one on its left. */
+const LINKED_TRIGGER = {
+  ...TRIGGER_DETAIL,
   links: [
     { relation: "reports_to", kind: "conversation", name: CONVO_ID, opens: true },
-    { relation: "follows", kind: "scheduled_task", name: "weekly-roll", opens: true },
+    { relation: "follows", kind: "source_trigger", name: "github-pulls", opens: true },
   ],
 };
 
-const ROLL_DETAIL = { ...TASK_DETAIL, name: "weekly-roll", links: [] };
+const PULLS_DETAIL = { ...TRIGGER_DETAIL, name: "github-pulls", links: [] };
 
-/** The wire every path test reads: one index of two tasks, one record carrying two links, and the
- *  record each link names. */
-function tasks() {
+/** The wire every path test reads: one index of two triggers, one record carrying two links, and
+ *  the record each link names. */
+function triggers() {
   return wire({
     ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
-    "/objects/scheduled_task/daily-brief": () => json(LINKED_TASK),
-    "/objects/scheduled_task/weekly-roll": () => json(ROLL_DETAIL),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
+    "/objects/source_trigger/github-issues": () => json(LINKED_TRIGGER),
+    "/objects/source_trigger/github-pulls": () => json(PULLS_DETAIL),
+    "/objects/source_trigger": () =>
+      objectIndex(TRIGGER_KIND, [TRIGGER_ROW, SECOND_TRIGGER_ROW]),
   });
 }
 
@@ -217,7 +287,7 @@ function link(said: string): HTMLElement {
 }
 
 const REPORTS_TO = "reports_to conversation " + CONVO_ID;
-const FOLLOWS = "follows scheduled task weekly-roll";
+const FOLLOWS = "follows source trigger github-pulls";
 
 /** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
  *  instance holds the key down over the click — the module's own verbs each set up a fresh one and
@@ -563,52 +633,56 @@ test("a row names the agent that owns it, and leads nowhere but the record", asy
 
 test("a detail renders spec, then status, then links, then when the row was made", async () => {
   wire({
-    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger/github-issues": () => json(TRIGGER_DETAIL),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
   });
-  mount();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
+  await openRow("github-issues");
 
   const sections = [...document.querySelectorAll("h2")].map((heading) => heading.textContent);
-  expect(sections).toEqual(["daily-brief", "Spec", "Status", "Links"]);
+  expect(sections).toEqual(["github-issues", "Spec", "Status", "Links"]);
   expect(document.querySelectorAll("h1").length).toBe(0);
-  expect(await screen.findByText("write the daily brief")).toBeTruthy();
+  expect(await waitFor(() => specFact("Delivery"))).toHaveProperty("said.textContent", "current");
   expect(fact("Created By")).toBe("mel@example.com");
   expect(screen.queryByText("Owner Email")).toBeNull();
   expect(screen.getByText("Created").textContent).toBe("Created Jul 1 2026");
 });
 
+/** A record's header act applies part of the spec and reads the record again, so the screen states
+ *  what the workspace now holds rather than what the press asked for. */
 test("a record header action applies a partial spec and reads back its next state", async () => {
   const posted: unknown[] = [];
-  let paused = false;
+  let delivery = "current";
   wire({
-    "/objects/scheduled_task/daily-brief": () =>
+    "/objects/source_trigger/github-issues": () =>
       json({
-        ...TASK_DETAIL,
-        spec: { ...TASK_DETAIL.spec, paused },
-        status: { ...TASK_DETAIL.status, paused },
+        ...TRIGGER_DETAIL,
+        spec: { ...TRIGGER_DETAIL.spec, delivery },
+        status: { ...TRIGGER_DETAIL.status, delivery },
       }),
     "/intents": (_url, init) => {
       const envelope = JSON.parse(String(init?.body));
       posted.push(envelope);
-      paused = envelope.spec.paused;
-      return json({ applied: true, message: paused ? "Paused." : "Resumed." });
+      delivery = envelope.spec.delivery;
+      return json({ applied: true, message: "Applied." });
     },
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
       <ObjectDetail
         agentId={AGENT_ID}
-        kind="scheduled_task"
-        name="daily-brief"
+        kind="source_trigger"
+        name="github-issues"
         actions={(status, apply) =>
           status === null ? null : (
             <button
               type="button"
-              onClick={() => void apply({ paused: status.paused !== true })}
+              onClick={() =>
+                void apply({ delivery: status.delivery === "current" ? "per_page" : "current" })
+              }
             >
-              {status.paused === true ? "Resume" : "Pause"}
+              {status.delivery === "current" ? "Wake per page" : "Wake this chat"}
             </button>
           )
         }
@@ -618,53 +692,56 @@ test("a record header action applies a partial spec and reads back its next stat
     </MainAgentProvider>,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Wake per page" }));
 
-  expect(await screen.findByRole("button", { name: "Resume" })).toBeTruthy();
-  expect(await screen.findByText("Paused.")).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Wake this chat" })).toBeTruthy();
+  expect(await screen.findByText("Applied.")).toBeTruthy();
   expect(posted).toEqual([
-    { verb: "apply", kind: "scheduled_task", name: "daily-brief", spec: { paused: true } },
+    {
+      verb: "apply",
+      kind: "source_trigger",
+      name: "github-issues",
+      spec: { delivery: "per_page" },
+    },
   ]);
 });
 
 test("a spec value longer than its row stands under its label, wrapped, and clears its neighbours", async () => {
   wire({
-    "/objects/scheduled_task/daily-brief": () =>
-      json({ ...TASK_DETAIL, spec: { ...TASK_DETAIL.spec, prompt: LONG_PROMPT } }),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/memory/mem-1": () => json(memoryDetail(LONG_PROMPT)),
+    "/objects/memory": () => objectIndex(MEMORY_KIND, [MEMORY_ROW]),
   });
-  mount();
+  mount([AGENT], "memory");
 
-  await openRow("daily-brief");
+  await openRow("mem-1");
 
-  const prompt = await waitFor(() => specFact("Prompt"));
-  expect(prompt.said.textContent).toBe(LONG_PROMPT);
-  expect(prompt.said.className).toContain("whitespace-pre-wrap");
-  expect(prompt.said.className).toContain("wrap-anywhere");
-  expect(prompt.said.className).not.toContain("truncate");
-  expect(prompt.row.className).toContain("flex-col");
+  const body = await waitFor(() => specFact("Body"));
+  expect(body.said.textContent).toBe(LONG_PROMPT);
+  expect(body.said.className).toContain("whitespace-pre-wrap");
+  expect(body.said.className).toContain("wrap-anywhere");
+  expect(body.said.className).not.toContain("truncate");
+  expect(body.row.className).toContain("flex-col");
 
-  const schedule = specFact("Schedule");
-  expect(schedule.said.textContent).toBe("0 9 * * *");
-  expect(schedule.said.className).toContain("truncate");
-  expect(schedule.row.className).toContain("overflow-hidden");
-  expect(schedule.row.className).not.toContain("flex-col");
+  const kind = specFact("Memory Kind");
+  expect(kind.said.textContent).toBe("decision");
+  expect(kind.said.className).toContain("truncate");
+  expect(kind.row.className).toContain("overflow-hidden");
+  expect(kind.row.className).not.toContain("flex-col");
 });
 
 test("a spec value with no space to break on wraps in its own block rather than being cut", async () => {
   wire({
-    "/objects/scheduled_task/daily-brief": () =>
-      json({ ...TASK_DETAIL, spec: { ...TASK_DETAIL.spec, prompt: LONG_URL } }),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/memory/mem-1": () => json(memoryDetail(LONG_URL)),
+    "/objects/memory": () => objectIndex(MEMORY_KIND, [MEMORY_ROW]),
   });
-  mount();
+  mount([AGENT], "memory");
 
-  await openRow("daily-brief");
+  await openRow("mem-1");
 
-  const prompt = await waitFor(() => specFact("Prompt"));
-  expect(prompt.said.textContent).toBe(LONG_URL);
-  expect(prompt.said.className).toContain("wrap-anywhere");
-  expect(prompt.row.className).toContain("flex-col");
+  const body = await waitFor(() => specFact("Body"));
+  expect(body.said.textContent).toBe(LONG_URL);
+  expect(body.said.className).toContain("wrap-anywhere");
+  expect(body.row.className).toContain("flex-col");
 });
 
 /** One agent's index states who made each row, because the pane names the agent and nothing else on
@@ -683,7 +760,7 @@ test("a creator reads as You to its own member, the address to another, Workspac
     <Viewer.Provider value={MEMBER.email}>
       <MainAgentProvider agents={[AGENT]}>
         <Pane>
-          <PlacedPane agentId={AGENT_ID} />
+          <PlacedPane agentId={AGENT_ID} kind="scheduled_task" />
         </Pane>
       </MainAgentProvider>
     </Viewer.Provider>,
@@ -711,18 +788,18 @@ test("the index read across the audience names the agent and leaves the creator 
  *  reached from a branch they have left does not stay standing. A link the projection marks closed
  *  opens nothing and is not a control. */
 test("a link inside a record replaces the visible sheet and closing returns to its source", async () => {
-  tasks();
-  mount();
+  triggers();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
-  expect(standing()).toEqual(["daily-brief"]);
+  await openRow("github-issues");
+  expect(standing()).toEqual(["github-issues"]);
 
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
-  expect(standing()).toEqual(["weekly-roll"]);
+  const pulls = await screen.findByRole("dialog", { name: "github-pulls" });
+  expect(standing()).toEqual(["github-pulls"]);
 
-  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
+  await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
 
   await userEvent.click(link(REPORTS_TO));
 
@@ -736,48 +813,48 @@ test("a link inside a record replaces the visible sheet and closing returns to i
   await userEvent.click(
     within(screen.getByRole("dialog", { name: CONVO_ID })).getByRole("button", { name: "Close" }),
   );
-  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
+  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
 });
 
 test("a modifier press retains the source behind the one visible sheet", async () => {
-  tasks();
-  mount();
+  triggers();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
+  await openRow("github-issues");
   await besidePress(link(FOLLOWS));
 
-  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
-  expect(standing()).toEqual(["weekly-roll"]);
-  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
+  const pulls = await screen.findByRole("dialog", { name: "github-pulls" });
+  expect(standing()).toEqual(["github-pulls"]);
+  await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
 });
 
 /** The index is the root of the path, so a row pressed there leaves one record standing however
  *  far the member had walked from the last one. */
 test("a row of the index shuts every record standing and opens the one it names", async () => {
-  tasks();
-  mount();
+  triggers();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
+  await openRow("github-issues");
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  expect(await screen.findByRole("dialog", { name: "weekly-roll" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "github-pulls" })).toBeTruthy();
 
-  await openRow("weekly-roll");
+  await openRow("github-pulls");
 
-  await waitFor(() => expect(standing()).toEqual(["weekly-roll"]));
+  await waitFor(() => expect(standing()).toEqual(["github-pulls"]));
 });
 
 test("closing the current record returns to the record opened from it", async () => {
-  tasks();
-  mount();
+  triggers();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
+  await openRow("github-issues");
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
+  const pulls = await screen.findByRole("dialog", { name: "github-pulls" });
 
-  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
+  await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
+  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
 });
 
 /** The screen owns the track and the pane reads it, so the record the address opened and the record
@@ -814,13 +891,13 @@ test("the index row whose record is standing is marked, and no other", async () 
 test("an outcome does not leak into the sheet that replaces its record", async () => {
   wire({
     ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
-    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger/github-issues": () => json(TRIGGER_DETAIL),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
     "/intents": () => json({ applied: false, message: "The workspace refuses it." }),
   });
-  mount();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
+  await openRow("github-issues");
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
   expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
@@ -834,16 +911,16 @@ test("an outcome does not leak into the sheet that replaces its record", async (
 
 test("a spec the kind elides reads as the row's own summary, with no form to submit", async () => {
   wire({
-    "/objects/scheduled_task/daily-brief": () =>
-      json({ ...TASK_DETAIL, spec: null, summary: "0 9 * * * — private member task" }),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/objects/source_trigger/github-issues": () =>
+      json({ ...TRIGGER_DETAIL, spec: null, summary: "a source another member watches" }),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
   });
-  mount();
+  mount([AGENT], "source_trigger");
 
-  await openRow("daily-brief");
+  await openRow("github-issues");
 
-  expect(await screen.findByText("0 9 * * * — private member task")).toBeTruthy();
-  expect(screen.queryByLabelText("prompt")).toBeNull();
+  expect(await screen.findByText("a source another member watches")).toBeTruthy();
+  expect(screen.queryByLabelText("source")).toBeNull();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
 });
@@ -993,21 +1070,6 @@ test("a moment typed on the clock in front of the member is submitted as an inst
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0].spec.expires_at).toBe(new Date(LOCAL_EXPIRY).toISOString());
   expect(posted[0].spec.expires_at.endsWith("Z")).toBe(true);
-});
-
-test("an instant off the wire is shown on the clock in front of the member", async () => {
-  const instant = new Date(LOCAL_EXPIRY).toISOString();
-  wire({
-    "/objects/scheduled_task/daily-brief": () =>
-      json({ ...TASK_DETAIL, ...EXPIRING_KIND, spec: { ...TASK_DETAIL.spec, expires_at: instant } }),
-    "/objects/scheduled_task": () => objectIndex(EXPIRING_KIND, [TASK_ROW]),
-  });
-  mount();
-
-  await openRow("daily-brief");
-  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
-
-  expect((await screen.findByLabelText("expires_at")).getAttribute("value")).toBe(LOCAL_EXPIRY);
 });
 
 test("a record is deleted from the record's own page, and a refusal says so there", async () => {

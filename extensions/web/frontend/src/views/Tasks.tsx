@@ -1,11 +1,9 @@
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
 import { ObjectDetail, ObjectPane, objectAt, slotOf } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { PanelEmpty } from "@/kernel/panel";
-import type { SpecValue } from "@/kernel/form";
 
 /** What is armed to run an agent when nobody is typing: a clock, or a source that changed. The two
  *  are one destination because a member asking what stands ready here asks one question, and an
@@ -62,36 +60,10 @@ export function Tasks({
           agentId={at.agent}
           kind={at.kind}
           name={at.name}
-          actions={(status, apply) =>
-            at.kind === "scheduled_task" && typeof status?.paused === "boolean" ? (
-              <TaskStateAction paused={status.paused} onApply={apply} />
-            ) : null
-          }
           onOpen={(next) => onPlace({ opens: [slotOf(next)] })}
           onBack={close}
         />
       ) : null}
     </>
-  );
-}
-
-function TaskStateAction({
-  paused,
-  onApply,
-}: {
-  paused: boolean;
-  onApply: (spec: Record<string, SpecValue>) => Promise<unknown>;
-}) {
-  const [busy, setBusy] = useState(false);
-  async function toggle() {
-    if (busy) return;
-    setBusy(true);
-    await onApply({ paused: !paused });
-    setBusy(false);
-  }
-  return (
-    <Button variant="send" busy={busy} onClick={toggle}>
-      {paused ? "Resume" : "Pause"}
-    </Button>
   );
 }

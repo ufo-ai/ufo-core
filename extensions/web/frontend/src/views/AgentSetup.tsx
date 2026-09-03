@@ -16,6 +16,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Notice, Panel, QUIET, usePanelRead, type NoticeState } from "@/kernel/panel";
+import { movedDays, shifted, WORKING_WEEK } from "@/lib/cadence";
 import { BASE, postIntent } from "@/lib/api";
 import { openConsentWindow } from "@/lib/consent";
 import { newChatHash } from "@/lib/route";
@@ -95,27 +96,14 @@ const CONSENT_ELSEWHERE = "The consent window closed before the link arrived. Pr
 const EVERY_HOUR = "every hour";
 const EVERY_DAY = "every day";
 const EVERY_WEEKDAY = "every weekday";
-const WORKING_WEEK = [1, 2, 3, 4, 5];
-const MINUTES_IN_DAY = 24 * 60;
-const WEEK = 7;
-
-/** The cron this cadence fires on, in UTC.
- *
- *  Cron stores UTC and only the browser knows the member's offset, so this is the one place the two
- *  meet. An hourly cadence names no wall-clock time, so there is nothing to convert. An hour that
- *  crosses midnight takes its weekdays with it — a Monday 9pm local that is Tuesday 03:00 UTC fires
- *  on Tuesday, and a set that did not move would fire a day early every week. */
+/** The cron this cadence fires on, in UTC. An hourly cadence names no wall-clock time, so there is
+ *  nothing to convert; every other one is moved by the member's offset. */
 export function cronFor(cadence: SetupCadence, offsetMinutes: number): string {
   if (cadence.hour === null) return `${cadence.minute} * * * *`;
-  const local = cadence.hour * 60 + cadence.minute;
-  const utc = local + offsetMinutes;
-  const shift = Math.floor(utc / MINUTES_IN_DAY);
-  const settled = ((utc % MINUTES_IN_DAY) + MINUTES_IN_DAY) % MINUTES_IN_DAY;
-  const days = cadence.weekdays.length
-    ? cadence.weekdays.map((day) => (((day + shift) % WEEK) + WEEK) % WEEK).sort()
-    : [];
+  const moved = shifted(cadence.hour * 60 + cadence.minute, offsetMinutes);
+  const days = cadence.weekdays.length ? movedDays(cadence.weekdays, moved.days) : [];
   const field = days.length ? days.join(",") : "*";
-  return `${settled % 60} ${Math.floor(settled / 60)} * * ${field}`;
+  return `${moved.minute} ${moved.hour} * * ${field}`;
 }
 
 /** What a cadence is called, in the member's own clock.
@@ -156,19 +144,16 @@ export function cadenceOf(cron: string, offsetMinutes: number): SetupCadence | n
   if (hour === "*") return weekday === "*" ? { hour: null, minute: past, weekdays: [] } : null;
   const struck = Number(hour);
   if (!Number.isInteger(struck)) return null;
-  const local = struck * 60 + past - offsetMinutes;
-  const shift = Math.floor(local / MINUTES_IN_DAY);
-  const settled = ((local % MINUTES_IN_DAY) + MINUTES_IN_DAY) % MINUTES_IN_DAY;
+  const local = shifted(struck * 60 + past, -offsetMinutes);
   const days =
     weekday === "*"
       ? []
-      : weekday
-          .split(",")
-          .flatMap((one) => (one.includes("-") ? span(one) : [Number(one)]))
-          .map((day) => (((day + shift) % WEEK) + WEEK) % WEEK)
-          .sort();
+      : movedDays(
+          weekday.split(",").flatMap((one) => (one.includes("-") ? span(one) : [Number(one)])),
+          local.days,
+        );
   if (days.some((day) => !Number.isInteger(day))) return null;
-  return { hour: Math.floor(settled / 60), minute: settled % 60, weekdays: days };
+  return { hour: local.hour, minute: local.minute, weekdays: days };
 }
 
 /** Cron's own range, which a member's app may write where the offers write a list. */

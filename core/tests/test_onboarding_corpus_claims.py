@@ -57,6 +57,7 @@ CODING_SKILL_MD = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
 RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
 ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
 TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
+TASK_PANE = "extensions/web/frontend/src/kernel/task.tsx"
 WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
@@ -475,7 +476,7 @@ CLAIMS = (
         claim="Tasks can pause or resume a scheduled task",
         corpus="references/capabilities.md",
         phrase="Tasks can also pause or resume a scheduled task",
-        source=TASKS_VIEW,
+        source=TASK_PANE,
         pattern=r'\{paused \? "Resume" : "Pause"\}',
     ),
     Claim(
