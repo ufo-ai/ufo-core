@@ -611,3 +611,27 @@ async def test_preemption_grader_requires_both_old_reviewers_and_no_old_status()
     assert passed.passed, passed.reason
     assert not failed.passed
     assert "old head still received" in failed.reason
+
+
+async def test_a_foreground_launch_reads_as_a_foreground_launch() -> None:
+    """The count and the background rule are two facts, and the verdict names which one failed.
+
+    Folded together they lied: a suite run reported "started 0 background reviewers" for a parent
+    that had spawned two reviewers, both of which reviewed the pull request and returned findings.
+    The launch was never the problem in that case."""
+    calls = tuple(
+        _call(
+            "spawn",
+            f"spawn-{index}",
+            {"target": "coding", "payload": {"objective": "review it"}},
+        )
+        for index in (1, 2)
+    )
+    output = CapabilityOutput("", calls, own_calls=calls)
+
+    verdict = await code_review._grade_no_parent_plan(output)
+
+    assert not verdict.passed
+    assert "2 of 2 launches ran in the foreground" in verdict.reason
+    assert verdict.evidence["spawn_count"] == 2
+    assert verdict.evidence["foreground_launches"] == 2

@@ -715,6 +715,36 @@ def _review_failures(output: CapabilityOutput) -> tuple[str, ...]:
     return tuple(text for text in texts if any(failure in text for failure in REVIEW_FAILURES))
 
 
+def _coding_spawns(output: CapabilityOutput) -> tuple[ToolInvocation, ...]:
+    """Every reviewer launch the parent issued, whatever else it asked for.
+
+    `background` is a separate property from "the reviewers started". A grader that folds the two
+    reports a foreground launch as no launch at all: "started 0 background reviewers" is what one
+    said while the parent had spawned two reviewers and both had finished reviewing. Each grader
+    counts the launches here and states the background rule as its own verdict."""
+    return tuple(
+        call
+        for call in output.own_calls
+        if call.name == "spawn"
+        and isinstance(target := call.input.get("target"), str)
+        and target.removeprefix("profile:") == "coding"
+    )
+
+
+def _background_verdict(
+    spawns: tuple[ToolInvocation, ...], evidence: JsonObject
+) -> CapabilityVerdict | None:
+    """The prompt asks for both reviewers in the background, so a foreground launch fails — under
+    its own name, after the count has already been reported."""
+    foreground = tuple(call for call in spawns if call.input.get("background") is not True)
+    if not foreground:
+        return None
+    evidence["foreground_launches"] = len(foreground)
+    return CapabilityVerdict(
+        False, f"{len(foreground)} of {len(spawns)} launches ran in the foreground", evidence
+    )
+
+
 def _spawn_payload(call: ToolInvocation) -> dict[str, Json]:
     payload = call.input.get("payload")
     return payload if isinstance(payload, dict) else {}
@@ -755,14 +785,7 @@ def _tool_groups(turn: TurnTiming) -> tuple[int, ...]:
 
 
 async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-        and call.input.get("background") is True
-    )
+    spawns = _coding_spawns(output)
     objective_chars = tuple(_spawn_objective_chars(call) for call in spawns)
     objective_evidence: list[Json] = [*objective_chars]
     skill_loads = tuple(call for call in output.own_calls if call.name == "load_skill")
@@ -772,9 +795,9 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
         "skill_loads": len(skill_loads),
     }
     if len(spawns) != 2:
-        return CapabilityVerdict(
-            False, f"started {len(spawns)} background reviewers, expected 2", evidence
-        )
+        return CapabilityVerdict(False, f"started {len(spawns)} reviewers, expected 2", evidence)
+    if (foreground := _background_verdict(spawns, evidence)) is not None:
+        return foreground
     spawn_steps = _call_evidence(output, frozenset(call.call_id for call in spawns))
     evidence["spawns"] = spawn_steps
     spawn_messages: set[int] = set()
@@ -863,14 +886,7 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
 
 
 async def _grade_real_review_efficiency(output: CapabilityOutput) -> CapabilityVerdict:
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-        and call.input.get("background") is True
-    )
+    spawns = _coding_spawns(output)
     objective_chars = tuple(_spawn_objective_chars(call) for call in spawns)
     objective_evidence: list[Json] = [*objective_chars]
     skill_loads = tuple(call for call in output.own_calls if call.name == "load_skill")
@@ -881,6 +897,8 @@ async def _grade_real_review_efficiency(output: CapabilityOutput) -> CapabilityV
     }
     if len(spawns) != 2:
         return CapabilityVerdict(False, "the parent did not start two reviewers", evidence)
+    if (foreground := _background_verdict(spawns, evidence)) is not None:
+        return foreground
     spawn_steps = _call_evidence(output, frozenset(call.call_id for call in spawns))
     spawn_messages = {
         item["message"]
@@ -937,14 +955,7 @@ async def _grade_real_review_efficiency(output: CapabilityOutput) -> CapabilityV
 
 
 async def _grade_large_review_efficiency(output: CapabilityOutput) -> CapabilityVerdict:
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-        and call.input.get("background") is True
-    )
+    spawns = _coding_spawns(output)
     objective_chars = tuple(_spawn_objective_chars(call) for call in spawns)
     evidence: JsonObject = {
         "spawn_count": len(spawns),
@@ -952,6 +963,8 @@ async def _grade_large_review_efficiency(output: CapabilityOutput) -> Capability
     }
     if len(spawns) != 2:
         return CapabilityVerdict(False, "the parent did not start two reviewers", evidence)
+    if (foreground := _background_verdict(spawns, evidence)) is not None:
+        return foreground
     spawn_steps = _call_evidence(output, frozenset(call.call_id for call in spawns))
     spawn_messages = {
         item["message"]
@@ -1016,17 +1029,12 @@ async def _grade_large_review_efficiency(output: CapabilityOutput) -> Capability
 
 
 async def _grade_current_objective(output: CapabilityOutput) -> CapabilityVerdict:
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-        and call.input.get("background") is True
-    )
+    spawns = _coding_spawns(output)
     evidence: JsonObject = {"spawn_count": len(spawns), "launches": _launch_shape(spawns)}
     if len(spawns) != 2:
         return CapabilityVerdict(False, "the parent did not start two reviewers", evidence)
+    if (foreground := _background_verdict(spawns, evidence)) is not None:
+        return foreground
     spawn_steps = _call_evidence(output, frozenset(call.call_id for call in spawns))
     spawn_messages = {
         item["message"]
@@ -1083,13 +1091,7 @@ async def _grade_launch(output: CapabilityOutput) -> CapabilityVerdict:
     calls, or what they carried. A model that emits the target and drops the ~3 KB objective is
     the failure it exists for: the child's contract refuses that call, the parent reads the refusal
     as a fault in the deploy, and no review runs at all."""
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-    )
+    spawns = _coding_spawns(output)
     launches = _launch_shape(spawns)
     evidence: JsonObject = {"spawn_count": len(spawns), "launches": launches}
     if not spawns:
@@ -1135,13 +1137,7 @@ async def _grade_recovered_launch(output: CapabilityOutput) -> CapabilityVerdict
     unchanged — twelve times in the incident this case exists for, and sixty-four in one live turn
     afterwards — so the wasted attempts ride in the evidence and only a launch that never lands
     fails."""
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-    )
+    spawns = _coding_spawns(output)
     valid = tuple(call for call in spawns if _spawn_objective_chars(call))
     refused = tuple(call for call in spawns if not _spawn_objective_chars(call))
     evidence: JsonObject = {
@@ -1163,14 +1159,7 @@ async def _grade_recovered_launch(output: CapabilityOutput) -> CapabilityVerdict
 
 
 async def _grade_no_parent_plan(output: CapabilityOutput) -> CapabilityVerdict:
-    spawns = tuple(
-        call
-        for call in output.own_calls
-        if call.name == "spawn"
-        and isinstance(target := call.input.get("target"), str)
-        and target.removeprefix("profile:") == "coding"
-        and call.input.get("background") is True
-    )
+    spawns = _coding_spawns(output)
     planning = tuple(
         call
         for call in output.own_calls
@@ -1182,8 +1171,10 @@ async def _grade_no_parent_plan(output: CapabilityOutput) -> CapabilityVerdict:
     }
     if len(spawns) < 2:
         return CapabilityVerdict(
-            False, f"started {len(spawns)} background reviewers, expected at least 2", evidence
+            False, f"started {len(spawns)} reviewers, expected at least 2", evidence
         )
+    if (foreground := _background_verdict(spawns, evidence)) is not None:
+        return foreground
     if planning:
         return CapabilityVerdict(
             False, "the parent created durable review planning state", evidence
