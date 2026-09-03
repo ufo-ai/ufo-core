@@ -5,8 +5,12 @@
 A new customer is invited by the UFO team, by email. The invitation opens the workspace's first-run
 page. The customer signs in with their work email, and sign-in continues to that page without
 another action: a short setup confirms their website, then asks about their business, their role,
-the tools that role works in, and what is top of mind, before the workspace's main agent answers
-them. An admin reaches every agent; every other member reaches the agents open to everyone in the
+the tools that role works in, and what is top of mind, then offers connecting Slack — or, if they
+decline it, connecting other surfaces — before the workspace's main agent answers them. Only a
+workspace admin can connect Slack; another member sees that step but is told an admin connects it.
+The other surfaces are the member's own: any member copies the terminal install command, and any
+member connects their own phone to iMessage once an admin has made the first iMessage connection.
+An admin reaches every agent; every other member reaches the agents open to everyone in the
 workspace, the agents they created themselves, and any agent shared with them (see
 `capabilities.md`). The invitation also gives the terminal install command.
 

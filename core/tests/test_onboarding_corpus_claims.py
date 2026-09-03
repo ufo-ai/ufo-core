@@ -62,6 +62,8 @@ MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
 WEB_APP = "extensions/web/frontend/src/App.tsx"
 FIRST_RUN_VIEW = "extensions/web/frontend/src/views/FirstRun.tsx"
+SURFACES_VIEW = "extensions/web/frontend/src/views/Surfaces.tsx"
+IMESSAGE_TOOLS = "extensions/imessage/ufo_ext_imessage/tools.py"
 WEB_TEAM_VIEW = "extensions/web/frontend/src/views/Team.tsx"
 SIGNUP_EMAIL = "servers/control/src/email.rs"
 
@@ -679,6 +681,51 @@ CLAIMS = (
             r"\.\.\.\(confirm \? \[WEBSITE_STEP\] : \[\]\),\n\s+BUSINESS_STEP,\n"
             r"\s+POSITION_STEP,\n\s+\.\.\.\(tools \? \[TOOLS_STEP\] : \[\]\),\n"
             r"\s+GOALS_STEP,"
+        ),
+    ),
+    Claim(
+        claim="first run offers connecting Slack after the goals step, then other surfaces only"
+        " where Slack was declined",
+        corpus="references/getting-started.md",
+        phrase="then offers connecting Slack — or, if they\ndecline it, connecting other surfaces",
+        source=FIRST_RUN_VIEW,
+        pattern=(
+            r"GOALS_STEP,\n\s+\.\.\.\(slack \? \[SLACK_STEP\] : \[\]\),\n"
+            r"\s+\.\.\.\(slack && declined \? \[SURFACES_STEP\] : \[\]\),"
+        ),
+    ),
+    Claim(
+        claim="the first-run Slack step is admin-gated",
+        corpus="references/getting-started.md",
+        phrase="Only a\nworkspace admin can connect Slack",
+        source=FIRST_RUN_VIEW,
+        pattern=r"<Connect\n\s+agent=\{agent\}\n\s+admin=\{member\.admin\}\n\s+row=\{slack\}",
+    ),
+    Claim(
+        claim="a non-admin on the Slack step is told an admin connects it, instead of an act that"
+        " would be refused",
+        corpus="references/getting-started.md",
+        phrase="another member sees that step but is told an admin connects it",
+        source=SURFACES_VIEW,
+        pattern=r'"A workspace admin connects " \+ row\.label \+ "\."',
+    ),
+    Claim(
+        claim="the terminal row carries only the install command, so no admin is needed to take it",
+        corpus="references/getting-started.md",
+        phrase="any member copies the terminal install command",
+        source=SURFACES_VIEW,
+        pattern=r"case TERMINAL:\n\s+return <TerminalRow key=\{row\.name\} row=\{row\} />;",
+    ),
+    Claim(
+        claim="iMessage needs an admin only to bind the deploy's provider, so a member connects"
+        " their own phone once that bind stands",
+        corpus="references/getting-started.md",
+        phrase="any\nmember connects their own phone to iMessage once an admin has made the first"
+        " iMessage connection",
+        source=IMESSAGE_TOOLS,
+        pattern=(
+            r"if configured != provider\.installation_id:\n"
+            r"\s+if not await ctx\.speaker_is_admin\(\):"
         ),
     ),
     Claim(
