@@ -146,7 +146,7 @@ impl SharedWorkspaces {
         Ok(listed.choices)
     }
 
-    /// One craft per workspace, for the landing page's live fleet.
+    /// The workspace count the deploy gates read to prove a door reaches this database.
     pub async fn fleet(&self) -> Result<i64, SeatError> {
         let fleet: Fleet = self.get("fleet", &[]).await?;
         Ok(fleet.craft)

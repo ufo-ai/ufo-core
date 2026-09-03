@@ -455,7 +455,7 @@ class OnboardControl:
         return WorkspaceChoices(choices=_labelled(rows, subject))
 
     async def _fleet(self) -> Fleet:
-        """One craft per workspace, for the landing page's live fleet."""
+        """The workspace count the deploy gates read to prove a door reaches this database."""
         warn(CROSS_WORKSPACE_READ, route="fleet")
         async with owner_tx() as connection:
             craft = (
