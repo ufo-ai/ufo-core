@@ -1,9 +1,6 @@
 const CLI_UA = /^(curl|wget|httpie)\b/i;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL = 254;
-const COUNT_TTL_MS = 3_600_000;
-const FLEET_TTL_MS = 300_000;
-const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const PAGE_CACHE = "public, max-age=600";
 // One script fronts several doors, and every document it serves names the production apex as its
 // canonical home, so the sitemap and robots.txt name that apex too rather than the door they were
@@ -53,22 +50,14 @@ const EMAIL_SCHEMA =
   "  queued_at text," +
   "  sent_at text)";
 
-let counted = { count: null, at: 0 };
-let fleet = { count: null, at: 0 };
-
-function card(host, total, workspaces) {
+function card(host) {
   return `
-      ╭─◠◠◠─╮
-  ╾══╡ ◉ ◉ ◉ ╞══╼   ${host}
-     ╰┄┄┄┄┄┄┄╯
+  ∵ ${host}
+  Build the unknown.
 
-  ${workspaces} workspace${workspaces === 1 ? "" : "s"}. ${total} on the waitlist.
+  Sign up: ${JOIN_URL}
 
-  Sign up:
-    ${JOIN_URL}
-
-  Already invited?
-    curl -fsSL https://${host}/ufo | sh
+  Install: curl -fsSL https://${host}/ufo | sh
 
 `;
 }
@@ -137,31 +126,6 @@ async function ensureWaitlist(db) {
   }
 }
 
-async function waitlistCount(db) {
-  if (counted.count === null || Date.now() - counted.at > COUNT_TTL_MS) {
-    await ensureWaitlist(db);
-    const row = await db.prepare("select count(*) as n from waitlist").first();
-    counted = { count: row.n, at: Date.now() };
-  }
-  return counted.count;
-}
-
-async function fleetCount(originBase) {
-  if (fleet.count !== null && Date.now() - fleet.at <= FLEET_TTL_MS) {
-    return fleet.count;
-  }
-  try {
-    const reply = await fetch(`${originBase}/fleet`, {
-      signal: AbortSignal.timeout(FLEET_FETCH_TIMEOUT_MS),
-    });
-    const { craft } = await reply.json();
-    fleet = { count: Math.max(4, Number(craft) || 0), at: Date.now() };
-  } catch {
-    return fleet.count ?? 0;
-  }
-  return fleet.count;
-}
-
 async function siteCard(url) {
   const key = new Request(`${url.origin}${url.pathname}`);
   const cached = await caches.default.match(key);
@@ -185,17 +149,13 @@ async function artifactBytes(request, url) {
   return served;
 }
 
-async function landing(request, env, url) {
+function landing(request, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
     const bounce = secure(url);
     if (bounce) return bounce;
     return page(LANDING_HTML);
   }
-  const [total, workspaces] = await Promise.all([
-    waitlistCount(env.DB),
-    fleetCount(env.ORIGIN_BASE),
-  ]);
-  return text(card(url.hostname, total, workspaces));
+  return text(card(url.hostname));
 }
 
 async function join(request, env, url) {
@@ -227,7 +187,6 @@ async function join(request, env, url) {
       .bind(email)
       .run();
   }
-  counted = { count: null, at: 0 };
   return text(ack(row.n));
 }
 
@@ -253,7 +212,7 @@ export default {
     }
     switch (url.pathname) {
       case "/":
-        return landing(request, env, url);
+        return landing(request, url);
       case "/favicon.svg":
         return new Response(FAVICON_SVG, {
           headers: { "cache-control": "no-cache", "content-type": "image/svg+xml" },

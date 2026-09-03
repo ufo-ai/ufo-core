@@ -67,12 +67,12 @@ headings and labels are cased normally — Title Case or sentence case, one conv
 never lowercase-as-aesthetic (`Join Waitlist`); placeholder values are neutral (`email@work.com`).
 Commands, addresses, and header names render verbatim (`curl`, `gmail.com`, `x-ufo-session`) even
 at sentence start. Letter-spacing spelled in spaces (`u f o`) and decorative punctuation do not
-ship — visual character lives in CSS and the drawn craft, never in the characters of the words.
+ship — visual character lives in CSS and the mark, never in the characters of the words.
 
-**The ASCII craft is the mark and stays.** It is drawn, not said — the metaphor ban governs words,
-and the card's fleet is live data (one craft per workspace). The curl card keeps it, held there by
-a test; strip decoration around it, never it. The apex serves browsers the brand page instead, and
-its words answer to the same rules.
+**`∵` is the mark and stays.** It is drawn, not said — the metaphor ban governs words, and the
+mark is exempt from the punctuation rule that governs them. The curl card heads its host with it,
+held there by a test; strip decoration around it, never it. The apex serves browsers the brand page
+instead, and its words answer to the same rules.
 
 ## Prompts
 

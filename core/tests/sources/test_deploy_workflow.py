@@ -214,7 +214,7 @@ case "$URL" in
     ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
-    printf 'Sign up:\\n    https://ufo.ai/join/ufo\\n'
+    printf '  Sign up: https://ufo.ai/join/ufo\\n'
     ;;
 esac
 """
@@ -4558,7 +4558,7 @@ def _check_both_door_gates_grep_the_join_door_the_card_prints() -> None:
     prefix = re.search(r'const JOIN_PREFIX = "([^"]+)"', worker)
     assert apex and prefix
     assert "const JOIN_URL = `${APEX}${JOIN_PREFIX}ufo`" in worker
-    assert re.search(r"Sign up:\n\s+\$\{JOIN_URL\}", worker)
+    assert "  Sign up: ${JOIN_URL}" in worker
     join = f"{apex.group(1)}{prefix.group(1)}ufo"
     for job, name, workflow in (
         ("edge", "Gate testing door", "deploy.yml"),

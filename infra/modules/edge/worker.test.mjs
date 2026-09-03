@@ -57,15 +57,28 @@ function request(url, { ua = "curl/8.6.0", method = "GET", body } = {}) {
   return worker.fetch(new Request(url, { method, body, headers: { "user-agent": ua } }), env);
 }
 
-test("curl landing renders the card with live counts and https commands", async () => {
+test("curl landing renders the card with the mark, the door, and the install command", async () => {
   const reply = await request("https://flyingobject.ai/");
   const body = await reply.text();
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
-  assert.match(body, /◉ ◉ ◉/);
-  assert.match(body, /flyingobject\.ai/);
-  assert.match(body, /4 workspaces\. 0 on the waitlist\./);
-  assert.match(body, /Sign up:\n {4}https:\/\/ufo\.ai\/join\/ufo\n/);
-  assert.match(body, /curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
+  assert.match(body, /∵ flyingobject\.ai\n/);
+  assert.match(body, /Build the unknown\.\n/);
+  assert.match(body, /Sign up: https:\/\/ufo\.ai\/join\/ufo\n/);
+  assert.match(body, /Install: curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
+});
+
+// The card is the worker's own text and reads nothing, so a door answers a curl whole while its
+// origin and its database are both down.
+test("the card is served with no call and no read of the worker's own", async () => {
+  const fresh = await importWorker("card-standalone");
+  const before = outbound.length;
+  const reply = await fresh.fetch(
+    new Request("https://flyingobject.ai/", { headers: { "user-agent": "curl/8.6.0" } }),
+    { ORIGIN_BASE: "https://origin.flyingobject.ai" },
+  );
+  assert.equal(reply.status, 200);
+  assert.match(await reply.text(), /∵ flyingobject\.ai/);
+  assert.deepEqual(outbound.slice(before), []);
 });
 
 // The key that opens a join door is that door's own configuration, so the card hands every reader
@@ -80,7 +93,7 @@ test("curl landing over plain http gets the card directly", async () => {
   const reply = await request("http://flyingobject.ai/");
   assert.equal(reply.status, 200);
   assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
-  assert.match(await reply.text(), /\d+ workspaces?\. \d+ on the waitlist\./);
+  assert.match(await reply.text(), /∵ flyingobject\.ai/);
 });
 
 test("browser landing over plain http is bounced to https with its query intact", async () => {
@@ -546,11 +559,6 @@ test("an exhausted confirmation is surfaced and consumed", async (context) => {
       .first(),
     { queued_at: null, sent_at: null },
   );
-});
-
-test("a signup busts the counter cache so the card reflects it", async () => {
-  const body = await (await request("https://flyingobject.ai/")).text();
-  assert.match(body, /4 workspaces\. 2 on the waitlist\./);
 });
 
 test("a malformed email is a 400 and takes no queue slot", async () => {
