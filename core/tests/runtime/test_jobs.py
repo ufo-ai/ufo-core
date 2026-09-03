@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from dbos import DBOS, SetWorkflowID
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from ufo_testsupport.invoker import RecordingInvoker
 
 from ufo.db import workspace_tx
 from ufo.harness import o11y
@@ -30,10 +31,22 @@ from ufo.product import (
     product_census,
 )
 from ufo.runtime import jobs as jobs_module
+from ufo.runtime.authority import MemberAuthority
+from ufo.runtime.billing.accounting import PARK, OffTurnSpendRefused
 from ufo.runtime.candidates import owner_candidates
 from ufo.runtime.ext.context import ExtensionContext, ScopedStore
 from ufo.runtime.ext.manifest import JobSpec
-from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.runtime.jobs import (
+    CORE_EXTENSION,
+    JobRunner,
+    bindings_from,
+    spend_refusal_notice_key,
+)
+from ufo.runtime.turns.audience import (
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+)
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, TerminalFrame, Usage
@@ -232,6 +245,294 @@ async def test_fire_names_the_statement_the_database_refused(
     assert record.ufo["workspace_id"] == str(workspace_id)
     assert record.ufo["statement"] == "select agent_id from workspace"
     assert "_refused" in record.ufo["stack"]
+
+
+async def _spoken_workspace() -> tuple[UUID, UUID, UUID, UUID]:
+    """A workspace whose seated member has spoken to a live agent once: the workspace, that
+    conversation, its agent, and the member — the rows a notice turn needs to be addressed to
+    somebody."""
+    workspace_id = uuid4()
+    member_id = uuid4()
+    agent_id = uuid4()
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@work.com",
+                is_admin=True,
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="Main",
+                prompt="help",
+                model="auto",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key=str(conversation_id),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="hello",
+                terminal=TerminalFrame(status="done", text="hi").model_dump(mode="json"),
+                admission_source=MEMBER_ADMISSION,
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, conversation_id, agent_id, member_id
+
+
+async def _spoke_again_in(
+    workspace_id: UUID,
+    agent_id: UUID,
+    member_id: UUID,
+    audience: Audience,
+    surface: str,
+    spoken_at: datetime,
+) -> UUID:
+    """One more conversation of this audience, with a member turn in it at `spoken_at` — the row
+    that decides which conversation is the newest one the member spoke in."""
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=surface,
+                queue_key=str(conversation_id),
+                audience=str(audience),
+                member_id=member_id if audience == conversation_audience(member_id) else None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="hello",
+                terminal=TerminalFrame(status="done", text="hi").model_dump(mode="json"),
+                admission_source=MEMBER_ADMISSION,
+                speaker_member_id=member_id,
+                created_at=spoken_at,
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_spend_notice_skips_an_externally_shared_room_for_the_member_s_own_conversation(
+    db: None,
+) -> None:
+    """The notice states a workspace's spend hold and where to lift it, so it is founded only in a
+    conversation the speaker reads as a member of this workspace. A newer turn in an externally
+    shared channel is passed over, however recent it is, and the member's own conversation carries
+    the notice instead."""
+    workspace_id, _, agent_id, member_id = await _spoken_workspace()
+    own_conversation_id = await _spoke_again_in(
+        workspace_id,
+        agent_id,
+        member_id,
+        conversation_audience(member_id),
+        "web",
+        datetime.now(UTC) + timedelta(hours=1),
+    )
+    await _spoke_again_in(
+        workspace_id,
+        agent_id,
+        member_id,
+        foreign_room_audience("slack", "C0FOREIGN"),
+        "slack",
+        datetime.now(UTC) + timedelta(hours=2),
+    )
+    key = f"{CORE_EXTENSION}:memory"
+
+    async def _refused(context: ExtensionContext) -> None:
+        raise OffTurnSpendRefused(PARK, "this workspace has no credit left", BACKGROUND_MODEL)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="memory", schedule="* * * * * *", handler=_refused, candidates=_candidate)
+    invoker = RecordingInvoker()
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)),
+        manifests=(),
+        invoker_factory=lambda _: invoker,
+    )
+
+    await runner.fire(key, workspace_id)
+
+    assert [turn.conversation_id for turn in invoker.turns] == [own_conversation_id]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_workspace_that_spoke_only_in_a_foreign_room_is_not_told_at_all(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No conversation of this workspace's own carries the notice, so no turn is founded and the
+    mark is released: the refusal is still untold, and a later one tells it once a member speaks
+    where this workspace can answer."""
+    workspace_id, conversation_id, _, _ = await _spoken_workspace()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .values(audience=str(foreign_room_audience("slack", "C0FOREIGN")), surface="slack")
+            .where(tables.conversation.c.id == conversation_id)
+        )
+    key = f"{CORE_EXTENSION}:memory"
+
+    async def _refused(context: ExtensionContext) -> None:
+        raise OffTurnSpendRefused(PARK, "this workspace has no credit left", BACKGROUND_MODEL)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="memory", schedule="* * * * * *", handler=_refused, candidates=_candidate)
+    invoker = RecordingInvoker()
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)),
+        manifests=(),
+        invoker_factory=lambda _: invoker,
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await runner.fire(key, workspace_id)
+
+    assert invoker.turns == []
+    assert [
+        record.ufo["workspace_id"]
+        for record in caplog.records
+        if record.message == "jobs.spend_refusal_untold"
+    ] == [str(workspace_id)]
+    with ws(workspace_id):
+        mark = spend_refusal_notice_key(BACKGROUND_MODEL)
+        assert await ScopedStore(extension=CORE_EXTENSION).get(mark) is None
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_spend_refusal_defers_the_job_and_tells_the_member_once(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A handler the workspace's spend gates refused is deferred, not failed: nothing re-raises, no
+    `jobs.failed` line is written, and the member is told exactly once — the mark the notice leaves
+    keeps the next refusal quiet, and a cleared mark tells again."""
+    workspace_id, conversation_id, agent_id, member_id = await _spoken_workspace()
+    key = f"{CORE_EXTENSION}:memory"
+
+    async def _refused(context: ExtensionContext) -> None:
+        raise OffTurnSpendRefused(PARK, "this workspace has no credit left", BACKGROUND_MODEL)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="memory", schedule="* * * * * *", handler=_refused, candidates=_candidate)
+    invoker = RecordingInvoker()
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)),
+        manifests=(),
+        invoker_factory=lambda _: invoker,
+    )
+    scoped = ScopedStore(extension=CORE_EXTENSION)
+    mark = spend_refusal_notice_key(BACKGROUND_MODEL)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await runner.fire(key, workspace_id)
+
+    assert [record for record in caplog.records if record.message == "jobs.failed"] == []
+    deferred = next(
+        record for record in caplog.records if record.message == "jobs.deferred_on_spend"
+    )
+    assert deferred.ufo["job"] == key
+    assert deferred.ufo["outcome"] == PARK
+    assert deferred.ufo["model"] == BACKGROUND_MODEL
+    with ws(workspace_id):
+        assert await scoped.get(mark) == PARK
+    assert len(invoker.turns) == 1
+    told = invoker.turns[0]
+    assert told.conversation_id == conversation_id
+    assert told.agent_id == agent_id
+    assert told.authority == MemberAuthority(member_id)
+    assert "this workspace has no credit left" in told.message
+    assert key in told.message
+
+    await runner.fire(key, workspace_id)
+    assert len(invoker.turns) == 1
+
+    with ws(workspace_id):
+        await scoped.delete(mark)
+    await runner.fire(key, workspace_id)
+    assert len(invoker.turns) == 2
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_refusal_reads_the_mark_of_the_model_it_was_refused_on(db: None) -> None:
+    """A hold stands per model, so the mark another model's refusal left says nothing about this
+    one: the member is told about this model's hold, and the other mark is left as it was."""
+    workspace_id, _, _, _ = await _spoken_workspace()
+    key = f"{CORE_EXTENSION}:memory"
+    other = spend_refusal_notice_key("claude-opus-4-8")
+    scoped = ScopedStore(extension=CORE_EXTENSION)
+
+    async def _refused(context: ExtensionContext) -> None:
+        raise OffTurnSpendRefused(PARK, "this workspace has no credit left", BACKGROUND_MODEL)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="memory", schedule="* * * * * *", handler=_refused, candidates=_candidate)
+    invoker = RecordingInvoker()
+    runner = JobRunner(
+        bindings=bindings_from((), (spec,)),
+        manifests=(),
+        invoker_factory=lambda _: invoker,
+    )
+
+    with ws(workspace_id):
+        await scoped.put(other, PARK)
+    await runner.fire(key, workspace_id)
+
+    assert len(invoker.turns) == 1
+    with ws(workspace_id):
+        assert await scoped.get(spend_refusal_notice_key(BACKGROUND_MODEL)) == PARK
+        assert await scoped.get(other) == PARK
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

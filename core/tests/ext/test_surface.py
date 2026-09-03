@@ -1404,7 +1404,7 @@ class _SpendRefused:
     model: str = "decider"
 
     async def complete(self, request: ModelRequest) -> str:
-        raise OffTurnSpendRefused(self.outcome, "out of credit")
+        raise OffTurnSpendRefused(self.outcome, "out of credit", self.model)
 
 
 @dataclass

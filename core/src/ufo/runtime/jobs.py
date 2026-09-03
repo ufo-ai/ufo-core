@@ -35,15 +35,25 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import emit_metric, formatted_stack, log, log_error, warn
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, product_census
-from ufo.runtime.authority import authority_member_id, turn_authority
-from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
+from ufo.runtime.authority import MemberAuthority, authority_member_id, turn_authority
+from ufo.runtime.billing.accounting import (
+    ALLOW,
+    BalanceGate,
+    OffTurnSpendRefused,
+    SpendEvaluator,
+)
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.runtime.ext.context import (
+    CORE_EXTENSION,
+    SPEND_REFUSAL_NOTICE_KEY,
     ConversationProbes,
     ExtensionContext,
+    ScopedStore,
     TurnInvoker,
+    agent_is_live,
     context_for,
     seated_member_workspaces,
+    spend_refusal_notice_key,
 )
 from ufo.runtime.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY,
@@ -64,10 +74,13 @@ from ufo.runtime.sources.sync import (
     SyncDriver,
     page_cursor,
 )
+from ufo.runtime.turns.audience import SHARED_AUDIENCE
+from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    MEMBER_ADMISSION,
     PARKED,
     RUNNING,
     TURN_WORKFLOW_NAME,
@@ -92,7 +105,6 @@ InvokerFactory = Callable[[UUID], TurnInvoker]
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
 JOB_TICK_WORKFLOW_NAME = "job_tick"
-CORE_EXTENSION = "core"
 TURN_DISPATCH_JOB = "turn_dispatch"
 TURN_DISPATCH_SCHEDULE = "0 * * * * *"
 TURN_DISPATCH_GRACE_SECONDS = 300
@@ -837,6 +849,8 @@ class JobRunner:
             )
             try:
                 await binding.spec.handler(context)
+            except OffTurnSpendRefused as refusal:
+                await self._deferred_on_spend(key, workspace_id, refusal)
             except Exception as error:
                 log_error(
                     "jobs.failed",
@@ -846,6 +860,129 @@ class JobRunner:
                     **failed_statement(error),
                 )
                 raise
+
+    async def _deferred_on_spend(
+        self, key: str, workspace_id: UUID, refusal: OffTurnSpendRefused
+    ) -> None:
+        """A job the workspace's own spend gates refused: deferred to its next pass, and told to the
+        member once.
+
+        The refusal is a policy decision rather than a fault, so the execution ends here instead of
+        raising. Nothing is lost by ending it: every gated job re-reads its own state on each pass
+        and writes whole once the spend is allowed, so the schedule is already the retry, and a
+        `jobs.failed` line for a decision the gate meant to make reads as a fault an operator must
+        chase.
+
+        What the refusal did drop is the member. A workspace whose own key serves its chat and not
+        the deploy's background model keeps answering while its memory sections and profiles stop
+        being written, day after day, with the log line as the only trace. So the first refusal a
+        workspace hits opens one turn in the conversation that member last spoke in, carrying the
+        refusal's own words; the mark that turn leaves keeps every later refusal quiet, because a
+        standing hold restated daily is the same silence one step louder.
+
+        The mark is claimed before the turn and released when there is nothing to carry it — no
+        invoker on this deploy, or no conversation a seated member has spoken in — so a workspace
+        whose first refusal could not be told is told by a later one.
+
+        The mark holds the refusal's own outcome rather than a bare flag, so it re-arms: a park that
+        becomes a reject is a different hold in different words and tells again, and an outcome
+        cleared from this key leaves the next refusal to tell the member as the first one did. The
+        write is a compare-and-swap on the outcome the mark already holds, so two of a workspace's
+        jobs refused in the same pass open one notice between them, never two.
+
+        The mark is the refused model's own, because that is what a hold covers: a workspace holding
+        its own key for the chat model has that model exempted by the balance gate while the
+        deploy's background model stays refused, so its jobs on the two models are held apart. One
+        workspace-wide mark would be deleted by the allowed model's next pass and the member would
+        read a new notice for the same unchanged hold on every later refusal.
+
+        The hold ends where it began: the off-turn model seam deletes this model's mark on the first
+        pass its gates allow, so a workspace that adds credit is told again the next time its jobs
+        are refused. Nothing here expires the mark on time, because a hold that still stands has
+        nothing new to say."""
+        log("jobs.deferred_on_spend", job=key, outcome=refusal.outcome, model=refusal.model)
+        store = ScopedStore(extension=CORE_EXTENSION)
+        mark = spend_refusal_notice_key(refusal.model)
+        told = await store.get(mark)
+        if told == refusal.outcome:
+            return
+        if not await store.put_if(mark, refusal.outcome, expected=told):
+            return
+        if await self._tell_the_member(key, workspace_id, str(refusal)) is None:
+            await store.delete(mark)
+
+    async def _tell_the_member(self, key: str, workspace_id: UUID, refusal: str) -> UUID | None:
+        """The notice turn, or None where this workspace has nobody to open it with. It rides the
+        speaker's own authority in the conversation they last spoke in — the shape every on-behalf
+        invocation takes — because a room a job opened for itself lists nowhere and would state the
+        hold to nobody. Only a seated speaker and a live agent are named, so the invoke seam is
+        never handed a turn it must refuse.
+
+        The ask carries the refusal's own words, because those name the act and the screen that
+        performs it, and it says the work resumes by itself, because the job re-reads its own state
+        on every pass and needs nothing from the member but the spend.
+
+        The conversation is one the speaker reads as a member of this workspace — the shared
+        audience or their own — never a room and never an externally shared channel. The notice
+        states a workspace's spend hold and where to lift it, so a foreign channel would carry it
+        out of the workspace to whoever else sits in that room; a member's own audience is exact
+        through `conversation.member_id`, which the schema sets for that audience alone.
+
+        The idempotency key is fresh per notice: one fixed key would collapse every later notice
+        onto the first turn it founded, and would be refused outright once the member's newest
+        conversation is another one."""
+        if self.invoker_factory is None:
+            return None
+        async with workspace_tx() as connection:
+            told = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.turn.c.speaker_member_id,
+                    )
+                    .select_from(
+                        tables.turn.join(
+                            tables.member,
+                            tables.member.c.id == tables.turn.c.speaker_member_id,
+                        ).join(
+                            tables.conversation,
+                            tables.conversation.c.id == tables.turn.c.conversation_id,
+                        )
+                    )
+                    .where(
+                        tables.turn.c.workspace_id == workspace_id,
+                        tables.turn.c.admission_source == MEMBER_ADMISSION,
+                        tables.member.c.workspace_id == workspace_id,
+                        tables.member.c.seated_at.is_not(None),
+                        tables.conversation.c.workspace_id == workspace_id,
+                        sa.or_(
+                            tables.conversation.c.audience == str(SHARED_AUDIENCE),
+                            sa.and_(
+                                tables.conversation.c.audience.startswith(MEMBER_SUBJECT_PREFIX),
+                                tables.conversation.c.member_id == tables.turn.c.speaker_member_id,
+                            ),
+                        ),
+                        agent_is_live(tables.turn.c.workspace_id, tables.turn.c.agent_id),
+                    )
+                    .order_by(tables.turn.c.created_at.desc(), tables.turn.c.id.desc())
+                    .limit(1)
+                )
+            ).one_or_none()
+        if told is None:
+            warn("jobs.spend_refusal_untold", job=key, workspace_id=str(workspace_id))
+            return None
+        return await self.invoker_factory(workspace_id).invoke(
+            told.conversation_id,
+            told.agent_id,
+            f"The {key} background job asked for a model call and this workspace's spend gates "
+            f"refused it: {refusal}\n\nTell the member, once, that this work is paused, what the "
+            "refusal above says to do about it, and that the job writes again on its next pass "
+            "once the spend is allowed. Do nothing else.",
+            f"{SPEND_REFUSAL_NOTICE_KEY}:{uuid4().hex}",
+            authority=MemberAuthority(told.speaker_member_id),
+            as_scheduled=True,
+        )
 
     def _registered(self, key: str) -> _Binding | None:
         return next((binding for binding in self.bindings if binding.key == key), None)

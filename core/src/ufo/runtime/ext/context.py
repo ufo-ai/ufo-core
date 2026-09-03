@@ -104,6 +104,18 @@ from ufo.schema.records import (
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
+CORE_EXTENSION = "core"
+SPEND_REFUSAL_NOTICE_KEY = "spend_refusal_notice"
+
+
+def spend_refusal_notice_key(model: str) -> str:
+    """The store key holding whether this workspace was told its off-turn spend on `model` is
+    refused. One key per model, because a hold is per model: `BalanceGate` exempts a model whose key
+    slot the workspace owns, so a deploy whose jobs run on two models can have one of them allowed
+    for the whole time the other is held. A workspace-wide key would let the allowed model's pass
+    forget the held model's mark, and the member would be told again on every later refusal."""
+    return f"{SPEND_REFUSAL_NOTICE_KEY}:{model}"
+
 
 class UndeclaredCredentialSlot(KeyError):
     """A handler asked for a credential slot its manifest never declared."""
@@ -794,7 +806,15 @@ class ModelAccess:
         A failed call is metered too, carrying the `error_class` a round records: a job whose model
         call raises books no spend, so the ledger cannot show it, and the latency of the attempt is
         the only trace that the model was reached at all. A cancellation is one of those classes — a
-        job dropped at shutdown must not read back as a round that answered in no tokens."""
+        job dropped at shutdown must not read back as a round that answered in no tokens.
+
+        A pass the gates allow ends the hold a refusal left on this model, so the mark a refused job
+        wrote to keep its workspace quiet is forgotten here — the one point in the deploy that
+        learns the spend on this model is allowed again. Without it the first refusal would be the
+        last one a workspace was ever told about, because the mark has no expiry and nothing else
+        reads the gates off-turn. The mark cleared is this model's alone: another off-turn model can
+        stay refused through the same pass, and its hold has still not ended. A delete that matches
+        nothing is the common case and costs one statement."""
         model = self._resolver.auto_model
         async with workspace_tx() as connection:
             balance = await BalanceGate(ws_current().workspace_id).admits(
@@ -806,9 +826,10 @@ class ModelAccess:
                 connection, 0
             )
         if balance.outcome != ALLOW:
-            raise OffTurnSpendRefused(balance.outcome, balance.message)
+            raise OffTurnSpendRefused(balance.outcome, balance.message, model)
         if spend.outcome != ALLOW:
-            raise OffTurnSpendRefused(spend.outcome, spend.message)
+            raise OffTurnSpendRefused(spend.outcome, spend.message, model)
+        await ScopedStore(extension=CORE_EXTENSION).delete(spend_refusal_notice_key(model))
         client = await self._resolver.client_for(model)
         byok = client.funding != PLATFORM_FUNDED
         dimensions = {

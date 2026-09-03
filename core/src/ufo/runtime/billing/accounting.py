@@ -56,10 +56,14 @@ class TurnUsageConflict(RuntimeError):
 
 
 class OffTurnSpendRefused(RuntimeError):
-    """An off-turn model call was refused by its workspace spend gates."""
+    """An off-turn model call was refused by its workspace spend gates. `model` names the model the
+    gates refused, because a refusal holds per model rather than per workspace: `BalanceGate`
+    exempts a model whose key slot the workspace owns, so one off-turn model can be refused while
+    another is allowed for the whole time the hold stands."""
 
-    def __init__(self, outcome: SpendOutcome, message: str) -> None:
+    def __init__(self, outcome: SpendOutcome, message: str, model: str) -> None:
         self.outcome = outcome
+        self.model = model
         super().__init__(message)
 
 

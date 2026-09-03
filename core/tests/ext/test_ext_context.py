@@ -52,9 +52,10 @@ from ufo.runtime.authority import (
     ExecutionAuthority,
     MemberAuthority,
 )
-from ufo.runtime.billing.accounting import record_workspace_usage
+from ufo.runtime.billing.accounting import PARK, record_workspace_usage
 from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.ext.context import (
+    CORE_EXTENSION,
     PROBE_TIMEOUT_MAX_SECONDS,
     ConversationFacts,
     ConversationFiles,
@@ -64,6 +65,7 @@ from ufo.runtime.ext.context import (
     TurnOutcome,
     UndeclaredCredentialSlot,
     context_for,
+    spend_refusal_notice_key,
 )
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.runtime.ext.surface import (
@@ -279,6 +281,45 @@ async def test_a_spent_workspace_cannot_run_a_background_model_call(db: None) ->
                 )
             )
     assert model.sent == []
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_allowed_background_call_forgets_the_spend_refusal_mark(db: None) -> None:
+    """The mark a refused job left keeps its workspace quiet while the hold stands, and this seam is
+    where the deploy learns the hold is over: a refused call leaves the mark as it is, and the first
+    call the gates allow deletes it, so the next refusal tells the member as the first one did. What
+    it deletes is this model's mark alone: another off-turn model whose own hold still stands keeps
+    its mark, so the member reads no second notice for a hold that never lifted."""
+    workspace_id = await _workspace()
+    context = context_for(
+        "core", frozenset(), model_resolver=StubResolver(RecordingModel()), model_job=JOB
+    )
+    assert context.model is not None
+    request = ModelRequest(
+        model="auto",
+        system="be terse",
+        messages=(Message(role="user", content="hi"),),
+        max_tokens=64,
+        conversation_cache_ttl="5m",
+    )
+    store = ScopedStore(extension=CORE_EXTENSION)
+    mark = spend_refusal_notice_key(MODEL)
+    held = spend_refusal_notice_key("gpt-5.6-luna")
+    with ws(workspace_id):
+        await store.put(mark, PARK)
+        await store.put(held, PARK)
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 1, 1, "seed")
+            await debit(connection, workspace_id, 1)
+        with pytest.raises(RuntimeError, match="out of credit"):
+            await context.model.complete(request)
+        assert await store.get(mark) == PARK
+
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 1_000_000, 1_000_000, "top-up")
+        await context.model.complete(request)
+        assert await store.get(mark) is None
+        assert await store.get(held) == PARK
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
