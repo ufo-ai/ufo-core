@@ -265,6 +265,11 @@ LOG_TAIL_LINES = 20
 LOG_TAIL_TIMEOUT_SECONDS = 15
 """Reading the tail of one log inside the sandbox, on the failure path of a start that already ended
 — so the wait is short and stated rather than the 120s default."""
+SERVER_NEVER_LISTENED = (
+    "nothing listened on port {port} within {seconds}s and {log} holds nothing: the hosted link "
+    "serves that port alone, so the command must bind $PORT, which the sandbox sets to {port}"
+)
+SERVER_START_SAID_NOTHING = "the start of {command!r} failed with no output and {log} holds nothing"
 TOOL_OUTPUT_DIR = "tool-output"
 SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
 DEPLOY_LOG = f"{TOOL_OUTPUT_DIR}/deploy-{{port}}.log"
@@ -572,6 +577,14 @@ async def _reset_server_task(ctx: ToolContext, base: str) -> None:
         raise RuntimeError(reset.stderr.strip() or f"cannot clear the server task at {base}")
 
 
+async def _log_tail(ctx: ToolContext, log_path: str) -> str:
+    tail = await ctx.sandbox.bash(
+        f"tail -n {LOG_TAIL_LINES} {shell_path(log_path)} 2>/dev/null || true",
+        timeout_s=LOG_TAIL_TIMEOUT_SECONDS,
+    )
+    return tail.stdout
+
+
 async def _serve(
     ctx: ToolContext, command: str, project: str, port: int, log_path: str
 ) -> dict[str, object]:
@@ -609,38 +622,44 @@ async def _serve(
         f"exec env PORT={port} bash -lc {shlex.quote(command)} "
         f">{shell_path(log_path)} 2>&1"
     )
-    result = await ctx.sandbox.bash_task(
+    started = await ctx.sandbox.bash_task(
         server_command,
         task_base,
         detach=True,
         model_authored=True,
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
-    if result.exit_code == 0:
-        task_pid = result.stdout.strip()
-        try:
-            result = await ctx.sandbox.bash(
-                readiness_probe, timeout_s=READINESS_TIMEOUT_SECONDS + 5
-            )
-        except BaseException:
-            await _stop_server_task(ctx, server_command, task_base, task_pid)
-            raise
-        if result.exit_code != 0:
-            await _stop_server_task(ctx, server_command, task_base, task_pid)
-    if result.exit_code != 0:
-        tail = await ctx.sandbox.bash(
-            f"tail -n {LOG_TAIL_LINES} {shell_path(log_path)} 2>/dev/null || true",
-            timeout_s=LOG_TAIL_TIMEOUT_SECONDS,
-        )
-        if tail.stdout:
-            raise RuntimeError(tail.stdout)
-        if result.timed_out_after_s is not None:
+    if started.exit_code != 0:
+        logged = await _log_tail(ctx, log_path)
+        if logged:
+            raise RuntimeError(logged)
+        if started.timed_out_after_s is not None:
             raise RuntimeError(
                 f"the server never answered on port {port}: the sandbox stopped the start after "
-                f"{result.timed_out_after_s}s and {log_path} holds nothing"
+                f"{started.timed_out_after_s}s and {log_path} holds nothing"
             )
-        raise RuntimeError(result.stderr or result.stdout)
-    return {"url": f"http://localhost:{port}", "port": port, "log": log_path}
+        raise RuntimeError(
+            started.stderr
+            or started.stdout
+            or SERVER_START_SAID_NOTHING.format(command=command, log=log_path)
+        )
+    task_pid = started.stdout.strip()
+    try:
+        probe = await ctx.sandbox.bash(readiness_probe, timeout_s=READINESS_TIMEOUT_SECONDS + 5)
+    except BaseException:
+        await _stop_server_task(ctx, server_command, task_base, task_pid)
+        raise
+    if probe.exit_code == 0:
+        return {"url": f"http://localhost:{port}", "port": port, "log": log_path}
+    await _stop_server_task(ctx, server_command, task_base, task_pid)
+    logged = await _log_tail(ctx, log_path)
+    if logged:
+        raise RuntimeError(logged)
+    if probe.stderr:
+        raise RuntimeError(probe.stderr)
+    raise RuntimeError(
+        SERVER_NEVER_LISTENED.format(port=port, seconds=READINESS_TIMEOUT_SECONDS, log=log_path)
+    )
 
 
 def _site_media_type(path: str) -> str:
