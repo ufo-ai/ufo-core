@@ -77,7 +77,6 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
-EXCLUSION_EXHAUSTED_STEP = "Filter by Ignored Providers"
 GEMINI_ABORT_RETRY_MODEL = "google/gemini-3.7-flash"
 GEMINI_ABORT_ERROR = "The operation was aborted"
 JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
@@ -109,8 +108,10 @@ and one window for the id — so which route takes a call is a real difference, 
 both ids. `only` is a hard allowlist: a request whose permitted set serves the model nowhere
 answers 404 rather than routing outside it, which is why `allow_fallbacks` stays unset. That field
 belongs to `order`; against `only` it collapses the list to its single top route, which then
-carries every upstream 429 for the slug alone. The dead-provider re-route's `ignore` subtracts from
-this set."""
+carries every upstream 429 for the slug alone. This table pins routes and nothing else: the
+dead-provider re-route's `ignore` subtracts from the pinned set for a slug named here and is the
+whole `provider` object for one that is not, because an exclusion has to reach the wire for every
+id or the re-issue lands back on the upstream that answered empty."""
 
 IMAGES_PATH = "/images"
 IMAGE_TIMEOUT_SECONDS = 300.0
@@ -310,21 +311,6 @@ def _chunk_provider(chunk: ChatCompletionChunk) -> str | None:
     extra = chunk.model_extra
     provider = extra.get("provider") if extra else None
     return str(provider) if provider else None
-
-
-def _exclusions_exhausted(error: openai.APIStatusError) -> bool:
-    """Whether the re-route's own exclusions are what left the request nowhere to go. A slug with
-    two providers — every Gemini id — is out of them after two dead upstreams, and the next call
-    carries an `ignore` set covering the model: OpenRouter answers 404 naming the routing step it
-    stopped at, which is what separates a refusal the client caused from a slug it serves nowhere
-    (that one answers 400). The SDK unwraps the error envelope, so the step sits at `body`'s own
-    `metadata`."""
-    if error.status_code != 404:
-        return False
-    metadata = error.body.get("metadata") if isinstance(error.body, dict) else None
-    if not isinstance(metadata, dict):
-        return False
-    return metadata.get("failed_routing_step") == EXCLUSION_EXHAUSTED_STEP
 
 
 def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage:
@@ -546,12 +532,18 @@ class OpenRouterModelClient:
     round and re-runs it once, and a second interruption fails the turn. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
-    nudge; an id in PROVIDER_ALLOWLIST rides the same `provider` object as `only`, and the
-    exclusion subtracts from it. A slug can run out of providers before those retries do — every
-    Gemini id serves from two — and OpenRouter then refuses the call outright; that refusal names
-    the exclusions as its cause, so it degrades to the same empty result rather than failing the
-    turn on a 404 the client asked for. Gemini 3.7 Flash's exact no-output abort retries once
-    immediately.
+    nudge. The exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying
+    no exclusion is byte-identical to the call the dead upstream answered empty, and the sticky
+    routing key below pins it straight back to that upstream. An id in PROVIDER_ALLOWLIST rides the
+    exclusion in the same `provider` object as `only`, five routes against three exclusions at
+    most; every other id — every Gemini one — sends `ignore` as its whole provider preference, so
+    the pin stays where a slug names one. An unpinned slug can run out of upstreams before those
+    retries do — every Gemini id serves from two — and OpenRouter then refuses the call outright; a
+    404 on a call carrying exclusions of ours and no pin is a refusal those exclusions asked for,
+    so the round degrades to the same empty result rather than failing the turn. Under a pin the
+    exclusions cannot cover the slug, and the first call of a round carries none at all, so a 404
+    there is the account's own routing policy and keeps its plain raise. Gemini 3.7 Flash's exact
+    no-output abort retries once immediately.
     The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter derives
     from max_tokens when the model's spec supports it; `off` rides there too, as `enabled: false`,
     because an omitted parameter leaves the upstream model reasoning at its own default effort
@@ -574,6 +566,7 @@ class OpenRouterModelClient:
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         retry = _OpenRouterRetry(self.spec, request.model)
+        slug = openrouter_slug(request.model)
         empty_attempt = 0
         ignore_providers: set[str] = set()
         while True:
@@ -592,7 +585,8 @@ class OpenRouterModelClient:
             except openai.APIStatusError as error:
                 if state.usage is not None:
                     yield state.usage
-                if ignore_providers and _exclusions_exhausted(error):
+                nowhere_left = error.status_code == 404 and slug not in PROVIDER_ALLOWLIST
+                if ignore_providers and nowhere_left:
                     log(
                         "model.provider_exclusions_exhausted",
                         provider=self.spec.provider,
