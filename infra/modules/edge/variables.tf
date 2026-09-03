@@ -1,6 +1,6 @@
 variable "name" {
   type        = string
-  description = "Worker script name; also prefixes the D1 waitlist database."
+  description = "Worker script name."
 }
 
 variable "hostname" {

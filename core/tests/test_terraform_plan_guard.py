@@ -37,9 +37,7 @@ PERSISTENT_DELETIONS = (
     ("module.platform.aws_s3_bucket_versioning.blob", "aws_s3_bucket_versioning"),
     ("module.platform.aws_secretsmanager_secret.postgres", "aws_secretsmanager_secret"),
     ("module.platform.aws_sesv2_email_identity.onboard", "aws_sesv2_email_identity"),
-    ("module.prod.cloudflare_d1_database.waitlist", "cloudflare_d1_database"),
     ("cloudflare_dns_record.ses_dkim", "cloudflare_dns_record"),
-    ("module.prod.cloudflare_queue.waitlist_email", "cloudflare_queue"),
     ("datadog_integration_aws_account.ufo", "datadog_integration_aws_account"),
     ("datadog_integration_aws_external_id.ufo", "datadog_integration_aws_external_id"),
     ("module.platform.random_id.serve_credential_key", "random_id"),
@@ -67,7 +65,6 @@ REGENERABLE_TYPE_DELETIONS = (
     ),
     ("module.platform.aws_security_group.rds", "aws_security_group"),
     ("module.platform.aws_security_group_rule.rds_from_nodes", "aws_security_group_rule"),
-    ("module.prod.cloudflare_queue_consumer.waitlist_email", "cloudflare_queue_consumer"),
     ("cloudflare_ruleset.flyingobject_redirect", "cloudflare_ruleset"),
     ("cloudflare_ruleset.shipped_app_cache", "cloudflare_ruleset"),
     ("module.prod.cloudflare_workers_route.edge", "cloudflare_workers_route"),
@@ -438,8 +435,41 @@ def _check_the_tombstone_list_is_read_from_the_repo() -> None:
     assert _guard(tombstones=None).FLAG_TOMBSTONES == frozenset(held)
 
 
+def _check_allows_a_retired_resource_deletion() -> None:
+    """A retirement is what lets the deploy destroy a database or a queue, which the guard refuses
+    to every other address. The record is read from the repo, so a case reads it too."""
+    retired = json.loads((ROOT / "infra" / "retired_resources.json").read_text())
+    assert retired, "the guard's retirement branch cannot be proved with an empty record"
+    for address in retired:
+        plan = {"resource_changes": [_change(address, address.split(".")[-2], ["delete"])]}
+        assert _guard().rejected_deletions(plan) == []
+
+
+def _check_rejects_a_retired_address_that_is_replaced_rather_than_destroyed() -> None:
+    """A retirement destroys once. `delete/create` is a replace, which loses the rows and keeps the
+    resource — the case the guard exists for."""
+    address = json.loads((ROOT / "infra" / "retired_resources.json").read_text())[0]
+    plan = {"resource_changes": [_change(address, address.split(".")[-2], ["delete", "create"])]}
+    assert _guard().rejected_deletions(plan) == [f"{address} (delete/create)"]
+
+
+def _check_an_unretired_address_of_a_retired_type_is_still_refused() -> None:
+    """The record names addresses, never types: retiring one database does not make the next one
+    deletable."""
+    plan = {
+        "resource_changes": [
+            _change(
+                "module.prod.cloudflare_d1_database.other", "cloudflare_d1_database", ["delete"]
+            )
+        ]
+    }
+    assert _guard().rejected_deletions(plan) == [
+        "module.prod.cloudflare_d1_database.other (delete)"
+    ]
+
+
 def test_terraform_plan_guard_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 17
+    assert len(checks) == 20
     for check in checks:
         check()

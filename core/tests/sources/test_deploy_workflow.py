@@ -4543,7 +4543,6 @@ def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
         "__LANDING_HTML__": "local.landing_html",
         "__PRIVACY_HTML__": "local.privacy_html",
         "__TERMS_HTML__": "local.terms_html",
-        "__WAITLIST_SENDER__": "local.waitlist_sender",
     }
     assert set(re.findall(r'"(__[A-Z_]+__)"', worker)) == set(substituted)
     for placeholder, value in substituted.items():

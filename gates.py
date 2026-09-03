@@ -37,6 +37,10 @@ DB_MODULE = CORE_SRC / "db.py"
 # Retired flag keys. An entry authorises the terraform destroy and forbids re-declaring the key
 # while any environment still holds it; the doctrine sweep drops one once no app does.
 FLAG_TOMBSTONES = ROOT / "infra" / "flag_tombstones.json"
+# Retired terraform addresses. The plan guard reads the same record to permit their one destroy;
+# this holds the other half, so a retirement is also the name's retirement.
+RETIRED_RESOURCES = ROOT / "infra" / "retired_resources.json"
+INFRA_ROOT = ROOT / "infra"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
 SESSION_COOKIE_FACTORY = CORE_SRC / "sdk" / "http.py"
@@ -1657,6 +1661,27 @@ def _registered_naming_failures() -> list[str]:
     return _naming_failures(manifests, packs)
 
 
+def _retired_resource_failures() -> list[str]:
+    """A retired resource stays retired.
+
+    `infra/retired_resources.json` is what lets the deploy destroy a database or a queue, which the
+    plan guard refuses to every other address. Left at that, the record would permit a deletion
+    nobody meant the day somebody declared the name again — and the resource terraform then created
+    would be a new, empty one wearing a retired resource's address. So the name is spent: no root
+    may declare a resource whose type and name a retirement holds."""
+    retired = json.loads(RETIRED_RESOURCES.read_text())
+    spent = {tuple(address.split(".")[-2:]) for address in retired}
+    failures = []
+    for path in sorted(INFRA_ROOT.rglob("*.tf")):
+        source = path.read_text()
+        for kind, name in sorted(spent):
+            if re.search(rf'^resource\s+"{re.escape(kind)}"\s+"{re.escape(name)}"', source, re.M):
+                failures.append(
+                    f"{path.relative_to(ROOT)} declares {kind}.{name}, which a retirement spent"
+                )
+    return failures
+
+
 def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
     """Every flag the code reads is a flag each environment's terraform declares, and the reverse.
 
@@ -2179,6 +2204,7 @@ def main() -> int:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
     failures.extend(_shared_singleton_failures(terraform))
     failures.extend(_declared_flag_failures(terraform))
+    failures.extend(_retired_resource_failures())
     failures.extend(_census_period_failures(terraform))
 
     for failure in failures:

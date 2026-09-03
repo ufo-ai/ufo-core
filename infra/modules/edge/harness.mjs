@@ -1,6 +1,5 @@
 // The same substitution main.tf applies at deploy, so the tested worker is the shipped artifact.
 import { readFile } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
 
 const moduleDir = new URL(".", import.meta.url);
 export const FAVICON_SVG = await readFile(
@@ -45,8 +44,7 @@ export async function importWorker(tag) {
     .replace('"__FAVICON_SVG__"', JSON.stringify(FAVICON_SVG))
     .replace('"__FAVICON_DARK_SVG__"', JSON.stringify(FAVICON_DARK_SVG))
     .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))
-    .replace('"__TERMS_HTML__"', JSON.stringify(TERMS_PAGE))
-    .replace('"__WAITLIST_SENDER__"', JSON.stringify("no-reply@flyingobject.ai"));
+    .replace('"__TERMS_HTML__"', JSON.stringify(TERMS_PAGE));
   const tagged = `${source}\n// ${tag}`;
   return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))
     .default;
@@ -76,34 +74,3 @@ export function edgeCache() {
   };
 }
 
-export function d1(database = new DatabaseSync(":memory:")) {
-  return {
-    database,
-    prepare(sql) {
-      let args = [];
-      return {
-        bind(...bound) {
-          args = bound;
-          return this;
-        },
-        async run() {
-          return { meta: database.prepare(sql).run(...args) };
-        },
-        async first() {
-          const row = database.prepare(sql).get(...args);
-          return row === undefined ? null : { ...row };
-        },
-      };
-    },
-    async batch(statements) {
-      database.exec("begin");
-      try {
-        for (const statement of statements) await statement.run();
-        database.exec("commit");
-      } catch (error) {
-        database.exec("rollback");
-        throw error;
-      }
-    },
-  };
-}

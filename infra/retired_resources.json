@@ -1,0 +1,12 @@
+[
+  "module.prod.cloudflare_d1_database.waitlist",
+  "module.prod.cloudflare_queue.waitlist_email",
+  "module.prod.cloudflare_queue.waitlist_email_dead_letters",
+  "module.prod.cloudflare_queue_consumer.waitlist_email",
+  "module.prod.cloudflare_queue_consumer.waitlist_email_dead_letters",
+  "module.testing.cloudflare_d1_database.waitlist",
+  "module.testing.cloudflare_queue.waitlist_email",
+  "module.testing.cloudflare_queue.waitlist_email_dead_letters",
+  "module.testing.cloudflare_queue_consumer.waitlist_email",
+  "module.testing.cloudflare_queue_consumer.waitlist_email_dead_letters"
+]

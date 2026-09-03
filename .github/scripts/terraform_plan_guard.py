@@ -8,6 +8,12 @@ from pathlib import Path
 FLAG_TOMBSTONES = frozenset(
     json.loads((Path(__file__).parents[2] / "infra" / "flag_tombstones.json").read_text())
 )
+# The resources this repo has retired. An address here is one the deploy is permitted to destroy,
+# and one no root may declare again — the contract test holds the second half, so the record cannot
+# outlive its job by quietly permitting a deletion nobody meant.
+RETIRED_RESOURCES = frozenset(
+    json.loads((Path(__file__).parents[2] / "infra" / "retired_resources.json").read_text())
+)
 FLAG_RESOURCE_TYPE = "cloudflare_flagship_flag"
 FLAG_ENVIRONMENTS = ("testing", "prod")
 
@@ -21,7 +27,6 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
         "aws_secretsmanager_secret_version",
         "aws_security_group",
         "aws_security_group_rule",
-        "cloudflare_queue_consumer",
         "cloudflare_ruleset",
         "cloudflare_workers_route",
         "cloudflare_workers_script",
@@ -105,6 +110,11 @@ def _is_tombstoned_flag(
     )
 
 
+def _is_retired(address: str, actions: list[str]) -> bool:
+    """A retirement destroys once. A replace is never one, so `delete/create` stays refused."""
+    return actions == ["delete"] and address in RETIRED_RESOURCES
+
+
 def rejected_deletions(plan: object) -> list[str]:
     match plan:
         case {"resource_changes": list(changes)}:
@@ -133,6 +143,7 @@ def rejected_deletions(plan: object) -> list[str]:
             "delete" in actions
             and not _is_regenerable(address, resource_type)
             and not _is_tombstoned_flag(address, resource_type, actions, change.get("before"))
+            and not _is_retired(address, actions)
         ):
             rejected.append(f"{address} ({'/'.join(actions)})")
     return sorted(rejected)

@@ -1499,7 +1499,6 @@ resource "datadog_dashboard" "product" {
         - Whether a member arrived through the terminal or the browser, and whether they founded
           their workspace or joined one. Both live in `ufo_control.onboard_claim`, which the fleet
           holds no privilege on.
-        - Waitlist size. That table is Cloudflare D1, reachable only by the edge worker.
         - Refunds and operator corrections. `dollars the fleet charged` counts what the fleet
           charged a card; `ufoctl balance credit` writes a purchase in a process that exports no
           metrics, so read a correction off `balance_purchase` rather than off this board.

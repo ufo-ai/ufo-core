@@ -4,7 +4,7 @@ import test, { after, before } from "node:test";
 
 import { chromium } from "playwright";
 
-import { d1, importWorker } from "./harness.mjs";
+import { importWorker } from "./harness.mjs";
 
 const APEX = "https://flyingobject.ai";
 
@@ -14,12 +14,7 @@ let origin;
 
 before(async () => {
   const worker = await importWorker("page");
-  const env = {
-    DB: d1(),
-    ORIGIN_BASE: APEX,
-    WAITLIST_EMAILS: { async send() {} },
-    WAITLIST_DEAD_LETTER_QUEUE: "dead-letters",
-  };
+  const env = { ORIGIN_BASE: APEX };
   // The page's render asks the worker for nothing, so a call out of the worker is a call the
   // suite must see.
   globalThis.fetch = async () => {
