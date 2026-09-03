@@ -92,6 +92,15 @@ function connects(label: string): HTMLElement {
   return within(row(label)).getByRole("button", { name: "Connect" });
 }
 
+/** One headed zone of the page. A provider the member does not hold stands in two of them — the
+ *  shared account under one heading, the connect that lands their own under another — so a test
+ *  reaches the row through the zone it is asking about. */
+function zone(title: string): HTMLElement {
+  const found = screen.getByRole("heading", { name: title }).closest("section");
+  if (!found) throw new Error("no zone headed " + title);
+  return found as HTMLElement;
+}
+
 /** One tool's row while a record of the same name stands beside the list: the crumb over that
  *  record carries the label too, and the lane stands after the list, so the row is the first
  *  item the label is found in. */
@@ -647,7 +656,7 @@ test("an empty pool stands the catalog alone, with no connected zone", async () 
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("heading", { name: "Available" });
-  expect(screen.queryByRole("heading", { name: "Connected" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Your connections" })).toBeNull();
 });
 
 test("the bar is drawn while the first read is still in flight", async () => {
@@ -912,8 +921,107 @@ test("a row the member holds no claim on draws no remove", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Notion connected");
-  expect(within(row("Notion")).queryByRole("button", { name: "Remove Notion" })).toBeNull();
-  expect(within(row("GitHub")).queryByRole("button", { name: "Remove GitHub" })).toBeNull();
+  const shared = within(zone("Shared with the workspace"));
+  expect(shared.queryByRole("button", { name: "Remove Notion" })).toBeNull();
+  expect(shared.queryByRole("button", { name: "Remove GitHub" })).toBeNull();
+});
+
+/** Whose an account is decides who may disconnect it, so the page says whose it is before the
+ *  member presses: their own accounts stand under one heading and the workspace's under another,
+ *  and a shared row is never read as one of their own. */
+test("a shared account stands under a heading of its own", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () =>
+      json({
+        connections: [
+          POOLED_NOTION.connections[0],
+          { ...grant("gmail", true, "g2"), own: false, owner_email: "other@example.com" },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  const own = within(zone("Your connections"));
+  expect(own.getByLabelText("Notion connected")).toBeTruthy();
+  expect(own.queryByLabelText("Gmail connected")).toBeNull();
+  const shared = within(zone("Shared with the workspace"));
+  expect(shared.getByLabelText("Gmail connected")).toBeTruthy();
+  expect(shared.queryByRole("button", { name: "Remove Gmail" })).toBeNull();
+});
+
+/** `own` is whether the viewer may manage an account, which a workspace admin may on every
+ *  member's, so the zones read the owner address instead. An admin did not connect a colleague's
+ *  account, and no heading tells them they did. */
+test("an admin reads a colleague's account as the workspace's, not their own", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () =>
+      json({
+        connections: [
+          { ...POOLED_NOTION.connections[0], shared: true, owner_email: "other@example.com" },
+          grant("gmail", false, "g2"),
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  const own = within(zone("Your connections"));
+  expect(own.getByLabelText("Gmail connected")).toBeTruthy();
+  expect(own.queryByLabelText("Notion connected")).toBeNull();
+  expect(within(zone("Shared with the workspace")).getByLabelText("Notion connected")).toBeTruthy();
+});
+
+/** A colleague's shared account stands for the workspace, not for this member: their own turns run
+ *  on their own account first, so the tool stays offered beside the shared row until they connect
+ *  theirs. */
+test("a provider another member shares still offers the member their own connect", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            ...POOLED_NOTION.connections[0],
+            own: false,
+            shared: true,
+            owner_email: "other@example.com",
+          },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  expect(within(zone("Available")).getByText("Notion")).toBeTruthy();
+});
+
+/** `own` states whether the viewer may remove an account, which a workspace admin may on every
+ *  member's, so the offer reads the owner address instead: an admin is offered the provider a
+ *  colleague holds and not the one they hold themselves. */
+test("the library offers a provider another member holds and not the member's own", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            ...POOLED_NOTION.connections[0],
+            shared: true,
+            owner_email: "other@example.com",
+          },
+          grant("gmail", false, "g2"),
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  const available = within(zone("Available"));
+  expect(available.getByText("Notion")).toBeTruthy();
+  expect(available.queryByText("Gmail")).toBeNull();
 });
 
 test("the library offers every catalog tool and hoists the connected ones", async () => {
@@ -921,13 +1029,13 @@ test("the library offers every catalog tool and hoists the connected ones", asyn
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Connected" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Your connections" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Available" })).toBeTruthy();
   expect(connects("Slack")).toBeTruthy();
   expect(connects("Gmail")).toBeTruthy();
   expect(screen.getByLabelText("GitHub connected")).toBeTruthy();
   expect(screen.getByLabelText("Notion connected")).toBeTruthy();
-  expect(within(row("Notion")).queryByRole("button", { name: "Connect" })).toBeNull();
+  expect(within(zone("Available")).queryByText("Notion")).toBeNull();
 });
 
 test("the library adds providers from the broker catalog", async () => {
@@ -1074,7 +1182,7 @@ test("a fully connected catalog stands as one zone", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Connected" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Your connections" })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Available" })).toBeNull();
 });
 
@@ -1227,7 +1335,7 @@ test("the category picker narrows both zones and lands in the place", async () =
   expect(connects("Slack")).toBeTruthy();
   // Notion is connected but stands under another category, so its zone goes with it.
   expect(screen.queryByText("Notion")).toBeNull();
-  expect(screen.queryByRole("heading", { name: "Connected" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Your connections" })).toBeNull();
   expect(screen.queryByText("Gmail")).toBeNull();
 });
 

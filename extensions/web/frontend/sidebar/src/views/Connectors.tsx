@@ -228,18 +228,46 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
   ];
 }
 
-/** What the catalog still offers: a tool the workspace has not installed, and one no connection in
- *  the pool already stands for. An install reads its own flag and never the pool — the press
- *  installs the workspace leg, and a member's own account on the same provider does not fill what
- *  the workspace still lacks. */
-function offers(catalog: FirstRunPayload, pool: PoolPayload): Offer[] {
+/** What the catalog still offers: a tool the workspace has not installed, and one this member has
+ *  not connected an account of their own on. A connection another member shares with the workspace
+ *  does not fill that: a member's turns run on their own account first, so the tool stays offered
+ *  beside the shared row until they connect theirs. Whose an account is, is the owner address
+ *  against the viewer, never `own` — that flag is whether the viewer may manage the account, which
+ *  a workspace admin may on every member's. An install reads its own flag and never the pool — the
+ *  press installs the workspace leg, and a member's own account on the same provider does not fill
+ *  what the workspace still lacks. */
+function offers(catalog: FirstRunPayload, pool: PoolPayload, viewer: string | null): Offer[] {
   const installs = new Map(catalog.connectors.map((row) => [row.name, row.installed]));
-  const connected = new Set(pool.connections.map((entry) => entry.provider));
+  const connected = new Set(
+    pool.connections
+      .filter((entry) => entry.owner_email !== null && entry.owner_email === viewer)
+      .map((entry) => entry.provider),
+  );
   return catalog.providers.filter((tile) => {
     const installed = installs.get(tile.name);
     return installed === undefined ? !connected.has(tile.name) : !installed;
   });
 }
+
+/** Whose a standing row is: the owner address against the viewer, never `own` — that flag is
+ *  whether the viewer may manage the account, which a workspace admin may on every member's. A
+ *  workspace install carries no connection row and stands with what the workspace shares, not with
+ *  what the member connected. */
+function ownHeld(row: Standing, viewer: string | null): boolean {
+  return row.entry !== null && row.entry.owner_email !== null && row.entry.owner_email === viewer;
+}
+
+/** The two headed zones a connected row falls into. A shared account another member holds reads on
+ *  a row exactly like an own one, and a remove pressed on it disconnects that member — so the two
+ *  stand apart, under headings that say whose the accounts under them are. */
+const HELD_ZONES: [string, string, (row: Standing, viewer: string | null) => boolean][] = [
+  ["Your connections", "Accounts you connected, and the apps that can use them.", ownHeld],
+  [
+    "Shared with the workspace",
+    "Accounts another member connected, and the tools the workspace installed.",
+    (row, viewer) => !ownHeld(row, viewer),
+  ],
+];
 
 /** The catalog's own order carried into headed runs, so a group's tools arrive together and no page
  *  sorts what the read already ordered. */
@@ -577,7 +605,7 @@ export function WorkspaceConnectors({
               inCategory(row.group) &&
               (row.label + " " + row.said).toLowerCase().includes(term),
           );
-          const open = offers(reads.catalog, reads.pool).filter(
+          const open = offers(reads.catalog, reads.pool, viewer).filter(
             (row) =>
               inCategory(row.group) &&
               (row.label + " " + row.name + " " + row.summary).toLowerCase().includes(term),
@@ -596,62 +624,66 @@ export function WorkspaceConnectors({
           }
           return (
             <div className="flex flex-col gap-8xl">
-              {!mine.length ? null : (
-                <Section title="Connected" note="Connected accounts and the apps that can use them.">
-                  <ItemGroup>
-                    {mine.map((row, index) => {
-                      const held = row.entry;
-                      return (
-                        <Fragment key={row.key}>
-                          {index ? <ItemSeparator /> : null}
-                          <Row
-                            name={row.name}
-                            label={row.label}
-                            detail={row.detail}
-                            open={
-                              held
-                                ? (aside) => show(CONNECTION + held.grant, aside)
-                                : row.name === GITHUB
-                                  ? (aside) => show(COVERAGE, aside)
-                                  : null
-                            }
-                            current={opens.includes(held ? CONNECTION + held.grant : COVERAGE)}
-                            act={
-                              <>
-                                {/* The word gives way to the act on a phone: a row under the
-                                    Connected heading already says it is connected, and the
-                                    remove needs the width the chip was taking. */}
-                                <span
-                                  className={cn(
-                                    "flex items-center gap-xs text-label text-ink-soft",
-                                    held?.own && "max-narrow:hidden",
-                                  )}
-                                >
-                                  <IconCheck
-                                    role="img"
-                                    aria-label={row.label + " connected"}
-                                    className="size-icon"
-                                  />
-                                  Connected
-                                </span>
-                                {held?.own ? (
-                                  <Button
-                                    variant="row"
-                                    aria-label={"Remove " + row.label}
-                                    onClick={() => setRemoving(row)}
+              {HELD_ZONES.map(([title, note, holds]) => {
+                const rows = mine.filter((row) => holds(row, viewer));
+                if (!rows.length) return null;
+                return (
+                  <Section key={title} title={title} note={note}>
+                    <ItemGroup>
+                      {rows.map((row, index) => {
+                        const held = row.entry;
+                        return (
+                          <Fragment key={row.key}>
+                            {index ? <ItemSeparator /> : null}
+                            <Row
+                              name={row.name}
+                              label={row.label}
+                              detail={row.detail}
+                              open={
+                                held
+                                  ? (aside) => show(CONNECTION + held.grant, aside)
+                                  : row.name === GITHUB
+                                    ? (aside) => show(COVERAGE, aside)
+                                    : null
+                              }
+                              current={opens.includes(held ? CONNECTION + held.grant : COVERAGE)}
+                              act={
+                                <>
+                                  {/* The word gives way to the act on a phone: a row under a
+                                      connected heading already says it is connected, and the
+                                      remove needs the width the chip was taking. */}
+                                  <span
+                                    className={cn(
+                                      "flex items-center gap-xs text-label text-ink-soft",
+                                      held?.own && "max-narrow:hidden",
+                                    )}
                                   >
-                                    Remove
-                                  </Button>
-                                ) : null}
-                              </>
-                            }
-                          />
-                        </Fragment>
-                      );
-                    })}
-                  </ItemGroup>
-                </Section>
-              )}
+                                    <IconCheck
+                                      role="img"
+                                      aria-label={row.label + " connected"}
+                                      className="size-icon"
+                                    />
+                                    Connected
+                                  </span>
+                                  {held?.own ? (
+                                    <Button
+                                      variant="row"
+                                      aria-label={"Remove " + row.label}
+                                      onClick={() => setRemoving(row)}
+                                    >
+                                      Remove
+                                    </Button>
+                                  ) : null}
+                                </>
+                              }
+                            />
+                          </Fragment>
+                        );
+                      })}
+                    </ItemGroup>
+                  </Section>
+                );
+              })}
               {!open.length && !more ? null : (
                 <Section title="Available" note="Connect an account to let the app reach it.">
                   <div className="flex flex-col gap-4xl">
