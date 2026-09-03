@@ -146,7 +146,7 @@ test: ## Run the parallel suite; T=<paths> narrows it; SHARD=1/10 runs one slice
 		--timeout $(PYTEST_TIMEOUT_SECONDS) --timeout-method thread \
 		-m "not serial and not integration and not docker" -q $(T)
 
-test-one: ## Run one file or node id serially (FILE=path) — xdist only pays above ~100 tests
+test-one: reinstall ## Run one file or node id serially (FILE=path) — xdist only pays above ~100 tests
 	@test -n "$(FILE)" || { echo "FILE is required: make test-one FILE=core/tests/test_hooks.py"; exit 1; }
 	uv run pytest -m "not integration and not docker" -q $(FILE)
 
