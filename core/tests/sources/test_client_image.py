@@ -84,7 +84,7 @@ def _check_gh_payload_is_pinned_to_the_runtime_that_reads_the_bundle() -> None:
     (setup,) = [step for step in steps if step.get("uses") == "actions/setup-go@v6"]
     assert setup["with"]["go-version"] == "1.27.0"
     script = GH_SCRIPT.read_text()
-    assert "github.com/cli/cli/v2/cmd/gh@v2.97.0" in script
+    assert "github.com/cli/cli/v2/cmd/gh@v2.99.0" in script
     assert "GOTOOLCHAIN=local" in script
     assert "gzip -9" in script
     assert "cargo:rerun-if-changed=" in BUILD_SCRIPT.read_text()

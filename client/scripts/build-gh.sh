@@ -24,7 +24,7 @@ fi
 mkdir -p "$ufo_gopath"
 GOTOOLCHAIN=local GOOS="$ufo_goos" GOARCH="$ufo_goarch" CGO_ENABLED=0 GOPATH="$ufo_go_gopath" \
   GOMODCACHE="$(go env GOMODCACHE)" \
-  go install -trimpath -ldflags='-s -w' github.com/cli/cli/v2/cmd/gh@v2.97.0
+  go install -trimpath -ldflags='-s -w' github.com/cli/cli/v2/cmd/gh@v2.99.0
 
 if test "$ufo_host_os" = "$ufo_goos" && test "$ufo_host_arch" = "$ufo_goarch"; then
   ufo_binary="$ufo_gopath/bin/gh$ufo_suffix"
@@ -33,7 +33,7 @@ else
 fi
 ufo_build=$(go version -m "$ufo_binary")
 grep -F 'go1.27.0' <<<"${ufo_build%%$'\n'*}"
-grep -F $'mod\tgithub.com/cli/cli/v2\tv2.97.0' <<<"$ufo_build"
+grep -F $'mod\tgithub.com/cli/cli/v2\tv2.99.0' <<<"$ufo_build"
 mkdir -p "$(dirname "$ufo_archive")"
 gzip -9 -c "$ufo_binary" > "$ufo_archive"
 gzip -t "$ufo_archive"

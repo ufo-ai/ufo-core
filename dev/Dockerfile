@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM golang:1.27.0-bookworm AS gh
 RUN GOTOOLCHAIN=local CGO_ENABLED=0 \
-    go install -trimpath -ldflags='-s -w' github.com/cli/cli/v2/cmd/gh@v2.97.0 \
+    go install -trimpath -ldflags='-s -w' github.com/cli/cli/v2/cmd/gh@v2.99.0 \
     && gzip -9 /go/bin/gh
 
 FROM node:24.19.0-bookworm-slim AS node

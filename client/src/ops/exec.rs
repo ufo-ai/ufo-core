@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(result["exit_code"], 0);
         let stdout = String::from_utf8(decoded(&result, "stdout_b64")).unwrap();
         assert!(stdout.contains("/gh\n"));
-        assert!(stdout.contains("gh version 2.97.0"));
+        assert!(stdout.contains("gh version 2.99.0"));
     }
 
     #[test]
