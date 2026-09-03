@@ -58,7 +58,11 @@ class FakeCarrier:
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         command = argv[-1]
         self.commands.append(command)
@@ -108,7 +112,11 @@ class ShellCarrier:
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         if argv[-1].startswith("wc -c"):
             return ExecResult(stdout=f"{self.sized}\n", stderr="", exit_code=0)
@@ -140,7 +148,11 @@ class ExpiringCarrier:
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         self.timeouts.append(timeout_s)
         command = argv[-1]
@@ -165,7 +177,11 @@ class FailingCarrier:
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         return ExecResult(
             stdout="", stderr="the browser exited 1 without serving\nAbort trap", exit_code=1

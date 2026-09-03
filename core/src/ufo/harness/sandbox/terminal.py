@@ -662,7 +662,11 @@ class TerminalCarrier:
         )
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         """One command on the member's machine, in the bound directory, under their own user. The
         `/workspace` paths tools pass are rewritten here — path logic never reaches the client.
@@ -673,9 +677,17 @@ class TerminalCarrier:
         never asked to accept. Model-generated shell commands invoke `ufo run`, whose child sees the
         plaintext forward-proxy protocol standard clients speak while its public hop uses TLS. A
         `gh` operation uses the client's embedded Go 1.27 build, whose verifier reads that bundle
-        without changing the member's certificate store."""
+        without changing the member's certificate store.
+
+        `model_command` rides down as `safety_argv`, and it is the only text this carrier ever asks
+        the client to classify. The argv cannot answer the question on its own: the journal wraps a
+        member's declared command and the model's own in the same `ufo run --task … -- bash -lc`
+        shape, so reading authorship back off it would refuse a member their own command on their
+        own machine. The caller states it instead, and everything that states nothing — a file walk,
+        a probe, the member's declared command — spawns exactly as it always did."""
         root = _root(handle)
-        return await self._exec(handle, host_argv(argv, root), timeout_s)
+        safety_argv = ("bash", "-lc", model_command) if model_command is not None else None
+        return await self._exec(handle, host_argv(argv, root), timeout_s, safety_argv=safety_argv)
 
     async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult:
         """Ask the running client to load skills under `$UFO_HOME/skills`."""
@@ -691,7 +703,11 @@ class TerminalCarrier:
         return ExecResult(stdout=reply.decode(), stderr="", exit_code=0)
 
     async def _exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        safety_argv: tuple[str, ...] | None = None,
     ) -> ExecResult:
         """Run an argv already resolved to the member's real paths, without the `/workspace`
         rewrite `exec` applies — the one caller that composes concrete host paths itself (a tree
@@ -705,15 +721,16 @@ class TerminalCarrier:
         is what left a timed-out `bash` on this carrier reporting a bare exit code instead of the
         handles its command is still running behind. A client the deploy has not yet updated sends
         no such field, and its reply reads as the command's own exit exactly as before."""
+        params = {"argv": list(argv), "env": dict(handle.egress_env)}
+        if safety_argv is not None:
+            params["safety_argv"] = list(safety_argv)
         try:
             reply = await self.terminals.send(
                 handle.conversation_id,
                 OP_EXEC,
                 timeout_s,
                 name=OP_EXEC,
-                params=json.dumps(
-                    {"argv": list(argv), "env": dict(handle.egress_env)}, separators=(",", ":")
-                ),
+                params=json.dumps(params, separators=(",", ":")),
             )
         except TerminalOpFailed as error:
             raise RuntimeError(str(error)) from error

@@ -184,7 +184,11 @@ class _ResumeRecordingCarrier:
         return SandboxHandle(conversation_id=spec.conversation_id, container_id=self.container_id)
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         raise AssertionError("open_sandbox never execs")
 
@@ -1135,7 +1139,11 @@ class _UniqueIdCarrier:
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         self.execs.append((handle.container_id, handle.run_token))
         return ExecResult(stdout="", stderr="", exit_code=0)
@@ -1368,7 +1376,13 @@ class _TruncatingCarrier:
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
         return await self.create(spec)
 
-    async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> object:
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
+    ) -> object:
         listing = {
             "files": [{"path": "/workspace/a.txt", "size": 2, "modified": 1700000000.0}],
             "count": 1,

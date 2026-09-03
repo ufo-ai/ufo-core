@@ -227,7 +227,11 @@ class _StubCarrier:
         raise AssertionError("the ingress never creates a sandbox")
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         raise AssertionError("the ingress never execs in a sandbox")
 
@@ -1164,7 +1168,11 @@ class _UnreachableCarrier:
         raise AssertionError("the ingress never creates a sandbox")
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         raise AssertionError("the ingress never execs in a sandbox")
 

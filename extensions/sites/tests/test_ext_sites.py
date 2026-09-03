@@ -289,7 +289,13 @@ class FakeSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         self.tasks.append((command, base, detach, timeout_s))
         for needle, result in self.scripted.items():
@@ -451,9 +457,17 @@ class JournalSandbox(FakeSandbox):
     launches: list[str] = field(default_factory=list)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
-        result = await super().bash_task(command, base, detach=detach, timeout_s=timeout_s)
+        result = await super().bash_task(
+            command, base, detach=detach, model_authored=model_authored, timeout_s=timeout_s
+        )
         if detach and base not in self.journaled:
             self.journaled.add(base)
             self.launches.append(base)
@@ -4428,6 +4442,20 @@ def test_the_playwright_guidance_keeps_the_browser_outside_the_cell() -> None:
     assert "keep the handles alive" not in lowered
     assert "handles alive across" not in lowered
     assert "bootstrap" not in lowered, "the bootstrap cell is the timeout this guidance replaced"
+
+
+def test_the_qa_guidance_cleans_its_profile_without_a_forced_rm() -> None:
+    """The model runs this launch block verbatim, and a client carrier refuses a forced `rm` before
+    it spawns. The profile directory is this run's own and always exists, so `rm -r` removes it and
+    keeps the block runnable on a member's own machine."""
+    for guidance in (_playwright_guidance(), _application_qa_guidance()):
+        launch = next(
+            block
+            for block in re.findall(r"```\n(.*?)```", guidance, re.S)
+            if "--headless=new" in block
+        )
+        assert "trap 'rm -r \"$PROFILE\"' EXIT INT TERM" in launch
+        assert "rm -rf" not in launch
 
 
 async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:

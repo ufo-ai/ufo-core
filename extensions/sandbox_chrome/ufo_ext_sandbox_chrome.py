@@ -1118,6 +1118,7 @@ async def _start_bridge(sandbox: Sandbox, stack: BrowserStack) -> None:
         _egress_bridge_up_command(stack),
         stack.task_base,
         detach=True,
+        model_authored=False,
         timeout_s=STACK_TASK_START_TIMEOUT_SECONDS,
     )
     if started.exit_code != 0:

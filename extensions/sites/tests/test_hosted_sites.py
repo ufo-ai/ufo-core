@@ -183,7 +183,13 @@ class FakeSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
 
@@ -229,7 +235,13 @@ class WorkingSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
 
@@ -292,7 +304,13 @@ class ShootingSandbox:
         return ExecResult(stdout=str(len(self.png)), stderr="", exit_code=0)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
 
@@ -1614,7 +1632,13 @@ class FailingSandbox:
         return ExecResult(stdout="", stderr="port never opened", exit_code=1)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
 

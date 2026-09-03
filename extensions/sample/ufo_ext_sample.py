@@ -1405,7 +1405,11 @@ class SampleCarrier:
         )
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         return ExecResult(stdout=" ".join(argv), stderr="", exit_code=0)
 

@@ -14,6 +14,10 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use flate2::read::GzDecoder;
 
+mod command_safety;
+
+use command_safety::dangerous_command_match;
+
 use crate::config::Home;
 
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
@@ -52,6 +56,7 @@ struct Params {
     argv: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    safety_argv: Option<Vec<String>>,
 }
 
 /// Run the params' argv with its env overlaid, in `cwd`, group-killed at `timeout_s`, and answer
@@ -90,6 +95,13 @@ pub fn run_at_home(
     let Some(program) = argv.first() else {
         return Err("exec argv is empty".into());
     };
+    if parsed
+        .safety_argv
+        .as_deref()
+        .is_some_and(dangerous_command_match)
+    {
+        return Err("exec refused dangerous command".into());
+    }
     let gh = invokes_gh(&argv)
         .then(|| materialize_gh(workdir))
         .transpose()?;
@@ -409,6 +421,65 @@ mod tests {
         assert_eq!(result["timed_out"], false);
         assert_eq!(decoded(&result, "stdout_b64"), b"hi\n");
         assert_eq!(result["stderr_b64"], "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_dangerous_shell_commands_before_spawn() {
+        let dir = scratch("dangerous");
+        let target = dir.join("keep");
+        fs::write(&target, b"keep").unwrap();
+        let params = serde_json::json!({
+            "argv": ["/bin/bash", "-lc", format!("rm -f {}", target.display())],
+            "env": {},
+            "safety_argv": ["/bin/bash", "-lc", format!("rm -f {}", target.display())]
+        })
+        .to_string();
+
+        assert_eq!(
+            run(&params, &dir, Path::new("/tmp"), 30).unwrap_err(),
+            "exec refused dangerous command"
+        );
+        assert!(target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_nonforced_temp_directory_cleanup() {
+        let dir = scratch("temp-cleanup");
+        let target = dir.join("profile");
+        fs::create_dir(&target).unwrap();
+        let command = format!(
+            "PROFILE={}; trap 'rm -r \"$PROFILE\"' EXIT",
+            target.display()
+        );
+        let params = serde_json::json!({
+            "argv": ["/bin/bash", "-lc", &command],
+            "env": {},
+            "safety_argv": ["/bin/bash", "-lc", &command]
+        })
+        .to_string();
+
+        let result = parsed(&run(&params, &dir, Path::new("/tmp"), 30).unwrap());
+        assert_eq!(result["exit_code"], 0);
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_runtime_cleanup_without_a_safety_command() {
+        let dir = scratch("runtime-cleanup");
+        let target = dir.join("remove");
+        fs::write(&target, b"remove").unwrap();
+        let params = serde_json::json!({
+            "argv": ["/bin/bash", "-lc", format!("rm -f {}", target.display())],
+            "env": {}
+        })
+        .to_string();
+
+        let result = parsed(&run(&params, &dir, Path::new("/tmp"), 30).unwrap());
+        assert_eq!(result["exit_code"], 0);
+        assert!(!target.exists());
     }
 
     #[cfg(unix)]

@@ -1013,7 +1013,11 @@ class RecordingCarrier:
         self.stops += 1
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         self.calls.append(argv)
         self.operations.append(f"exec:{argv[-1]}")
@@ -3488,7 +3492,11 @@ async def test_tool_dispatch_does_not_wait_for_activity_generation(
             self.activity = activity
 
         async def exec(
-            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+            self,
+            handle: SandboxHandle,
+            argv: tuple[str, ...],
+            timeout_s: int,
+            model_command: str | None = None,
         ) -> ExecResult:
             async with asyncio.timeout(5):
                 await self.activity.started.wait()

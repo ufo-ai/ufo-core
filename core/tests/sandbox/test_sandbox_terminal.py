@@ -7,9 +7,12 @@ import base64
 import io
 import json
 import os
+import shlex
 import subprocess
 import threading
 import zipfile
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -34,6 +37,33 @@ from ufo.harness.sandbox.terminal import (
     Terminals,
     TerminalTransport,
 )
+from ufo.host.assemble import _run_tool
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.schema.records import Agent, Turn
+
+
+def _tool_context(sandbox: SandboxSession) -> ToolContext:
+    return ToolContext(
+        sandbox=sandbox,
+        blob=None,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=uuid4(),
+            conversation_id=sandbox.handle.conversation_id,
+            agent_id=uuid4(),
+            seq=0,
+            status="running",
+            inbound="build it",
+            created_at=datetime(2026, 9, 3, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+        spawn=None,
+        speaker_member_id=None,
+        audience=conversation_audience(None),
+        artifact_token_secret="secret",
+    )
 
 
 def _spec(conversation_id: UUID, cwd: str, public_url: str | None = None) -> SandboxSpec:
@@ -401,6 +431,7 @@ async def _check_exec_names_its_program_with_rewritten_argv_and_decodes_the_repl
     assert op.kind == "exec" and op.timeout_s == 30 and op.name == "exec"
     params = _op_params(op)
     assert params["argv"] == ["cat", "/Users/member/proj/a.txt"]
+    assert "safety_argv" not in params
     assert params["env"]["HTTP_PROXY"].startswith("http://run-token:ufo@")
     assert result.exit_code == 0 and result.stdout == "out\n"
 
@@ -425,6 +456,45 @@ async def _check_skills_use_the_running_clients_native_operation() -> None:
     assert op.name == "" and op.arg == ""
     assert _op_params(op) == requested
     assert await running == {"sandbox": "/Users/member/.ufo/skills/sandbox"}
+
+
+async def _check_a_journal_launch_declares_whose_command_it_carries() -> None:
+    """`safety_argv` is the client's only cue to classify, and the argv cannot supply it: the
+    journal wraps the model's own shell and the tools a member's environment document declares in
+    the same `ufo run --task ... -- bash -lc` shape. So the launch says whose text it carries, and
+    the same forced `rm` is refused as the model's and spawned as the member's — a member who
+    declares `rm -rf dist && npm run build` runs it on their own machine, as they always could."""
+    forced = "rm -rf dist && npm run build"
+
+    async def journaled(call: Callable[[ToolContext], Awaitable[object]]) -> dict:
+        terminals = Terminals()
+        carrier = TerminalCarrier(terminals=terminals)
+        conversation_id = uuid4()
+        terminals.connect(conversation_id, "/Users/member/proj", None)
+        handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
+        running = asyncio.ensure_future(
+            call(_tool_context(SandboxSession(carrier=carrier, handle=handle)))
+        )
+        await asyncio.sleep(0)
+        op = await _answer(
+            terminals,
+            conversation_id,
+            json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode(),
+        )
+        await running
+        return _op_params(op)
+
+    bash = {tool.name: tool for tool in BUILTIN_TOOLS}["bash"]
+    wrote = await journaled(
+        lambda ctx: bash.handler(ctx, bash.input_model.model_validate({"command": forced}))
+    )
+    declared = _run_tool("build", "Build the app.", {}, forced)
+    ran = await journaled(lambda ctx: declared.handler(ctx, declared.input_model()))
+
+    assert wrote["argv"][-1] == forced
+    assert wrote["safety_argv"] == ["bash", "-lc", forced]
+    assert ran["argv"][-1] == f"sh -c {shlex.quote(forced)}"
+    assert "safety_argv" not in ran
 
 
 async def _check_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> None:
@@ -930,6 +1000,6 @@ def test_a_sender_on_another_loop_is_woken_from_this_one() -> None:
 
 async def test_terminal_in_memory_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 30
+    assert len(checks) == 31
     for check in checks:
         await check()

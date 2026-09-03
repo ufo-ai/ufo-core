@@ -376,7 +376,7 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
             content=(TextContent(text=FLAT_SLEEP_REFUSAL.format(seconds=max(padded))),),
             is_error=True,
         )
-    run = await run_task(ctx, args.command, args.timeout)
+    run = await run_task(ctx, args.command, args.timeout, model_authored=True)
     if (applied_s := run.result.timed_out_after_s) is not None:
         if run.pid is None:
             notice = timeout_notice(applied_s, run.requested_s)
@@ -399,7 +399,7 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
     task = task_id(ctx)
     base = await ctx.sandbox.runtime_path(f"{BACKGROUND_TASKS_DIR}/{task}")
     display_base = await ctx.sandbox.runtime_display_path(f"{BACKGROUND_TASKS_DIR}/{task}")
-    started = await ctx.sandbox.bash_task(command, base, detach=True)
+    started = await ctx.sandbox.bash_task(command, base, detach=True, model_authored=True)
     if started.exit_code != 0 or not started.stdout.strip():
         return ToolResult(
             content=(TextContent(text=started.stderr or "the command did not detach"),),

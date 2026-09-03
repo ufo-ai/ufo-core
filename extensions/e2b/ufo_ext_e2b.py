@@ -630,7 +630,11 @@ class E2BCarrier:
             raise RuntimeError(f"sandbox workload cap failed: {detail}") from error
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         """Run one command through the sandbox's `commands.run`. e2b takes a shell string, so argv
         is quoted into one command — bytes reach the workspace through `write`, never here. A

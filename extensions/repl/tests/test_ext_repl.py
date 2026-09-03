@@ -96,7 +96,13 @@ class FakeSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         self.timeouts.append(timeout_s)
         return await self.bash(command)

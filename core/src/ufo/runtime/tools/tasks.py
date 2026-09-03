@@ -91,11 +91,17 @@ class TaskRun:
     display_base: str
 
 
-async def run_task(ctx: ToolContext, command: str, timeout_ms: int | None) -> TaskRun:
+async def run_task(
+    ctx: ToolContext, command: str, timeout_ms: int | None, *, model_authored: bool
+) -> TaskRun:
     """Launch one command through the journal and wait on it for the caller's budget. The command
     is detached from the start, which is what makes the move at the budget free: a command that
     fits answers as itself, for the single exec it always cost, and one still running when the wait
     expires is probed rather than killed.
+
+    `model_authored` says whose text `command` is. The journal serves the model's own shell and the
+    tools a member's environment document declares alike, and the two are indistinguishable by the
+    time they reach a carrier, so each caller names it here where the answer is still known.
 
     The task's identity is the call's, so the whole run is durable across a crash of this process: a
     dispatch step that re-runs on recovery derives the same task, finds the launch already made, and
@@ -109,7 +115,9 @@ async def run_task(ctx: ToolContext, command: str, timeout_ms: int | None) -> Ta
     task = task_id(ctx)
     base = await ctx.sandbox.runtime_path(f"{BACKGROUND_TASKS_DIR}/{task}")
     display_base = await ctx.sandbox.runtime_display_path(f"{BACKGROUND_TASKS_DIR}/{task}")
-    result = await ctx.sandbox.bash_task(command, base, detach=False, timeout_s=timeout_s)
+    result = await ctx.sandbox.bash_task(
+        command, base, detach=False, model_authored=model_authored, timeout_s=timeout_s
+    )
     if result.timed_out_after_s is None:
         return TaskRun(
             task_id=task,

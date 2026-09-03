@@ -544,6 +544,7 @@ async def _stop_server_task(ctx: ToolContext, command: str, base: str, pid: str)
         command,
         base,
         detach=False,
+        model_authored=True,
         timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
     )
     if waited.timed_out_after_s is not None:
@@ -612,6 +613,7 @@ async def _serve(
         server_command,
         task_base,
         detach=True,
+        model_authored=True,
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
     if result.exit_code == 0:

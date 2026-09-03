@@ -469,10 +469,14 @@ def _crash_once_exec(probe_execs: list[tuple[str, ...]]):
     original = LocalCarrier.exec
 
     async def exec_(
-        self: LocalCarrier, handle: object, argv: tuple[str, ...], timeout_s: int
+        self: LocalCarrier,
+        handle: object,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         if not any(GUIDANCE_PROBE in arg for arg in argv):
-            return await original(self, handle, argv, timeout_s)
+            return await original(self, handle, argv, timeout_s, model_command)
         probe_execs.append(argv)
         if len(probe_execs) == 1:
             raise _WorkerCrash("killed mid command")

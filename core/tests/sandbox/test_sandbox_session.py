@@ -323,7 +323,11 @@ class _RecordingCarrier:
         self.writes.append((path, content))
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         self.timeouts.append(timeout_s)
         self.commands.append(argv[-1] if argv else "")
@@ -520,7 +524,11 @@ async def _check_a_stale_sandbox_refreshes_before_loading_the_requested_system_s
             return await super().exec(handle, argv, timeout_s)
 
         async def exec(
-            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+            self,
+            handle: SandboxHandle,
+            argv: tuple[str, ...],
+            timeout_s: int,
+            model_command: str | None = None,
         ) -> ExecResult:
             raise AssertionError("skill programs must use privileged execution")
 
@@ -1338,7 +1346,11 @@ async def test_a_container_that_cannot_answer_is_the_reading_that_matters(
 
     class _Unanswering(_RecordingCarrier):
         async def exec(
-            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+            self,
+            handle: SandboxHandle,
+            argv: tuple[str, ...],
+            timeout_s: int,
+            model_command: str | None = None,
         ) -> ExecResult:
             if argv and argv[-1] == EXEC_TIMEOUT_VITALS_CMD:
                 await asyncio.sleep(5)

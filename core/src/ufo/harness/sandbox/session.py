@@ -665,8 +665,19 @@ class Carrier(Protocol):
         ...
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
-    ) -> ExecResult: ...
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
+    ) -> ExecResult:
+        """Run `argv` in the sandbox. `model_command` is the one element of it the model wrote,
+        set only by a journal launch the caller declared model-authored; everything else — a file
+        walk, a probe, a member's own declared command — leaves it unset, because the text was
+        composed here rather than by the model. A carrier that runs commands on hardware the deploy
+        owns has no use for the distinction and ignores it; the client carrier runs on the member's
+        own machine, where what the model wrote is the only text it may refuse."""
+        ...
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """Write `content` to the absolute workspace `path`, creating parent directories — the
@@ -942,9 +953,13 @@ class Sandbox:
         )
         return result.exit_code == 0
 
-    def _commands(self, bound: "SandboxSession") -> SandboxCommands[ExecResult]:
+    def _commands(
+        self, bound: "SandboxSession", model_command: str | None = None
+    ) -> SandboxCommands[ExecResult]:
         return SandboxCommands(
-            execute=lambda argv, timeout_s: bound.carrier.exec(bound.handle, argv, timeout_s),
+            execute=lambda argv, timeout_s: bound.carrier.exec(
+                bound.handle, argv, timeout_s, model_command
+            ),
             default_timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
             python_flag=SANDBOX_PYTHON_FLAG,
             python_bootstrap=SANDBOX_MODULE_BOOTSTRAP,
@@ -956,13 +971,23 @@ class Sandbox:
         return await self._commands(bound).bash(command, timeout_s)
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
-        """Run or reattach one journaled bash command through the shared sandbox supervisor."""
+        """Run or reattach one journaled bash command through the shared sandbox supervisor.
+
+        `model_authored` says whose text `command` is, and every caller states it because the
+        launch cannot be read back off the argv: a member's declared command and the model's own
+        arrive at the carrier in the same shape. A carrier that refuses commands on the member's
+        machine refuses only what the model wrote."""
         bound = await self._bound()
-        return await self._commands(bound).bash_task(
-            command, base, detach=detach, timeout_s=timeout_s
-        )
+        commands = self._commands(bound, command if model_authored else None)
+        return await commands.bash_task(command, base, detach=detach, timeout_s=timeout_s)
 
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         """Run a POSIX script with `args` as its positional parameters — each one its own argv

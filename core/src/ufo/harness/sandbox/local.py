@@ -359,7 +359,11 @@ class LocalCarrier:
         )
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         """Run one command as a host subprocess in the workspace. The `/workspace` paths the tools
         pass are logical, so each argv element is rewritten to the host workspace directory before

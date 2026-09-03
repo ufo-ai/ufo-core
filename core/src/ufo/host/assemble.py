@@ -458,7 +458,7 @@ def _run_tool(name: str, description: str, inputs: dict[str, ToolInput], run: st
     input_model = create_model(f"EnvironmentRun_{name}", **fields)
 
     async def handler(ctx: ToolContext, payload: BaseModel) -> ToolResult:
-        started = await run_task(ctx, _run_command(run, payload), None)
+        started = await run_task(ctx, _run_command(run, payload), None, model_authored=False)
         result = started.result
         output = result.stdout + result.stderr
         if result.timed_out_after_s is not None:

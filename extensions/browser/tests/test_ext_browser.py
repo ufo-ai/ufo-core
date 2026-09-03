@@ -191,7 +191,11 @@ class WritesCarrier:
         self.writes.append((path, content))
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
@@ -216,7 +220,11 @@ class FileCarrier:
         self.files[path] = content
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         command = argv[-1]
         self.commands.append(command)

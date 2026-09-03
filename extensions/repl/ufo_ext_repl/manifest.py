@@ -309,7 +309,7 @@ async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
     linked = await ctx.sandbox.bash(global_modules_link(state_dir))
     if linked.exit_code != 0:
         raise OSError(linked.stderr.strip() or "linking global node_modules failed")
-    run = await run_task(ctx, f"node {shell_path(run_path)}", args.timeout)
+    run = await run_task(ctx, f"node {shell_path(run_path)}", args.timeout, model_authored=True)
     _meter_run(ctx, JS_REPL_TOOL, run.result.exit_code)
     if (applied_s := run.result.timed_out_after_s) is not None:
         return _expired_result(run, applied_s)
@@ -332,7 +332,7 @@ async def xlsx_repl(ctx: ToolContext, args: XlsxReplInput) -> ToolResult:
     await ctx.sandbox.write_runtime_file(
         XLSX_RUN_PATH, candidate.encode() + XLSX_RESULT_FOOTER.encode()
     )
-    run = await run_task(ctx, f"python3 {shell_path(run_path)}", args.timeout)
+    run = await run_task(ctx, f"python3 {shell_path(run_path)}", args.timeout, model_authored=True)
     _meter_run(ctx, XLSX_REPL_TOOL, run.result.exit_code)
     if (applied_s := run.result.timed_out_after_s) is not None:
         return _expired_result(run, applied_s)

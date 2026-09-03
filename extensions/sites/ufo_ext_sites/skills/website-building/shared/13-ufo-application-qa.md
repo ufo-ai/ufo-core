@@ -29,7 +29,7 @@ that endpoint is absent, with `bash(background=true)`:
 BROWSER="$(command -v chromium || command -v chromium-browser \
   || node -e 'console.log(require("playwright").chromium.executablePath())')"
 PROFILE="$(mktemp -d /tmp/ufo-chrome-qa.XXXXXX)"
-trap 'rm -rf "$PROFILE"' EXIT INT TERM
+trap 'rm -r "$PROFILE"' EXIT INT TERM
 CONTAINED=
 if [ "$(uname -s)" = Linux ]; then CONTAINED="--no-sandbox --disable-dev-shm-usage"; fi
 "$BROWSER" --headless=new --use-mock-keychain --password-store=basic $CONTAINED \

@@ -320,7 +320,11 @@ class DockerCarrier:
                 self._touched.setdefault(conversation_id, touched)
 
     async def exec(
-        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        model_command: str | None = None,
     ) -> ExecResult:
         """A call in flight pins its container: the in-flight count parks the conversation outside
         reclaim's reach for exactly the call's duration, whatever that duration is, and the

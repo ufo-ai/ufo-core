@@ -384,21 +384,22 @@ walls, metering, and a terminal audit record.
 A conversation born in a connected CLI terminal binds instead to the `client` carrier: its
 `/workspace` is the member's own `$PWD`, and its ops run as the member's own subprocesses on the
 member's machine. This is not isolation and does not claim to be — the agent acts as the member,
-guarded by nothing the member's own shell is not, so it is offered only to a terminal the member
-themselves connected, never a deploy default. The ops travel down the surface's held stream and
-their results return as the client's next request (the rendezvous, §Extension surfaces); egress
-metering is cooperative there, since a command that ignores the proxy env reaches the member's own
-network, but the model sentinel is never exported, so no key leaks. The client gives each operation
-a merged CA bundle; `ufo run` gives its child a plaintext loopback proxy and forwards to the
-deploy's public proxy over verified TLS for the command or supervised task's lifetime. An operation
-that invokes `gh` uses the client's embedded build whose verifier reads that bundle without changing
-the member's certificate store. A client-bound conversation
-with no connected terminal is unreachable — its turns and its file browser fail loud rather than
-running somewhere the member cannot see. The op logic runs natively in the client binary the
-deploy builds and serves, held to the server's op contracts by the client's own tests; a stale
-client is told to update the moment the server sees its version. `ufo --remote` sends no terminal
-binding, so the conversation opens on the deploy's configured carrier exactly as web and Slack do;
-`--json` changes only the client event framing and composes with either carrier choice.
+with model-authored Bash commands containing a literal forced `rm` refused before spawn, so it is
+offered only to a terminal the member themselves connected, never a deploy default. The ops travel
+down the surface's held stream and their results return as the client's next request (the
+rendezvous, §Extension surfaces); egress metering is cooperative there, since a command that
+ignores the proxy env reaches the member's own network, but the model sentinel is never exported,
+so no key leaks. The client gives each operation a merged CA bundle; `ufo run` gives its child a
+plaintext loopback proxy and forwards to the deploy's public proxy over verified TLS for the
+command or supervised task's lifetime. An operation that invokes `gh` uses the client's embedded
+build whose verifier reads that bundle without changing the member's certificate store. A
+client-bound conversation with no connected terminal is unreachable — its turns and its file
+browser fail loud rather than running somewhere the member cannot see. The op logic runs natively
+in the client binary the deploy builds and serves, held to the server's op contracts by the
+client's own tests; a stale client is told to update the moment the server sees its version.
+`ufo --remote` sends no terminal binding, so the conversation opens on the deploy's configured
+carrier exactly as web and Slack do; `--json` changes only the client event framing and composes
+with either carrier choice.
 A client's `--model` travels with each admitted turn: that concrete model replaces every agent and
 subagent profile model in the turn tree, and `--no-internet` beside it may only narrow the deployed
 agent policy. The server validates both at admission and stores the selection on each turn; it

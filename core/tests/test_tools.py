@@ -81,7 +81,13 @@ class FakeSandbox:
         return self.bash_result
 
     async def bash_task(
-        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+        self,
+        command: str,
+        base: str,
+        *,
+        detach: bool,
+        model_authored: bool,
+        timeout_s: int | None = None,
     ) -> ExecResult:
         return self.bash_result
 
