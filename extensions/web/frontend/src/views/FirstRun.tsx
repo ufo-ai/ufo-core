@@ -17,7 +17,7 @@ import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Notice, Panel, PanelSkeleton, usePanelRead } from "@/kernel/panel";
 import { Frame, Head } from "@/views/Frame";
 import { AgentIcon } from "@/lib/agentIcon";
-import { BASE, getJson, postAction, postIntent, postObjectAction } from "@/lib/api";
+import { BASE, postAction, postIntent, postObjectAction } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
@@ -371,8 +371,10 @@ export function firstRunRecorded(
  *  changes and dropped when the run ends or is closed. */
 type Answers = {
   business: string;
+  businessWritten: boolean;
   website: string;
   profile: Profile | null;
+  profilePending: boolean;
   role: Role;
   rolePicked: boolean;
   otherRole: string;
@@ -392,8 +394,10 @@ function answersKey(member: Member): string {
 function freshAnswers(member: Member): Answers {
   return {
     business: "",
+    businessWritten: false,
     website: signupWebsite(member.email),
     profile: null,
+    profilePending: false,
     role: DEFAULT_ROLE,
     rolePicked: false,
     otherRole: "",
@@ -816,6 +820,7 @@ export function FirstRun({
   const founding = useRef<Promise<string | null> | null>(null);
   const [thread, setThread] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(SILENT);
+  const [profileRead, setProfileRead] = useState(0);
   /* Held across renders, because the failed panel raises its sentence from an effect keyed on this
      function: a new one every render would raise the sentence again on every render it caused. */
   const refuse = useCallback((title: string) => setToast({ title }), []);
@@ -827,20 +832,38 @@ export function FirstRun({
   };
   const { business, website, profile, role, otherRole, goals, otherGoal, tools } = answers;
   const declined = asked === SURFACES_STEP || answers.declined;
+  const acceptProfile = useCallback((own: Profile) => {
+    setAnswers((held) => {
+      const learned = describes(own);
+      return {
+        ...held,
+        profile: own,
+        profilePending: false,
+        role: held.rolePicked ? held.role : suggestedRole(own),
+        business: held.businessWritten || !learned ? held.business : learned,
+      };
+    });
+  }, []);
+  const profileWatch = answers.profilePending ? (
+    <ProfileWatch key={profileRead} email={member.email} onProfile={acceptProfile} />
+  ) : null;
 
   if (asked === undefined) {
     return <Welcome onStart={() => onStep(WEBSITE_STEP)} onClose={close} />;
   }
   if (building) {
     return (
-      <Building
-        company={profile?.status === "matched" ? profile.company_name : null}
-        apps={agents.filter((row) => row.app && !row.main)}
-        assistant={agent}
-        threads={threads}
-        onClose={() => onDone(thread)}
-        onDone={() => onDone(thread)}
-      />
+      <>
+        <Building
+          company={profile?.status === "matched" ? profile.company_name : null}
+          apps={agents.filter((row) => row.app && !row.main)}
+          assistant={agent}
+          threads={threads}
+          onClose={() => onDone(thread)}
+          onDone={() => onDone(thread)}
+        />
+        <Toast state={toast} onDone={() => setToast(SILENT)} />
+      </>
     );
   }
 
@@ -919,19 +942,24 @@ export function FirstRun({
               return;
             }
             const opened: string[] = [];
+            const missed: string[] = [];
             for (const goal of picked) {
               const founded = await openConversation(speaks.id, goalOpening(business, said, goal));
-              if (founded) opened.push(goal.label);
+              (founded ? opened : missed).push(goal.label);
             }
             kickOff();
             await founding.current;
             setThreads(opened);
+            if (missed.length) {
+              refuse(`No thread started for ${missed.join(", ")}. Ask for it in chat.`);
+            }
             setBusy(false);
             setBuilding(true);
             holdAnswers(member, null);
           };
           const advance = () => {
             if (step === BUSINESS_STEP) kickOff();
+            if (step === POSITION_STEP) answer({ rolePicked: true });
             /* The tools step answers twice: the picks, then connecting them. A step that picked
                nothing has nothing to connect and moves straight on. */
             if (step === TOOLS_STEP && tools.length && !connecting) return setConnecting(true);
@@ -952,22 +980,15 @@ export function FirstRun({
               refuse(outcome.message);
               return;
             }
-            const read = await getJson<{ objects: Profile[] }>(
-              `${PROFILE_READ}?email=${encodeURIComponent(member.email)}`,
-            );
             setBusy(false);
-            if (!read.ok) {
-              refuse(read.message);
-              return;
-            }
-            const own = read.payload.objects.find((row) => row.name === member.email) ?? null;
-            const learned = own ? describes(own) : "";
             setAnswers((held) => ({
               ...held,
-              profile: own,
-              role: own && !held.rolePicked ? suggestedRole(own) : held.role,
-              business: held.business.trim() || !learned ? held.business : learned,
+              profile: null,
+              profilePending: Boolean(website.trim()),
+              role: held.rolePicked ? held.role : DEFAULT_ROLE,
+              business: held.businessWritten ? held.business : "",
             }));
+            setProfileRead((read) => read + 1);
             advance();
           };
           const company = profile?.status === "matched" ? profile.company_name : null;
@@ -1014,7 +1035,9 @@ export function FirstRun({
                       autoFocus
                       placeholder="Software startup, Marketing agency, Design studio, AI consulting…"
                       value={business}
-                      onChange={(event) => answer({ business: event.target.value })}
+                      onChange={(event) =>
+                        answer({ business: event.target.value, businessWritten: true })
+                      }
                       className={ANSWER_BOX}
                     />
                     <span
@@ -1299,9 +1322,31 @@ export function FirstRun({
           );
         }}
       </Panel>
+      {profileWatch}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>
   );
+}
+
+function ProfileWatch({
+  email,
+  onProfile,
+}: {
+  email: string;
+  onProfile: (profile: Profile) => void;
+}) {
+  const state = usePanelRead<{ objects: Profile[] }>(
+    `${PROFILE_READ}?email=${encodeURIComponent(email)}`,
+    0,
+    WATCH_MS,
+  );
+  const rows = state.phase === "ready" ? state.payload.objects : null;
+  useEffect(() => {
+    if (rows === null) return;
+    const profile = rows.find((row) => row.name === email);
+    if (profile) onProfile(profile);
+  }, [email, onProfile, rows]);
+  return null;
 }
 
 /** The link a connect request mints. The broker verb ends its turn on the handoff rather than in

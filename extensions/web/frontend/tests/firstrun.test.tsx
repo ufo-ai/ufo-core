@@ -203,30 +203,8 @@ const PROFILE_ROW = {
 /** The business box as the matched row above writes it: the company summary over its facts. */
 const LEARNED = "keep it simple, keep it casual.\nDesign Consulting, 1-10 people, founded 2013.";
 
-/** What the projection holds for a member who cleared the website: the address alone matched
- *  nothing, so there is no company to describe. */
-const CLEARED_ROW = {
-  ...PROFILE_ROW,
-  summary: "Nothing matched.",
-  status: "no_match",
-  full_name: null,
-  job_title: null,
-  job_title_role: null,
-  job_title_levels: null,
-  company_name: null,
-  company_industry: null,
-  company_size: null,
-  company_founded: null,
-  company_summary: null,
-  company_location: null,
-};
-
 const PROFILE_READ: Record<string, Route> = {
   "/objects/enrichment_profile": () => json({ objects: [PROFILE_ROW], next_cursor: null }),
-};
-
-const CLEARED_READ: Record<string, Route> = {
-  "/objects/enrichment_profile": () => json({ objects: [CLEARED_ROW], next_cursor: null }),
 };
 
 /** A deploy offering no Slack install: the run is the three questions. */
@@ -1157,7 +1135,7 @@ test("a mail provider's domain is not prefilled as the website", async () => {
 
 test("clearing the website empties the field, Next posts an empty website, and the business box is left empty", async () => {
   const posted = recorder();
-  await open({ ...lanes(posted), ...CLEARED_READ }, ADMIN, WITH_WEBSITE);
+  await open(lanes(posted), ADMIN, WITH_WEBSITE);
 
   await screen.findByRole("heading", { name: "Confirm your website" });
   const website = screen.getByLabelText("Website") as HTMLInputElement;
@@ -1177,19 +1155,116 @@ test("clearing the website empties the field, Next posts an empty website, and t
   ]);
 });
 
-test("a matched website writes the business box, and the member's own words hold", async () => {
-  await open({ ...lanes(recorder()), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
+test("a matched website writes the business box once the job has written the row", async () => {
+  let rows: unknown[] = [];
+  await open(
+    {
+      ...lanes(recorder()),
+      "/objects/enrichment_profile": () => json({ objects: rows, next_cursor: null }),
+    },
+    ADMIN,
+    WITH_WEBSITE,
+  );
 
   await screen.findByRole("heading", { name: "Confirm your website" });
   await userEvent.click(next());
 
   const about = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
-  expect(about.value).toBe(LEARNED);
+  expect(about.value).toBe("");
+
+  rows = [PROFILE_ROW];
+  await waitFor(() => expect(about.value).toBe(LEARNED), { timeout: WATCH_MS * 4 });
   expect(next().disabled).toBe(false);
 
   await userEvent.clear(about);
   await userEvent.type(about, "A two-person design studio");
   expect(about.value).toBe("A two-person design studio");
+});
+
+test("a row that lands after the member has typed does not overwrite them", async () => {
+  let rows: unknown[] = [];
+  await open(
+    {
+      ...lanes(recorder()),
+      "/objects/enrichment_profile": () => json({ objects: rows, next_cursor: null }),
+    },
+    ADMIN,
+    WITH_WEBSITE,
+  );
+
+  await screen.findByRole("heading", { name: "Confirm your website" });
+  await userEvent.click(next());
+  const about = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
+  await userEvent.type(about, "A two-person design studio");
+
+  rows = [PROFILE_ROW];
+  await new Promise((done) => setTimeout(done, WATCH_MS * 2));
+  expect(about.value).toBe("A two-person design studio");
+}, WATCH_MS * 4);
+
+test("confirming another website waits for that website's profile", async () => {
+  let rows: unknown[] = [PROFILE_ROW];
+  await open(
+    {
+      ...lanes(recorder()),
+      "/objects/enrichment_profile": () => json({ objects: rows, next_cursor: null }),
+    },
+    ADMIN,
+    WITH_WEBSITE,
+  );
+
+  await screen.findByRole("heading", { name: "Confirm your website" });
+  await userEvent.click(next());
+  const about = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
+  await waitFor(() => expect(about.value).toBe(LEARNED));
+  await userEvent.click(next());
+  expect(await screen.findByText("Simplecasual")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  const website = screen.getByLabelText("Website");
+  await userEvent.clear(website);
+  await userEvent.type(website, "beta.co");
+  rows = [
+    {
+      ...PROFILE_ROW,
+      company_name: "Beta",
+      company_industry: "Robotics",
+      company_summary: "Robots for warehouses.",
+    },
+  ];
+  await userEvent.click(next());
+
+  const betaAbout = (await screen.findByLabelText("About your business")) as HTMLTextAreaElement;
+  await waitFor(() => expect(betaAbout.value).toContain("Robots for warehouses."));
+  await userEvent.click(next());
+  expect(await screen.findByText("Beta")).toBeTruthy();
+  expect(screen.queryByText("Simplecasual")).toBeNull();
+});
+
+test("a profile that lands after the role step does not replace the confirmed role", async () => {
+  let rows: unknown[] = [];
+  await open(
+    {
+      ...lanes(recorder()),
+      "/objects/enrichment_profile": () => json({ objects: rows, next_cursor: null }),
+    },
+    ADMIN,
+    WITH_WEBSITE,
+  );
+
+  await screen.findByRole("heading", { name: "Confirm your website" });
+  await userEvent.click(next());
+  await describeBusiness();
+  await screen.findByRole("heading", { name: "What is your role at the business?" });
+  await userEvent.click(next());
+
+  rows = [{ ...PROFILE_ROW, job_title_levels: null, job_title_role: "engineering" }];
+  await returning();
+  await screen.findByText("Simplecasual");
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(screen.getByRole("radio", { name: "Founder" }).getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByRole("radio", { name: "Engineer" }).getAttribute("aria-checked")).toBe("false");
 });
 
 test("confirming posts the website, pre-selects Founder, and the top-of-mind step names the company", async () => {
@@ -1315,6 +1390,27 @@ test("the workspace screen names the goals it opened a thread on", async () => {
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await screen.findByText("Started work on your goals", {}, { timeout: BUILD_STEP_MS * 6 });
   expect(screen.getByText("Growing revenue")).toBeTruthy();
+});
+
+test("the build screen states when a goal thread did not start", async () => {
+  await open(
+    {
+      ...lanes(recorder()),
+      "/chat": () => new Response(null, { status: 500 }),
+    },
+    ADMIN,
+    NO_SLACK,
+  );
+  await describeBusiness();
+  await pickRole();
+  await pickGoals(["Growing revenue"]);
+
+  expect(
+    await screen.findByRole("heading", { name: "Creating your business’s workspace" }),
+  ).toBeTruthy();
+  expect(
+    await screen.findByText("No thread started for Growing revenue. Ask for it in chat."),
+  ).toBeTruthy();
 });
 
 test("a refused memory write holds the last step and states the refusal", async () => {
