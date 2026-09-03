@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { chatHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -23,6 +24,8 @@ beforeEach(() => {
   useStreamFake();
 });
 
+const CONVERSATION_ID = "d28e2f45-85c5-4ce8-bc12-32b42b32af91";
+
 test("the workspace Tasks tab draws both of its listings", async () => {
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
@@ -39,7 +42,7 @@ test("the workspace Tasks tab draws both of its listings", async () => {
   expect(screen.getByRole("button", { name: "New scheduled task" })).toBeTruthy();
 });
 
-test("a task the address opens stands in the sheet, where its pause is one press", async () => {
+test("a task the address opens links its conversation and offers pause", async () => {
   const posted: unknown[] = [];
   wire({
     "/objects/scheduled_task/nightly-deploy": () =>
@@ -48,7 +51,11 @@ test("a task the address opens stands in the sheet, where its pause is one press
         name: "nightly-deploy",
         summary: "0 9 * * * — build the nightly",
         spec: { schedule: "0 9 * * *", prompt: "build the nightly", paused: false },
-        status: { next_run_at: "2026-08-27T09:00:00+00:00", paused: false },
+        status: {
+          conversation: CONVERSATION_ID,
+          next_run_at: "2026-08-27T09:00:00+00:00",
+          paused: false,
+        },
         links: [],
         created_at: "2026-08-01T09:00:00Z",
         updated_at: "2026-08-01T09:00:00Z",
@@ -69,6 +76,9 @@ test("a task the address opens stands in the sheet, where its pause is one press
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
+  expect(within(sheet).getByRole("link", { name: CONVERSATION_ID }).getAttribute("href")).toBe(
+    chatHash(CONVERSATION_ID),
+  );
   await userEvent.click(within(sheet).getByRole("button", { name: "Pause" }));
   await vi.waitFor(() =>
     expect(posted).toEqual([
@@ -80,6 +90,9 @@ test("a task the address opens stands in the sheet, where its pause is one press
       },
     ]),
   );
+
+  await userEvent.click(within(sheet).getByRole("link", { name: CONVERSATION_ID }));
+  expect(location.hash).toBe(chatHash(CONVERSATION_ID));
 });
 
 test.each([

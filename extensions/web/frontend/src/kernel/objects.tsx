@@ -35,6 +35,7 @@ import { cn } from "@/lib/cn";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Moment, isMoment } from "@/lib/moments";
+import { chatHash } from "@/lib/route";
 import type { Agent, SpecSchema } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
@@ -165,6 +166,18 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null): Rea
   if (typeof value === "number") return String(value);
   if (isMoment(value)) return <Moment at={value} />;
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
+  /* The conversation stands on a screen this cell never draws, so the address is the whole link: the
+     portal's router reads it, and inside a framed app page the shell takes it over the bridge — which
+     a press answered here would stop, moving the frame's own address and nothing the member sees. */
+  if (field === CONVERSATION_FIELD && typeof value === "string")
+    return (
+      <a
+        href={chatHash(value)}
+        className="text-inherit underline-offset-2 hover:underline focus-visible:underline"
+      >
+        {value}
+      </a>
+    );
   if (typeof value === "string" && ADDRESS.test(value))
     return (
       <a

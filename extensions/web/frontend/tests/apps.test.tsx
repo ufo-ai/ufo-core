@@ -1,9 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AppInit, Placement } from "@/apps/kit";
 
-import { objectIndex, wire, AGENT, MEMBER, TASK_KIND, TURN_ID } from "./harness";
+import { json, objectIndex, wire, AGENT, CONVO_ID, MEMBER, TASK_KIND, TURN_ID } from "./harness";
 
 let nextAnimationFrame = 0;
 const animationFrames = new Map<number, FrameRequestCallback>();
@@ -574,6 +574,67 @@ test("a record opened inside a banded page stands in the page's own track", asyn
   expect(screen.getByRole("button", { name: "Open report" })).toBeTruthy();
   await bridge.settled();
   expect(bridge.posted).toEqual([]);
+});
+
+/** The conversation a record names is a place this page cannot draw, so the link to it is one the
+ *  shell takes: it rides the bridge's navigate verb and the frame's own address stays where it
+ *  stands. A cell that answered the press itself would stop the shell's listener at
+ *  `defaultPrevented` and write the frame's address instead, which moves nothing the member sees. */
+test("a conversation link inside a framed record rides the bridge and leaves the frame standing", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const { ObjectDetail } = await import("@/kernel/objects");
+  const { MainAgentProvider } = await import("@/lib/mainAgent");
+  const { Viewer } = await import("@/lib/audience");
+  const { chatHash } = await import("@/lib/route");
+  wire({
+    "/objects/scheduled_task/nightly-deploy": () =>
+      json({
+        ...TASK_KIND,
+        name: "nightly-deploy",
+        summary: "0 9 * * * — build the nightly",
+        spec: { schedule: "0 9 * * *", prompt: "build the nightly", paused: false },
+        status: {
+          conversation: CONVO_ID,
+          next_run_at: "2026-08-27T09:00:00+00:00",
+          paused: false,
+        },
+        links: [],
+        created_at: "2026-08-01T09:00:00Z",
+        updated_at: "2026-08-01T09:00:00Z",
+      }),
+  });
+  const bridge = navigations();
+  location.hash = "#/radar";
+  render(
+    <Viewer.Provider value={MEMBER.email}>
+      <MainAgentProvider agents={[AGENT]}>
+        <SectionApp
+          tab="radar"
+          init={{ ...INIT, banded: true }}
+          view={{
+            label: "Radar",
+            remountOnPlace: false,
+            render: () => (
+              <ObjectDetail
+                agentId={AGENT.id}
+                kind="scheduled_task"
+                name="nightly-deploy"
+                onOpen={() => {}}
+                onBack={() => {}}
+              />
+            ),
+          }}
+        />
+      </MainAgentProvider>
+    </Viewer.Provider>,
+  );
+
+  const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
+  fireEvent.click(await within(sheet).findByRole("link", { name: CONVO_ID }));
+  await bridge.settled();
+  expect(bridge.posted).toEqual([chatHash(CONVO_ID)]);
+  expect(location.hash).toBe("#/radar");
 });
 
 /** A lane is 320 pixels wide, so the page inside one takes the lane's own gutter — the same padding
