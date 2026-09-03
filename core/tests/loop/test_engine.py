@@ -4872,6 +4872,7 @@ async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
         offer_tools=True,
         force_finish=False,
         first_round=True,
+        round_index=0,
     )
     call = ToolUseBlock(id="toolu_1", name="write", input={"content": secret})
     resolved = engine._resolve_call(call)
@@ -4895,7 +4896,7 @@ async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
     )
     assert repr(round_input) == (
         f"_RoundInput(messages=1, system_chars={len(secret)}, offer_tools=True, "
-        "force_finish=False, first_round=True)"
+        "force_finish=False, first_round=True, round_index=0)"
     )
     assert repr(bound) == "_BoundToolCall(tool=write, call_id=toolu_1)"
     assert repr(rejected) == (

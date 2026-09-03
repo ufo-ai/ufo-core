@@ -707,6 +707,7 @@ async def test_member_turn_trace_joins_admission_and_names_its_stages(
     } <= stages
     assert "sandbox.open" not in {finished.name for finished in exporter.get_finished_spans()}
     assert await _sandbox_handle(seed.conversation_id) is None
+    assert spans["model.round"].attributes["ufo.round"] == 0
     assert [event.name for event in spans["model.round"].events] == ["model.first_visible_event"]
 
 

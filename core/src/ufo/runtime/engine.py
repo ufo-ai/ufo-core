@@ -437,6 +437,7 @@ class _RoundInput:
     offer_tools: bool
     force_finish: bool
     first_round: bool
+    round_index: int
     include_requested_by: bool = True
     tool_schemas: tuple[ToolSchema, ...] | None = None
     tool_choice: str | None = None
@@ -445,7 +446,7 @@ class _RoundInput:
         return (
             f"_RoundInput(messages={len(self.messages)}, system_chars={len(self.system)}, "
             f"offer_tools={self.offer_tools}, force_finish={self.force_finish}, "
-            f"first_round={self.first_round})"
+            f"first_round={self.first_round}, round_index={self.round_index})"
         )
 
 
@@ -1135,6 +1136,7 @@ class _RuntimeModel:
                 request.system_prompt,
                 schemas,
                 request.tool_choice,
+                round_index,
                 offer_tools=request.mode is HarnessRoundMode.NORMAL,
                 force_finish=request.mode is HarnessRoundMode.FORCE_FINISH,
                 active_requests=active_requests,
@@ -2372,6 +2374,7 @@ class TurnEngine:
         system: str,
         tool_schemas: tuple[ToolSchema, ...],
         tool_choice: str | None,
+        round_index: int,
         offer_tools: bool = True,
         force_finish: bool = False,
         active_requests: tuple[str, ...] = (),
@@ -2392,6 +2395,7 @@ class TurnEngine:
                     offer_tools=offer_tools,
                     force_finish=force_finish,
                     first_round=first_round,
+                    round_index=round_index,
                     include_requested_by=include_requested_by,
                     tool_schemas=tool_schemas,
                     tool_choice=tool_choice,
@@ -2424,6 +2428,7 @@ class TurnEngine:
                     offer_tools=offer_tools,
                     force_finish=force_finish,
                     first_round=first_round,
+                    round_index=round_index,
                     include_requested_by=include_requested_by,
                     tool_schemas=tool_schemas,
                     tool_choice=tool_choice,
@@ -2615,7 +2620,7 @@ class TurnEngine:
                 "model.round",
                 model=request.model,
                 provider=self.provider,
-                round="first" if round_input.first_round else "later",
+                round=round_input.round_index,
             ) as round_span:
                 runner: ModelRoundRunner[ModelRequest, ToolUseBlock, ReasoningBlock, Usage] = (
                     ModelRoundRunner(
