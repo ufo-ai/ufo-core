@@ -1,275 +1,196 @@
-# Tool Dispatch, Sandboxed Work, and External Actions  `stage-10`
+# Browser automation and hosted browser sessions  `stage-10`
 
-This stage is the agent’s action dispatcher. It sits in the main work loop, after the model asks to do something, and turns that request into a safe, specific tool run. Built-in runtime tools handle local work such as shell commands, file edits, asking the user, sharing files, and spawning helper agents, while sandbox rules keep that work inside approved boundaries. Connector and credential tools let the agent use outside services without handing private access keys to ordinary code. Browser, research, site, and document tools provide a workbench for web pages, publishing, searches, PDFs, and Office files. Workspace object tools update saved records such as tasks, monitors, prompts, skills, and todos.
+This stage gives the assistant a working web browser during its main work loop. When a task needs the web, it either starts, rents, or connects to Chrome, then controls pages through the Chrome DevTools Protocol, a standard “remote control” channel for Chrome.
 
-The bridge files connect these parts. tool_bridge.py lets code inside a sandbox request approved tools through the live parent turn, so permissions and history stay intact. runtime/tools/bridge.py defines the message format for listing, describing, and running those bridged tools. harness/tools.py batches ordered work safely. runtime/tools/__init__.py marks the shared tool package and its purpose.
+The in-process browser tool surface is the part the assistant talks to directly. It turns requests such as open a page, click a button, type text, upload a file, read page content, switch tabs, or take a screenshot into careful browser actions. It also waits for pages to settle, handles pop-ups, tracks downloads, and cleans up at the end of the turn.
+
+The remote and sandbox-hosted Chrome providers supply the actual browser. They can run Chrome inside the sandbox, connect to Browserbase, or delegate work to Browser Use, depending on what the task needs.
+
+The cdp.py file is the message pipe to Chrome. It sends commands over a WebSocket, waits for replies, and routes browser events back to the right waiting code.
 
 ## Sub-stages
 
-- [Built-In Runtime Tools and Workspace Files](stage-10.1.md) `stage-10.1` — 10 files
-- [Connectors, Credentials, and Provider Tool Brokers](stage-10.2.md) `stage-10.2` — 20 files
-- [Browser, Research, Sites, and Document Automation](stage-10.3.md) `stage-10.3` — 55 files
-- [Workspace Object Mutations and Domain Tools](stage-10.4.md) `stage-10.4` — 7 files
+- [In-process browser tool surface](stage-10.1.md) `stage-10.1` — 21 files
+- [Remote and sandbox-hosted Chrome providers](stage-10.2.md) `stage-10.2` — 3 files
 
 ## Files in this stage
 
-### Sandbox tool orchestration
-The sandbox-facing bridge lets in-sandbox code request approved tool listing, inspection, and execution through the live parent turn.
+### Browser automation and hosted browser sessions
+### `extensions/browser/ufo_ext_browser/bua/cdp.py`
 
-### `core/src/ufo/runtime/tool_bridge.py`
+`io_transport` · `browser session connection and event loop`
 
-`orchestration` · `request handling during a live sandbox turn`
+Chrome automation works like a conversation: the program sends Chrome a numbered command, and Chrome later sends back either an answer with the same number or a separate event such as “page loaded.” This file keeps that conversation organized so the rest of the project does not have to deal with raw WebSocket messages.
 
-A sandboxed run cannot simply call any system tool directly. It needs a safe bridge that checks what the current agent is allowed to use, records the request, sends it through the same turn loop as other work, and waits for the final answer. This file provides that bridge.
+The main class, CdpConnection, wraps a WebSocket connection to Chrome. When it opens, it starts a background reader task. That reader continuously receives JSON messages, which are text messages shaped like nested dictionaries and lists. If a message is a reply to a command, the file finds the matching waiting task and gives it the result. If Chrome reports an error, it turns that into a clear CdpError. If a message is an event, the file either wakes up one-time waiters that were expecting that event, or calls registered listeners.
 
-The main piece is `ToolBridge`. Given a sandbox run and a bridge request, it first looks up the parent turn and confirms it is still running. If the request only asks to list tools or fetch a tool schema, it answers directly after filtering by permissions. If the request asks to call a tool, it creates a new child conversation and turn in the database. That new turn contains the requested tool name and arguments, and it is created with a stable identifier so retrying the same request does not create duplicates.
-
-After writing the turn, the bridge asks DBOS, the background workflow system, to run it. Then it tails, or watches, the turn until it finishes. If the child turn succeeds, its final text is parsed as JSON when possible and returned to the sandbox. If the turn fails or parks, the bridge returns a clear failure. In short, this file is like a front desk: it checks badges, writes down the request, sends it to the right queue, and waits for the official result.
+This is important because browser automation has many things happening at once. Without the bookkeeping here, one command could accidentally receive another command’s answer, or a task could wait forever after the browser disconnects. The file also enforces timeouts and, when the connection closes, loudly fails all pending waits instead of leaving them stuck.
 
 #### Function details
 
-##### `ToolBridge.request`  (lines 65–99)
+##### `CdpError.__init__`  (lines 30–33)
 
 ```
-async def request(self, run: RunToken, request: ToolBridgeRequest) -> ToolBridgeResponse
+def __init__(self, method: str, code: int, message: str) -> None
 ```
 
-**Purpose**: This is the main entry point for a sandbox bridge request. It decides whether the sandbox is asking to list tools, inspect one tool's input shape, or actually run a tool, and it applies the required permission checks before doing anything.
+**Purpose**: Creates a clear Python error for a failed Chrome DevTools Protocol command. It keeps the command name and Chrome’s numeric error code so callers can see what failed and why.
 
-**Data flow**: It receives a `RunToken`, which identifies the live sandbox run, and a `ToolBridgeRequest`, which says what the sandbox wants. It looks up the parent turn, filters or validates the requested tool, and either returns a success or failure immediately for listing/schema requests, or creates and queues a child turn for actual tool execution. The final output is a `ToolBridgeResponse` containing either a result or an error message.
+**Data flow**: It receives the command name, an error code, and Chrome’s error message. It stores the command name and code on the error object, then builds a readable message such as “CDP Page.navigate failed...” that can be raised to the caller.
 
-**Call relations**: This function coordinates the whole bridge flow. It calls `_parent` to confirm the parent turn is live, `_allowed` to check access, `_admit` to record a callable tool request as a new turn, `_enqueue` to send that turn to the workflow queue, and `_terminal` to wait for the turn's final result.
+**Call relations**: CdpConnection._dispatch uses this when Chrome sends an error response for a command. Instead of passing raw protocol details upward, _dispatch turns that response into this focused exception and attaches it to the waiting command future.
 
-*Call graph*: calls 5 internal fn (_admit, _allowed, _enqueue, _parent, _terminal); 5 external calls (__init__, __init__, __init__, __init__, __init__).
-
-
-##### `ToolBridge._parent`  (lines 101–130)
-
-```
-async def _parent(self, run: RunToken) -> sa.Row[tuple[object, ...]] | None
-```
-
-**Purpose**: This function finds the currently running parent turn for the sandbox run. The bridge needs this because the parent turn carries the agent, conversation, and permission context used to decide what the sandbox may do.
-
-**Data flow**: It receives a `RunToken` with a workspace ID and turn ID. It opens a database transaction, joins the turn, agent, and conversation records, and only accepts the turn if its status is `RUNNING`. It returns the matching database row, or `None` if the parent turn is no longer running.
-
-**Call relations**: `request` calls this first. If `_parent` returns nothing, the bridge stops early, because there is no live authority under which to list or run tools.
-
-*Call graph*: called by 1 (request); 2 external calls (select, workspace_tx).
+*Call graph*: called by 1 (_dispatch).
 
 
-##### `ToolBridge._allowed`  (lines 132–144)
+##### `resolve_ws_url`  (lines 36–42)
 
 ```
-def _allowed(self, parent: sa.Row[tuple[object, ...]], tool: ToolDef) -> bool
+async def resolve_ws_url(url: str, headers: dict[str, str]) -> str
 ```
 
-**Purpose**: This function answers the question, “Is this specific tool visible and callable for this parent turn?” It protects the system from exposing tools that the current agent or subagent should not have.
+**Purpose**: Finds the real DevTools WebSocket address to connect to. A caller can give either a direct WebSocket URL or an HTTP Chrome debugging URL, and this function turns it into the WebSocket URL Chrome expects.
 
-**Data flow**: It receives the parent turn's database row and a tool definition. It checks special action-related tools first, then checks the parent agent's tool list or the subagent profile's allowed tools, including any implied grants. It returns `True` if the tool is allowed and `False` otherwise.
+**Data flow**: It receives a URL and HTTP headers. If the URL already starts with ws:// or wss://, it returns it unchanged. Otherwise it asks the given HTTP endpoint for /json/version, reads the webSocketDebuggerUrl field from the response, checks that it is a string, and returns it.
 
-**Call relations**: `request` uses this while listing tools, fetching a schema, and before admitting a call. For action-related tools it delegates to `_any_action_granted`, because those tools depend on whether at least one bound action is available.
+**Call relations**: This is a preparation helper for code that needs to open a Chrome DevTools connection. It uses httpx.AsyncClient to make the HTTP request and as_str to validate the response field before another part of the system connects with CdpConnection.open.
 
-*Call graph*: calls 1 internal fn (_any_action_granted); called by 1 (request); 1 external calls (with_implied_grants).
-
-
-##### `ToolBridge._any_action_granted`  (lines 146–162)
-
-```
-def _any_action_granted(self, parent: sa.Row[tuple[object, ...]]) -> bool
-```
-
-**Purpose**: This function checks whether the parent agent or subagent has access to any registered object action. Object actions are special callable operations, so the bridge only exposes action tools when there is at least one real action the caller could use.
-
-**Data flow**: It reads the bridge's bound action registry and the parent turn's tool or subagent profile settings. It expands those tool names with implied permissions, then compares them with the canonical action IDs. It returns a simple yes-or-no answer.
-
-**Call relations**: `_allowed` calls this when deciding whether to show or permit the general object-action tool and related read tools. This keeps action permission logic in one place instead of mixing it into every tool check.
-
-*Call graph*: called by 1 (_allowed); 1 external calls (with_implied_grants).
+*Call graph*: 2 external calls (AsyncClient, as_str).
 
 
-##### `ToolBridge._admit`  (lines 164–259)
+##### `CdpConnection.__init__`  (lines 46–52)
 
 ```
-async def _admit(self, run: RunToken, parent: sa.Row[tuple[object, ...]], request: ToolBridgeRequest) -> tuple[UUID, UUID] | None
+def __init__(self, ws: ClientConnection) -> None
 ```
 
-**Purpose**: This function records a real bridge tool call as a new child turn in the database. “Admit” here means the request has passed initial checks and is now officially entered into the turn-processing system.
+**Purpose**: Builds the in-memory state needed to track one live DevTools WebSocket connection. It prepares places to remember outstanding commands, event listeners, one-time event waits, and the background reader task.
 
-**Data flow**: It receives the sandbox run, the parent turn row, and the request. It creates stable IDs for a child conversation and child turn, packages the tool name and arguments into an intent, verifies again that the parent turn is still running, inserts the conversation and turn if they do not already exist, and marks the queued turn as ready to dispatch. It returns the new turn ID and conversation ID, or `None` if the parent turn stopped before admission finished.
+**Data flow**: It receives an already-open WebSocket connection. It stores that socket, starts the command id counter at zero, and creates empty collections for pending command replies, event listeners, event waiters, and the future reader task reference.
 
-**Call relations**: `request` calls this only for actual tool calls, after permission checks pass. It uses database transactions to make retries safe: if the same request ID is reused with different contents, it raises an error rather than silently mixing up two calls.
-
-*Call graph*: called by 1 (request); 8 external calls (__init__, TypeAdapter, select, update, workspace_tx, current_traceparent, turn_id_for, uuid5).
+**Call relations**: CdpConnection.open creates the WebSocket first, then calls this initializer to wrap it in a higher-level connection object. Other methods on the object depend on the state set up here to match replies and route events correctly.
 
 
-##### `ToolBridge._enqueue`  (lines 261–289)
+##### `CdpConnection.open`  (lines 55–59)
 
 ```
-async def _enqueue(self, workspace_id: UUID, turn_id: UUID, conversation_id: UUID) -> None
+async def open(cls, ws_url: str, headers: dict[str, str] | None=None) -> Self
 ```
 
-**Purpose**: This function asks the background workflow system to run the child turn created by `_admit`. It is the handoff from “the request is written down” to “the worker should process it.”
+**Purpose**: Opens a new WebSocket connection to Chrome and starts listening for incoming DevTools messages. This is the usual entry point for creating a usable CdpConnection.
 
-**Data flow**: It receives the workspace ID, turn ID, and conversation ID. It builds enqueue options naming the queue, workflow, workflow ID, and app version, then asks DBOS to start the workflow. If the enqueue is cancelled or fails, it clears the turn's dispatch timestamp so another dispatcher can try later; on ordinary failure it also logs what happened.
+**Data flow**: It receives the WebSocket URL and optional headers. It connects to Chrome with a large allowed message size, creates a CdpConnection around that socket, starts the background read loop as an asynchronous task, and returns the ready connection object.
 
-**Call relations**: `request` calls this after `_admit` has created the queued turn. It does not produce the tool result itself; it only starts or schedules the work, then `request` moves on to `_terminal` to wait for the outcome.
+**Call relations**: BrowserSession._bootstrap calls this while setting up a browser session. After open returns, the rest of the session can call send, expect, wait, and on while the background _read_loop keeps processing Chrome’s replies and events.
 
-*Call graph*: called by 1 (request); 3 external calls (update, workspace_tx, log).
-
-
-##### `ToolBridge._terminal`  (lines 291–300)
-
-```
-async def _terminal(self, turn_id: UUID) -> ToolBridgeResponse
-```
-
-**Purpose**: This function watches the child turn until it reaches an ending state and converts that ending into a bridge response. It is how the sandbox gets a synchronous-looking answer from work that actually ran through the turn loop.
-
-**Data flow**: It receives a turn ID and opens a tail, meaning a live stream of updates for that turn. As frames arrive, it waits for either a terminal frame, meaning the turn finished, or a parked frame, meaning it cannot continue without intervention. A terminal frame is passed to `_response`; a parked frame causes the turn to be cancelled and returns a failure message.
-
-**Call relations**: `request` calls this after enqueueing the child turn. It delegates final result formatting to `_response`, and it calls `cancel_one_turn` if the child turn parks so the bridge call does not leave stuck work behind.
-
-*Call graph*: calls 1 internal fn (_response); called by 1 (request); 2 external calls (__init__, cancel_one_turn).
+*Call graph*: called by 1 (_bootstrap); 2 external calls (create_task, connect).
 
 
-##### `ToolBridge._response`  (lines 302–314)
+##### `CdpConnection.close`  (lines 61–67)
 
 ```
-def _response(self, terminal: TerminalFrame) -> ToolBridgeResponse
+async def close(self) -> None
 ```
 
-**Purpose**: This function turns a finished child turn into the success or failure object returned to the sandbox. It hides the internal terminal-frame shape and gives the caller a clean bridge response.
+**Purpose**: Shuts down the DevTools connection cleanly. It stops the background reader task first, then closes the WebSocket to Chrome.
 
-**Data flow**: It receives a terminal frame. If the frame status is not `done`, it builds an error message from the terminal's error fields or text and returns a failure. If the status is `done`, it tries to parse the terminal text as JSON, falls back to plain text if parsing fails, validates that the result is a JSON-compatible value, and returns success.
+**Data flow**: It reads the stored reader task and WebSocket. If the reader task exists, it cancels it, waits for the cancellation to finish, ignores the expected cancellation error, clears the task reference, and then closes the socket.
 
-**Call relations**: `_terminal` calls this when the watched turn finishes. This is the last step in the bridge flow before the result goes back through `request` to the sandbox caller.
+**Call relations**: This is used during cleanup when the browser automation session no longer needs the DevTools connection. It works together with _read_loop’s shutdown behavior, which makes sure pending commands and event waits do not remain silently stuck.
 
-*Call graph*: called by 1 (_terminal); 4 external calls (__init__, __init__, loads, TypeAdapter).
+*Call graph*: 1 external calls (suppress).
 
 
-### Work batching utility
-The harness helper preserves ordered work while safely batching neighboring items that can run together.
-
-### `core/src/ufo/harness/tools.py`
-
-`util` · `cross-cutting`
-
-This file solves a common coordination problem: some tasks can be run side by side, but others must be kept separate, and the original order still matters. Think of it like sorting people into elevator rides: groups can ride together only if everyone in that stretch is allowed, the elevator has a size limit, and anyone who needs a private ride gets one.
-
-The main helper, `dispatch_segments`, walks through a tuple of items from left to right. For each item, it asks a caller-provided test function whether that item is “parallel-safe,” meaning it is allowed to be grouped with other safe items. Consecutive safe items are collected into batches, but each batch is capped by a `limit`. When the helper reaches an unsafe item, it first gives back any waiting safe batch, then gives back the unsafe item by itself.
-
-The important behavior is that it never reorders anything. It only decides where to place batch boundaries. Without this helper, callers that want parallel execution would each need to carefully duplicate this batching logic, increasing the risk of accidentally changing call order or grouping something that should run alone.
-
-#### Function details
-
-##### `dispatch_segments`  (lines 4–23)
+##### `CdpConnection.send`  (lines 69–85)
 
 ```
-def dispatch_segments(items: tuple[ItemT, ...], *, parallel_safe: Callable[[ItemT], bool], limit: int) -> Iterator[tuple[ItemT, ...]]
+async def send(self, method: str, params: JsonDict | None=None, session_id: str | None=None) -> JsonDict
 ```
 
-**Purpose**: Splits an ordered tuple of items into smaller tuples that can be dispatched safely. Consecutive items that pass the `parallel_safe` test are grouped together up to the given `limit`, while unsafe items are returned alone.
+**Purpose**: Sends one DevTools command to Chrome and waits for that command’s response. It is the main way the rest of the project asks Chrome to do something, such as inspect a page or perform browser actions.
 
-**Data flow**: It receives a tuple of items, a `parallel_safe` function that answers yes or no for each item, and a maximum batch size. It scans the items in order, builds a temporary batch of safe items, emits that batch when it is full or when an unsafe item appears, and emits unsafe items as one-item batches. The result is an iterator that yields tuples, preserving the original item order; if `limit` is less than 1, it raises an error instead of producing invalid batches.
+**Data flow**: It receives a command name, optional command parameters, and optionally a session id for a specific browser target. It assigns a new numeric id, stores a future under that id, sends the JSON command over the WebSocket, and waits up to the command timeout for _dispatch to fill in the future. It returns Chrome’s result dictionary, or raises a timeout or protocol error.
 
-**Call relations**: This is a standalone helper that other parts of the harness can call when they are preparing work for dispatch. It does not call into the rest of the project; instead, it relies on the caller’s `parallel_safe` test to decide what may be grouped, then hands back ready-to-use ordered segments for the caller to run or schedule.
+**Call relations**: Callers use this when they need a direct command-and-answer exchange with Chrome. The sent message later comes back through _read_loop, which passes it to _dispatch; _dispatch matches the reply by id and completes the future that send is awaiting.
 
-
-### Runtime bridge contracts
-The runtime tools package defines the bridge-facing package boundary, shared JSON request shapes, and exposed tool-name set.
-
-### `core/src/ufo/runtime/tools/__init__.py`
-
-`other` · `import time / cross-cutting`
-
-This file does not define any executable code. Its job is to give the surrounding package a clear identity. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package. Here, the short module comment explains that this package is the home for the runtime tool contract: the shared rules for what a tool looks like, the context needed when a tool is dispatched, and the registry that maps tool names or wire-level messages to actual tool behavior. Think of it like the label on a drawer: the drawer may contain several important parts, and this label tells readers what kind of parts belong there. Without this file, the package would be less self-documenting, and depending on the Python packaging setup, imports of this tools package could be less clear or less reliable.
+*Call graph*: 3 external calls (get_running_loop, timeout, dumps).
 
 
-### `core/src/ufo/runtime/tools/bridge.py`
-
-`io_transport` · `live-turn tool bridge setup and request handling`
-
-This file is the rulebook for a small doorway between a live run sandbox and the system’s tools. The sandbox cannot just call any Python function directly. Instead, it sends a structured request, like “list tools” or “execute this tool with these arguments,” and receives a structured success or failure response. These request and response shapes are defined here with Pydantic models, which are Python classes that check incoming data before the rest of the system trusts it.
-
-The file also names the bridge’s built-in tools, such as object listing, object editing, and gateway tools for external connectors. Think of this like a service desk menu: the caller may ask for only the services printed on the menu, and the request must include the right details for that service.
-
-`ToolBridgeRequest` makes sure each request makes sense. A list request must not sneak in a tool name or arguments, while schema and execute requests must say which tool they mean. `ToolBridgeRequester` describes the interface for something that can perform these requests under a signed live-run identity. Finally, `bridge_tools` assembles the actual callable tools by combining object-related verbs with allowed unbound tools from extension manifests, then validates that set by putting it through the tool registry.
-
-#### Function details
-
-##### `ToolBridgeRequest._matches_action`  (lines 52–58)
+##### `CdpConnection.on`  (lines 87–88)
 
 ```
-def _matches_action(self) -> 'ToolBridgeRequest'
+def on(self, event: str, listener: EventListener) -> None
 ```
 
-**Purpose**: This checks that a bridge request is internally consistent before it is accepted. It prevents confusing requests, such as asking to list all tools while also naming one specific tool.
+**Purpose**: Registers a callback to be run whenever a particular DevTools event arrives. This is for ongoing event watching, not just waiting once.
 
-**Data flow**: It starts with a parsed `ToolBridgeRequest`, including its action, optional tool name, and argument dictionary. If the action is `list`, it confirms there is no tool name and no arguments; if the action is `get_schema` or `execute`, it confirms a tool name is present. It returns the same request when valid, or raises an error when the fields do not match the action.
+**Data flow**: It receives an event name and a listener function. It adds that listener to the list for the event, changing the connection’s listener table; it does not return a value.
 
-**Call relations**: Pydantic calls this validator automatically after it has read the request fields. Its job is to stop bad bridge messages at the boundary, before any later code tries to look up or run a tool.
-
-
-##### `ToolBridgeRequester.request`  (lines 92–92)
-
-```
-async def request(self, run: RunToken, request: ToolBridgeRequest) -> ToolBridgeResponse
-```
-
-**Purpose**: This defines the promise that any bridge requester must keep: given a live run identity and a tool bridge request, it must return either a success result or a failure message. It is an interface, not an implementation.
-
-**Data flow**: The inputs are a `RunToken`, which represents the signed authority for one live run, and a `ToolBridgeRequest`, which says what the sandbox wants. A concrete implementation will use those inputs to contact or perform the bridge action, then produce a `ToolBridgeSuccess` with a JSON result or a `ToolBridgeFailure` with an error string.
-
-**Call relations**: Other code can depend on this protocol without caring which concrete requester is used underneath. The real requester implementation supplies the body; this file only states the shape of the call and the kind of answer callers should expect.
+**Call relations**: Other parts of the browser session use this when they want to react repeatedly to Chrome events. When _dispatch later sees an event with the matching name, it calls each registered listener with the event parameters and optional session id.
 
 
-##### `bridge_tools`  (lines 95–111)
+##### `CdpConnection.expect`  (lines 90–93)
 
 ```
-def bridge_tools(manifests: tuple[Manifest, ...]) -> tuple[ToolDef, ...]
+def expect(self, *events: str, session_id: str | None=None) -> asyncio.Future[JsonDict]
 ```
 
-**Purpose**: This builds the list of tools that the bridge is allowed to expose. It combines the system’s object tools with approved connector gateway tools from extension manifests, while deliberately excluding bound action tools that must be reached through `object_action` instead.
+**Purpose**: Creates a one-time wait for one of several possible DevTools events. It is like putting a note on the desk saying, “wake me when this event happens.”
 
-**Data flow**: It receives a tuple of extension `Manifest` objects, each of which may declare tools and connector tools. It first asks `ObjectVerbs` for the standard object-related tools. Then it walks through the manifests and keeps only tools that are unbound and whose names are part of the bridge’s approved name set. It creates a combined tuple, passes it into `ToolRegistry` so the set is checked as a valid registry, and returns the tuple.
+**Data flow**: It receives one or more event names and optionally a session id to narrow the wait to one browser target. It creates a future, stores it with the event names and session filter, and returns the future to the caller.
 
-**Call relations**: This function is used when the bridge’s callable menu is being assembled. It calls `ObjectVerbs.__init__` to create the object-tool provider and `ToolRegistry.__init__` as a validation step, so the final bridge tool list is both complete and acceptable to the normal tool registry rules.
+**Call relations**: Callers typically call expect before doing something that should trigger an event, then pass the returned future to wait. When _dispatch sees a matching event, it completes this future with the event parameters.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: 1 external calls (get_running_loop).
+
+
+##### `CdpConnection.wait`  (lines 95–104)
+
+```
+async def wait(self, future: asyncio.Future[JsonDict], timeout: float=EVENT_TIMEOUT_S) -> JsonDict
+```
+
+**Purpose**: Waits for an event future created by expect, with a timeout. It also removes the waiter afterward so old waits do not build up.
+
+**Data flow**: It receives a future and an optional timeout. It awaits the future for at most that many seconds and returns the event parameters if the event arrives. Whether it succeeds, times out, or is cancelled, it removes that future from the connection’s waiter list.
+
+**Call relations**: This pairs with expect: expect registers interest in an event, and wait turns that interest into a bounded wait. _dispatch is the part that completes the future when Chrome sends the matching event.
+
+*Call graph*: 1 external calls (timeout).
+
+
+##### `CdpConnection._read_loop`  (lines 106–120)
+
+```
+async def _read_loop(self) -> None
+```
+
+**Purpose**: Continuously reads incoming WebSocket messages from Chrome and feeds them into the dispatcher. It is the background worker that keeps command replies and browser events moving.
+
+**Data flow**: It reads raw text messages from the WebSocket, parses each JSON message into a dictionary, and passes it to _dispatch. If the WebSocket closes, it stops reading. Before exiting, it gives every still-pending command and event waiter a clear connection-closed error and clears the stored lists.
+
+**Call relations**: CdpConnection.open starts this loop as an asynchronous background task. It is the only path by which incoming Chrome messages reach _dispatch, and it protects callers of send and wait from hanging if the connection disappears.
+
+*Call graph*: calls 1 internal fn (_dispatch); 1 external calls (loads).
+
+
+##### `CdpConnection._dispatch`  (lines 122–161)
+
+```
+def _dispatch(self, message: JsonDict) -> None
+```
+
+**Purpose**: Sorts one incoming DevTools message into the right bucket: a command response, a command error, or a browser event. This is the message router for the connection.
+
+**Data flow**: It receives one parsed message dictionary. If the message has a numeric id, it treats it as a reply to a previous command, finds the matching pending future, and completes it with either a result dictionary or a CdpError. If the message has an event method name instead, it extracts the event parameters and optional session id, completes any matching one-time waiters, keeps the non-matching waiters, and calls registered listeners for that event.
+
+**Call relations**: _read_loop calls this for every message received from Chrome. It completes the futures that send, expect, and wait rely on, and it uses CdpError when Chrome reports a failed command.
+
+*Call graph*: calls 1 internal fn (__init__); called by 1 (_read_loop); 2 external calls (get, as_map).
 
 ## 📊 State Registers Touched
 
-- `reg-selected-pack-services` — The chosen product pack and the shared service objects it wires up for the rest of the app.
-- `reg-workspace-member-agent-state` — The saved list of workspaces, people, memberships, seats, and agents.
-- `reg-agent-configuration` — Each agent’s saved settings, such as model choice, reasoning mode, tools, visibility, internet access, sandbox size, and setup needs.
-- `reg-extension-registry` — The loaded set of extensions and the routes, tools, hooks, jobs, skills, agents, and backends they contribute.
-- `reg-extension-install-store` — The saved record of which extensions are installed, removed, or holding extension-specific data.
-- `reg-credential-connections` — The encrypted accounts, secrets, connection grants, and credential fulfillments that let agents use outside services safely.
-- `reg-access-permissions-audience` — The shared rules for who may read, use, share, or act on workspace content and conversations.
-- `reg-egress-policy-proxy` — The network allowlist and proxy state that decide which outside hosts sandboxed work may contact.
-- `reg-billing-spend-ledger` — The shared accounting state for spend caps, usage charges, prepaid balances, BYOK billing, and ledger exports.
-- `reg-feature-flags` — The rollout switches that turn product and infrastructure behavior on or off across the system.
-- `reg-search-provider-catalog` — The common search and page-fetching service state used when the system needs outside web information.
-- `reg-memory-index-state` — The stored knowledge, embeddings, chunks, and memory indexes that agents can search later.
-- `reg-source-config-sync-state` — The configured external sources plus their sync progress, errors, backoff, ownership, and access grants.
-- `reg-tool-catalog-allowlists` — The shared list of tools and actions an agent may see or run, including extension tools and sandbox bridge tools.
-- `reg-skill-prompt-library` — The reusable instructions, skills, prompt rules, and agent setup guidance loaded into turns.
-- `reg-conversation-turn-queue` — The durable state of conversations and turns, including admission, ordering, current runner, lifecycle status, and queued work.
-- `reg-live-turn-stream` — The live event feed that lets clients and other processes watch a running turn and learn how it ended.
-- `reg-sandbox-runtime` — The durable sandbox and browser workspace handles where agent commands, files, web browsing, and hosted previews run safely.
-- `reg-blob-artifact-store` — The shared file, blob, artifact, preview, download, and hosted media storage used by turns and surfaces.
-- `reg-presentation-slots` — The shared conversation display slots for showing artifacts, sources, tasks, sites, automations, image previews, and other side-panel content.
-- `reg-delegation-workflows` — The saved state for subagents, parent-child turns, objectives, workflow checkpoints, pending deliveries, and recovery.
-- `reg-object-journal` — The shared naming and change history for workspace objects such as tasks, prompts, skills, monitors, memories, and reports.
-- `reg-observability-trace` — The logs, metrics, traces, health signals, and trace links used to understand what the system is doing.
-- `reg-active-turn-cancellation-handles` — The in-process registry of currently running turn/workflow tasks and cancellation handles used to stop active work before marking it cancelled durably.
-- `reg-conversation-workspace-change-state` — The persisted record of file/workspace changes detected for a conversation sandbox, used for commit summaries, artifact presentation, recovery, and debugging.
-- `reg-workspace-object-store` — The current persisted workspace object records, such as tasks, monitors, todos, reports, prompts, and site metadata, read and mutated through object APIs, tools, jobs, and slots.
-- `reg-turn-runtime-snapshot` — The per-turn frozen runtime configuration and generated references used to run, recover, bill, and debug a turn consistently after settings change.
-- `reg-execution-step-log` — The structured persisted model, tool, and workflow execution records that power debugger timelines and post-run inspection beyond the user transcript.
-- `reg-sandbox-template-build-cache` — The local Docker image and E2B template build/version state that sandbox launch code relies on to create compatible runtimes.
-- `reg-support-feedback-reports` — The buffered debugger/support reports emitted by agents or operators and later delivered to or inspected by engineering.
-- `reg-proposal-approval-state` — Persisted proposed changes with before/after payloads, authoring information, and pending/approved/rejected status used for review and application workflows.
-- `reg-provider-rate-limit-budgets` — Shared per-provider throttle, retry, and backoff budget state for model, search, connector, and external API calls so workers avoid overrunning provider limits.
-- `reg-evaluation-fixture-backends` — Deterministic fake connector/backend data for evaluation packs, such as mailbox, calendar, code-search, and business records used across test routes and tools.
+- `reg-egress-policy` — The network access rules that decide which outside hosts sandboxed or connector code may contact.
+- `reg-billing-ledger` — The shared meter and wallet state for usage costs, spend caps, prepaid balances, and billing identity.
+- `reg-sandbox-state` — The remembered sandbox handles and execution environments where commands, files, and risky work run safely.
+- `reg-browser-sessions` — The active or reusable Chrome browser sessions, tabs, downloads, and remote-control connections used by agents.

@@ -1,1340 +1,520 @@
-# Objective and Workflow State Machines  `stage-11.2`
+# Research and web search tools  `stage-11.2`
 
-This stage is the project’s “job tracker” for work that takes more than one agent turn. It supports the main work loop and also helps after a pause, when the agent wakes up and must remember unfinished goals. The objectives manifest tells UFO to load this extension and to bring long-running objectives back into view at the start of each turn. The objectives tools let an agent plan a goal, record step evidence, run checks, delegate parts to other workers, and mark progress. They do not accept “I’m done” by itself; they re-run the promised checks first. The objectives store is the durable notebook that keeps goals, steps, attempts, evidence, and verification results.
+This stage is the system’s research desk. It is shared support used when an agent needs outside information during its work: searching the web, opening pages, looking in special areas like images or academic papers, and keeping track of sources for later citation.
 
-Several specialized workflows use the same idea. The application builder guides a worker from a member’s request to a deployable UFO app page, with tools for design, writing, checking, repair, and publishing. The application audit is its quality gate, deciding pass or repair from browser, layout, accessibility, and product checks. The brief pipeline defines a simpler writing machine: outline, draft, then critique.
+At the center is `core/src/ufo/runtime/search.py`, which defines the common shape of a search request and a page-fetch request. This lets the rest of the system ask for information without caring which search company is actually used. `extensions/perplexity/ufo_ext_perplexity.py` is one bridge for that contract. It translates the system’s requests into Perplexity API calls, checks the answers, and converts them back into the project’s normal result format.
+
+`extensions/research/ufo_ext_research/tools.py` exposes these abilities as tools an agent can safely use, while hiding service credentials. `delegation.py` adds a bigger “wide research” tool, like sending several assistants to research many subjects at once, then saving their combined results and progress. `observations.py` records the sources found, tied to the current workspace and conversation turn. `__init__.py` simply makes the research extension importable.
 
 ## Files in this stage
 
-### Objective lifecycle state
-Objective extension files register turn-time rehydration, expose planning and verification tools, and persist step evidence in durable state.
+### Perplexity provider bridge
+Perplexity is plugged in as an external search and page-fetching provider that returns results in the project’s standard format.
 
-### `extensions/objectives/ufo_ext_objectives/manifest.py`
+### `extensions/perplexity/ufo_ext_perplexity.py`
 
-`orchestration` · `startup and user prompt handling`
+`io_transport` · `request handling and extension registration`
 
-This extension exists because an agent can lose its short-term working memory between turns, especially after a scheduled wake-up or after another worker hands control back. Without this file’s hook, an objective might still exist in durable storage, but the agent would not be reminded what it was trying to finish, which steps remain open, or what evidence is still missing.
+This file is the bridge between the project and Perplexity’s hosted search API. Without it, the rest of the system could ask for “search the web” or “fetch this page,” but it would not know how to speak Perplexity’s particular language, add the API key, or understand the response.
 
-The file does two things. First, it defines a prompt section that teaches the agent when to create an objective, what counts as a real step, and how to record progress honestly. In plain terms, it tells the agent: save important multi-turn work, split it into meaningful pieces, and do not mark something done just because you hope it is done.
+The main piece is `PerplexitySearchProvider`. Think of it like a travel adapter: the project has its own shape for search queries and fetched pages, while Perplexity expects a specific web request and returns a specific JSON reply. This provider converts between the two.
 
-Second, it registers a hook. A hook is code the system automatically runs at a particular moment. Here, the hook runs when a user prompt is submitted. It looks up whether the current conversation has an objective. If it does, it builds a compact “frontier” summary: the objective name, directive, attempt count, closed-step count, the currently relevant steps, their acceptance conditions, and any already-raised blocker. This is like putting the project checklist back on the desk before work resumes.
+For searches, it builds a safe request body, adds optional filters like domains or date ranges, sends the request, validates the reply, and returns a list of `SearchHit` objects. For fetching a page, it asks Perplexity to search only within the requested page’s domain, then checks that the returned result really matches the requested URL. It trims the text to the requested size and can treat the result as a summary when an extraction prompt was supplied.
+
+The file also defines limits, such as maximum query length and URL length, so bad or overly large requests fail early with a clear `PerplexityError`. Finally, `manifest()` announces this extension to the host system and declares the Perplexity API key credential it needs.
 
 #### Function details
 
-##### `_inject_frontier`  (lines 51–88)
+##### `PerplexitySearchProvider.search`  (lines 72–85)
 
 ```
-async def _inject_frontier(ctx: HookContext) -> HookOutcome
+async def search(self, query: SearchQuery) -> SearchResults
 ```
 
-**Purpose**: This function adds the current objective’s live checklist into the agent’s prompt at the start of a turn. It helps the agent continue long-running work without relying on memory from earlier turns.
+**Purpose**: Runs a web search through Perplexity and returns the results in the project’s normal search-result shape. A caller uses this when it wants search hits without caring about Perplexity’s raw API format.
 
-**Data flow**: It receives a hook context from the system. If there is no current turn, it does nothing. Otherwise, it opens the extension’s stored data, uses the current agent’s workspace to find any objective tied to this conversation, and stops if none exists. When it finds one, it records a metric, turns the objective’s open work into readable lines of text, summarizes each acceptance condition, notes blockers that were already raised with the member, and warns when attempted steps still need their conditions checked. It returns an injected prompt context containing that text, which becomes visible to the agent.
+**Data flow**: It receives a `SearchQuery`, which contains the search text and optional filters. It turns that query into a Perplexity request body, sends it over the network, validates the returned data, then converts each Perplexity result into a `SearchHit`. The final output is a `SearchResults` object containing those hits.
 
-**Call relations**: The UFO hook system calls this function when a user prompt is submitted, because `manifest` registers it for that event. Inside, it asks `agent_current` which workspace is active, creates an `Objectives` view over the stored objective data, uses `condition_summary` to make acceptance conditions readable, reports the injection with `emit_metric`, and finally hands the finished text to `InjectContext` so the platform can add it to the turn.
+**Call relations**: This is one of the provider’s public actions. It relies on `_search_body` to prepare the request, `_post` to contact Perplexity, and `_response` to make sure the reply has the expected shape before wrapping the results for the rest of the system.
 
-*Call graph*: 5 external calls (__init__, __init__, agent_current, emit_metric, condition_summary).
+*Call graph*: calls 3 internal fn (_post, _response, _search_body); 2 external calls (__init__, __init__).
 
 
-##### `manifest`  (lines 91–103)
+##### `PerplexitySearchProvider.fetch`  (lines 87–131)
+
+```
+async def fetch(self, request: FetchRequest) -> FetchedPage
+```
+
+**Purpose**: Extracts text for one specific web page URL using Perplexity. It is used when the system wants content from a known page, not just a general list of search results.
+
+**Data flow**: It receives a `FetchRequest` with a URL, an optional extraction prompt, and an optional character limit. It first checks that the URL, prompt, and limits are reasonable. It then builds a Perplexity search restricted to the URL’s domain, sends it, validates the reply, and looks for a result whose canonical page matches the requested URL. If found, it trims the snippet to the allowed length and returns a `FetchedPage`; if not, it raises a `PerplexityError`.
+
+**Call relations**: This is the provider’s public fetch path. It uses `_post` for the Perplexity call, `_response` for validation, and `_canonical_page` to compare URLs in a forgiving way, such as ignoring a trailing `.html` difference. It creates the final `FetchedPage` only after confirming Perplexity returned the requested page.
+
+*Call graph*: calls 3 internal fn (_post, _response, _canonical_page); 3 external calls (__init__, __init__, urlsplit).
+
+
+##### `PerplexitySearchProvider._search_body`  (lines 134–159)
+
+```
+def _search_body(query: SearchQuery) -> dict[str, Json]
+```
+
+**Purpose**: Builds the JSON body that Perplexity expects for a search request. It also enforces search limits before any network call is made.
+
+**Data flow**: It receives a `SearchQuery`. It checks the requested result count, caps it at the provider’s maximum, adds a plain-language qualifier for some search types, includes optional domain and date filters, and calculates token limits. It returns a dictionary ready to send as JSON to Perplexity, or raises `PerplexityError` if the query is too small or too long.
+
+**Call relations**: This helper is called by `PerplexitySearchProvider.search` before contacting Perplexity. When date filters are present, it hands each date to `_api_date` so the date is formatted the way Perplexity’s API expects.
+
+*Call graph*: calls 1 internal fn (_api_date); called by 1 (search); 1 external calls (__init__).
+
+
+##### `PerplexitySearchProvider._response`  (lines 162–166)
+
+```
+def _response(payload: object) -> _PerplexitySearchResponse
+```
+
+**Purpose**: Checks that Perplexity’s reply has the result structure this provider needs. It protects the rest of the system from malformed or unexpected API responses.
+
+**Data flow**: It receives the decoded response payload, usually a Python object made from JSON. It asks the `_PerplexitySearchResponse` data model to validate that the payload contains a `results` list with usable items. If validation succeeds, it returns the typed response object; if validation fails, it raises `PerplexityError`.
+
+**Call relations**: Both `search` and `fetch` call this after `_post` returns data. It acts as the gate between outside API data and the project’s own trusted objects.
+
+*Call graph*: called by 2 (fetch, search); 1 external calls (__init__).
+
+
+##### `PerplexitySearchProvider._post`  (lines 168–188)
+
+```
+async def _post(self, body: dict[str, Json]) -> object
+```
+
+**Purpose**: Sends a prepared request body to Perplexity’s `/search` endpoint and returns the decoded JSON reply. It is the one place in this file that actually performs the HTTP network call.
+
+**Data flow**: It receives a dictionary that will be sent as JSON. It reads the Perplexity API key from the configured credential slot, creates an asynchronous HTTP client, sends a POST request with the API key in the authorization header, and checks the HTTP status. On success it returns the parsed JSON body; on an HTTP error or invalid JSON it raises `PerplexityError` with a clear message.
+
+**Call relations**: `search` and `fetch` both hand their prepared request bodies to this function. It is the shared transport layer for the provider, while the higher-level methods decide what the request should mean and how to interpret the validated results.
+
+*Call graph*: called by 2 (fetch, search); 2 external calls (__init__, AsyncClient).
+
+
+##### `_api_date`  (lines 191–192)
+
+```
+def _api_date(value: date) -> str
+```
+
+**Purpose**: Formats a Python date into the month/day/year text format expected by Perplexity’s API. It is a small compatibility helper.
+
+**Data flow**: It receives a `date` value. It converts it into a string like `03/09/2026` and returns that string. It does not change anything else.
+
+**Call relations**: `PerplexitySearchProvider._search_body` calls this when a search query includes start or end publication dates. That lets the search body include date filters in Perplexity’s preferred format.
+
+*Call graph*: called by 1 (_search_body); 1 external calls (strftime).
+
+
+##### `_canonical_page`  (lines 195–202)
+
+```
+def _canonical_page(value: str) -> tuple[str | None, str, str]
+```
+
+**Purpose**: Turns a URL into a simplified identity that can be compared with another URL. This helps decide whether Perplexity really returned the exact page that was requested.
+
+**Data flow**: It receives a URL string. It splits the URL into parts, removes a trailing slash, and strips common page suffixes like `.html`, `.htm`, or `.txt` from the path. It returns a tuple containing the hostname, simplified path, and query string.
+
+**Call relations**: `PerplexitySearchProvider.fetch` uses this on both the requested URL and Perplexity’s returned URLs. This makes the comparison a little more tolerant while still checking that the domain, page path, and query match.
+
+*Call graph*: called by 1 (fetch); 1 external calls (urlsplit).
+
+
+##### `manifest`  (lines 205–225)
 
 ```
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function describes the objectives extension to the UFO runtime. It names the extension, lists the tools it provides, registers the automatic prompt-injection hook, and adds the instruction text the agent should see.
+**Purpose**: Registers this extension with the host system. It tells the system that there is a Perplexity search provider and that it needs a Perplexity API key credential.
 
-**Data flow**: It takes no input. It gathers constants and imported tool definitions into a single manifest object: the extension name and version, the four objective-related tools, the hook that should run on user prompt submission, and the prompt section explaining how objectives should be used. It returns that manifest for the runtime to load.
+**Data flow**: It takes no input. It creates a `Manifest` containing the extension name and version, declares the credential slot for the API key, and describes how to build a `PerplexitySearchProvider` when credentials are available. It returns that manifest to the extension loader.
 
-**Call relations**: The extension loader calls this function when the objectives extension is being set up. The function builds a `HookSpec` that points to `_inject_frontier`, creates a `PromptSection` for the agent-facing instructions, and wraps everything in a `Manifest` so the rest of UFO knows which tools and prompt behavior this extension contributes.
+**Call relations**: The host calls this during extension discovery or startup. The returned manifest is how the rest of the project learns that the `perplexity` backend exists and how to construct it.
 
 *Call graph*: 3 external calls (__init__, __init__, __init__).
 
 
-### `extensions/objectives/ufo_ext_objectives/tools.py`
+### Agent search tools and contract
+Agent-facing research tools expose web, page, and category searches through the shared runtime search abstraction.
 
-`domain_logic` · `tool invocation during objective planning, progress recording, reading, and delegation`
+### `extensions/research/ufo_ext_research/tools.py`
 
-This file is the practical front door for the objectives extension. An objective is longer-running work, broken into named steps. Each step may include acceptance conditions: concrete things that must be true, such as “this file exists,” “this file contains this text,” or “this command succeeds.” Without this file, agents could store plans but would not have the tools to create them, inspect them, mark progress, or send independent steps to subagents.
+`domain_logic` · `request handling`
 
-The key idea is that saying “I did it” is not the same as proving “it is done.” When a step is recorded as attempted, the file re-checks the step’s conditions in the sandbox, which is the controlled environment where commands can be run. If the checks fail, the step stays unmet and the result explains what failed.
+This file is the public face of the research extension. It defines three tools: one for normal web search, one for fetching the contents of a URL, and one for searching a specific kind of content such as videos, products, or academic papers. Think of it like a library reference desk: the agent asks a clear question, this file checks that the request is shaped correctly, then passes it to the search provider that actually knows how to look things up.
 
-It also prevents a misleading kind of plan: a step cannot use a produced artifact, like an already-existing file, as proof of future work. That would be like checking off “bake a cake” because there was already a cake on the table before cooking began. The file also formats objectives for humans, updates stored objective state through the Objectives store, emits metrics so operators can see how often checks pass or fail, and can fan out independent steps to subagents.
+The input classes describe what each tool accepts and put guardrails around it. For example, web search can take up to five genuinely different queries, a result limit, publication-date filters, and allowed domains. Fetching requires a public HTTP or HTTPS URL and can optionally ask the provider to extract or summarize specific information.
+
+The tool functions then call the current turn’s `SearchProvider`, which is the backend search service chosen by the host process. That matters because API keys stay on the host side; the sandboxed agent never receives them. Search results are converted into JSON text for the model to read, and observations can be recorded for later inspection. URL fetching also adds a clear warning: fetched pages come from the provider’s crawler session, not from the user’s workspace or login session. Without this file, the agent would not have a safe, consistent way to ask for current web information.
 
 #### Function details
 
-##### `_require_ext`  (lines 95–98)
+##### `_provider`  (lines 133–136)
 
 ```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
+def _provider(ctx: ToolContext) -> SearchProvider
 ```
 
-**Purpose**: This small helper makes sure the tool call has the extension context it needs. The extension context is the extra project-specific state and services attached to a tool run, such as access to stored objectives.
+**Purpose**: This function finds the search provider for the current tool call. If no provider was configured for this turn, it stops immediately with a clear error instead of pretending search is available.
 
-**Data flow**: It receives the current tool context. If the context contains an extension object, it returns that object. If it does not, it stops the operation by raising an error, because the objectives tools cannot safely work without their storage and transaction support.
+**Data flow**: It receives the tool context, reads the `search_provider` value from it, and either returns that provider or raises an error. Nothing is changed; it is a gatekeeper that turns “maybe there is a provider” into “there definitely is one, or this call fails loudly.”
 
-**Call relations**: The main tool handlers call this at the start of their work. `plan_objective`, `record_step`, `run_independent_steps`, and `read_objective` all rely on it before they open database transactions or read objective state.
+**Call relations**: The three tool handlers call this first, before doing any search or fetch work. That way `_search_web`, `_search_vertical`, and `_fetch_url` all share the same check and do not each need their own version of the missing-provider error.
 
-*Call graph*: called by 4 (plan_objective, read_objective, record_step, run_independent_steps).
-
-
-##### `render`  (lines 101–116)
-
-```
-def render(view: ObjectiveView) -> str
-```
-
-**Purpose**: This turns an objective view into readable text for the agent or user. It is the report card for an objective: what it is, how many steps are closed, what each step still needs, and recent evidence.
-
-**Data flow**: It receives an `ObjectiveView`, which is a snapshot of one objective and its steps. It builds a list of plain text lines from the objective name, directive, step states, acceptance conditions, failed verdicts, and the last couple of events for each step. It returns one joined string ready to put in a tool result.
-
-**Call relations**: After objective state is created, updated, or refreshed, the tool handlers call `render` to explain the current state. While building the text, it asks `condition_summary` to turn each technical condition into a short human-readable phrase.
-
-*Call graph*: called by 3 (plan_objective, read_objective, record_step); 1 external calls (condition_summary).
+*Call graph*: called by 3 (_fetch_url, _search_vertical, _search_web).
 
 
-##### `evaluate`  (lines 119–123)
+##### `_results_json`  (lines 139–153)
 
 ```
-async def evaluate(ctx: ToolContext, step: StepView) -> tuple[ConditionVerdict, ...]
+def _results_json(hits: list[SearchHit], answer: str | None) -> str
 ```
 
-**Purpose**: This checks all acceptance conditions for one step. It is used when the system needs to know whether an attempted step really satisfies its promised proof.
+**Purpose**: This function turns search hits into a JSON string the model can read. It gives every result the same simple shape: URL, title, text snippet, publication date, and highlights, with an optional direct answer if the provider supplied one.
 
-**Data flow**: It receives the tool context and a step view. For every condition attached to the step, it asks `_verdict` to test that condition in the sandbox. It collects the resulting pass-or-fail verdicts and returns them as a tuple.
+**Data flow**: It receives a list of search hits and maybe an answer. It copies the useful fields from each hit into plain dictionary objects, adds them under a `results` key, adds `answer` only when one exists, and returns the whole package as JSON text.
 
-**Call relations**: `record_step` calls this after an agent says a step was attempted, and `read_objective` calls it to refresh the truth of already-attempted steps. It delegates the actual checking of each single condition to `_verdict`.
+**Call relations**: After `_search_web` or `_search_vertical` gets raw provider results, they hand those results to this helper. The helper does the final packaging so both search tools return the same style of response.
 
-*Call graph*: calls 1 internal fn (_verdict); called by 2 (read_objective, record_step).
-
-
-##### `_verdict`  (lines 126–150)
-
-```
-async def _verdict(ctx: ToolContext, condition: Condition, phase: str) -> ConditionVerdict
-```
-
-**Purpose**: This tests one acceptance condition against real state and records a metric about the result. It answers the simple question: does this promised condition hold right now?
-
-**Data flow**: It receives the tool context, one condition, and the phase that asked for the check, such as planning or recording. It converts the condition into a shell command: for example, test whether a path exists, search for fixed text in a file, or run a supplied command. It runs that command in the sandbox with a timeout, treats exit code zero as success, emits a metric describing the kind of condition and whether it held, and returns a `ConditionVerdict` with the condition, the true-or-false result, and a readable detail string.
-
-**Call relations**: `evaluate` uses `_verdict` for normal step closure checks. `plan_objective` also uses it earlier as a gate, to reject produced-state conditions that are already true before the work starts. It uses `shlex.quote` to safely place paths and text into shell commands, `condition_summary` for readable details, and `emit_metric` so production behavior can be observed.
-
-*Call graph*: called by 2 (evaluate, plan_objective); 4 external calls (__init__, quote, emit_metric, condition_summary).
+*Call graph*: called by 2 (_search_vertical, _search_web); 1 external calls (dumps).
 
 
-##### `plan_objective`  (lines 153–208)
+##### `_search_web`  (lines 156–174)
 
 ```
-async def plan_objective(ctx: ToolContext, args: PlanObjectiveInput) -> ToolResult
+async def _search_web(ctx: ToolContext, args: SearchWebInput) -> ToolResult
 ```
 
-**Purpose**: This creates or revises an objective plan, but first rejects acceptance checks that would prove nothing. It is the tool an agent uses when it wants future turns to remember the goal, steps, and what counts as done.
+**Purpose**: This is the handler behind the `search_web` tool. It runs one web search for each requested query, combines the results, records them if observation logging is available, and returns them to the model.
 
-**Data flow**: It receives the tool context and a plan containing an objective name, directive, and ordered steps. It loads any existing objective with the same name, then checks new file-based acceptance conditions that claim the step will produce state. If one of those conditions is already true, it returns an error explaining that the condition is empty proof. Otherwise, it stores the plan through the objectives store and returns a rendered view of the saved objective.
+**Data flow**: It receives the tool context and validated web-search arguments. It gets the provider, builds a search request for each query using the requested result count, date filters, and allowed domains, then collects all returned hits into one list. It keeps the first provider-supplied answer it sees, optionally records the hits for the current conversation turn, converts everything to JSON text, and returns a tool result.
 
-**Call relations**: This function starts by getting the extension context through `_require_ext`. It reads existing state through `Objectives`, uses `_verdict` during planning to catch vacuous file conditions, uses `condition_summary` in error messages, saves the accepted plan, and finally hands the saved view to `render` so the caller sees what was recorded.
+**Call relations**: When the agent uses the web search tool, the tool system calls this function. It relies on `_provider` to obtain the configured backend, uses `_results_json` to format the final response, and calls the observation recorder when extension state is present so the search activity can be saved outside the immediate reply.
 
-*Call graph*: calls 3 internal fn (_require_ext, _verdict, render); 5 external calls (__init__, __init__, __init__, agent_current, condition_summary).
-
-
-##### `record_step`  (lines 211–259)
-
-```
-async def record_step(ctx: ToolContext, args: RecordStepInput) -> ToolResult
-```
-
-**Purpose**: This records that a step was attempted or that it is blocked. For attempted work, it does not simply trust the claim; it re-checks the step’s acceptance conditions before showing the updated objective state.
-
-**Data flow**: It receives the tool context and a record containing the objective name, exact step title, kind of record, and evidence. It looks up the objective and step, returning clear errors if either is missing. If the step is marked blocked, it stores that block and reports whether it was new or a repeated block. If the step is marked did, it records the attempt, evaluates the step’s conditions, stores the check results, refreshes the objective, overlays the newest verdicts, emits a metric, and returns a rendered status report.
-
-**Call relations**: This is one of the central tool handlers. It uses `_require_ext` to access extension services, `Objectives` to read and write objective state, `evaluate` to test whether an attempted step actually holds, `_with_verdicts` to show the freshest verdicts in the returned view, `render` to format the answer, and `emit_metric` to count what happened.
-
-*Call graph*: calls 4 internal fn (_require_ext, _with_verdicts, evaluate, render); 5 external calls (__init__, __init__, __init__, agent_current, emit_metric).
+*Call graph*: calls 2 internal fn (_provider, _results_json); 4 external calls (__init__, __init__, __init__, record_search_hits).
 
 
-##### `run_independent_steps`  (lines 262–308)
+##### `_fetch_url`  (lines 177–198)
 
 ```
-async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput) -> ToolResult
+async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult
 ```
 
-**Purpose**: This sends every currently runnable independent step to a subagent at the same time. It saves the current agent from manually figuring out which steps can run in parallel.
+**Purpose**: This is the handler behind the `fetch_url` tool. It asks the search provider’s crawler to retrieve a public web page, then returns the page text, any summary, and a warning explaining that the content came from the crawler’s session, not the user’s workspace.
 
-**Data flow**: It receives the tool context, an objective name, and a subagent profile such as a coding profile. It loads the objective, finds the steps marked runnable, and if none are ready it returns an explanatory message. For each runnable step, it spawns a background subagent with the overall directive and that step’s title, using a deduplication key so the same step is not accidentally launched twice in the same way. It returns a list of dispatched steps and their subagent turn IDs.
+**Data flow**: It receives the tool context and validated fetch arguments. It gets the provider and first checks whether that provider can fetch pages at all. If not, it returns an error message telling the agent to use another route. If fetching is supported, it builds a fetch request from the URL, optional prompt, length limit, and cache-bypass flag, sends it to the provider, optionally records the fetched page, wraps the page content and provenance warning into JSON, and returns it as tool output.
 
-**Call relations**: The function first uses `_require_ext` and `Objectives` to read the current objective. It then calls `ToolContext.spawn` for each runnable step and emits a dispatch metric. Unlike `record_step`, it does not close anything itself; it starts child work and tells the caller to wait for results and record each step later.
+**Call relations**: When the agent calls `fetch_url`, this function is the bridge to the provider’s crawler. It starts with `_provider`, hands a fetch request to the backend, may pass the fetched page to `record_fetched_page`, and then constructs the final `ToolResult` for the model.
 
-*Call graph*: calls 1 internal fn (_require_ext); 6 external calls (__init__, __init__, __init__, spawn, agent_current, emit_metric).
-
-
-##### `read_objective`  (lines 311–330)
-
-```
-async def read_objective(ctx: ToolContext, args: ReadObjectiveInput) -> ToolResult
-```
-
-**Purpose**: This retrieves an objective and presents its current status. If attempted steps have acceptance conditions, it re-checks them so the reader sees whether they still hold now.
-
-**Data flow**: It receives the tool context and an objective name. It loads the matching objective, or returns an error if none exists. For every step that has been attempted and has acceptance conditions, it evaluates those conditions again, stores the new check results, and updates the view used for display. It returns the rendered objective report.
-
-**Call relations**: This is the read-only-looking status tool, though it may update stored check results to keep them fresh. It uses `_require_ext` and `Objectives` to load and update state, `evaluate` to re-check real-world conditions, `_with_verdicts` to keep the displayed view current, and `render` to produce the final human-readable output.
-
-*Call graph*: calls 4 internal fn (_require_ext, _with_verdicts, evaluate, render); 4 external calls (__init__, __init__, __init__, agent_current).
+*Call graph*: calls 1 internal fn (_provider); 5 external calls (__init__, __init__, __init__, dumps, record_fetched_page).
 
 
-##### `_with_verdicts`  (lines 333–343)
+##### `_search_vertical`  (lines 201–210)
 
 ```
-def _with_verdicts(view: ObjectiveView, title: str, verdicts: tuple[ConditionVerdict, ...]) -> ObjectiveView
+async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolResult
 ```
 
-**Purpose**: This returns a copy of an objective view with fresh verdicts attached to one named step. It lets the tool response show the newest check results immediately, without mutating the original snapshot in place.
+**Purpose**: This is the handler behind the `search_vertical` tool. It performs a search aimed at a specific content type, such as images, people profiles, academic papers, videos, or shopping results.
 
-**Data flow**: It receives an objective view, a step title, and a tuple of verdicts. It creates a replacement objective view whose steps are the same except that the matching step is copied with the supplied verdicts. The output is a new `ObjectiveView` value ready for rendering.
+**Data flow**: It receives the tool context and the validated vertical-search arguments. It gets the provider, builds a search query using the requested vertical and the default number of results, sends it to the provider, optionally records the hits for the current turn, formats the hits and optional answer as JSON, and returns that JSON in a tool result.
 
-**Call relations**: `record_step` uses this after checking a just-attempted step, and `read_objective` uses it while refreshing attempted steps. Internally it relies on `dataclasses.replace`, which is a standard helper for making changed copies of data objects.
+**Call relations**: The tool system calls this when the agent chooses a specialized search instead of a general web search. Like `_search_web`, it uses `_provider` to reach the backend, uses `_results_json` to make the response consistent, and records hits when the extension observation system is available.
 
-*Call graph*: called by 2 (read_objective, record_step); 1 external calls (replace).
-
-
-### `extensions/objectives/ufo_ext_objectives/__init__.py`
-
-`other` · `startup/import time`
-
-This is the package marker file for the objectives extension. In Python, a folder with an `__init__.py` file can be imported as a package, which means other parts of the system can refer to this extension by its package name. Think of it like a label on a drawer: the drawer may contain many useful tools in other files, but this label tells Python and readers what the drawer is for. Here, the only content is a docstring, which says that this package is “The objectives extension.” There are no functions, classes, settings, or side effects in this file. If it were missing, imports that expect `extensions.objectives.ufo_ext_objectives` to be a regular Python package could fail or behave differently depending on the Python environment.
+*Call graph*: calls 2 internal fn (_provider, _results_json); 4 external calls (__init__, __init__, __init__, record_search_hits).
 
 
-### `extensions/objectives/ufo_ext_objectives/store.py`
+### `core/src/ufo/runtime/search.py`
 
-`domain_logic` · `objective planning, turn wake-up, and progress recording`
+`data_model` · `startup and request handling`
 
-This file defines how the objectives extension stores and reads its work. An objective is a named goal inside a conversation. It has ordered steps, and each step can declare acceptance conditions such as “this file exists,” “this file contains this text,” or “this command succeeds.” Those conditions are stored as data so the extension can check them later, instead of trusting a worker’s own claim.
+This file is a boundary, or “seam,” between the core runtime and any real web search provider. The core project does not include a built-in search engine here. Instead, it defines the shapes of the messages that pass back and forth, and the promises a search provider must keep.
 
-The database tables keep four kinds of records: objectives, steps, step events, and condition checks. Events are append-only, meaning new facts are added rather than old facts being edited. This matters because a later plan revision should not erase what already happened. It is like keeping a lab notebook: you can add a new observation, but you do not rewrite yesterday’s page.
+The small data classes describe the pieces of a search workflow. A SearchQuery is the question being asked, including limits such as date range, allowed websites, result count, and optional category. SearchResults contains ranked SearchHit entries, and may also include a direct answer from a provider that can summarize results. FetchRequest describes asking for the contents of one web page, and FetchedPage is the extracted text that comes back.
 
-The view classes turn database rows into readable snapshots. A step’s state is derived from its events and latest check: pending, attempted, done, blocked, or unmet. The Objectives class is the main doorway for code that wants to create or revise a plan, find an objective, record that work was done or blocked, and save condition-check results. A key safety rule is that once a step has been attempted, its acceptance conditions are frozen, so nobody can loosen the test after the work proves difficult.
+The SearchProvider protocol is the important doorway. A real provider, supplied by an extension, must offer search. It may also offer fetch, which is advertised through supports_fetch. This matters because API keys and network calls stay in the host process, not inside the sandboxed tool environment. In everyday terms, this file is like defining the plug shape for search providers: many devices can fit, but the wall socket stays the same.
 
 #### Function details
 
-##### `StepView.attempted`  (lines 157–158)
+##### `SearchProvider.supports_fetch`  (lines 82–82)
 
 ```
-def attempted(self) -> bool
+def supports_fetch(self) -> bool
 ```
 
-**Purpose**: Tells whether anyone has recorded a “did” event for this step. This separates a step that has merely been planned from one that someone actually tried to complete.
+**Purpose**: This property tells the rest of the system whether this search provider can fetch and extract the contents of a specific web page. Code can check it before trying to call fetch, instead of guessing and failing later.
 
-**Data flow**: It reads the step’s stored events → looks for at least one event whose kind is “did” → returns true if it finds one, otherwise false. It does not change anything.
+**Data flow**: The caller starts with a SearchProvider object. It reads this property and gets back a true-or-false answer. Nothing is changed; the result simply tells the caller whether page fetching is available.
 
-**Call relations**: Other step-reading logic uses this as a basic signal. The step state calculation uses it to avoid calling an untried step done or unmet, and the objective’s runnable-step logic uses it to avoid dispatching work that has already been attempted.
-
-
-##### `StepView.open_block`  (lines 161–166)
-
-```
-def open_block(self) -> StepEvent | None
-```
-
-**Purpose**: Finds the current unanswered block on a step, if there is one. A block means the worker asked for help or reported something stopping progress.
-
-**Data flow**: It looks at the most recent event on the step → if that latest event is a “blocked” event, it returns that event → otherwise it returns nothing. It does not search older events because only the latest event can represent the currently standing block.
-
-**Call relations**: The step state uses this same idea to report a step as blocked. The objective runnable logic uses it to avoid starting blocked work again, and Objectives.record uses it to avoid writing the exact same block repeatedly.
+**Call relations**: This file only defines the promise, not the real behavior. In the larger flow, a research tool or other caller checks supports_fetch before asking the provider to fetch a URL, so providers that only support search are not asked to do work they cannot do.
 
 
-##### `StepView.state`  (lines 169–184)
+##### `SearchProvider.search`  (lines 84–84)
 
 ```
-def state(self) -> str
+async def search(self, query: SearchQuery) -> SearchResults
 ```
 
-**Purpose**: Turns a step’s history and latest checks into a simple status word, such as pending, attempted, done, blocked, or unmet. This is the central rule that decides whether a step still belongs on the objective’s frontier.
+**Purpose**: This method is the standard way to ask a provider to run a web search. It takes a structured SearchQuery and returns SearchResults, so callers do not need to know the provider’s private API format.
 
-**Data flow**: It reads the step’s events, acceptance conditions, and saved verdicts → first treats a latest block as blocked, then checks whether the step was attempted, then decides whether missing or failed condition checks prevent completion → returns one status string. It changes no stored data.
+**Data flow**: The caller provides a SearchQuery containing the natural-language query and optional limits like dates, domains, result count, or category. The provider implementation sends that request to its own backend, translates the backend response into SearchResults, and returns ranked hits plus an optional direct answer.
 
-**Call relations**: ObjectiveView.confirmed and ObjectiveView.frontier depend on this property to count finished work and find unfinished work. The rest of the extension can ask for the state without reimplementing the rules for events, conditions, and verdicts.
-
-
-##### `ObjectiveView.attempts`  (lines 199–200)
-
-```
-def attempts(self) -> int
-```
-
-**Purpose**: Counts how many times work was recorded across all steps of an objective. This gives a simple measure of effort spent.
-
-**Data flow**: It reads every step and every event inside those steps → counts only events marked “did” → returns that count as a number. Nothing is written or updated.
-
-**Call relations**: This is a reporting view over the objective. It pairs with ObjectiveView.confirmed so callers can compare effort against proven progress.
+**Call relations**: This protocol method is called through the selected provider during a turn when a tool needs web search. The real provider implementation does the network work and hands back SearchResults in the common shape defined in this file.
 
 
-##### `ObjectiveView.confirmed`  (lines 203–204)
+##### `SearchProvider.fetch`  (lines 86–86)
 
 ```
-def confirmed(self) -> int
+async def fetch(self, request: FetchRequest) -> FetchedPage
 ```
 
-**Purpose**: Counts how many steps are actually done according to the extension’s state rules. It measures confirmed progress, not just claimed progress.
+**Purpose**: This method is the standard way to retrieve readable text from one web page, when the selected provider supports that feature. It can also request a focused extraction or summary using an optional prompt.
 
-**Data flow**: It reads each step → asks each step for its state → counts the steps whose state is “done” → returns that number. It does not change the objective.
+**Data flow**: The caller provides a FetchRequest with a URL and optional settings such as a prompt, maximum returned text length, and whether to bypass cached data. The provider implementation fetches or retrieves the page, extracts text, possibly summarizes it, and returns a FetchedPage.
 
-**Call relations**: This builds directly on StepView.state. It is meant to be read alongside attempts: many attempts with few confirmed steps can show that an objective is stuck or too broad.
+**Call relations**: This method is meant to be called only after supports_fetch says fetching is available. In the larger research flow, a fetch tool uses the selected provider through this interface, while the actual provider takes care of its own API calls and credentials outside the sandbox.
 
 
-##### `ObjectiveView.runnable`  (lines 207–215)
+### Research package setup
+The research extension package is made importable before its orchestration and observation helpers are used.
 
-```
-def runnable(self) -> tuple[StepView, ...]
-```
+### `extensions/research/ufo_ext_research/__init__.py`
 
-**Purpose**: Identifies the unfinished steps that may be started in parallel right now. A step qualifies only if the plan marked it independent, it has not already been attempted, and it is not currently blocked.
+`other` · `import time`
 
-**Data flow**: It starts from the objective’s frontier, meaning unfinished steps → filters to independent steps with no prior attempt and no open block → returns those steps as a tuple. It does not write anything.
+In Python, a folder often needs an `__init__.py` file to be treated as an importable package. This file is that marker for the `extensions/research/ufo_ext_research` package. Think of it like a label on a drawer: the drawer may contain useful tools in other files, but this label simply tells Python, “this drawer belongs to the project and can be opened by imports.” Because the file is empty, it does not set up shared state, expose shortcuts, or run startup code. Its importance is structural: without it, depending on the Python version and import style, code elsewhere might not be able to reliably import modules from this package.
 
-**Call relations**: This relies on ObjectiveView.frontier plus StepView.attempted and StepView.open_block. A dispatcher can use it when deciding which steps to fan out to workers at the same time.
 
+### Research orchestration and source records
+Wide research coordinates concurrent subagent investigations and records discovered web sources for later citation.
 
-##### `ObjectiveView.frontier`  (lines 218–219)
+### `extensions/research/ufo_ext_research/delegation.py`
 
-```
-def frontier(self) -> tuple[StepView, ...]
-```
+`orchestration` · `tool request handling`
 
-**Purpose**: Returns the steps that are not done yet. This is the objective’s active edge: the remaining work still needing attention or proof.
+This file solves a practical batching problem: if a user wants the same kind of research done for many companies, people, or topics, doing them one by one is slow and fragile. `wide_research` acts like a foreman. It reads an input file with one entity per line, removes duplicates, then sends each entity to a separate research subagent with a customized prompt. It limits how many subagents run at once, so the system does not try to do too much work at the same time.
 
-**Data flow**: It reads all steps in order → asks each step for its state → keeps only steps whose state is not “done” → returns those steps. It does not modify the plan.
+Each child is asked to write its full JSON result to a hidden workspace file. The parent then reads those files, turns each into a row, and writes a final `wide_research.json` summary. If a child fails to write valid JSON, the final output records an error for that entity instead of losing the whole batch.
 
-**Call relations**: ObjectiveView.runnable narrows this list further for parallel dispatch. Callers that wake up a conversation can use the frontier to know what remains open.
-
-
-##### `condition_summary`  (lines 222–229)
-
-```
-def condition_summary(condition: Condition) -> str
-```
-
-**Purpose**: Turns an acceptance condition into a short human-readable sentence. This is useful when showing or explaining what proof a step requires.
-
-**Data flow**: It receives one condition object → checks whether it is a file-exists, file-contains, or command-succeeds condition → returns a plain text summary. It does not read or write the database.
-
-**Call relations**: This is a small helper for presentation. It does not call into the store, but it gives other parts of the extension a consistent way to describe the checks defined here.
-
-
-##### `Objectives.named`  (lines 239–253)
-
-```
-async def named(self, conversation_id: UUID, name: str) -> ObjectiveView | None
-```
-
-**Purpose**: Looks up one objective by conversation and name. The conversation filter is important because subagents can have their own conversations and should not accidentally take over a parent conversation’s objective with the same name.
-
-**Data flow**: It receives a conversation id and objective name → queries the objective table for a matching row in the current workspace → if found, passes that row to Objectives._view to build a full readable ObjectiveView; if not found, returns nothing.
-
-**Call relations**: Objectives.plan calls this first to decide whether it is creating a new objective or revising an existing one. When a row is found, this function hands off to Objectives._view so the caller gets steps, events, and checks, not just the objective header.
-
-*Call graph*: calls 1 internal fn (_view); called by 1 (plan); 1 external calls (select).
-
-
-##### `Objectives.on_conversation`  (lines 255–267)
-
-```
-async def on_conversation(self, conversation_id: UUID) -> ObjectiveView | None
-```
-
-**Purpose**: Finds the most recently created objective for a conversation. This lets code reopen the current objective for a conversation without already knowing its name.
-
-**Data flow**: It receives a conversation id → queries the objective table for objectives in the current workspace and conversation, newest first → turns the newest row into an ObjectiveView through Objectives._view, or returns nothing if none exists.
-
-**Call relations**: This is another read doorway into the store. Like Objectives.named, it delegates the full assembly work to Objectives._view after the database query finds the objective row.
-
-*Call graph*: calls 1 internal fn (_view); 1 external calls (select).
-
-
-##### `Objectives.plan`  (lines 269–332)
-
-```
-async def plan(self, conversation_id: UUID, name: str, directive: str, steps: tuple[StepPlan, ...]) -> ObjectiveView
-```
-
-**Purpose**: Creates a new objective or revises the plan for an existing one. It preserves the acceptance conditions of any step that has already been attempted, so a later revision cannot make the finish line easier after the race has started.
-
-**Data flow**: It receives a conversation id, name, directive, and planned steps → looks for an existing objective → inserts a new objective or updates the old directive → removes unstarted old steps that are no longer kept → updates or inserts the planned steps in order, freezing attempted steps’ conditions when needed → reads back and returns the completed ObjectiveView.
-
-**Call relations**: This is the main write path for planning. It begins by calling Objectives.named, uses database insert, update, and delete operations to reshape the stored plan, and finally calls Objectives.named again to return the same kind of full view that readers use.
-
-*Call graph*: calls 1 internal fn (named); 5 external calls (delete, insert, true, update, uuid4).
-
-
-##### `Objectives.record`  (lines 334–354)
-
-```
-async def record(self, step: StepView, kind: str, actor_turn_id: UUID, evidence: str) -> bool
-```
-
-**Purpose**: Adds a new event to a step, such as work being done or the step being blocked. It avoids recording the same still-open block over and over, which would otherwise flood the history with repeated copies of the same question.
-
-**Data flow**: It receives a step, event kind, actor turn id, and evidence text → trims the evidence to the maximum stored length → if this is the same block already standing, returns false without writing → otherwise inserts a new event row and returns true.
-
-**Call relations**: Callers use this after a worker reports progress or blockage. It reads StepView.open_block before writing so it can tell the difference between a new event and a repeated unresolved block.
-
-*Call graph*: 2 external calls (insert, uuid4).
-
-
-##### `Objectives.checked`  (lines 356–383)
-
-```
-async def checked(self, step: StepView, verdicts: tuple[ConditionVerdict, ...], actor_turn_id: UUID) -> None
-```
-
-**Purpose**: Saves the extension’s own verdicts after evaluating a step’s acceptance conditions. These records are observations made by the extension, not claims made by the worker.
-
-**Data flow**: It receives a step, a tuple of condition verdicts, and the actor turn id → converts each verdict into JSON-friendly data containing the condition, whether it held, and the detail text → inserts a new check row. It appends the result rather than replacing old checks.
-
-**Call relations**: This is called after condition evaluation happens elsewhere. Objectives._view later reads the saved checks and uses the latest one for each step, allowing future turns to see the last known proof without reusing a worker’s temporary memory.
-
-*Call graph*: 2 external calls (insert, uuid4).
-
-
-##### `Objectives._view`  (lines 385–436)
-
-```
-async def _view(self, row: sa.Row[tuple[object, ...]]) -> ObjectiveView
-```
-
-**Purpose**: Builds a complete ObjectiveView from database rows. It gathers the objective’s steps, their event history, and their latest condition-check results into one snapshot that the rest of the extension can read easily.
-
-**Data flow**: It receives an objective database row → queries the step, event, and check tables → groups events by step and keeps the latest check per step → parses stored JSON conditions and verdicts into typed objects → returns an ObjectiveView containing StepView objects with their events, verdicts, and metadata.
-
-**Call relations**: Objectives.named and Objectives.on_conversation call this after finding an objective row. It hands parsing work to _conditions and _verdicts, and it constructs the view objects that expose state, frontier, runnable steps, attempts, and confirmed progress.
-
-*Call graph*: calls 2 internal fn (_conditions, _verdicts); called by 2 (named, on_conversation); 4 external calls (__init__, __init__, __init__, select).
-
-
-##### `_conditions`  (lines 439–453)
-
-```
-def _conditions(payload: object) -> tuple[Condition, ...]
-```
-
-**Purpose**: Converts raw stored condition data back into condition objects the code can trust. It rejects unknown condition kinds instead of silently guessing.
-
-**Data flow**: It receives a payload, usually JSON read from the database → if the payload is not a list, returns an empty tuple → for each item, checks its kind and validates it as FileExists, FileContains, or CommandSucceeds → returns the parsed conditions as a tuple, or raises an error for an unknown kind.
-
-**Call relations**: Objectives._view uses this when rebuilding StepView.accepts from stored rows. _verdicts also uses it to rebuild the condition embedded inside each saved verdict.
-
-*Call graph*: called by 2 (_view, _verdicts).
-
-
-##### `_verdicts`  (lines 456–467)
-
-```
-def _verdicts(payload: object) -> tuple[ConditionVerdict, ...]
-```
-
-**Purpose**: Converts raw saved check results into ConditionVerdict objects. These verdicts say which condition was checked, whether it held, and what detail was recorded.
-
-**Data flow**: It receives a payload from the database → if it is not a list, returns an empty tuple → for each dictionary item, parses its condition through _conditions, converts the hold flag to true or false, converts the detail to text, and builds a ConditionVerdict → returns all parsed verdicts as a tuple.
-
-**Call relations**: Objectives._view calls this while building each StepView. It depends on _conditions so verdicts and step acceptance conditions are interpreted with the same validation rules.
-
-*Call graph*: calls 1 internal fn (_conditions); called by 1 (_view); 1 external calls (__init__).
-
-
-### Application builder gates
-The application builder workflow guides app creation through design, repair, and deployment while relying on audit rules to block unsafe or unverified output.
-
-### `extensions/sites/ufo_ext_sites/application_builder.py`
-
-`orchestration` · `request handling`
-
-This file is the control room for building a UFO application page. A member may ask for an app, but the system does not let a language model freely write and deploy arbitrary files. Instead, it gives the worker a fixed workspace, a required SVG design step, strict source-code rules, browser checks, and deployment gates.
-
-The workflow works like a building permit process. First, the worker may create a wireframe: an SVG drawing that fixes the layout and names the important regions. That design is checked for size, visible regions, allowed components, and safety. Then the worker writes one source file, app.tsx, and the file is checked for allowed imports, required UFO kit components, styling rules, and successful compilation. If something fails, the worker can read small excerpts and apply exact edits rather than rewriting everything blindly.
-
-Before deployment is accepted, product-owned QA proof must exist. The file then verifies that the deployed site belongs to the right member, contains retained source, matches the QA-tested source, and can be bound as the member’s homepage. Several hook functions also keep the workflow on rails: they force the right skill to load for app creation, stop deployment before QA, limit repeated repair reads, and prevent wireframe-only turns from doing build work.
+A key detail is recovery. Because this tool changes workspace state, it uses a stable idempotency key, meaning the same call can be safely retried. It writes a recovery file as rows finish, so after a crash or retry, completed entities can be reused and only unfinished work needs to continue. Temporary child result files are registered for cleanup.
 
 #### Function details
 
-##### `_local_source_bindings`  (lines 507–524)
+##### `_read_lines`  (lines 59–72)
 
 ```
-def _local_source_bindings(code: str) -> set[str]
+async def _read_lines(ctx: ToolContext, path: str) -> list[str]
 ```
 
-**Purpose**: Finds names that are locally defined inside a source file, such as functions, variables, destructured values, and function parameters. This helps the validator tell the difference between a real UFO kit component and a locally defined component with the same-looking name.
+**Purpose**: Reads the user-provided entity list from the sandbox workspace and turns it into a clean list of unique, non-empty entries. Someone uses this so the rest of the tool can work with simple entity names instead of raw file text.
 
-**Data flow**: It takes the app source text in → scans it with simple patterns for declarations and parameter names → returns a set of names that belong to the file itself.
+**Data flow**: It receives the tool context and a file path. It asks the sandbox shell to `cat` that path, safely quotes the path so shell metacharacters are treated as text, then splits the file into lines, trims whitespace, skips blanks, and removes duplicates while preserving first-seen order. It returns the cleaned list, or raises an error if the file cannot be read.
 
-**Call relations**: When _rendered_application_components is checking JSX tags, it calls this helper first so local names can be excluded from the list of kit components that appear on screen.
+**Call relations**: `_wide_research` calls this near the start, before any subagents are created. The cleaned list it returns becomes the work queue that `_WideResearch.run` later fans out across child research tasks.
 
-*Call graph*: called by 1 (_rendered_application_components); 1 external calls (findall).
+*Call graph*: called by 1 (_wide_research); 1 external calls (quote).
 
 
-##### `ApplicationBuilderTask.source_is_the_scaffolds_app_tsx`  (lines 683–695)
+##### `_WideResearch.run`  (lines 91–101)
 
 ```
-def source_is_the_scaffolds_app_tsx(self) -> 'ApplicationBuilderTask'
+async def run(self) -> ToolResult
 ```
 
-**Purpose**: Checks that a build task is only allowed to work on app.tsx directly inside the fixed scaffold folder. This prevents a worker from pointing the build tools at some other file.
+**Purpose**: Runs the full batch after setup is complete. It starts one visit task per entity, collects all rows, writes both the recovery file and the final output file, and returns a tool response pointing to the result.
 
-**Data flow**: It reads the task’s scaffold_path and source_path → converts them into safe paths under /workspace → accepts the task only if the source path is exactly scaffold/app.tsx, otherwise it raises a validation error.
+**Data flow**: It starts with a prepared `_WideResearch` object containing the context, entities, file paths, schema text, and recovery state. It registers cleanup for temporary child result files, runs `_visit` for every entity concurrently, builds a `WideResearchFile` from the returned rows, saves a recovery copy, writes `wide_research.json`, and returns a `ToolResult` containing the JSON summary plus the output filename.
 
-**Call relations**: This runs automatically when an ApplicationBuilderTask is validated, before build and wireframe worker turns use the task.
+**Call relations**: `_wide_research` creates the `_WideResearch` instance and calls `run` as the final step. Inside the run, it calls `_visit` for each entity and `_install_recovery` after all rows are gathered, then wraps the result in the SDK response objects.
 
-*Call graph*: 2 external calls (PurePosixPath, contained_relative).
+*Call graph*: calls 2 internal fn (_install_recovery, _visit); 5 external calls (__init__, __init__, __init__, gather, dumps).
 
 
-##### `ApplicationWireframeResult.result_matches_status`  (lines 729–738)
+##### `_WideResearch._remove_result_files`  (lines 103–110)
 
 ```
-def result_matches_status(self) -> 'ApplicationWireframeResult'
+async def _remove_result_files(self) -> None
 ```
 
-**Purpose**: Makes sure a wireframe result says only things that match its status. A ready wireframe must include the shared file and digest; a blocked one must include a reason.
+**Purpose**: Deletes the hidden per-entity result files that child research agents wrote. This keeps the workspace from accumulating temporary files after the batch is done.
 
-**Data flow**: It reads the result fields after construction → compares them with the status value → either returns the valid result or raises an error describing the mismatch.
+**Data flow**: It reads the set of persisted result paths from the `_WideResearch` object. If there are none, it does nothing. Otherwise it safely quotes each path, runs a sandbox shell command to remove them, and raises an error if deletion fails.
 
-**Call relations**: This protects the output returned by design_ufo_application so callers do not receive a half-ready or contradictory wireframe response.
+**Call relations**: `run` registers this function with the context cleanup system, so it is called later by the tool framework during cleanup rather than as part of the main result-building path. It complements `_visit`, which creates and records those child result paths as rows finish.
 
+*Call graph*: 1 external calls (quote).
 
-##### `ApplicationBuilderResult.result_matches_status`  (lines 756–775)
 
-```
-def result_matches_status(self) -> 'ApplicationBuilderResult'
-```
-
-**Purpose**: Makes sure a builder result is internally honest. A wireframe, deployed app, and blocked app each require different evidence, and this validator enforces those combinations.
-
-**Data flow**: It reads the result’s status and evidence fields → checks that required fields are present and forbidden fields are absent → returns the valid model or raises an error.
-
-**Call relations**: This validation is used whenever worker output is parsed, especially by build_ufo_application and ApplicationBuildAcceptance, so bad worker claims are rejected early.
-
-
-##### `ApplicationBuildAcceptance.accept`  (lines 785–871)
-
-```
-async def accept(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult
-```
-
-**Purpose**: Performs the final acceptance check after the worker says an app was deployed. It proves the deployed site is the right one, belongs to the right member, matches QA-tested source, and can be bound as the homepage.
-
-**Data flow**: It takes a worker result in → rejects obvious wrong statuses or paths → reads stored QA proof and hosted-site records → compares source hashes from deployment, QA, and accepted source → updates the result with the final bound site URL or returns a blocked result.
-
-**Call relations**: build_ufo_application calls this after a child worker finishes. It delegates smaller checks to _initial_result, _proof, _blocked, _source_acceptance_path, and _runtime_root, then talks to HostedSites to verify and bind the site.
-
-*Call graph*: calls 5 internal fn (_blocked, _initial_result, _proof, _runtime_root, _source_acceptance_path); 5 external calls (__init__, __init__, model_copy, model_validate_json, site_url).
-
-
-##### `ApplicationBuildAcceptance._initial_result`  (lines 873–880)
-
-```
-def _initial_result(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult | None
-```
-
-**Purpose**: Quickly rejects worker results that are the wrong kind before doing heavier checks. It catches cases like returning a wireframe when a full build was requested.
-
-**Data flow**: It receives the worker result → checks status and source path → returns either a blocked replacement result or None to mean the result can continue to deeper review.
-
-**Call relations**: ApplicationBuildAcceptance.accept calls this first. If it finds a problem, accept stops there instead of checking store records and deployment details.
-
-*Call graph*: calls 1 internal fn (_blocked); called by 1 (accept).
-
-
-##### `ApplicationBuildAcceptance._proof`  (lines 882–904)
-
-```
-async def _proof(self, result: ApplicationBuilderResult, extension: ExtensionContext) -> ApplicationQaProof | ApplicationBuilderResult
-```
-
-**Purpose**: Loads and checks the product QA proof for a builder turn. This proof is the system’s record that browser QA passed for a particular app source.
-
-**Data flow**: It reads the QA proof key from the extension store → validates the stored data as an ApplicationQaProof → blocks if proof is missing or if the worker reported browser errors → otherwise returns the proof.
-
-**Call relations**: ApplicationBuildAcceptance.accept calls this before trusting any deployment. It uses _blocked when proof is absent or contradicted by reported errors.
-
-*Call graph*: calls 1 internal fn (_blocked); called by 1 (accept); 1 external calls (model_validate).
-
-
-##### `ApplicationBuildAcceptance._blocked`  (lines 906–919)
-
-```
-def _blocked(self, result: ApplicationBuilderResult, reason: str, browser_batches: int) -> ApplicationBuilderResult
-```
-
-**Purpose**: Creates a standard blocked build result with a clear reason. This gives callers one consistent shape for failed acceptance.
-
-**Data flow**: It receives the original result, a reason, and browser batch count → copies over useful evidence like checked controls and observed errors → returns a new ApplicationBuilderResult with status blocked.
-
-**Call relations**: _initial_result, _proof, and accept all use this helper whenever a worker result fails one of the acceptance gates.
-
-*Call graph*: called by 3 (_initial_result, _proof, accept); 1 external calls (__init__).
-
-
-##### `EditApplicationSourceInput.json_text_edits_are_objects`  (lines 973–995)
-
-```
-def json_text_edits_are_objects(cls, value: object) -> object
-```
-
-**Purpose**: Accepts a few convenient edit formats and turns them into the structured edit objects the tool expects. This makes repair calls more forgiving without changing what edits mean.
-
-**Data flow**: It receives the raw edits field → if items are JSON strings, patch-style search/replace blocks, or pairs of strings, it converts them into old_text/new_text objects → returns the normalized edit list for normal validation.
-
-**Call relations**: This runs during EditApplicationSourceInput validation before edit_application_source applies exact replacements.
-
-*Call graph*: 1 external calls (loads).
-
-
-##### `_validate_application_imports`  (lines 998–1009)
-
-```
-def _validate_application_imports(source: str) -> None
-```
-
-**Purpose**: Checks that app.tsx imports only from the approved ufo/kit package and does so using named imports. This keeps generated apps inside the supported runtime and component library.
-
-**Data flow**: It takes source text in → scans import and export statements → raises clear repair errors for missing kit imports, outside imports, side-effect imports, non-named imports, exports, or old runtime names.
-
-**Call relations**: _validate_application_source calls this as the first source-code gate before checking rendered components and styling rules.
-
-*Call graph*: called by 1 (_validate_application_source).
-
-
-##### `_rendered_application_components`  (lines 1012–1039)
-
-```
-def _rendered_application_components(source: str) -> set[str]
-```
-
-**Purpose**: Finds which approved UFO kit components are actually rendered in the app. It prevents a page from importing the kit but drawing everything with unsupported custom markup.
-
-**Data flow**: It takes source text in → confirms mountApp is used on the root element → reads named imports from ufo/kit → removes strings, comments, and locally declared names → returns the set of imported kit components that appear as JSX elements.
-
-**Call relations**: _validate_application_source calls this after import validation. It uses _local_source_bindings to avoid counting local components as kit components.
-
-*Call graph*: calls 1 internal fn (_local_source_bindings); called by 1 (_validate_application_source).
-
-
-##### `_validate_designed_components`  (lines 1042–1053)
-
-```
-def _validate_designed_components(rendered_kit_components: set[str], designed_kit_components: tuple[str, ...]) -> None
-```
-
-**Purpose**: Checks that components promised by the SVG design also appear directly in the app source. This links the visual contract to the built page.
-
-**Data flow**: It receives the set of rendered kit components and the list of designed kit components → finds any designed components missing from the rendered source → raises a repair error if any are absent.
-
-**Call relations**: _validate_application_source calls this after discovering rendered components, especially when a prior accepted design named required components.
-
-*Call graph*: called by 1 (_validate_application_source).
-
-
-##### `_validate_application_styling`  (lines 1056–1086)
-
-```
-def _validate_application_styling(source: str) -> None
-```
-
-**Purpose**: Enforces house styling rules for generated app pages. These rules keep pages on the shared theme instead of using raw CSS values, reserved attributes, unsupported spacing, or ad-hoc style tags.
-
-**Data flow**: It takes source text in → searches for disallowed styling patterns → raises a specific error explaining the fix when it finds one → otherwise returns without output.
-
-**Call relations**: _validate_application_source calls this after import and component checks, before source is allowed to compile and be written.
-
-*Call graph*: called by 1 (_validate_application_source).
-
-
-##### `_validate_application_source`  (lines 1089–1095)
-
-```
-def _validate_application_source(source: str, designed_kit_components: tuple[str, ...]=()) -> None
-```
-
-**Purpose**: Runs all source-code checks for app.tsx in one place. It is the main quality gate for generated application code.
-
-**Data flow**: It receives source text and optional designed component names → checks imports → identifies rendered kit components → checks that designed components are present → checks styling rules → either completes silently or raises a repairable error.
-
-**Call relations**: write_application_source and edit_application_source call this before compiling and publishing app.tsx.
-
-*Call graph*: calls 4 internal fn (_rendered_application_components, _validate_application_imports, _validate_application_styling, _validate_designed_components); called by 2 (edit_application_source, write_application_source).
-
-
-##### `_parse_application_design`  (lines 1098–1126)
-
-```
-def _parse_application_design(source: str) -> tuple[ElementTree.Element, tuple[float, ...]]
-```
-
-**Purpose**: Parses the SVG design and checks its basic page shape. The design must be a safe, 305-pixel-wide mobile-style page with a valid height.
-
-**Data flow**: It receives SVG text → rejects XML entity declarations → parses the SVG root → reads and validates viewBox, width, and height → returns the root element and numeric viewBox values.
-
-**Call relations**: _validate_application_design calls this before walking individual SVG elements.
-
-*Call graph*: called by 1 (_validate_application_design); 3 external calls (isfinite, split, fromstring).
-
-
-##### `_visible_design_element`  (lines 1129–1155)
-
-```
-def _visible_design_element(element: ElementTree.Element, tag: str, attributes: dict[str, str]) -> bool
-```
-
-**Purpose**: Decides whether a drawing element would actually show something. Empty rectangles, zero-length lines, and blank text should not count as real design content.
-
-**Data flow**: It receives an SVG element, its tag name, and attributes → applies tag-specific visibility checks → returns true if the element is visibly meaningful.
-
-**Call relations**: _validate_design_element calls this while counting visible drawing elements in the full design.
-
-*Call graph*: called by 1 (_validate_design_element); 1 external calls (itertext).
-
-
-##### `_validate_design_attributes`  (lines 1158–1165)
-
-```
-def _validate_design_attributes(element: ElementTree.Element) -> None
-```
-
-**Purpose**: Rejects SVG attributes that could run code or load outside content. This keeps a design drawing from becoming an active web document.
-
-**Data flow**: It receives an SVG element → inspects every attribute name and value → raises an error if it sees event handlers or javascript, data, http, or https links.
-
-**Call relations**: _validate_design_element calls this for every SVG element it walks.
-
-*Call graph*: called by 1 (_validate_design_element).
-
-
-##### `_validate_design_element`  (lines 1168–1221)
-
-```
-def _validate_design_element(element: ElementTree.Element, ids: set[str], regions: list[ElementTree.Element], kit_components: list[str]) -> bool
-```
-
-**Purpose**: Checks one SVG element against the application design rules. It catches unsafe effects, duplicate IDs, scripts, invalid region markers, and invalid kit component markers.
-
-**Data flow**: It receives an element plus shared collections for IDs, regions, and kit components → validates the element and records region/component markers → returns whether this element counts as a visible drawing element.
-
-**Call relations**: _validate_application_design calls this for every element in the SVG tree. It uses _validate_design_attributes and _visible_design_element for focused checks.
-
-*Call graph*: calls 2 internal fn (_validate_design_attributes, _visible_design_element); called by 1 (_validate_application_design); 1 external calls (itertext).
-
-
-##### `_validate_application_design`  (lines 1224–1251)
-
-```
-def _validate_application_design(source: str) -> tuple[tuple[str, ...], tuple[str, ...], int]
-```
-
-**Purpose**: Runs the full static validation for an application SVG design. It confirms the drawing is safe, visible, regioned, and tied to at least one approved UFO kit component.
-
-**Data flow**: It receives SVG text → parses page bounds → walks all elements → gathers region names and kit components → checks region count, uniqueness, and nesting → returns region names, kit component names, and page height.
-
-**Call relations**: write_application_design, design_ufo_application, build_ufo_application, and _require_application_design call this before trusting or reusing any design.
-
-*Call graph*: calls 2 internal fn (_parse_application_design, _validate_design_element); called by 4 (_require_application_design, build_ufo_application, design_ufo_application, write_application_design).
-
-
-##### `_build_application_project`  (lines 1254–1268)
-
-```
-async def _build_application_project(ctx: ToolContext, project: str, runtime_root: str | None=None) -> None
-```
-
-**Purpose**: Builds the application project with the standard page kit installed. This proves the project can be compiled by the same toolchain used for real pages.
-
-**Data flow**: It receives a tool context, project path, and optional runtime root → writes project config if needed → unpacks the page kit → runs the Vite build command → raises a concise compile error if the build fails.
-
-**Call relations**: _compile_application_source uses this for temporary compile checks, while write_application_source and edit_application_source use it again on the real scaffold.
-
-*Call graph*: called by 3 (_compile_application_source, edit_application_source, write_application_source); 1 external calls (unpack_page_kit).
-
-
-##### `_compile_application_source`  (lines 1271–1284)
-
-```
-async def _compile_application_source(ctx: ToolContext, task: ApplicationBuilderTask, source: str) -> None
-```
-
-**Purpose**: Compiles a proposed app.tsx in a temporary project before touching the real scaffold. This gives a safe test run for generated source.
-
-**Data flow**: It receives the task and source text → copies the existing index.html and proposed app.tsx into a runtime check folder → asks _build_application_project to compile that folder → returns only if compilation succeeds.
-
-**Call relations**: write_application_source and edit_application_source call this after validation and before writing the source into the live scaffold.
-
-*Call graph*: calls 2 internal fn (_build_application_project, _runtime_root); called by 2 (edit_application_source, write_application_source).
-
-
-##### `_source_claim_path`  (lines 1287–1291)
-
-```
-async def _source_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Computes the runtime file path used to claim ownership of app.tsx for one builder turn. The claim prevents repeated full writes from racing or overwriting each other.
-
-**Data flow**: It receives the context, task, and turn ID → hashes the source path and combines it with the turn ID → returns a runtime path for the claim file.
-
-**Call relations**: write_application_source creates this claim, and _require_application_source checks it before repair reads or edits are allowed.
-
-*Call graph*: called by 2 (_require_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_runtime_root`  (lines 1294–1295)
-
-```
-async def _runtime_root(ctx: ToolContext) -> str
-```
-
-**Purpose**: Finds the root directory that sandbox helper scripts should treat as their safe runtime area. This keeps helper-file operations inside the intended sandbox.
-
-**Data flow**: It receives the tool context → asks the sandbox for the runtime path of tool-output → returns that path’s parent as a string.
+##### `_WideResearch._install_recovery`  (lines 112–122)
 
-**Call relations**: Many functions pass this path into contained helper scripts, including build_ufo_application, write_application_design, source reading and editing, and final acceptance.
-
-*Call graph*: called by 9 (accept, _compile_application_source, _require_application_design, _require_application_source, build_ufo_application, edit_application_source, read_application_source, write_application_design, write_application_source); 1 external calls (PurePosixPath).
-
-
-##### `_design_path`  (lines 1298–1299)
-
-```
-def _design_path(task: ApplicationBuilderTask) -> str
-```
-
-**Purpose**: Builds the fixed path where the application design SVG must live inside the scaffold. It centralizes the naming rule so all design tools use the same file.
-
-**Data flow**: It receives a build task → appends application-design.svg to the task’s scaffold path → returns that full workspace path.
-
-**Call relations**: Design claiming, design validation, wireframe acceptance, and source requirements all call this when they need the canonical design file path.
-
-*Call graph*: called by 4 (_design_claim_path, _require_application_design, accept_application_wireframe, write_application_design).
-
-
-##### `_design_claim_path`  (lines 1302–1306)
-
-```
-async def _design_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Computes the runtime path used to claim that the design has been fixed for one builder turn. This stops the worker from changing the accepted design after source work begins.
-
-**Data flow**: It receives the context, task, and turn ID → gets the canonical design path → hashes it and combines it with the turn ID → returns a runtime claim path.
-
-**Call relations**: write_application_design writes this claim, and _require_application_design checks it before app.tsx can be written or edited.
-
-*Call graph*: calls 1 internal fn (_design_path); called by 2 (_require_application_design, write_application_design); 1 external calls (sha256).
-
-
-##### `application_design_acceptance_relative`  (lines 1309–1315)
-
-```
-def application_design_acceptance_relative(design_path: str, turn_id: UUID) -> str
-```
-
-**Purpose**: Returns the relative runtime path where the accepted design SVG is stored. This is product-owned evidence, separate from the editable workspace file.
-
-**Data flow**: It receives a design path and turn ID → hashes the design path and adds an accepted SVG suffix → returns the relative runtime filename.
-
-**Call relations**: write_application_design uses this when sealing the validated SVG as accepted evidence.
-
-*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
-
-
-##### `application_design_evidence_relative`  (lines 1318–1324)
-
-```
-def application_design_evidence_relative(design_path: str, turn_id: UUID) -> str
-```
-
-**Purpose**: Returns the relative runtime path where metadata about the accepted design is stored. That metadata records what design was accepted and what regions/components were found.
-
-**Data flow**: It receives a design path and turn ID → hashes the design path and adds an accepted-design JSON suffix → returns the relative runtime filename.
-
-**Call relations**: write_application_design uses this beside application_design_acceptance_relative when publishing design evidence.
-
-*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
-
-
-##### `_source_candidate_path`  (lines 1327–1333)
-
-```
-async def _source_candidate_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Computes the runtime path for the current candidate app.tsx. Repairs operate on this candidate before the source is accepted and written to the scaffold.
-
-**Data flow**: It receives the context, task, and turn ID → hashes the source path and adds a candidate TypeScript suffix → returns a runtime path.
-
-**Call relations**: write_application_source creates the candidate, read_application_source reads it, and edit_application_source updates it.
-
-*Call graph*: called by 3 (edit_application_source, read_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_render_application_design`  (lines 1336–1387)
-
-```
-async def _render_application_design(ctx: ToolContext, candidate_path: str, preview_path: str, names: tuple[str, ...], page_height: int) -> tuple[ApplicationAuditRegion, ...]
-```
-
-**Purpose**: Runs a browser-based audit of the SVG design and returns the visible named regions it found. This catches layout problems that plain XML parsing cannot see, such as overlaps or drawing outside the page.
-
-**Data flow**: It receives paths for the candidate SVG and preview image, expected region names, and page height → writes the audit script → runs it with Node → validates the JSON region output → checks that regions match and do not overlap → returns the audited regions.
-
-**Call relations**: write_application_design calls this after static SVG validation and before sealing the design as accepted.
-
-*Call graph*: called by 1 (write_application_design); 2 external calls (search, application_region_relation).
-
-
-##### `_source_acceptance_path`  (lines 1390–1396)
-
-```
-async def _source_acceptance_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Computes the runtime path where the accepted source hash is recorded. This hash later proves that deployed source matches the source that passed checks.
-
-**Data flow**: It receives context, task, and turn ID → hashes the source path and combines it with the turn ID → returns a runtime path ending in accepted.
-
-**Call relations**: write_application_source and edit_application_source write this hash after a successful build. ApplicationBuildAcceptance.accept reads it during final deployment acceptance.
-
-*Call graph*: called by 3 (accept, edit_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_require_application_source`  (lines 1399–1408)
-
-```
-async def _require_application_source(ctx: ToolContext, task: ApplicationBuilderTask) -> None
-```
-
-**Purpose**: Checks that an initial app.tsx candidate has already been claimed before repair tools run. This prevents reading or editing source that was never admitted into the workflow.
-
-**Data flow**: It receives context and task → checks the source claim file through a sandbox helper → raises a user-facing error if no claim exists, or a runtime error if the claim cannot be read.
-
-**Call relations**: read_application_source and edit_application_source call this before touching the candidate source.
-
-*Call graph*: calls 2 internal fn (_runtime_root, _source_claim_path); called by 2 (edit_application_source, read_application_source).
-
-
-##### `_require_application_design`  (lines 1411–1432)
-
-```
-async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> tuple[str, ...]
-```
-
-**Purpose**: Checks that a valid design has been written before app.tsx is written or repaired. It also returns the UFO kit components the source must render.
-
-**Data flow**: It receives context and task → checks the design claim → reads application-design.svg → verifies any accepted wireframe digest → validates the SVG → returns the kit component names recorded in the design.
-
-**Call relations**: write_application_source and edit_application_source call this so code cannot proceed without a fixed visual contract.
-
-*Call graph*: calls 4 internal fn (_design_claim_path, _design_path, _runtime_root, _validate_application_design); called by 2 (edit_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `write_application_design`  (lines 1435–1589)
-
-```
-async def write_application_design(ctx: ToolContext, args: WriteApplicationDesignInput) -> ToolResult
-```
-
-**Purpose**: Writes and seals the SVG visual contract for the app. This is the step that fixes the layout before source-code work begins.
-
-**Data flow**: It receives the tool context and SVG content → validates the design → writes a candidate SVG → runs the browser design audit → creates evidence JSON → atomically publishes accepted design and evidence → writes the design into the scaffold → returns path, digest, size, height, and region details.
-
-**Call relations**: This is exposed as the profile-only write_application_design tool. accept_application_wireframe also calls it to seal a previously staged member-approved wireframe.
-
-*Call graph*: calls 8 internal fn (_complete_application_design_cleanup, _design_claim_path, _design_path, _render_application_design, _runtime_root, _validate_application_design, application_design_acceptance_relative, application_design_evidence_relative); called by 1 (accept_application_wireframe); 7 external calls (__init__, __init__, __init__, sha256, dumps, application_design_region_fold_failure, application_design_region_size_failure).
-
-
-##### `accept_application_wireframe`  (lines 1592–1603)
-
-```
-async def accept_application_wireframe(ctx: ToolContext, _args: AcceptApplicationWireframeInput) -> ToolResult
-```
-
-**Purpose**: Accepts an already staged wireframe as the fixed design for a build turn. It does not redesign anything; it validates and seals the existing SVG.
-
-**Data flow**: It reads the task from the turn → confirms the task names an accepted wireframe digest → reads application-design.svg from the scaffold → passes that content into write_application_design → returns the same kind of design result.
-
-**Call relations**: This is a profile-only tool used when a member has approved a wireframe and the build should start from that exact design.
-
-*Call graph*: calls 2 internal fn (_design_path, write_application_design); 1 external calls (__init__).
-
-
-##### `_complete_application_design_cleanup`  (lines 1606–1622)
-
-```
-async def _complete_application_design_cleanup(ctx: ToolContext, program: str, *args: str) -> tuple[ExecResult | None, tuple[str, ...]]
-```
-
-**Purpose**: Tries hard to clean up design claims or accepted files if write_application_design fails partway through. It shields cleanup from cancellation so half-published evidence is less likely to remain.
-
-**Data flow**: It receives a sandbox cleanup program and its arguments → starts it as an async task → waits even through interruptions while recording cleanup problems → returns the cleanup result and any failure notes.
-
-**Call relations**: write_application_design calls this in its error path, either to release a claim or remove accepted design evidence.
-
-*Call graph*: called by 1 (write_application_design); 2 external calls (create_task, shield).
-
-
-##### `read_application_source`  (lines 1625–1679)
-
-```
-async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceInput) -> ToolResult
-```
-
-**Purpose**: Returns small, targeted excerpts of the candidate app.tsx for repairs. It avoids dumping the whole file while still giving enough context around requested search terms.
-
-**Data flow**: It receives search terms → verifies source was claimed → reads the candidate source → counts matching lines for each term → builds line-numbered excerpts from the start, end, and match areas within a size limit → returns the excerpt text.
-
-**Call relations**: The builder uses this after an exact edit fails. limit_application_builder_repair_reads can restrict repeated calls to this tool during repair loops.
-
-*Call graph*: calls 3 internal fn (_require_application_source, _runtime_root, _source_candidate_path); 2 external calls (__init__, __init__).
-
-
-##### `edit_application_source`  (lines 1682–1731)
-
-```
-async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceInput) -> ToolResult
-```
-
-**Purpose**: Applies exact text replacements to the current candidate app.tsx, then revalidates and rebuilds it. This is the safe repair path after the initial full write.
-
-**Data flow**: It receives one or more old_text/new_text edits → verifies source and design claims → reads candidate source → ensures each old_text appears exactly once and edits do not overlap → applies replacements → validates, compiles, writes the scaffold, builds the project, records accepted source hash → returns path, replacement count, and size.
-
-**Call relations**: This profile-only tool follows write_application_source when repairs are needed. It calls the same validation and build helpers, then writes acceptance evidence for ApplicationBuildAcceptance.
-
-*Call graph*: calls 8 internal fn (_build_application_project, _compile_application_source, _require_application_design, _require_application_source, _runtime_root, _source_acceptance_path, _source_candidate_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
-
-
-##### `write_application_source`  (lines 1734–1778)
-
 ```
-async def write_application_source(ctx: ToolContext, args: WriteApplicationSourceInput) -> ToolResult
+async def _install_recovery(self, rows: tuple[WideResearchRow, ...]) -> None
 ```
 
-**Purpose**: Writes the first complete app.tsx candidate for a build turn. After this, repairs must use exact edits rather than another full overwrite.
+**Purpose**: Writes the current aggregate progress to the recovery file in the workspace. This is what lets a later retry reuse completed rows instead of starting the whole batch over.
 
-**Data flow**: It receives complete source text → verifies a design exists → claims source ownership → stores the candidate source → validates imports, components, and styling → compiles it in a temporary project → writes it to the scaffold → builds the real project → records the accepted source hash → returns path and size.
+**Data flow**: It receives a tuple of completed rows. It wraps them in a `WideResearchFile`, serializes that to nicely formatted JSON, writes it to a temporary staging path, then moves the staging file into the real recovery path. The move makes the update act like replacing the old recovery snapshot with a complete new one.
 
-**Call relations**: This is the main source-writing tool available to the application builder profile. edit_application_source is the follow-up path if validation or QA requires changes.
+**Call relations**: `_save_row` calls this each time an entity finishes, so progress is saved incrementally. `run` also calls it after all visits complete, ensuring the final recovery file matches the final row set.
 
-*Call graph*: calls 8 internal fn (_build_application_project, _compile_application_source, _require_application_design, _runtime_root, _source_acceptance_path, _source_candidate_path, _source_claim_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+*Call graph*: called by 2 (_save_row, run); 3 external calls (__init__, dumps, quote).
 
 
-##### `design_ufo_application`  (lines 1781–1839)
+##### `_WideResearch._save_row`  (lines 124–134)
 
 ```
-async def design_ufo_application(ctx: ToolContext, args: DesignUfoApplicationInput) -> ToolResult
+async def _save_row(self, row: WideResearchRow) -> None
 ```
 
-**Purpose**: Runs the builder in wireframe mode and shares the accepted SVG with the member. It stores the exact design so a later build can use the same member-approved wireframe.
+**Purpose**: Records one entity's finished row and immediately saves the updated batch progress. It prevents two concurrent entity tasks from writing the recovery file at the same time.
 
-**Data flow**: It receives an application name, prompt, and optional revision → ensures scaffold files exist → spawns the application builder profile in wireframe phase → validates the returned SVG and digest → stores a preview and shares the SVG artifact → saves the wireframe in extension storage → returns ready or blocked wireframe status.
+**Data flow**: It receives a `WideResearchRow` containing either a result or an error. It takes an async lock, adds the row to the in-memory completed-row map, rebuilds the completed rows in the original entity order, writes that snapshot through `_install_recovery`, and records the child result file path for later cleanup.
 
-**Call relations**: This is the public design_ufo_application delegation tool. It calls _ensure_application_scaffold and _validate_application_design, then stores the wireframe for build_ufo_application to consume later.
+**Call relations**: `_visit` calls this whenever an entity has reached a final state. Because many `_visit` calls run in parallel, `_save_row` is the safe checkpointing doorway that serializes progress updates before handing file writing to `_install_recovery`.
 
-*Call graph*: calls 4 internal fn (share_artifact, store_preview, _ensure_application_scaffold, _validate_application_design); 8 external calls (__init__, __init__, __init__, __init__, __init__, spawn, sha256, PurePosixPath).
+*Call graph*: calls 1 internal fn (_install_recovery); called by 1 (_visit).
 
 
-##### `_ensure_application_scaffold`  (lines 1842–1850)
+##### `_WideResearch._visit`  (lines 136–183)
 
 ```
-async def _ensure_application_scaffold(ctx: ToolContext) -> None
+async def _visit(self, entity: str) -> WideResearchRow
 ```
 
-**Purpose**: Creates the basic app scaffold files if they are missing. These files give the generated app a stable index page, placeholder source, and preview shell.
+**Purpose**: Performs the research workflow for one entity. It either reuses a recovered row, or asks a research subagent to do the work, reads the JSON the child wrote, and turns it into a row for the final output.
 
-**Data flow**: It checks each required scaffold path → if a file cannot be read, writes the default content → returns once the scaffold is present.
+**Data flow**: It receives an entity name from `run`. It waits for the shared semaphore, which is a counter that limits how many visits run at once. If the entity was recovered from a previous attempt, it returns that saved row. Otherwise it builds a deterministic child id, fills `{entity}` into the prompt template, adds instructions to write JSON to a known result path, and spawns the research profile. After the child finishes, it reads the result file. Valid JSON becomes a success row; a missing file or invalid JSON becomes an error row. In either case it saves the row and returns it.
 
-**Call relations**: design_ufo_application and build_ufo_application call this before spawning the worker so the child turn starts with a known project shape.
+**Call relations**: `run` starts `_visit` for each entity through `asyncio.gather`, so many visits happen in parallel. `_visit` hands completed or failed rows to `_save_row`, and it uses the research subagent output only to add helpful error context when the expected result file cannot be read.
 
-*Call graph*: called by 2 (build_ufo_application, design_ufo_application).
+*Call graph*: calls 1 internal fn (_save_row); called by 1 (run); 4 external calls (__init__, model_validate, loads, quote).
 
 
-##### `build_ufo_application`  (lines 1853–1940)
+##### `_wide_research`  (lines 186–241)
 
 ```
-async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInput) -> ToolResult
+async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResult
 ```
 
-**Purpose**: Delegates one full application build to the fixed builder worker and returns the accepted result. It is the main tool a member-facing agent uses to turn a request into a deployed UFO app.
-
-**Data flow**: It verifies extension context and idempotency → claims that this parent turn only delegates once → records redeploy and audit contract data → prepares scaffold and any stored accepted wireframe → spawns the builder profile → validates or blocks the worker output through ApplicationBuildAcceptance → deletes a spent wireframe after successful deployment → returns structured JSON.
-
-**Call relations**: This is the public build_ufo_application tool. It coordinates scaffold setup, stored wireframes, child worker spawning, and final deployment acceptance.
-
-*Call graph*: calls 3 internal fn (_ensure_application_scaffold, _runtime_root, _validate_application_design); 9 external calls (__init__, __init__, __init__, __init__, __init__, spawn, sha256, format, format).
-
-
-##### `limit_application_builder_repair_reads`  (lines 1943–1978)
-
-```
-async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | None
-```
-
-**Purpose**: Limits how many times the builder can read source excerpts after product QA has requested repairs. This nudges the worker to edit, test, and deploy instead of endlessly inspecting code.
-
-**Data flow**: It receives a hook context before a tool call → ignores unrelated turns and tools → checks whether a QA repair attempt exists → resets the read count on edits → increments the count on reads → returns a Deny if the limit is reached.
-
-**Call relations**: This hook runs around application builder tool use. It affects read_application_source and edit_application_source during repair loops.
-
-*Call graph*: 2 external calls (__init__, format).
-
-
-##### `enforce_application_builder_phase`  (lines 1981–1996)
-
-```
-async def enforce_application_builder_phase(ctx: HookContext) -> Deny | None
-```
-
-**Purpose**: Keeps wireframe-only builder turns from doing source, QA, connector, or deployment work. It also stops redesign when a member-approved wireframe is already fixed.
-
-**Data flow**: It receives a pre-tool-use hook → checks whether the turn belongs to the application builder profile → reads the task phase → returns a Deny for tools that are not allowed in that phase.
-
-**Call relations**: This hook protects the profile defined at the bottom of the file, especially when design_ufo_application spawns a wireframe-phase worker.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `is_application_creation_request`  (lines 1999–2003)
-
-```
-def is_application_creation_request(text: str) -> bool
-```
-
-**Purpose**: Detects whether a member’s message appears to ask for creating an application rather than a general website or other app type. This helps route requests to the right skill.
-
-**Data flow**: It receives plain text → tests it against creation wording and excludes website/mobile/desktop/full-stack wording → returns true or false.
-
-**Call relations**: enforce_application_creation_route calls this before deciding whether the main agent must load the create-application skill.
-
-*Call graph*: called by 1 (enforce_application_creation_route).
-
-
-##### `enforce_application_creation_route`  (lines 2006–2029)
-
-```
-async def enforce_application_creation_route(ctx: HookContext) -> Deny | None
-```
-
-**Purpose**: Forces the main agent to load the create-application skill before using other tools when a member asks to create a UFO application. This prevents the wrong workflow from starting.
-
-**Data flow**: It receives a hook context → filters to member messages on the main agent → checks the message with is_application_creation_request → allows the first correct load_skill call and records it → denies other tool use until that happens.
-
-**Call relations**: This hook runs before tool use in the main conversation, outside the builder subagent. It uses the extension store to remember that routing was completed for the turn.
-
-*Call graph*: calls 1 internal fn (is_application_creation_request); 1 external calls (__init__).
-
-
-##### `require_application_builder_qa`  (lines 2032–2045)
-
-```
-async def require_application_builder_qa(ctx: HookContext) -> Deny | None
-```
+**Purpose**: This is the tool handler called by the SDK when someone invokes `wide_research`. It validates and prepares everything the batch runner needs, including entity lists, recovery state, schema text, concurrency limits, and result file paths.
 
-**Purpose**: Blocks application deployment until product QA proof exists and is valid. It is the final guardrail before the builder can use the deployment tool.
+**Data flow**: It receives the tool context and validated input arguments. It checks that an idempotency key exists, reads and limits the entity list, hashes the call key into a stable call id, removes stale recovery files from older turns, tries to load a matching recovery file for this call, reads the optional output schema file, creates a semaphore for bounded parallel work, builds deterministic hidden result paths for each entity, and constructs `_WideResearch`. It then calls `run` and returns that result.
 
-**Data flow**: It receives a hook context → checks the current builder turn’s QA proof key in the store → validates the proof if present → returns a Deny when proof is missing, otherwise allows deployment to continue.
+**Call relations**: The `WIDE_RESEARCH_TOOL` definition points to `_wide_research` as its handler, so this function is the bridge from the external tool call into the internal batch machinery. It calls `_read_lines` for input cleanup, builds the `_WideResearch` worker object, and then delegates the actual fan-out and aggregation to `_WideResearch.run`.
 
-**Call relations**: This hook is tied to the application builder profile’s deployment step. ApplicationBuildAcceptance later relies on the same proof when accepting the worker’s deployed result.
+*Call graph*: calls 1 internal fn (_read_lines); 6 external calls (__init__, Lock, Semaphore, sha256, loads, quote).
 
-*Call graph*: 2 external calls (__init__, model_validate).
 
+### `extensions/research/ufo_ext_research/observations.py`
 
-### `extensions/sites/ufo_ext_sites/application_audit.py`
+`domain_logic` · `during research result recording and conversation source display`
 
-`domain_logic` · `quality gate after browser measurement`
+When the research extension searches the web or fetches a page, the system needs a durable memory of what sources were used. Without this file, those links, titles, snippets, and dates would disappear after the immediate search result was processed, and the conversation could not later show a reliable “Sources” panel.
 
-This file is the quality gate for an application builder. A browser has already visited the staged application and collected facts such as text contrast, page width, visible regions, console errors, and whether controls actually change the page. This file gives that raw evidence a strict shape, then applies deterministic checks to it. “Deterministic” means the same report always produces the same verdict, like a checklist rather than a human opinion.
+The file defines a database table for source observations. Each saved source belongs to one workspace and one conversation, and it is identified by a digest, which is a short fixed-length fingerprint made from the URL. That lets the code update the same source if it appears again instead of creating duplicates.
 
-Most of the file is made of Pydantic models, which are data containers that also validate their contents. They describe things like one measured browser view, one text contrast problem, one clickable control, or the final audit verdict. The constants near the top are the audit’s fixed standards: desktop and narrow widths, light and dark color schemes, minimum contrast ratios, minimum controls, maximum issue count, and so on.
+Before saving, the code trims long titles, snippets, and dates to safe sizes and validates them as conversation sources. Invalid source records are skipped rather than breaking the whole save. It also keeps only the newest 100 sources per conversation, like keeping the most recent pages in a neat reading list and throwing away older overflow.
 
-The main work happens in audit_application. It checks that all required views exist, that the page has readable text, no horizontal overflow, no clipping, no accidental overlaps, no browser errors, enough accessible controls, enough successful interactions, and any required facts. It also compares the live application’s visible regions with the accepted design, rather like checking that a built room still has the same named areas in the same order as the blueprint. The result is an ApplicationAuditVerdict: either no issues, or a short bounded list of repair instructions.
+The file also exposes a conversation slot provider named “Sources”. A slot provider is a small plug-in point that tells the wider app how to summarize and read a piece of conversation-related content. Here, it can report how many sources exist and return the actual source list for display.
 
 #### Function details
 
-##### `AcceptedApplicationDesignEvidence.regions_are_unique`  (lines 131–137)
+##### `_bounded`  (lines 53–54)
 
 ```
-def regions_are_unique(self) -> 'AcceptedApplicationDesignEvidence'
+def _bounded(value: str, limit: int) -> str
 ```
 
-**Purpose**: This validation step makes sure an accepted design does not use the same region name or Kit component name more than once. That matters because later checks compare regions by name, so duplicate names would make the blueprint ambiguous.
+**Purpose**: This small helper shortens a string to a maximum allowed length. It is used before saving source details so overly long titles, snippets, or dates do not get stored or shown in full.
 
-**Data flow**: It reads the design evidence object after its fields have been filled. It collects region names and component names, compares each list with its set of unique values, and either returns the unchanged object or raises an error explaining the duplicate problem.
+**Data flow**: It receives some text and a numeric limit. It returns the same text cut off at that many characters, leaving shorter text unchanged.
 
-**Call relations**: This runs automatically when AcceptedApplicationDesignEvidence is created. It protects later design-comparison code from receiving a design where two different areas claim the same identity.
+**Call relations**: When record_sources prepares source data for storage, it calls _bounded to make each user-facing field fit the expected size before validation and saving.
 
-
-##### `ApplicationAuditReport.views_are_unique`  (lines 202–206)
-
-```
-def views_are_unique(self) -> 'ApplicationAuditReport'
-```
-
-**Purpose**: This validation step makes sure the browser report contains at most one view for each combination of color scheme and screen width. Without this, the audit could see two conflicting reports for the same view and make an unclear decision.
-
-**Data flow**: It reads the report’s views, turns each view into a simple key made from its scheme and width, and checks for duplicates. If all keys are unique, the report is returned unchanged; if not, report creation fails with a clear error.
-
-**Call relations**: This runs automatically when an ApplicationAuditReport is created. The main audit later builds a lookup table from scheme and width, so this validator ensures that lookup has only one answer for each required view.
+*Call graph*: called by 1 (record_sources).
 
 
-##### `ApplicationAuditVerdict.passed`  (lines 227–230)
+##### `record_sources`  (lines 57–130)
 
 ```
-def passed(self) -> bool
+async def record_sources(ext: ExtensionContext, conversation_id: UUID, turn_id: UUID, sources: tuple[RetrievedSource, ...]) -> None
 ```
 
-**Purpose**: This property answers the simple question: did the audit pass? It returns true only when there are no repair issues.
+**Purpose**: This is the main saving routine for retrieved sources. It validates and stores sources for a conversation, updates existing records for repeated URLs, and trims the stored list so only the most recent sources are kept.
 
-**Data flow**: It reads the verdict’s issue list. If the list is empty, it returns true; if there is even one issue, it returns false. It does not change anything.
+**Data flow**: It receives the extension context, a conversation ID, a turn ID, and a tuple of retrieved sources. If the tuple is empty, it does nothing. Otherwise it opens a database transaction, trims and validates each source, creates a URL fingerprint with SHA-256, inserts or updates the database row, then deletes older rows beyond the source limit. Its visible result is no returned value; the lasting effect is updated source records in the database.
 
-**Call relations**: Code that receives an ApplicationAuditVerdict can use this property as the final yes-or-no result after audit_application has built the issue list.
+**Call relations**: record_search_hits and record_fetched_page both hand normalized source information to this function. Inside, it uses the extension context to open a transaction, uses _bounded to keep text fields safe, builds validated ConversationSource objects, and uses SQLAlchemy select and delete statements to keep the database list current and limited.
 
-
-##### `_needed_ratio`  (lines 277–282)
-
-```
-def _needed_ratio(item: ApplicationAuditText) -> float
-```
-
-**Purpose**: This helper decides the minimum contrast ratio required for one piece of text. Contrast ratio is a number that describes how readable foreground text is against its background.
-
-**Data flow**: It receives one measured text item. If the text is in a special quiet Kit slot, it uses the lower Kit-specific floor; if it is large text, it uses the large-text accessibility floor; otherwise it uses the normal body-text floor. It returns the required number.
-
-**Call relations**: _contrast_failures calls this for each measured text style so it can compare what the browser saw against the correct readability standard.
-
-*Call graph*: called by 1 (_contrast_failures).
+*Call graph*: calls 2 internal fn (transaction, _bounded); called by 2 (record_fetched_page, record_search_hits); 5 external calls (__init__, now, sha256, delete, select).
 
 
-##### `_issue`  (lines 285–292)
+##### `record_search_hits`  (lines 133–152)
 
 ```
-def _issue(code: AuditIssueCode, message: str, terms: tuple[str, ...]=()) -> ApplicationAuditIssue
+async def record_search_hits(ext: ExtensionContext, conversation_id: UUID, turn_id: UUID, hits: tuple[SearchHit, ...]) -> None
 ```
 
-**Purpose**: This helper creates one audit issue while enforcing the file’s safety limits on message length and number of search terms. It keeps repair feedback short enough to send back to the builder safely.
+**Purpose**: This function saves sources that came from search results. It converts search-hit objects into the simpler RetrievedSource shape used by the rest of this file.
 
-**Data flow**: It receives an issue code, a human-readable message, and optional terms connected to the problem. It cuts the message down to the maximum allowed length, keeps only the first ten terms, and returns a new ApplicationAuditIssue.
+**Data flow**: It receives the extension context, conversation ID, turn ID, and search hits. For each hit, it takes the URL, title, result text, and published date, wraps them as RetrievedSource objects, and passes the full tuple onward. It returns nothing; the database changes happen through record_sources.
 
-**Call relations**: audit_application calls this whenever it finds a problem. This keeps all issue creation consistent instead of repeating trimming rules throughout the main audit.
+**Call relations**: This is the bridge from the search subsystem to the source-observation store. When search results are available, it packages them and calls record_sources, which performs validation, database writing, and cleanup.
 
-*Call graph*: called by 1 (audit_application); 1 external calls (__init__).
-
-
-##### `application_first_screen_scale`  (lines 295–305)
-
-```
-def application_first_screen_scale(page_height: int) -> float
-```
-
-**Purpose**: This helper converts first-screen pixel rules into fractions of the whole measured page. It is needed because region positions are stored as fractions, while the design rule is based on the first 844 pixels of the page.
-
-**Data flow**: It receives the measured page height. It divides the fixed first-screen height by that page height and returns the scale factor. Taller pages produce a smaller fraction.
-
-**Call relations**: application_region_relation and application_design_region_size_failure use this when they need vertical tolerances or minimum heights to mean the same real pixel size on pages of different heights.
-
-*Call graph*: called by 2 (application_design_region_size_failure, application_region_relation).
+*Call graph*: calls 1 internal fn (record_sources); 1 external calls (__init__).
 
 
-##### `application_region_relation`  (lines 308–328)
+##### `record_fetched_page`  (lines 155–173)
 
 ```
-def application_region_relation(first: ApplicationAuditRegion, second: ApplicationAuditRegion, page_height: int=APPLICATION_DESIGN_FOLD) -> tuple[Literal['horizontal', 'vertical'], int] | None
+async def record_fetched_page(ext: ExtensionContext, conversation_id: UUID, turn_id: UUID, page: FetchedPage) -> None
 ```
 
-**Purpose**: This function decides whether two visible regions are separated vertically or horizontally, and which one comes first. If they overlap or touch too much, it says there is no clean relationship.
+**Purpose**: This function saves a source when the research tool fetched a specific web page. It turns that page into a single RetrievedSource so it can be recorded just like a search result.
 
-**Data flow**: It receives two regions and the page height their coordinates were measured against. It scales the allowed vertical near-touch tolerance, compares top, bottom, left, and right edges, and returns a pair such as horizontal-before or vertical-after. If the regions are not clearly separated, it returns nothing.
+**Data flow**: It receives the extension context, conversation ID, turn ID, and fetched page. It uses the page URL as both the URL and title, chooses the page summary if present or the full text otherwise as the snippet, leaves the published date empty, and sends that one source to record_sources. It returns nothing; the lasting effect is the saved page source.
 
-**Call relations**: application_design_fidelity calls this first on accepted design regions to learn the intended layout, then again on measured application regions to see whether the live app kept the same order.
+**Call relations**: This is the bridge from page fetching to the shared source-saving path. After creating one RetrievedSource, it calls record_sources so fetched pages and search hits are stored with the same validation and deduplication rules.
 
-*Call graph*: calls 1 internal fn (application_first_screen_scale); called by 1 (application_design_fidelity).
-
-
-##### `application_design_region_size_failure`  (lines 331–349)
-
-```
-def application_design_region_size_failure(regions: tuple[ApplicationAuditRegion, ...], page_height: int=APPLICATION_DESIGN_FOLD) -> str | None
-```
-
-**Purpose**: This function finds the first design region that is too small to count as a meaningful visible area. It prevents tiny slivers or accidental marks from being treated as real application regions.
-
-**Data flow**: It receives a tuple of regions and the page height. It scales vertical and area thresholds to the first-screen size, then checks each region’s width, height, and area. It returns a short failure message for the first too-small region, or nothing if all regions are large enough.
-
-**Call relations**: application_design_fidelity calls this before doing deeper region matching. If the accepted design itself has an unusably small region, fidelity checking stops early with that failure.
-
-*Call graph*: calls 1 internal fn (application_first_screen_scale); called by 1 (application_design_fidelity).
+*Call graph*: calls 1 internal fn (record_sources); 1 external calls (__init__).
 
 
-##### `application_design_region_fold_failure`  (lines 352–374)
+##### `_source_count`  (lines 176–186)
 
 ```
-def application_design_region_fold_failure(regions: tuple[ApplicationAuditRegion, ...], page_height: int=APPLICATION_DESIGN_FOLD) -> str | None
+async def _source_count(ctx: ConversationSlotContext) -> int | None
 ```
 
-**Purpose**: This function checks whether a design region crosses the first-screen boundary in a way the design rules reject. The “fold” is the bottom of the initially visible screen before scrolling.
+**Purpose**: This function counts how many saved sources a conversation has, up to the display limit. It is used to summarize the “Sources” slot without loading every source record.
 
-**Data flow**: It receives regions and the page height. For each region, it converts fractional top and bottom positions back into pixel rows, allows a small tolerance around the fold, and returns a message if a region clearly paints on both sides of that boundary. If none do, it returns nothing.
+**Data flow**: It receives a conversation slot context, which includes the extension context and conversation ID. It opens a database transaction, counts matching source rows for the current workspace and conversation, and returns either no count if there are none or the count capped at the source limit.
 
-**Call relations**: This function is available as a design-rule check, although it is not called by the listed functions in this file’s call graph. It complements the other region-quality helpers by focusing specifically on the first-screen boundary.
+**Call relations**: The SOURCES_SLOT provider uses this function when the wider conversation system asks for a short summary of the Sources slot. It reads from the same table populated by record_sources.
 
-
-##### `application_design_fidelity`  (lines 377–460)
-
-```
-def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity
-```
-
-**Purpose**: This function scores how well the live desktop application matches the accepted design’s named visible regions. It checks identity, visibility above the fold, non-overlap, and relative ordering.
-
-**Data flow**: It receives the full audit report. It first validates that the accepted design has the right number of unique regions, then checks region size and overlap. For each desktop light and dark view, it compares measured application region names with design names, checks that expected visible regions are above the fold, and verifies that region order did not change. It returns an ApplicationDesignFidelity object with passed count, total count, and failure messages.
-
-**Call relations**: audit_application calls this as the design-matching part of the audit. Inside, it relies on application_design_region_size_failure and application_region_relation to turn region measurements into clear pass-or-fail evidence.
-
-*Call graph*: calls 2 internal fn (application_design_region_size_failure, application_region_relation); called by 1 (audit_application); 1 external calls (__init__).
+*Call graph*: 1 external calls (select).
 
 
-##### `_contrast_failures`  (lines 463–478)
+##### `_read_sources`  (lines 189–217)
 
 ```
-def _contrast_failures(views: tuple[ApplicationAuditView, ...]) -> list[str]
+async def _read_sources(ctx: ConversationSlotContext) -> SourcesSlotPayload
 ```
 
-**Purpose**: This helper gathers readable explanations for every text style whose contrast is too low. It turns raw contrast measurements into messages a builder can act on.
+**Purpose**: This function reads the saved sources for display in the conversation’s “Sources” slot. It returns source objects in newest-first order and notes whether there were more than the allowed display limit.
 
-**Data flow**: It receives the measured views. For each text item in each view, it asks _needed_ratio what contrast that item requires, compares the measured ratio with that requirement, and appends a message when the text is not readable enough. It returns the list of failure messages.
+**Data flow**: It receives a conversation slot context. It opens a database transaction, selects source rows for the current workspace and conversation, orders them by most recently updated and then by rank, and reads one extra row beyond the limit to detect overflow. It turns the rows into ConversationSource objects and returns a SourcesSlotPayload containing the visible sources plus a truncated flag.
 
-**Call relations**: audit_application calls this after confirming which required views were measured. The messages it returns are folded into a single contrast repair issue.
+**Call relations**: The SOURCES_SLOT provider uses this function when the wider conversation system needs the full Sources content. It reads records written by record_sources and packages them into the payload type expected by the conversation UI or API.
 
-*Call graph*: calls 1 internal fn (_needed_ratio); called by 1 (audit_application).
-
-
-##### `audit_application`  (lines 481–604)
-
-```
-def audit_application(report: ApplicationAuditReport, contract: ApplicationAuditContract | None=None) -> ApplicationAuditVerdict
-```
-
-**Purpose**: This is the main audit function. It applies the fixed product, accessibility, layout, interaction, design, and required-fact checks to one browser report and returns the verdict.
-
-**Data flow**: It receives an ApplicationAuditReport and, optionally, an ApplicationAuditContract containing facts the app must show. It builds a lookup of measured views, checks for missing or empty views, low contrast, overflow, clipping, overlaps, design mismatch, browser console errors, too few controls, too few successful interactions, absent required facts, and facts not visible above the desktop fold. Each problem becomes a bounded ApplicationAuditIssue, and the function returns an ApplicationAuditVerdict containing at most the maximum allowed number of issues.
-
-**Call relations**: This is the file’s central flow. It calls _contrast_failures for readability checks, application_design_fidelity for design matching, and _issue whenever it needs to create repair feedback. The returned verdict is what downstream builder or QA code can use to decide whether the application passed or needs repair.
-
-*Call graph*: calls 3 internal fn (_contrast_failures, _issue, application_design_fidelity); 1 external calls (__init__).
-
-
-### Brief pipeline stages
-The brief pipeline configuration defines the outline, draft, and critique stages with their instructions, shapes, and limits.
-
-### `extensions/brief_pipeline/ufo_ext_brief_pipeline/pipeline.py`
-
-`config` · `extension load`
-
-This file is the recipe card for a small writing assembly line. The extension wants to turn a topic into a useful brief, but it does that in three clear steps instead of asking one agent to do everything at once. First, an outline agent plans the brief. Next, a draft agent writes from that outline. Finally, a critic agent reviews the draft and suggests improvements.
-
-The file defines simple Pydantic models, which are data shapes that check that information has the expected fields. For example, a brief request must include a topic, and may include an audience. The outline stage returns an outline, the draft stage returns a draft, and the critic stage returns a verdict plus optional improvements.
-
-It also builds three SubagentProfile objects. A subagent profile is like a job description for a worker: it names the worker, gives it a prompt file with instructions, says what tools it may use, and states what kind of input and output it must accept. These agents are deliberately given no tools and cannot spawn further agents, so the parent pipeline stays in control of the order and depth of the process. One important detail is that the prompt files are read when this module is loaded, so missing prompt files would break setup before the pipeline can run.
+*Call graph*: 3 external calls (__init__, __init__, select).

@@ -1,690 +1,651 @@
-# Authentication and Signed Links  `stage-17.1` (cross-cutting infrastructure)
+# Document review state and annotation scripts  `stage-17.1`
 
-This stage is shared behind-the-scenes support for proving identity and building safe links. It is used whenever the system must let a browser, extension, or download request in without keeping a server-side session for every case. At the center, token_signing.py makes small signed tokens, meaning data bundled with a tamper-proof stamp. bearer.py uses that stamp for login tokens that prove a user belongs to a workspace, while sdk/bearer.py exposes the checking side safely to extensions. surface_token.py signs links for shareable “surface” routes before normal session details are known.
+This stage is the document-review skill’s backstage workbench. It does not review the document by itself. Instead, it stores what the review has found and turns those findings into comments that people can see in the final files.
 
-Sandbox access uses the same pattern. ingress_token.py creates short-lived permission slips for one sandbox app port, and ingress_url.py packs the public host, port, conversation identity, and token into the browser link. artifact_url.py does this for stored files, creating expiring download links tied to one artifact.
+The small __init__.py file simply makes the scripts folder importable by Python. constants.py keeps the agreed file names for the saved review state and the review log, so every script looks in the same place. models.py defines what a review issue looks like, such as the problem found and where it belongs, and can format an issue as a readable comment.
 
-External sign-in is the human-facing part. runtime/surfaces/cli.py receives the provider’s return request and serves the logo, callback_page.py builds the result page, and anthropic_login.py connects Anthropic accounts only after Anthropic confirms the credential works.
+manage_state.py is the record keeper. It updates a JSON state file, which is a plain text data file, with sections, claims, issues, progress, summaries, and an audit trail. The annotation scripts then use that saved state. annotate_pdf.py highlights matching PDF text and adds notes. annotate_pptx.py writes findings as PowerPoint comments. annotate_xlsx.py copies a spreadsheet and adds comments to cells. Together, they turn review data into visible feedback.
 
 ## Files in this stage
 
-### Sandbox ingress access
-Temporary sandbox browser links are assembled with port, conversation, and short-lived signed ingress claims.
+### Review state foundations
+Package markers, shared constants, issue models, and the state-management CLI define the document-review data that later annotation scripts consume.
 
-### `core/src/ufo/harness/sandbox/ingress_url.py`
-
-`domain_logic` · `request handling`
-
-A sandbox may run a web server on some internal port, but a browser needs a public URL to reach it. This file creates that URL in a controlled way. Think of it like printing a temporary visitor badge: the URL points to the right door, and the token proves the visitor is allowed in for a limited time.
-
-The main function, `mint_ingress_view_url`, starts with the configured public ingress URL. If there is no public URL, it returns nothing, because there is no outside address to use. It then creates claims, which are pieces of information placed inside an access token: which workspace and conversation this is for, which port should be exposed, when the link expires, and optionally which shipped artifact it came from. It also checks whether this view is being opened from another sandbox page, so the system can record a safe “framer” relationship.
-
-The function then builds a host label from the conversation ID and port, attaches it as a subdomain of the public ingress host, adds the fixed ingress path, appends the freshly minted token, and finally adds the requested entry path. The result is a single expiring URL that a browser can open.
-
-The helper `_framer_claim` is careful: it only accepts a framing page if it is under the same ingress base host and has a valid sandbox-style subdomain.
-
-#### Function details
-
-##### `mint_ingress_view_url`  (lines 17–50)
-
-```
-def mint_ingress_view_url(public_url: str | None, workspace_id: UUID, conversation_id: UUID, port: int, entry_path: str, *, framed_from: str | None=None, shipped_slug: str | None=None, shipped_digest:
-```
-
-**Purpose**: Creates the temporary public URL for viewing one sandbox port in a browser. Someone would use it when they need to give the frontend or a user a safe link into a workspace’s running web service.
-
-**Data flow**: It receives the public ingress URL, workspace and conversation IDs, the sandbox port, the desired path inside the sandbox app, and optional information about a shipped artifact or framing page. If there is no public ingress URL, it returns `None`. Otherwise it splits the public URL into parts, builds optional shipped and framer details, creates an expiring ingress token, creates a subdomain label from the conversation ID and port, safely quotes the entry path, and returns the finished browser URL string.
-
-**Call relations**: This is the file’s main outward-facing function. During URL creation it asks `_framer_claim` to decide whether the caller came from another valid sandbox page. It also relies on the ingress token code to mint the short-lived token, and on the ingress host code to produce the subdomain label that routes the browser to the correct sandbox port.
-
-*Call graph*: calls 1 internal fn (_framer_claim); 7 external calls (__init__, __init__, now, site_label, mint_ingress_token, quote, urlsplit).
-
-
-##### `_framer_claim`  (lines 53–73)
-
-```
-def _framer_claim(base: SplitResult, framed_from: str | None) -> FramerClaim | None
-```
-
-**Purpose**: Checks whether a `framed_from` URL points to another valid sandbox page under the same public ingress host. If it does, it turns that page’s subdomain into a small claim naming the conversation and port that framed this view.
-
-**Data flow**: It receives the already-parsed base ingress URL and an optional `framed_from` URL. It parses the framing URL, compares its scheme, port, and host against the base ingress URL, and rejects it if it is missing, malformed, or outside the expected host. If the host looks right, it removes the base host suffix, parses the remaining site label into a conversation ID and port, and returns a `FramerClaim`. If any check fails, it returns `None`.
-
-**Call relations**: `mint_ingress_view_url` calls this helper while assembling token claims. The helper does the cautious validation work before handing back a framer claim, so the main URL builder can include framing information only when it came from a trusted sandbox-style URL.
-
-*Call graph*: called by 1 (mint_ingress_view_url); 3 external calls (__init__, parse_site_label, urlsplit).
-
-
-### `core/src/ufo/harness/sandbox/ingress_token.py`
-
-`domain_logic` · `request handling`
-
-This file is about safely letting a browser visit a sandboxed service. A sandbox may expose a local port, but the system does not want anyone to reach any port just by guessing a URL. Instead, it uses a signed token, like a tamper-proof wristband at an event. The token says which workspace, conversation, and port the visitor may use, and when that permission ends.
-
-There are two different token types. A "view" token is used in the first link that opens the sandbox frame. A "session" token is later used as the browser cookie for that sandbox origin. The type is included inside the signed data, so one kind cannot be reused as the other. This prevents a cookie from being replayed as a fresh view link, and prevents a view link from acting like an established session.
-
-The file defines small data containers for the claims inside a token, including optional information about a shipped app bundle or a framing sibling site. It also defines the rules for accepting a token: the signature must match the deployment secret, the shape must be correct, the port must be a real TCP port number, the kind must be expected, and the expiry time must still be in the future.
-
-#### Function details
-
-##### `mint_ingress_token`  (lines 76–93)
-
-```
-def mint_ingress_token(claims: IngressClaims, kind: IngressTokenKind) -> str
-```
-
-**Purpose**: This function turns approved ingress claims into a signed token string. Someone uses it when they need to create a safe link or session marker for exactly one sandbox access hop.
-
-**Data flow**: It receives an IngressClaims object and a token kind, such as view or session. It copies the important fields into a plain JSON body, adds optional shipped-bundle or framer information when present, reads the shared deployment secret, and signs the JSON bytes. The result is a string token that can later prove it was made by this deployment and has not been changed.
-
-**Call relations**: When a part of the sandbox system needs to hand the browser a trusted permission slip, it calls this function. This function depends on ingress_secret to get the shared secret, then hands the prepared JSON body to sign_token so the token can be checked later by verify_ingress_token.
-
-*Call graph*: calls 1 internal fn (ingress_secret); 2 external calls (dumps, sign_token).
-
-
-##### `verify_ingress_token`  (lines 96–135)
-
-```
-def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> IngressClaims
-```
-
-**Purpose**: This function checks whether an incoming token is genuine, still valid, and meant for the current step of the ingress flow. It returns the permissions inside the token only if all safety checks pass.
-
-**Data flow**: It receives a token string, the current time, and the kind of token the caller expects. It reads the same deployment secret used to mint tokens, verifies the signature, parses the JSON, checks that the kind matches, rebuilds the claim objects, rejects invalid port numbers, and rejects expired tokens. On success it returns an IngressClaims object; on failure it raises IngressTokenError instead of returning unsafe data.
-
-**Call relations**: The ingress request path calls this when a browser presents a token. It uses ingress_secret and verify_token to prove the token came from this deployment, then constructs ShippedClaim, FramerClaim, and IngressClaims objects from the payload. If anything looks forged, malformed, expired, or meant for the wrong hop, it stops the flow by raising IngressTokenError.
-
-*Call graph*: calls 1 internal fn (ingress_secret); 8 external calls (__init__, __init__, __init__, __init__, timestamp, loads, verify_token, UUID).
-
-
-##### `ingress_secret`  (lines 138–145)
-
-```
-def ingress_secret() -> str
-```
-
-**Purpose**: This function reads the shared secret used to sign and verify ingress tokens. It makes missing configuration fail loudly, because token security depends on every process using the same secret.
-
-**Data flow**: It looks in the process environment for the configured secret variable. If the value exists, it returns the secret text. If it is missing or empty, it raises a RuntimeError, turning a bad deployment setup into an immediate visible failure.
-
-**Call relations**: Both mint_ingress_token and verify_ingress_token call this before signing or checking a token. That keeps the secret source centralized, so token creation and token verification always use the same deployment-level value.
-
-*Call graph*: called by 2 (mint_ingress_token, verify_ingress_token).
-
-
-### Harness signed tokens
-Harness authentication code defines login, surface-routing, and shared compact token signing formats, then exposes login-token checking through the SDK.
-
-### `core/src/ufo/harness/auth/__init__.py`
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/__init__.py`
 
 `other` · `import time`
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means other parts of the project can refer to this folder with imports such as `ufo.harness.auth...` and expect Python to find modules inside it. Think of it like a label on a filing cabinet drawer: the label does not contain the documents, but it tells the system that this drawer exists and can be opened by name. Without this file, some Python setups or tools might not recognize the `auth` folder as part of the package structure, which could make authentication-related harness modules harder or impossible to import consistently. Because the file is empty, it does not run setup code, expose shortcuts, or change behavior when imported.
+This is an empty Python package marker file. In Python projects, a file named `__init__.py` tells Python that the folder should be treated as an importable package, rather than just an ordinary directory. That matters because code elsewhere may need to refer to scripts inside this folder using Python import paths. Think of it like putting a label on a drawer: the drawer may hold the useful tools, but the label tells the system where the drawer is and lets it be opened by name. Since this file contains no code, it does not run any setup, change any settings, or expose any functions. Its value is structural: without it, depending on the Python version and import style, modules in this directory might be harder or impossible to import reliably.
 
 
-### `core/src/ufo/harness/auth/bearer.py`
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/constants.py`
 
-`domain_logic` · `token minting and request authentication`
+`config` · `cross-cutting`
 
-This file is the shared rulebook for UFO bearer tokens. A bearer token is like a signed ticket: whoever presents it can be treated as the member named inside, but only if the signature proves the ticket was made with the system’s secret key.
+This is a tiny configuration-style file. It does not run any steps by itself. Instead, it acts like a label maker for the document review workflow. The workflow needs to remember its current progress, and it also needs to record a line-by-line history of what happened during review. This file names those two storage files: `document_review_state.json` for the saved state, and `review_log.jsonl` for the log.
 
-The token contains three pieces of information: the workspace id, the member email address, and an expiry time. The file turns that small JSON message into URL-safe text, signs it with HMAC-SHA256, and joins the two parts with a dot. HMAC is a way to make a tamper-proof signature using a shared secret. If anyone changes the workspace, email, or expiry, the signature no longer matches.
+The important idea is consistency. If different parts of the document review code typed these filenames by hand, one spelling mistake could make the system write to one file and read from another. By putting the names here, other files can import the constants and use the same values everywhere.
 
-The important point is that there is no server-side session record to look up. Verification is self-contained: read the secret from the UFO_TOKEN_SECRET environment variable, check the signature, decode the payload, check the expiry, and then return the trusted claim. Without this file, token issuers and token checkers could drift into different formats, or worse, accept forged or expired credentials.
-
-It also defines the fixed browser paths and cookie name used around login and logout, so the token’s web-facing behavior stays consistent.
-
-#### Function details
-
-##### `mint_token`  (lines 37–54)
-
-```
-def mint_token(secret: str, workspace_id: str, email: str, ttl: timedelta, now: datetime | None=None) -> str
-```
-
-**Purpose**: Creates a signed token for one workspace and one email address, valid for a limited time. It is used when the system needs to give a user a portable proof of membership.
-
-**Data flow**: It receives a secret key, workspace id, email address, time-to-live, and optionally a current time. It trims and lowercases the email, calculates the expiry time, writes the claims as compact JSON, encodes that JSON in URL-safe base64 text, signs that text with HMAC-SHA256, and returns one string containing the encoded body plus its signature. If the secret is empty, it stops with an error instead of making an unsafe token.
-
-**Call relations**: This is the creation side of the same format that verified_claims reads later. It relies on standard JSON, base64, time, and HMAC tools to produce a token that other surfaces can verify without asking a database.
-
-*Call graph*: 4 external calls (urlsafe_b64encode, now, new, dumps).
+The `.json` state file is meant to hold structured saved data, such as where the review left off. The `.jsonl` log file means “JSON Lines,” where each line is a separate JSON record, which is useful for appending events over time. Without this file, the filenames would likely be scattered through the code, making changes harder and mistakes easier.
 
 
-##### `verified_claims`  (lines 57–80)
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/models.py`
 
-```
-def verified_claims(token: str, now: int | None=None) -> tuple[str, str] | None
-```
+`data_model` · `document review comment creation`
 
-**Purpose**: Checks whether a token is genuine and still valid, then returns the workspace and email it proves. If anything looks wrong, it returns nothing instead of trusting the token.
+This file is like the blank form used by a document reviewer. The `DocumentIssue` type says which fields every review issue is expected to have, such as its type, severity, description, location, original text, suggested replacement, and links to related issues. That matters because other parts of the review tool can then read issue data without guessing what keys might exist.
 
-**Data flow**: It receives a token string and optionally a current timestamp. It reads the signing secret through _secret, splits the token into body and signature, recomputes the expected signature, compares signatures safely, decodes the body through _b64url_decode, parses the JSON, checks that the workspace, email, and expiry have the right shapes, and rejects expired tokens. On success it returns the workspace id and email; on failure it returns None.
+It also defines friendly labels for internal issue codes. For example, a stored value like `spelling_grammar` becomes the more readable label `Spelling/Grammar` when shown to a person.
 
-**Call relations**: This is the main verification checkpoint. verify_token calls it when the process already knows which workspace the token must belong to, and workspace_claim calls it when the workspace needs to be discovered from the token itself. It hands decoding work to _b64url_decode and secret lookup to _secret.
-
-*Call graph*: calls 2 internal fn (_b64url_decode, _secret); called by 2 (verify_token, workspace_claim); 4 external calls (now, compare_digest, new, loads).
-
-
-##### `verify_token`  (lines 83–94)
-
-```
-def verify_token(token: str, workspace_id: UUID, now: int | None=None) -> str | None
-```
-
-**Purpose**: Confirms that a token is valid for one specific workspace, then returns the authenticated member email. This prevents a token from one workspace being reused in another.
-
-**Data flow**: It receives a token, the expected workspace UUID, and optionally a current timestamp. It asks verified_claims to prove the token first. If verification fails, or if the signed workspace does not match the expected workspace, it returns None. If everything matches, it returns the email in lowercase.
-
-**Call relations**: This function sits one step above verified_claims. It is used when the caller already has a pinned workspace and needs both token authenticity and a workspace match before treating the request as authenticated.
-
-*Call graph*: calls 1 internal fn (verified_claims).
-
-
-##### `workspace_claim`  (lines 97–108)
-
-```
-def workspace_claim(token: str, now: int | None=None) -> UUID | None
-```
-
-**Purpose**: Extracts the workspace UUID from a valid token. This is useful when one running service can serve many workspaces and must learn which one a request belongs to.
-
-**Data flow**: It receives a token and optionally a current timestamp. It first asks verified_claims to make sure the token is signed and unexpired. Then it tries to turn the signed workspace string into a UUID object. It returns that UUID on success, or None if the token is invalid or the workspace value is not a valid UUID.
-
-**Call relations**: Like verify_token, this builds on verified_claims. Instead of comparing against a known workspace, it turns the trusted workspace claim into the form the rest of the system can use for routing or scoping the request.
-
-*Call graph*: calls 1 internal fn (verified_claims); 1 external calls (UUID).
-
-
-##### `_secret`  (lines 111–115)
-
-```
-def _secret() -> str
-```
-
-**Purpose**: Reads the shared token signing secret from the environment. It makes sure verification cannot quietly proceed without the key that protects the tokens.
-
-**Data flow**: It looks for the UFO_TOKEN_SECRET environment variable. If it finds a non-empty value, it returns that string. If the value is missing or empty, it raises an error explaining that the secret is required.
-
-**Call relations**: verified_claims calls this before checking a token signature. That keeps secret access in one small place, so callers can verify tokens without directly handling the secret.
-
-*Call graph*: called by 1 (verified_claims).
-
-
-##### `_b64url_decode`  (lines 118–119)
-
-```
-def _b64url_decode(value: str) -> bytes
-```
-
-**Purpose**: Decodes the URL-safe base64 text used for the token body. It also restores any missing padding characters, because the token format strips them to keep the token shorter and cleaner.
-
-**Data flow**: It receives the encoded body text. It adds the right number of equals signs needed by the base64 decoder, decodes the text back into bytes, and returns those bytes for JSON parsing.
-
-**Call relations**: verified_claims calls this after the token signature has matched. It is a small helper that hides the padding detail from the main verification flow.
-
-*Call graph*: called by 1 (verified_claims); 1 external calls (urlsafe_b64decode).
-
-
-### `core/src/ufo/harness/auth/surface_token.py`
-
-`domain_logic` · `link generation and request handling`
-
-A surface token is like a tamper-proof address label on a package. The label may say which workspace or target a route should use, but the route still decides whether the visitor is allowed in. This file only proves that the label was made by this deployment and was meant for this specific surface.
-
-The core problem is that some routes are reached by link alone, before there is a cookie or logged-in session to say which workspace the request belongs to. To solve that, `mint_surface_token` takes a surface name and a set of string claims, adds the surface name into the signed data, turns it into compact JSON, and signs it using the deployment-wide secret from the environment. The result is an opaque token that can safely travel in a URL.
-
-Later, `verify_surface_token` checks the token. It first verifies the signature using the same secret, then parses the JSON, then makes sure the embedded surface name matches the route that is asking. This prevents a token made for one surface from being reused at another. It also rejects malformed payloads and claims that are not strings, because URL-carried claims are expected to be plain text.
-
-One important point: these tokens do not expire and do not grant permission by themselves. They are stable signed addresses, not access passes.
+The main behavior in the file is `format_comment`. It takes one issue and builds a short comment string. The comment starts with a bracketed heading that shows the issue category and severity, then includes the issue description. If a suggested replacement is available, and the caller wants suggestions included, it adds a “Suggested:” line. This keeps review comments consistent, so users see the same clear format no matter which part of the system produced the issue.
 
 #### Function details
 
-##### `mint_surface_token`  (lines 24–35)
+##### `format_comment`  (lines 29–35)
 
 ```
-def mint_surface_token(surface: str, payload: Mapping[str, str]) -> str
+def format_comment(issue: DocumentIssue, include_suggestion: bool=True) -> str
 ```
 
-**Purpose**: Creates a signed token for one named surface, carrying only the claims that route will later need. It refuses unsafe input, such as an empty surface name or a caller trying to supply the reserved `surface` claim themselves.
+**Purpose**: This function turns a structured document issue into a plain text comment that can be shown to a reviewer or inserted into a document-review workflow. It makes internal issue codes readable and optionally includes the suggested replacement text.
 
-**Data flow**: It receives a surface name and a mapping of string claims. It reads the shared token secret from the environment through `_secret`, adds the surface name to the claims, serializes the combined data as compact JSON, and passes those bytes to the shared token-signing helper. It returns a signed string token that can be placed in a URL.
+**Data flow**: It receives an issue dictionary and a yes-or-no setting for whether to include suggestions. It looks up a human-friendly label for the issue type, reads the severity and description, and checks whether the issue has `new_text`. It returns one formatted string; it does not change the issue itself.
 
-**Call relations**: This is the issuing side of the flow. When something needs to build a durable surface link, it calls this function; this function relies on `_secret` to fetch the signing key and hands the prepared JSON body to `sign_token` so the body cannot be changed unnoticed.
+**Call relations**: When another part of the document-review scripts needs to present an issue to a person, this function is the final formatting step. Inside, it asks the `DocumentIssue`-shaped dictionary for `new_text` using `get`, so missing or empty suggestion text simply means no suggestion line is added.
 
-*Call graph*: calls 1 internal fn (_secret); 2 external calls (dumps, sign_token).
-
-
-##### `verify_surface_token`  (lines 38–51)
-
-```
-def verify_surface_token(surface: str, token: str) -> dict[str, str] | None
-```
-
-**Purpose**: Checks whether a token is genuine, well-formed, and meant for the surface currently being accessed. If anything is wrong, it returns `None` instead of trusting the token.
-
-**Data flow**: It receives the expected surface name and a token string. It reads the shared secret through `_secret`, asks the token verifier to confirm the signature and recover the original bytes, then parses those bytes as JSON. If the data is a dictionary, names the same surface, and contains only string keys and string values after removing the reserved surface claim, it returns those claims; otherwise it returns `None`.
-
-**Call relations**: This is the receiving side of the flow, used when a request arrives with a surface token. It calls `_secret` to get the key needed for verification, delegates the cryptographic check to `verify_token`, then performs the surface-specific safety checks before giving route code any claims to use.
-
-*Call graph*: calls 1 internal fn (_secret); 2 external calls (loads, verify_token).
+*Call graph*: 1 external calls (get).
 
 
-##### `_secret`  (lines 54–58)
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/manage_state.py`
 
-```
-def _secret() -> str
-```
+`entrypoint` · `command invocation during the document review workflow`
 
-**Purpose**: Fetches the shared signing secret from the process environment. This keeps both token creation and token checking tied to the same deployment-wide secret.
+A document review has several steps: outline the document, find claims, fact-check them, find writing or content issues, then submit the final review. This script acts like a checklist keeper for that process. Without it, later review steps would not have a reliable shared record of what has already been found, what still needs checking, and what phase the review is in.
 
-**Data flow**: It reads the environment variable named by `UFO_TOKEN_SECRET_ENV`. If the value is present, it returns that string; if it is missing or empty, it raises a runtime error because signing or verifying tokens would be unsafe or impossible without it.
+The script stores the current review in `document_review_state.json`, using normal JSON so other tools can read it. It also writes a line-by-line JSON log, which is useful as a trail of what changed and when. Each command loads the state, checks that the incoming data has the fields it needs, updates the state, saves it back to disk, and often prints a structured result. For example, `add-sections` records page ranges and moves the review to claim-finding, while `update-claims` marks claims as verified, refuted, or inconclusive.
 
-**Call relations**: Both `mint_surface_token` and `verify_surface_token` call this helper before doing cryptographic work. It is the small gate that ensures the rest of the file never silently signs or verifies with a missing secret.
-
-*Call graph*: called by 2 (mint_surface_token, verify_surface_token).
-
-
-### `core/src/ufo/harness/auth/token_signing.py`
-
-`util` · `cross-cutting`
-
-This file is a small security helper. It turns raw payload bytes into an opaque-looking token made of two parts: the payload encoded in a web-safe text form, and a signature proving that the payload came from someone who knows the shared secret. The signature uses HMAC, which is like a tamper-evident seal made with a secret key: anyone with the key can check the seal, but someone without the key cannot make a valid new one.
-
-The token format is simple: `body.signature`. The body is base64url text, which means binary bytes are rewritten as URL-friendly characters. The signature is also base64url text and is calculated from the body, not directly from the original bytes. When a token is checked, the file first makes sure it has the expected two-part shape, then recalculates the signature and compares it safely, then decodes the body back into the original bytes.
-
-If anything is wrong, the code raises `SignedTokenError`: the token may be missing its separator, have the wrong signature, or contain unreadable payload text. Without this file, other parts of the harness would need to repeat delicate signing and verification code, increasing the chance of accepting forged or broken tokens.
+The script is forgiving about phase order: it warns if a command is run in an unexpected phase, but usually continues. That matters because human or automated reviewers may need to recover from imperfect sequencing. Its validation helpers are the gatekeepers that stop bad data, such as an unknown severity or an empty location, from corrupting the review record.
 
 #### Function details
 
-##### `sign_detached`  (lines 12–14)
+##### `_emit_result`  (lines 38–54)
 
 ```
-def sign_detached(secret: bytes, message: bytes) -> str
+def _emit_result(message: str, phase: str, document_name: str, **kwargs: list[dict]) -> None
 ```
 
-**Purpose**: Creates a standalone signature for a message using a secret. This is useful when the data and its proof need to be kept as separate pieces.
+**Purpose**: Prints the command's final answer as one JSON object. This gives callers both a readable message and structured progress details they can safely parse.
 
-**Data flow**: It receives a secret key as bytes and a message as bytes. It uses HMAC with SHA-256 to create a fixed-size digest, then rewrites that digest as URL-safe base64 text and removes extra padding characters. It returns the signature as a string.
+**Data flow**: It receives a message, the current phase, the document name, and optional extra lists such as newly created claims or issues. It wraps them into a single dictionary, converts that dictionary to JSON text, and prints it to standard output.
 
-**Call relations**: This is the basic sealing step used by the rest of the file. `sign_token` calls it to attach a signature to a token body, and `verify_detached` calls it to recreate the expected signature before comparing it with the one it was given.
+**Call relations**: The state-changing commands call this at the end of successful work. After commands such as `cmd_init`, `cmd_add_sections`, `cmd_add_claims`, `cmd_update_claims`, `cmd_add_issues`, or `cmd_submit` have saved changes and logged the action, they hand their result to `_emit_result` so the outside caller gets a clean machine-readable summary.
 
-*Call graph*: called by 2 (sign_token, verify_detached); 2 external calls (urlsafe_b64encode, new).
-
-
-##### `verify_detached`  (lines 17–18)
-
-```
-def verify_detached(secret: bytes, message: bytes, signature: str) -> bool
-```
-
-**Purpose**: Checks whether a given signature really matches a message and secret. Someone would use it to decide whether a message has been tampered with.
-
-**Data flow**: It receives the secret, the original message bytes, and a signature string. It recreates the correct signature by calling `sign_detached`, then compares the expected and supplied signatures using a safe comparison function designed for security-sensitive checks. It returns `True` if they match and `False` if they do not.
-
-**Call relations**: This is the checking partner to `sign_detached`. `verify_token` calls it after splitting a token into body and signature, so token verification can focus on the larger token format while this function focuses only on the signature match.
-
-*Call graph*: calls 1 internal fn (sign_detached); called by 1 (verify_token); 1 external calls (compare_digest).
+*Call graph*: called by 6 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_init, cmd_submit, cmd_update_claims); 1 external calls (dumps).
 
 
-##### `sign_token`  (lines 21–23)
+##### `log_action`  (lines 57–72)
 
 ```
-def sign_token(secret: bytes, payload: bytes) -> str
+def log_action(command: str, phase_before: str | None, phase_after: str | None, **kwargs: object) -> None
 ```
 
-**Purpose**: Builds a complete signed token from raw payload bytes. This gives callers one compact string they can pass around while still being able to detect later changes.
+**Purpose**: Adds an audit entry whenever an important command runs. This creates a chronological record of actions, like a receipt book for the review.
 
-**Data flow**: It receives a secret key and payload bytes. It encodes the payload as URL-safe base64 text, signs that text by calling `sign_detached`, then joins the encoded body and signature with a dot. It returns the finished token string.
+**Data flow**: It receives the command name, the phase before and after the command, and extra details such as counts or IDs. It adds the current UTC timestamp, turns the entry into JSON, and appends it as one line to the log file.
 
-**Call relations**: This function is the outward-facing creation step for tokens in this file. It depends on `sign_detached` for the cryptographic seal and packages that seal beside the encoded payload in the expected `body.signature` form.
+**Call relations**: Most commands call this after they inspect or change state. Update commands use it to record what changed, while read commands like `cmd_get_claims` and `cmd_get_issues` use it to record what was queried.
 
-*Call graph*: calls 1 internal fn (sign_detached); 1 external calls (urlsafe_b64encode).
+*Call graph*: called by 8 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_get_claims, cmd_get_issues, cmd_init, cmd_submit, cmd_update_claims); 3 external calls (now, dumps, Path).
 
 
-##### `verify_token`  (lines 26–35)
+##### `load_state`  (lines 75–84)
 
 ```
-def verify_token(token: str, secret: bytes) -> bytes
+def load_state() -> dict
 ```
 
-**Purpose**: Checks a complete signed token and returns the original payload if it is valid. It rejects tokens that are badly shaped, forged, or not decodable.
+**Purpose**: Reads the saved review state from disk. Commands use it when they need the current document, phase, sections, claims, issues, or summary.
 
-**Data flow**: It receives a token string and the secret key. It splits the token at the dot into body and signature, refuses the token if either part is missing, then calls `verify_detached` to confirm the signature. If the signature is valid, it decodes the base64url body back into bytes and returns those bytes. If any step fails, it raises `SignedTokenError` with a clear reason.
+**Data flow**: It looks for the configured state file. If the file is missing, it prints an error telling the user to run `init` first and stops the program; otherwise, it reads the JSON text and returns it as a Python dictionary.
 
-**Call relations**: This is the main reading and trust-checking step for tokens made by `sign_token`. It hands signature validation to `verify_detached`, then uses base64 decoding to recover the payload only after the token has passed the tamper check.
+**Call relations**: Nearly every command except `cmd_init` starts by calling this. It is the doorway from the saved review record into the command's in-memory work.
 
-*Call graph*: calls 1 internal fn (verify_detached); 2 external calls (__init__, b64decode).
-
-
-### `core/src/ufo/sdk/bearer.py`
-
-`io_transport` · `request handling`
-
-This file is a small bridge between outside-facing SDK code and the project’s internal bearer-token authentication code. A bearer token is like a temporary wristband: if someone presents it, the system can check whether it was issued by the trusted gateway and what workspace or session it belongs to. The important security idea here is that extensions can verify a token, but they never receive the signing secret itself. Instead, the verification functions look up the secret internally, through `UFO_TOKEN_SECRET`. Without this wrapper, extension authors might need to import deeper internal modules directly, or worse, be tempted to pass around secrets themselves. This file keeps the public surface simple and safer: it exposes the login path, logout path, session cookie name, and helper functions for verifying tokens and reading claims from them. The actual work still lives in `ufo.harness.auth.bearer`; this file is mostly a stable public doorway to that logic.
+*Call graph*: called by 8 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_get_claims, cmd_get_issues, cmd_status, cmd_submit, cmd_update_claims); 3 external calls (loads, Path, exit).
 
 
-### Artifact download links
-Stored artifacts are protected by secure, expiring, signature-checked download URLs.
+##### `save_state`  (lines 87–89)
 
-### `core/src/ufo/runtime/media/artifact_url.py`
+```
+def save_state(state: dict) -> None
+```
 
-`domain_logic` · `artifact URL creation and download request handling`
+**Purpose**: Writes the current review state back to disk in a readable JSON format. It preserves changes made by commands so later commands can continue from the same point.
 
-This file is the gatekeeper for artifact download URLs. An artifact is a stored file, and the URL is like a temporary claim ticket: it names the file, says when the ticket expires, says which workspace owns the file, and carries a signature proving the ticket was made by the system. Without this file, anyone could more easily guess or tamper with artifact paths, old links might keep working forever, and browsers would have a harder time caching repeated downloads safely.
+**Data flow**: It receives the full state dictionary, converts it to indented JSON text, and writes that text to the configured state file.
 
-The file does three main jobs. First, it mints signed URLs. The stored blob key becomes the URL path, while the query string carries the expiry time, workspace id, signature, and sometimes an image-preview permission. Second, it verifies incoming URLs. It checks that ids and filenames are well formed, that the signature matches, that the workspace claim is present, and that the link has not expired. If a link is authentic but expired, it reports that separately so a signed-in workspace member can potentially refresh it. Third, it decides safe media types for files, especially avoiding host-dependent guesses for important document formats.
+**Call relations**: Commands that create or change review data call this before reporting success. For example, `cmd_add_claims` saves new claims, `cmd_update_claims` saves fact-check results, and `cmd_submit` saves the completed status.
 
-A key design detail is bucketed expiry. Instead of every minted URL being unique down to the second, expiry times are rounded to hourly boundaries. That means repeated requests for the same artifact can reuse the same URL and be cached, while still guaranteeing the link lasts at least the intended time.
+*Call graph*: called by 6 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_init, cmd_submit, cmd_update_claims); 2 external calls (dumps, Path).
+
+
+##### `warn_phase`  (lines 92–98)
+
+```
+def warn_phase(state: dict, expected: str) -> None
+```
+
+**Purpose**: Warns the user when a command is being run outside the expected review phase. It does not stop the command; it just makes the mismatch visible.
+
+**Data flow**: It receives the current state and the phase the command normally expects. If they differ, it prints a warning to standard error; the state itself is not changed.
+
+**Call relations**: Workflow commands call this near the start. It helps `cmd_add_sections`, `cmd_add_claims`, `cmd_update_claims`, `cmd_add_issues`, and `cmd_submit` guide the user without being so strict that recovery becomes impossible.
+
+*Call graph*: called by 5 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_submit, cmd_update_claims).
+
+
+##### `_validate_required_keys`  (lines 101–109)
+
+```
+def _validate_required_keys(item: dict, required: list[str], label: str) -> None
+```
+
+**Purpose**: Checks that an incoming JSON object contains all fields a command needs. This prevents partial or malformed review entries from being saved.
+
+**Data flow**: It receives one item, a list of required field names, and a label such as `Claim` or `Issue`. If any fields are missing, it prints a clear error and exits; if all are present, it returns without changing anything.
+
+**Call relations**: Commands that import structured data call this before using that data. `cmd_add_sections`, `cmd_add_claims`, `cmd_update_claims`, and `cmd_add_issues` rely on it before they create or update state entries.
+
+*Call graph*: called by 4 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_update_claims); 1 external calls (exit).
+
+
+##### `_validate_enum`  (lines 112–119)
+
+```
+def _validate_enum(value: str, allowed: set[str], field_name: str) -> None
+```
+
+**Purpose**: Checks that a value is one of a fixed set of allowed choices. This keeps fields like claim type, issue type, severity, and claim status consistent.
+
+**Data flow**: It receives the value to check, the allowed set, and the field name. If the value is not allowed, it prints an error showing the valid choices and exits; otherwise, it lets the caller continue.
+
+**Call relations**: Commands call this while processing user-provided JSON. It protects `cmd_add_claims`, `cmd_update_claims`, and `cmd_add_issues` from saving unknown categories that later tools may not understand.
+
+*Call graph*: called by 3 (cmd_add_claims, cmd_add_issues, cmd_update_claims); 1 external calls (exit).
+
+
+##### `_validate_positive_int`  (lines 122–138)
+
+```
+def _validate_positive_int(value: str | int, field_name: str) -> int
+```
+
+**Purpose**: Turns a value into a positive page number and rejects invalid page values. It is used so section page ranges are meaningful.
+
+**Data flow**: It receives a value and a field name. It tries to convert the value to an integer, checks that it is at least 1, and returns the integer; if conversion fails or the number is too small, it prints an error and exits.
+
+**Call relations**: `cmd_add_sections` calls this for section start and end pages. After this helper confirms the numbers are valid, the command can safely compare the page range and save it.
+
+*Call graph*: called by 1 (cmd_add_sections); 1 external calls (exit).
+
+
+##### `_validate_nonempty_str`  (lines 141–156)
+
+```
+def _validate_nonempty_str(value: object, field_name: str) -> str
+```
+
+**Purpose**: Checks that a required text-like value is present and not blank. It also accepts integers and turns them into strings, which is useful for locations like page or paragraph numbers.
+
+**Data flow**: It receives a value and the field name. If the value is not a string or integer, or becomes empty after trimming spaces, it prints an error and exits; otherwise, it returns the value as a string.
+
+**Call relations**: `cmd_add_claims` and `cmd_add_issues` use this for locations. That gives every claim or issue a usable place in the document before it is written into the state file.
+
+*Call graph*: called by 2 (cmd_add_claims, cmd_add_issues); 1 external calls (exit).
+
+
+##### `_validate_anchor`  (lines 159–169)
+
+```
+def _validate_anchor(value: object, field_name: str) -> str | None
+```
+
+**Purpose**: Checks an optional anchor field, which is a more precise pointer into the document when available. It allows the anchor to be missing, but rejects blank or non-text anchors.
+
+**Data flow**: It receives a value and field name. If the value is `None`, it returns `None`; if it is a non-empty string, it returns that string; otherwise, it prints an error and exits.
+
+**Call relations**: `cmd_add_claims` and `cmd_add_issues` call this while building new entries. The result is stored with the claim or issue so later readers can locate the exact text more easily when an anchor exists.
+
+*Call graph*: called by 2 (cmd_add_claims, cmd_add_issues); 1 external calls (exit).
+
+
+##### `_resolve_data`  (lines 172–176)
+
+```
+def _resolve_data(args: argparse.Namespace) -> str
+```
+
+**Purpose**: Gets JSON input from either a command-line string or a file. This lets callers choose between passing small data directly and storing larger data in a separate file.
+
+**Data flow**: It receives parsed command-line arguments. If a file path was provided, it reads and returns that file's text; otherwise, it returns the direct `--data` text.
+
+**Call relations**: The commands that accept JSON arrays call this before parsing their input. `cmd_add_sections`, `cmd_add_claims`, `cmd_update_claims`, and `cmd_add_issues` all use it as the common front door for incoming data.
+
+*Call graph*: called by 4 (cmd_add_claims, cmd_add_issues, cmd_add_sections, cmd_update_claims); 1 external calls (Path).
+
+
+##### `cmd_init`  (lines 179–205)
+
+```
+def cmd_init(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Starts a fresh review for one document. It creates the initial state file with empty sections, claims, issues, and summary.
+
+**Data flow**: It receives command-line arguments containing the document filename. If the filename is blank, it exits with an error; otherwise, it builds a new state dictionary in the `outline` phase, saves it, logs the initialization, and prints a JSON success result.
+
+**Call relations**: `main` dispatches to this when the user runs the `init` command. This is the first command in the normal workflow, and later commands depend on the state file it creates.
+
+*Call graph*: calls 3 internal fn (_emit_result, log_action, save_state); 1 external calls (exit).
+
+
+##### `cmd_add_sections`  (lines 208–272)
+
+```
+def cmd_add_sections(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Adds the document's major sections and their page ranges. Once sections are recorded, the review can move from outlining to finding claims.
+
+**Data flow**: It loads the current state, warns if the phase is not `outline`, reads a JSON array from `--data` or `--file`, and checks every section has a name plus valid start and end pages. It stores each section by name, changes the phase to `find_claims`, saves the state, logs the change, and prints a JSON result listing the added sections.
+
+**Call relations**: `main` calls this for the `add-sections` command. It uses the validation helpers to keep section data clean, then hands persistence to `save_state`, audit recording to `log_action`, and final output to `_emit_result`.
+
+*Call graph*: calls 8 internal fn (_emit_result, _resolve_data, _validate_positive_int, _validate_required_keys, load_state, log_action, save_state, warn_phase); 2 external calls (loads, exit).
+
+
+##### `cmd_add_claims`  (lines 275–357)
+
+```
+def cmd_add_claims(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Records claims found in a specific section that need fact-checking. A claim is a statement in the document that should be verified, refuted, or marked inconclusive later.
+
+**Data flow**: It loads state, warns if not in `find_claims`, confirms the named section exists, reads a JSON array of claims, and checks each claim's required fields and allowed type. For every valid claim, it increments the claim counter, creates a unique ID, saves the claim as `unverified`, then saves the updated state, logs the new IDs, and prints a JSON result.
+
+**Call relations**: `main` dispatches here for `add-claims`. This command builds on sections created by `cmd_add_sections`, uses shared validators for safety, and prepares records that `cmd_update_claims` will later update during fact-checking.
+
+*Call graph*: calls 10 internal fn (_emit_result, _resolve_data, _validate_anchor, _validate_enum, _validate_nonempty_str, _validate_required_keys, load_state, log_action, save_state, warn_phase); 2 external calls (loads, exit).
+
+
+##### `cmd_update_claims`  (lines 360–445)
+
+```
+def cmd_update_claims(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Records fact-check results for existing claims. It changes claims from `unverified` to a final checked status and can attach source URLs used as evidence.
+
+**Data flow**: It loads state, remembers the old phase, warns if not in `fact_check`, and automatically moves from `find_claims` to `fact_check` if needed. It reads a JSON array of updates, verifies each claim exists and each new status is allowed, increments that claim's attempt count, appends any source URLs, saves the state, logs status counts, and prints a JSON result.
+
+**Call relations**: `main` calls this for `update-claims`. It follows after `cmd_add_claims` in the normal workflow and uses the same load, validate, save, log, and emit pattern as the other state-changing commands.
+
+*Call graph*: calls 8 internal fn (_emit_result, _resolve_data, _validate_enum, _validate_required_keys, load_state, log_action, save_state, warn_phase); 2 external calls (loads, exit).
+
+
+##### `cmd_add_issues`  (lines 448–543)
+
+```
+def cmd_add_issues(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Records problems found in a section, such as factual issues, grammar problems, non-public information, or narrative logic problems. These are the review findings that may require edits.
+
+**Data flow**: It loads state, remembers the old phase, warns if not in `find_issues`, and moves from `fact_check` to `find_issues` when appropriate. It confirms the section exists, reads a JSON array of issues, validates required fields, type, severity, location, and optional anchor, assigns each issue a unique ID, saves the state, logs the new issue IDs, and prints a JSON result.
+
+**Call relations**: `main` dispatches here for `add-issues`. It usually runs after claim checking, and it uses the shared helpers to make sure issue records are complete enough for later reporting or editing.
+
+*Call graph*: calls 10 internal fn (_emit_result, _resolve_data, _validate_anchor, _validate_enum, _validate_nonempty_str, _validate_required_keys, load_state, log_action, save_state, warn_phase); 2 external calls (loads, exit).
+
+
+##### `cmd_submit`  (lines 546–579)
+
+```
+def cmd_submit(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Marks the review as finished and stores the final summary. This is the closing step of the review workflow.
+
+**Data flow**: It loads state, remembers the old phase, warns if not in `find_issues`, and checks that the summary text is not blank. It sets the phase to `complete`, saves the summary, writes the state file, logs counts of sections, claims, and issues, and prints a JSON completion result.
+
+**Call relations**: `main` calls this for the `submit` command. It ties together everything gathered by earlier commands and uses `save_state`, `log_action`, and `_emit_result` to make the completion durable, auditable, and visible to callers.
+
+*Call graph*: calls 5 internal fn (_emit_result, load_state, log_action, save_state, warn_phase); 1 external calls (exit).
+
+
+##### `cmd_get_claims`  (lines 582–622)
+
+```
+def cmd_get_claims(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Shows saved claims to the user, optionally narrowed by status or section. This is a read-only way to inspect what needs checking or what has already been checked.
+
+**Data flow**: It loads state and starts with all claims. If a status or section filter was supplied, it keeps only matching claims, logs the query and result count, then prints each matching claim in a human-readable format, including text, description, location, anchor, and sources when present.
+
+**Call relations**: `main` dispatches here for `get-claims`. Unlike the update commands, it does not save state; it reads through `load_state` and records the lookup through `log_action`.
+
+*Call graph*: calls 2 internal fn (load_state, log_action).
+
+
+##### `cmd_get_issues`  (lines 625–665)
+
+```
+def cmd_get_issues(args: argparse.Namespace) -> None
+```
+
+**Purpose**: Shows saved issues to the user, optionally narrowed by severity or section. This helps reviewers see the findings that may need attention.
+
+**Data flow**: It loads state and starts with all issues. If a severity or section filter was supplied, it keeps only matching issues, logs the query and result count, then prints each issue with its section, location, text, context, description, and suggested replacement text when present.
+
+**Call relations**: `main` calls this for `get-issues`. It is a read-only companion to `cmd_add_issues`, using `load_state` to fetch the saved issues and `log_action` to leave a record of the inspection.
+
+*Call graph*: calls 2 internal fn (load_state, log_action).
+
+
+##### `cmd_status`  (lines 668–716)
+
+```
+def cmd_status(_args: argparse.Namespace) -> None
+```
+
+**Purpose**: Prints a dashboard-style summary of the current review. It gives a quick view of the document, phase, section list, claim counts, issue counts, and final summary if one exists.
+
+**Data flow**: It loads state, reads the document name and phase, then prints sections with page ranges, claim totals by status, issue totals by severity and type, and the stored summary when present. It does not change or save anything.
+
+**Call relations**: `main` dispatches here for the `status` command. It depends only on `load_state`, because it is meant to report the current state rather than modify it.
+
+*Call graph*: calls 1 internal fn (load_state).
+
+
+##### `main`  (lines 719–775)
+
+```
+def main() -> None
+```
+
+**Purpose**: Defines the command-line interface and routes each command to the right function. It is the front desk for this script.
+
+**Data flow**: It builds an argument parser, registers subcommands such as `init`, `add-claims`, `update-claims`, and `status`, parses the user's command-line input, looks up the matching command function, and calls it with the parsed arguments.
+
+**Call relations**: When the script is run directly, execution starts here. `main` does not do review work itself; it sends control to the specific `cmd_*` function that knows how to perform the requested action.
+
+*Call graph*: 1 external calls (ArgumentParser).
+
+
+### Document annotation outputs
+Format-specific command-line scripts read saved review findings and write them back into PDF, PowerPoint, and Excel files as visible annotations or comments.
+
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/annotate_pdf.py`
+
+`entrypoint` · `command-line run after document review issues have been saved`
+
+This file is a small finishing tool for a document review workflow. Earlier parts of the system record review problems in a JSON state file, which is a plain text file used to store structured data. This script reads those saved issues and makes them visible inside the PDF itself, so a person can open the output PDF and see what needs attention.
+
+The script expects two command-line arguments: the source PDF and the destination PDF. It first loads issues from the review state file named by STATE_FILENAME. If that file is missing, it stops with a clear error, because there is nothing reliable to annotate.
+
+For each issue, it treats the issue location as a page number. It skips issues with invalid page numbers. On a valid page, it chooses a color based on severity: red for high, orange for medium, and yellow for low. It then formats the issue text into a comment, searches the page for the original text, and highlights the found text if possible. If the exact text cannot be found, it still places a note at a safe fallback position near the top-left of the page. This is like putting a sticky note on a printed document even when you cannot underline the exact sentence.
+
+Finally, it saves the modified PDF and reports how many annotations it added.
 
 #### Function details
 
-##### `artifact_url_expiry`  (lines 59–66)
+##### `load_issues`  (lines 31–41)
 
 ```
-def artifact_url_expiry(now: datetime) -> int
+def load_issues()
 ```
 
-**Purpose**: Chooses the expiry timestamp to put into a newly minted artifact URL. It rounds expiry up to a fixed time bucket so the same artifact gets the same URL during that bucket, which helps browser and edge caches reuse it.
+**Purpose**: This function reads the saved review issues from the document review state file. It is used so the annotation step knows what comments need to be placed into the PDF.
 
-**Data flow**: It receives the current time. It converts that time to seconds, adds the required lifetime, rounds up to the next bucket boundary, and returns that future timestamp as an integer.
+**Data flow**: It starts with the expected state filename from STATE_FILENAME. It checks whether that file exists; if not, it prints an error and stops the script. If the file is present, it reads the JSON text, turns it into Python data, takes the values under the "issues" section, and returns them as a list.
 
-**Call relations**: When an image preview link is being created, mint_image_preview_url asks this function for the expiry time. The returned value is then passed into mint_artifact_url so the signed URL and its signature agree on the same expiry.
+**Call relations**: The main annotation flow calls this first inside annotate. It relies on standard file path handling, JSON parsing, and process exit behavior. Once it returns the issue list, annotate uses that list to decide which PDF pages to mark up.
 
-*Call graph*: called by 1 (mint_image_preview_url); 1 external calls (timestamp).
-
-
-##### `ArtifactUrlExpired.__init__`  (lines 88–90)
-
-```
-def __init__(self, claims: ArtifactClaims) -> None
-```
-
-**Purpose**: Creates the special error used when a URL is genuine but too old to use directly. It preserves the verified claims so another part of the system can decide whether a logged-in workspace member may refresh the link.
-
-**Data flow**: It receives already-verified artifact claims. It turns them into an error message saying the URL is expired, and stores the claims on the exception for later use.
-
-**Call relations**: verify_artifact_url calls this after it has confirmed the signature but finds that the link has expired or lacks a workspace claim. This separates 'real but expired' from 'fake or malformed', which matters for refresh behavior.
-
-*Call graph*: called by 1 (verify_artifact_url).
+*Call graph*: called by 1 (annotate); 3 external calls (loads, Path, exit).
 
 
-##### `artifact_media_type`  (lines 93–105)
+##### `find_quads`  (lines 44–49)
 
 ```
-def artifact_media_type(filename: str) -> str
+def find_quads(page, original_text)
 ```
 
-**Purpose**: Decides what internet media type, also called a MIME type, should be used when serving an artifact. This tells browsers whether a file is a patch, document, spreadsheet, image-like file, or just unknown bytes.
+**Purpose**: This function tries to find where a piece of issue text appears on a PDF page. It returns the PDF text areas that can be highlighted.
 
-**Data flow**: It receives a filename. It first checks the project’s own fixed list for important suffixes, then asks Python’s mimetype database for other names, and returns a safe fallback if the type is unknown or the filename suggests compressed content.
+**Data flow**: It receives one PDF page and the original text from an issue. First it searches using the first 80 characters, which is enough to identify the text without requiring the whole passage. If that fails, it tries again with the first 30 characters as a looser fallback. It returns whatever matching page areas the PDF library finds.
 
-**Call relations**: This function stands on its own as the file’s media-type lookup helper. It uses pathlib to inspect the filename suffix and mimetypes.guess_type for general guesses, but protects the product from relying only on host-specific MIME databases.
+**Call relations**: annotate calls this for each issue after it has chosen the target page. The results tell annotate whether it can create a highlight around real text or must fall back to placing only a sticky note.
 
-*Call graph*: 2 external calls (guess_type, PurePosixPath).
-
-
-##### `mint_artifact_url`  (lines 108–131)
-
-```
-def mint_artifact_url(secret: str, blob_key: str, expires_at: int, *, workspace_id: UUID, preview: ImagePreviewGrant | None=None) -> str
-```
-
-**Purpose**: Builds a signed relative download URL for one artifact blob in one workspace. Someone uses it when they want to give a browser a temporary link that can be checked later without requiring the link itself to reveal a password.
-
-**Data flow**: It receives the signing secret, blob key, expiry time, workspace id, and optionally an image-preview grant. It checks that the secret exists, splits and validates the blob key, encodes any preview claim, signs the workspace, artifact id, expiry, and preview data, then returns a URL path with query parameters containing the grant.
-
-**Call relations**: mint_image_preview_url calls this after deciding an image is eligible for preview. Inside, this function relies on _split_key to prove the blob key is in the artifact namespace, _parsed_preview to confirm any preview claim is valid, _signed_message to build the exact bytes to sign, sign_detached to make the signature, and quote to safely place the filename and preview value into a URL.
-
-*Call graph*: calls 3 internal fn (_parsed_preview, _signed_message, _split_key); called by 1 (mint_image_preview_url); 3 external calls (__init__, sign_detached, quote).
+*Call graph*: called by 1 (annotate).
 
 
-##### `mint_image_preview_url`  (lines 134–162)
+##### `annotate`  (lines 52–98)
 
 ```
-def mint_image_preview_url(secret: str, public_base_url: str | None, blob_key: str, size_bytes: int | None, *, workspace_id: UUID) -> str | None
+def annotate(input_path, output_path)
 ```
 
-**Purpose**: Creates a full public URL for displaying a stored raster image inline, when the file is safe and eligible. Raster means a pixel-based image such as PNG or JPEG.
+**Purpose**: This is the main worker that adds review annotations to a PDF. It connects the saved issue data, the PDF file, the color rules, and the final output file.
 
-**Data flow**: It receives the signing secret, public base URL, blob key, byte size, and workspace id. If required settings are missing, the file is not a supported raster image, the size is missing, or the file is too large, it returns None. Otherwise it calculates an expiry, creates an image-preview grant, asks mint_artifact_url for a signed path, prefixes the public base URL, and returns the absolute URL.
+**Data flow**: It receives an input PDF path and an output PDF path. It loads the issue list, opens the input PDF, and walks through each issue. For each usable issue, it reads the page number, severity, original text, and formatted comment; then it searches for the text, adds a colored highlight if found, adds a colored sticky note, and counts the annotation. At the end it saves the changed document to the output path, closes the PDF, and prints a summary.
 
-**Call relations**: This is the high-level helper for preview links. It asks raster_image_media_type what kind of image the blob key names, asks artifact_url_expiry for a cache-friendly expiry time, constructs an ImagePreviewGrant, and hands the actual signing work to mint_artifact_url.
+**Call relations**: This function is called by the script’s command-line entry block after the user supplies the input and output filenames. Inside its flow, it calls load_issues to get review data, find_quads to locate text on a page, and format_comment to turn an issue into readable note text. It also uses PyMuPDF, imported as fitz, to open the PDF and create the actual highlights and notes.
 
-*Call graph*: calls 2 internal fn (artifact_url_expiry, mint_artifact_url); 3 external calls (__init__, now, raster_image_media_type).
-
-
-##### `verify_artifact_url`  (lines 165–206)
-
-```
-def verify_artifact_url(secret: str, artifact_id: str, filename: str, expires_at: str, signature: str, preview: str, workspace: str, now: datetime) -> ArtifactClaims
-```
-
-**Purpose**: Checks whether an incoming artifact URL is valid and returns the permissions it proves. It rejects malformed, tampered, wrongly scoped, or expired links so the download route can avoid serving unsafe bytes.
-
-**Data flow**: It receives the secret, URL pieces such as artifact id, filename, expiry, signature, preview claim, workspace id, and the current time. It validates the id, filename, expiry, workspace id, and preview text; rebuilds the signed message; verifies the signature; constructs ArtifactClaims for the blob being requested; then either returns those claims or raises an error if the URL is expired or not directly servable.
-
-**Call relations**: This is the counterpart to mint_artifact_url. It uses _is_canonical_uuid and _is_filename to reject suspicious path pieces, _parsed_preview to understand preview permissions, _signed_message to recreate exactly what should have been signed, and verify_detached to check the signature. If the link is authentic but expired or missing a workspace claim, it raises ArtifactUrlExpired with the claims instead of treating it like a forged URL.
-
-*Call graph*: calls 5 internal fn (__init__, _is_canonical_uuid, _is_filename, _parsed_preview, _signed_message); 5 external calls (__init__, __init__, timestamp, verify_detached, UUID).
+*Call graph*: calls 2 internal fn (find_quads, load_issues); 4 external calls (Point, Rect, open, format_comment).
 
 
-##### `_signed_message`  (lines 209–211)
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/annotate_pptx.py`
 
-```
-def _signed_message(workspace: str, artifact_id: str, expires_at: str, preview_value: str) -> bytes
-```
+`entrypoint` · `post-review export/annotation`
 
-**Purpose**: Builds the exact byte string that gets signed and later verified. This matters because signing only works if both sides agree on precisely the same message.
+A PPTX file is really a zip package full of XML files. PowerPoint comments are not added by editing one simple text field; they require several linked XML parts: the comment text, the comment author, the slide-to-comment links, and the package content-type list. This file does that packaging work so review issues can appear inside PowerPoint itself, rather than only in a separate report.
 
-**Data flow**: It receives the workspace text, artifact id, expiry text, and preview text. It joins them in a fixed order, including the workspace prefix when present, encodes the result as bytes, and returns those bytes.
+The script starts by reading document_review_state.json, which is the saved review result. Each issue is expected to have a location that can be read as a slide number. The issues are grouped by slide, like sorting sticky notes into piles for slide 1, slide 2, and so on.
 
-**Call relations**: mint_artifact_url uses this before creating a signature, and verify_artifact_url uses it before checking one. It is the shared recipe that keeps minting and verification in sync.
+To edit the PPTX safely, the script copies the input file to the requested output file, unzips that output into a temporary folder, writes the needed comment XML files, updates the relationship files that tell PowerPoint where those comments live, updates the content-types file so PowerPoint recognizes the new parts, and then zips everything back into a PPTX. Finally, it deletes the temporary folder.
 
-*Call graph*: called by 2 (mint_artifact_url, verify_artifact_url).
-
-
-##### `_parsed_preview`  (lines 214–225)
-
-```
-def _parsed_preview(value: str) -> ImagePreviewGrant | None
-```
-
-**Purpose**: Turns a preview claim from URL text into a structured image-preview grant, but only if the claim is safe and allowed. It prevents a URL from falsely claiming that arbitrary bytes should be rendered inline as an image.
-
-**Data flow**: It receives a string such as a media type plus byte size. It splits out the media type and size, checks that the media type is one of the allowed raster image types, checks that the size is numeric and within the maximum preview size, and returns an ImagePreviewGrant. If any check fails, it returns None.
-
-**Call relations**: mint_artifact_url uses this as a self-check before signing a preview claim. verify_artifact_url uses it when reading an incoming preview parameter, so only the same allowed preview format can pass verification.
-
-*Call graph*: called by 2 (mint_artifact_url, verify_artifact_url); 3 external calls (__init__, cast, values).
-
-
-##### `_split_key`  (lines 228–237)
-
-```
-def _split_key(blob_key: str) -> tuple[str, str]
-```
-
-**Purpose**: Checks and splits a stored artifact blob key into its artifact id and filename. It makes sure signed URLs can only point inside the intended artifact storage area.
-
-**Data flow**: It receives a blob key string. It removes the required artifact prefix, separates the id from the filename, checks that the id is a canonical UUID and the filename is a simple single path segment, and returns the two pieces. If the key is not a valid artifact address, it raises an ArtifactUrlError.
-
-**Call relations**: mint_artifact_url calls this before signing any link. It delegates the id check to _is_canonical_uuid and the filename check to _is_filename, so malformed or path-traversal-like blob keys never become downloadable URLs.
-
-*Call graph*: calls 2 internal fn (_is_canonical_uuid, _is_filename); called by 1 (mint_artifact_url); 1 external calls (__init__).
-
-
-##### `_is_canonical_uuid`  (lines 240–244)
-
-```
-def _is_canonical_uuid(value: str) -> bool
-```
-
-**Purpose**: Checks whether a string is a UUID in the project’s exact normal form. A UUID is a standard unique identifier, and the canonical check prevents alternate spellings from being treated as equivalent in signed data.
-
-**Data flow**: It receives a string. It tries to parse it as a UUID, converts it back to the standard string form, and returns true only if that standard form exactly matches the original input. If parsing fails, it returns false.
-
-**Call relations**: _split_key uses this when minting URLs from blob keys, and verify_artifact_url uses it when checking incoming artifact and workspace ids. This keeps both creation and verification strict about identifier format.
-
-*Call graph*: called by 2 (_split_key, verify_artifact_url); 1 external calls (UUID).
-
-
-##### `_is_filename`  (lines 247–248)
-
-```
-def _is_filename(value: str) -> bool
-```
-
-**Purpose**: Checks whether a filename is a safe single filename rather than a path. It prevents names like empty strings, '.', '..', or names containing slashes from being used to escape the artifact’s folder.
-
-**Data flow**: It receives a filename string. It returns true only when the value is not empty, does not contain '/', and is not one of the special directory markers '.' or '..'.
-
-**Call relations**: _split_key uses this before minting a URL, and verify_artifact_url uses it before accepting a requested filename. This keeps the artifact id as the only directory-like part of the URL and stops the filename from changing where the system looks for bytes.
-
-*Call graph*: called by 2 (_split_key, verify_artifact_url).
-
-
-### External sign-in completion
-External account connection flows return through web endpoints and callback pages, including the Anthropic credential-linking implementation.
-
-### `core/src/ufo/runtime/surfaces/cli.py`
-
-`io_transport` · `request handling`
-
-This file is the public landing spot for an OAuth callback. OAuth is the common “sign in or connect this account through another service” flow: the outside provider sends the browser back with a short code, and this endpoint turns that code into a finished connection. The browser is not carrying a normal logged-in session here. Instead, it carries a sealed state value, like a tamper-proof claim ticket, which says which member, agent, and conversation started the connection.
-
-The main route, `connect_callback`, checks that the provider sent both the sealed state and the code. It asks the installed connection system to finish the flow. If the connection system is unavailable, the state is bad, or the provider is unknown, it returns a clear HTTP error. If everything works, it shows a simple HTML page saying the account is connected. If the original conversation was resumed, the page says the conversation continues; otherwise it tells the member they can close the page.
-
-The second route, `connect_logo`, serves the SVG logo used by that page. This matters because the callback page may be reached without the normal frontend app loaded, so it needs a stable logo URL from the backend itself.
+The important thing to know is that this script works directly with PowerPoint’s internal file format. If any of the relationship or content-type entries were missing, the comment files might exist inside the PPTX but PowerPoint would not know how to find or display them.
 
 #### Function details
 
-##### `connect_callback`  (lines 38–64)
+##### `load_issues`  (lines 49–59)
 
 ```
-async def connect_callback(state: str='', code: str='') -> HTMLResponse
+def load_issues() -> list[DocumentIssue]
 ```
 
-**Purpose**: This is the browser return endpoint for completing an account connection after an external provider redirects back. It verifies that the return contains the needed proof, finishes the connection, and shows a final “connected” page.
+**Purpose**: This function reads the saved document review results and pulls out the issues that should become PowerPoint comments. It stops the script with a clear error if the review state file is missing, because there would be nothing reliable to annotate.
 
-**Data flow**: The browser sends in a `state` value and a `code` value. The function first asks for the installed connection flow; if that system is unavailable, it turns that into a service-unavailable web error. It then rejects missing inputs, asks the flow to complete the connection, translates bad state or unknown provider problems into web errors, and finally builds a short success page naming the connected provider and account. The output is an HTML response shown in the member’s browser.
+**Data flow**: It looks for the configured state filename in the current working directory. If the file exists, it reads the JSON text, parses it into normal Python data, and returns the issue records from the state. If the file does not exist, it prints an error message and exits instead of continuing with bad or missing input.
 
-**Call relations**: FastAPI runs this function when a request reaches the connect callback URL. The function relies on `installed_connect_flow` to find the connection machinery, uses web exceptions to stop the request with the right error when something is wrong, and hands the final success message to `callback_page` so all return pages look and behave the same.
+**Call relations**: The main annotate flow calls this first. The issues it returns are then passed into group_by_slide so the rest of the script can create comments on the correct slides.
 
-*Call graph*: 3 external calls (HTTPException, installed_connect_flow, callback_page).
+*Call graph*: called by 1 (annotate); 3 external calls (loads, Path, exit).
 
 
-##### `connect_logo`  (lines 68–76)
+##### `group_by_slide`  (lines 62–71)
 
 ```
-async def connect_logo() -> Response
+def group_by_slide(issues: list[DocumentIssue]) -> dict[int, list[DocumentIssue]]
 ```
 
-**Purpose**: This serves the UFO logo image used by the connection callback page. It gives the callback page a dependable logo even when the normal frontend application is not available.
+**Purpose**: This function sorts review issues by the slide they belong to. It lets the script create one comment file per slide instead of treating all comments as one mixed pile.
 
-**Data flow**: A browser asks for the logo URL. The function reads the SVG file stored next to this backend code, wraps those bytes in a web response, marks it as an SVG image, and adds a long-lived cache header so browsers can safely keep it. The output is the logo image response.
+**Data flow**: It receives a list of issue records. For each issue, it tries to read the issue's location as a slide number. If that works, the issue is added to a dictionary under that slide number; if the location is missing or not a number, that issue is skipped. The result is a slide-number-to-issues map.
 
-**Call relations**: FastAPI runs this function when the logo URL is requested, usually by the callback page in the browser. It hands the file contents to FastAPI’s `Response` object, which turns the bytes and headers into the actual HTTP response sent back to the browser.
+**Call relations**: annotate calls this after loading the issues. Its grouped output is used by write_slide_comments to create the slide comment files and by write_author_and_rels to register those comment files in the PPTX package.
 
-*Call graph*: 1 external calls (Response).
+*Call graph*: called by 1 (annotate).
 
 
-### `core/src/ufo/sdk/callback_page.py`
+##### `find_max_rel_id`  (lines 74–86)
 
-`io_transport` · `request handling`
+```
+def find_max_rel_id(rels_path: Path) -> int
+```
 
-When someone starts a connection from Slack, a command line tool, or an install link, they may end up in a browser page after approving something with another provider. At that moment, the system may not have a normal signed-in web session for them. This file creates a simple, self-contained “you are done” page that only says what just happened and what the person should do next.
+**Purpose**: This function finds the largest relationship ID already used in a PowerPoint relationship file. That matters because any new link added to the PPTX needs a fresh ID that does not collide with an existing one.
 
-The page is deliberately tiny. It uses the browser’s built-in light or dark color theme, fetches only the product logo, and avoids extra fonts or styling. That matters because this page may be opened on a phone, from a chat link, and should load quickly.
+**Data flow**: It receives the path to a .rels file, which is an XML file listing links between parts of the PPTX package. If the file is missing, it returns 0. Otherwise it reads the XML, looks at each relationship's Id value, extracts the number from values like rId3, and returns the highest number it finds.
 
-The file defines a reusable page template, a small PageLink data object for “go back here” buttons, and the callback_page function that fills in the template. The function safely escapes all user-facing text before placing it into HTML, which helps prevent accidental or malicious HTML from being inserted into the page. It can add a link back to a conversation, add a short detail message, return a non-200 HTTP status if needed, and optionally include a script that asks the browser to close the tab after a short delay. Since browsers often refuse to close tabs they did not open by script, the link is the reliable fallback.
+**Call relations**: add_relationship calls this right before adding a new relationship. It uses the returned number to choose the next available rId value for the new link.
+
+*Call graph*: called by 1 (add_relationship); 3 external calls (exists, search, parse).
+
+
+##### `add_relationship`  (lines 89–116)
+
+```
+def add_relationship(rels_path: Path, rel_type: str, target: str) -> None
+```
+
+**Purpose**: This function adds a link inside a PPTX relationship file, creating the file if needed. These links are how PowerPoint knows that a slide has a comment file, or that the presentation has a comment author file.
+
+**Data flow**: It receives a relationship-file path, a relationship type, and a target path. It reads the existing XML or creates a new relationship list if the file does not exist. If a relationship of the same type is already present, it leaves the file unchanged. Otherwise it finds the next available rId, adds a new XML relationship entry, and writes the file back to disk.
+
+**Call relations**: write_slide_comments calls this to connect each slide to its comment XML file. write_author_and_rels calls it to connect the overall presentation to the comment author file. It relies on find_max_rel_id to avoid reusing an existing relationship ID.
+
+*Call graph*: calls 1 internal fn (find_max_rel_id); called by 2 (write_author_and_rels, write_slide_comments); 6 external calls (exists, Element, ElementTree, SubElement, parse, register_namespace).
+
+
+##### `write_slide_comments`  (lines 119–162)
+
+```
+def write_slide_comments(tmp: Path, grouped: dict[int, list[DocumentIssue]]) -> int
+```
+
+**Purpose**: This function creates the actual PowerPoint comment files for each slide that has review issues. It turns each issue into comment text and attaches that comment file to the matching slide.
+
+**Data flow**: It receives the temporary unpacked PPTX folder and the issues grouped by slide. For each slide, it creates an XML comment list, gives each comment an author, timestamp, unique index, fixed position, and formatted text, then writes that XML as ppt/comments/commentN.xml. It also updates the slide's relationship file so PowerPoint can find that comment file. It returns the total number of comments written.
+
+**Call relations**: annotate calls this after unpacking the copied PPTX. For each slide it delegates relationship editing to add_relationship, and it uses format_comment from the models module to turn a review issue into readable comment text. Its comment count is later passed to write_author_and_rels so the author metadata knows the last comment index.
+
+*Call graph*: calls 1 internal fn (add_relationship); called by 1 (annotate); 5 external calls (now, format_comment, Element, ElementTree, SubElement).
+
+
+##### `write_author_and_rels`  (lines 165–219)
+
+```
+def write_author_and_rels(tmp: Path, comment_idx: int, grouped: dict[int, list[DocumentIssue]]) -> None
+```
+
+**Purpose**: This function writes the shared metadata that makes the new comments valid PowerPoint comments. It records who the comment author is, links that author file into the presentation, and updates the PPTX content list so PowerPoint recognizes all new comment-related files.
+
+**Data flow**: It receives the temporary unpacked PPTX folder, the total number of comments, and the slide grouping. It writes ppt/commentAuthors.xml with a single author named Flying Object. It adds a presentation relationship pointing to that author file. Then it opens [Content_Types].xml and adds entries for the author file and each slide comment file that is not already listed, before saving the XML back to disk.
+
+**Call relations**: annotate calls this after write_slide_comments has created the per-slide comment files. It uses add_relationship for the presentation-level link, and it completes the package bookkeeping needed for PowerPoint to load the comments correctly.
+
+*Call graph*: calls 1 internal fn (add_relationship); called by 1 (annotate); 5 external calls (Element, ElementTree, SubElement, parse, register_namespace).
+
+
+##### `annotate`  (lines 222–251)
+
+```
+def annotate(input_path: str, output_path: str) -> None
+```
+
+**Purpose**: This is the main work function for the script. It takes an input PPTX and an output PPTX path, then builds the output file with review comments inserted.
+
+**Data flow**: It starts by loading review issues. If there are none, it prints a message and stops. Otherwise it groups them by slide, copies the input PPTX to the output path, unpacks the output into a temporary folder, writes slide comment files, writes author and content-type metadata, then zips the folder contents back into the output PPTX. Whether the process succeeds or fails, it removes the temporary folder at the end.
+
+**Call relations**: The command-line block calls this when the script is run with an input and output filename. It coordinates the whole flow: load_issues supplies the raw review findings, group_by_slide organizes them, write_slide_comments creates the visible comments, and write_author_and_rels adds the package metadata that lets PowerPoint display them.
+
+*Call graph*: calls 4 internal fn (group_by_slide, load_issues, write_author_and_rels, write_slide_comments); 6 external calls (walk, Path, copy2, rmtree, mkdtemp, ZipFile).
+
+
+### `extensions/documents/ufo_ext_documents/skills/document-review/scripts/annotate_xlsx.py`
+
+`entrypoint` · `post-review annotation`
+
+This file is a small command-line tool for marking up an Excel workbook after a document review has found problems. It reads a saved review state file, `document_review_state.json`, then writes those issues into a copy of the spreadsheet as Excel comments. Without this script, the review findings would stay outside the spreadsheet, making it harder for a person to connect each issue to the exact cell or sheet it concerns.
+
+The script works like someone placing sticky notes onto a printed spreadsheet. First it loads the list of issues. Then it copies the original workbook to the requested output path, so the input file is not changed. For each issue, it builds readable comment text using `format_comment`, creates an Excel comment with the author name “Flying Object,” and tries to put that comment in the best possible place.
+
+It prefers an exact sheet and cell reference if the issue provides them. If that fails, it searches the named worksheet for the original text. If that also fails, it searches every worksheet. As a last resort, it puts the comment on cell A1 of the first worksheet, adding multiple fallback comments together if needed. Finally it saves the annotated workbook.
 
 #### Function details
 
-##### `callback_page`  (lines 70–90)
+##### `load_issues`  (lines 25–35)
 
 ```
-def callback_page(*, headline: str, detail: str='', link: PageLink | None=None, status: int=200, close: bool=False) -> HTMLResponse
+def load_issues()
 ```
 
-**Purpose**: This function creates the final HTML response shown after a browser-based callback or install step. Callers use it to tell the person what happened, optionally show a return link, and optionally try to close the browser tab.
+**Purpose**: This function reads the saved document review results from `document_review_state.json`. It gives the rest of the script a simple list of issues to turn into Excel comments.
 
-**Data flow**: It receives a headline, an optional detail line, an optional PageLink with button text and a destination URL, an HTTP status code, and a flag saying whether to try closing the tab. It escapes the visible text and URL so they are treated as plain content rather than executable page markup, inserts the safe values into the prepared HTML template, adds link styling only when a link exists, adds the close script only when requested, and returns an HTMLResponse with the finished page and status code.
+**Data flow**: It starts with the expected state filename from the shared constants. It checks whether that file exists; if not, it prints an error and stops the program. If the file is present, it reads the JSON text, extracts the `issues` section, and returns those issue records as a list.
 
-**Call relations**: A callback or install route calls this function when it needs to answer the browser at the end of an external flow. Inside, it relies on html.escape to make the inserted text safe for a web page, then hands the completed HTML to ufo.sdk.http.HTMLResponse so the web layer can send it back to the browser.
+**Call relations**: The main `annotate` function calls this first, before opening the spreadsheet. `load_issues` depends on the JSON parser to turn stored text into Python data, and it stops the whole script early if the needed review state file is missing.
 
-*Call graph*: 2 external calls (escape, HTMLResponse).
+*Call graph*: called by 1 (annotate); 3 external calls (loads, Path, exit).
 
 
-### `extensions/web/ufo_ext_web/anthropic_login.py`
-
-`domain_logic` · `credential sign-in and verification`
-
-This file is the bridge between this web app and Anthropic sign-in. Its job is to make sure a member can prove they have a usable Anthropic credential before that credential is saved for their account. Without it, the app could not safely accept a pasted Anthropic code or API key, and users might store broken or fake credentials.
-
-There are two main paths. If the deployment has an Anthropic OAuth client ID, `AnthropicCodeLogin` creates a special Anthropic authorization link. The user opens that link, signs in with Anthropic, and Anthropic shows them a code. Because Anthropic displays the code on its own page instead of redirecting back to this app, the user acts like the courier: they paste the code back into this system.
-
-The file also protects the exchange with a verifier, which is like a matching ticket stub kept in the browser. When the pasted code comes back, the verifier must match before the app asks Anthropic to trade the code for an access token.
-
-For either OAuth access tokens or plain API keys, `verified_key` performs a practical test: it asks Anthropic for the list of available models. If Anthropic answers successfully, the credential is considered real enough to store. If the network fails or Anthropic rejects it, the credential is refused.
-
-#### Function details
-
-##### `AnthropicCodeLogin.authorize`  (lines 73–96)
+##### `find_cell`  (lines 38–47)
 
 ```
-def authorize(self) -> PendingAuthorization
+def find_cell(ws, text)
 ```
 
-**Purpose**: Starts the Anthropic OAuth sign-in journey. It creates a secure verifier, builds the Anthropic authorization URL, and returns both the URL the user should visit and the browser cookie value needed to finish the flow later.
+**Purpose**: This function searches one worksheet for the first cell whose text contains a given piece of original review text. It is used when the script does not have, or cannot use, an exact cell address.
 
-**Data flow**: It starts with the configured Anthropic client ID, authorization address, and redirect address. It creates a random verifier, turns that into a matching challenge, places the required OAuth details into a URL query string, and returns a `PendingAuthorization` containing the finished link plus the verifier to keep in the user's browser. Nothing is sent to Anthropic yet; this only prepares the trip.
+**Data flow**: It receives a worksheet and some target text. It lowercases and trims the target, then looks through every cell in every row. Empty cells are skipped. When a cell’s visible value contains the target text, that cell is returned; if no match is found, the result is `None`.
 
-**Call relations**: This is used at the beginning of the Anthropic code sign-in flow. It relies on standard library helpers to create safe random bytes, encode them for URLs, hash the verifier into a challenge, and build the final query string. The result is handed back to the web layer so the member can be sent to Anthropic and the verifier can be saved for the later claim step.
+**Call relations**: The `annotate` function calls this after trying more precise placement options. It is the script’s backup way to connect an issue to the likely cell by matching the issue’s original text against spreadsheet contents.
 
-*Call graph*: 5 external calls (__init__, urlsafe_b64encode, sha256, token_bytes, urlencode).
-
-
-##### `AnthropicCodeLogin.claim`  (lines 98–132)
-
-```
-async def claim(self, pasted: str, verifier: str) -> Grant | None
-```
-
-**Purpose**: Finishes the Anthropic OAuth sign-in journey after the user pastes back the code. It checks that the pasted information matches the browser's saved verifier, then asks Anthropic to exchange the code for an access token.
-
-**Data flow**: It receives the user's pasted text and the verifier saved from the earlier authorization step. It first extracts the code and optional state from the pasted text, rejects missing or mismatched values, then sends a token request to Anthropic. If Anthropic responds successfully and the response can be turned into a `Grant`, it returns that grant; otherwise it returns `None` and nothing is accepted.
-
-**Call relations**: This function runs after `AnthropicCodeLogin.authorize` has created the sign-in link and cookie verifier. It calls `_split_pasted` because Anthropic may give the user a bare code, a `code#state` pair, or a full URL. It then uses an HTTP client to contact Anthropic's token endpoint and passes the successful JSON response to `ufo.sdk.models.granted`, which turns Anthropic's answer into the system's grant object.
-
-*Call graph*: calls 1 internal fn (_split_pasted); 4 external calls (AsyncClient, dumps, compare_digest, granted).
+*Call graph*: called by 1 (annotate).
 
 
-##### `_split_pasted`  (lines 135–147)
+##### `find_worksheet`  (lines 50–55)
 
 ```
-def _split_pasted(pasted: str) -> tuple[str, str | None]
+def find_worksheet(wb, location)
 ```
 
-**Purpose**: Understands the different ways Anthropic might show the user their authorization code. It accepts a full callback URL, a `code#state` pair, or just a plain code, and pulls out the parts the app needs.
+**Purpose**: This function looks up a worksheet by name without caring about uppercase or lowercase differences. It helps the script use an issue’s recorded location even if the capitalization does not exactly match the workbook.
 
-**Data flow**: It receives the raw text the user pasted. It trims extra spaces, then checks its shape: if it looks like a URL, it reads `code` and `state` from the URL query or fragment; if it contains `#`, it treats the text before `#` as the code and the text after it as the state; otherwise it treats the whole text as the code. It returns the code plus either the state or `None`.
+**Data flow**: It receives an open workbook and a location name. It compares that name with each worksheet title in lowercase form. If it finds a matching sheet, it returns that worksheet; otherwise it returns `None`.
 
-**Call relations**: This is a small helper used by `AnthropicCodeLogin.claim` before any token exchange happens. Its role is to make the user-facing paste step forgiving, so the rest of the claim logic can work with one simple pair of values instead of several possible input formats.
+**Call relations**: The `annotate` function calls this when an issue includes a sheet-like location. If it finds the right worksheet, later steps can try to place the comment by exact cell anchor or by searching only that sheet first.
 
-*Call graph*: called by 1 (claim); 2 external calls (parse_qs, urlsplit).
+*Call graph*: called by 1 (annotate).
 
 
-##### `verified_key`  (lines 150–164)
+##### `_place_on_cell`  (lines 58–65)
 
 ```
-async def verified_key(credential: str) -> bool
+def _place_on_cell(ws, anchor, comment)
 ```
 
-**Purpose**: Checks whether an Anthropic credential really works before the system stores it. It does this by making a simple authenticated request to Anthropic and accepting the credential only if Anthropic replies successfully.
+**Purpose**: This helper tries to attach a comment directly to a specific cell reference, such as `B12`. It exists because a recorded anchor may be invalid, so the attempt needs to fail safely instead of crashing the whole script.
 
-**Data flow**: It receives a credential string. If the string looks like an Anthropic OAuth access token, it sends it as a bearer token with Anthropic's OAuth beta header; otherwise it sends it as an API key. It asks Anthropic's models endpoint for a response. If the request succeeds with HTTP status 200, it returns `true`; if Anthropic rejects it or the network call fails, it returns `false`.
+**Data flow**: It receives a worksheet, a cell reference, and a prepared comment. It asks the worksheet for that cell and assigns the comment to it. If the reference is not usable, it catches the error and returns `False`; if placement succeeds, it returns `True`.
 
-**Call relations**: This function is used after a user provides or obtains a credential, before that value is saved in the member's credential slot. It talks directly to Anthropic over HTTP and does not call the OAuth claim flow itself; instead, it acts as the final gatekeeper for both OAuth tokens and manually created API keys.
+**Call relations**: The `annotate` function calls this when an issue has both a target worksheet and an anchor cell. If this succeeds, no further searching is needed for that issue. If it fails, `annotate` falls back to text-based searching.
 
-*Call graph*: 1 external calls (AsyncClient).
+*Call graph*: called by 1 (annotate).
+
+
+##### `annotate`  (lines 68–122)
+
+```
+def annotate(input_path, output_path)
+```
+
+**Purpose**: This is the main work function for the script. It creates an annotated copy of an Excel file by adding one comment for each document-review issue.
+
+**Data flow**: It receives an input workbook path and an output workbook path. It loads the review issues, copies the input file to the output location, opens that output workbook, and then processes each issue. For every issue, it formats the issue as comment text, chooses the best cell it can find, attaches the comment, and counts it. At the end it saves the workbook and prints how many comments were added.
+
+**Call relations**: This function is called by the command-line block when the script is run with an input and output filename. It coordinates the smaller helpers: `load_issues` supplies the issue list, `find_worksheet` locates a named sheet, `_place_on_cell` tries an exact cell, and `find_cell` searches by text when exact placement is not possible. It also uses OpenPyXL, the Excel-reading library, to open the workbook and create comments.
+
+*Call graph*: calls 4 internal fn (_place_on_cell, find_cell, find_worksheet, load_issues); 4 external calls (format_comment, Comment, load_workbook, copy2).

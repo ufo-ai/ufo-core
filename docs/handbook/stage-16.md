@@ -1,1519 +1,1288 @@
-# Durable Data, Blob Storage, and Persistence Contracts  `stage-16` (cross-cutting infrastructure)
+# Scheduled, recurring, and long-running background work  `stage-16`
 
-This stage is the system’s long-term memory. It is shared behind-the-scenes support used during startup, normal request handling, agent turns, background jobs, and shutdown. Its job is to make sure data is saved in forms that other parts of the system can safely read later.
+This stage is the system’s background crew. It runs during normal operation, after startup, and keeps working even when no person is actively clicking. Its timer and monitor parts act like alarm clocks and watchmen: they fire scheduled conversations, resume paused work when a deadline passes, and poll outside signals until something changes.
 
-The database side is centered on tables.py, which defines the application’s tables and rules for SQLAlchemy, a library that maps Python objects to database rows. db.py is the safe doorway into that database, making sure each operation is tied to the correct workspace so different customers or projects do not get mixed together. records.py defines the agreed shapes of important events and messages, such as agent turns, user questions, terminal results, and credential requests. transcript.py does the same for saved conversations and summaries.
+The self-improvement and objective parts keep longer efforts on track. Objective tools record plans, steps, evidence, and blockers so progress is based on real state, not guesses. The self-improvement loop studies past failures, proposes prompt changes, tests them on old cases, and only offers safer improvements for human approval.
 
-Large files are handled by blob.py, which hides whether bytes are stored on a local disk or in S3-style cloud storage, while keeping workspace files separate from deployment-wide files. durability.py protects saved workflow data from code changes. schema/__init__.py simply makes the schema folder importable.
+The runtime files provide the machinery that makes all this safe. candidates.py finds which workspaces may have pending work without breaking workspace boundaries. jobs.py turns job definitions into scheduled runs and prevents runaway piles of work. runtime_instance.py records which server processes are alive and cleans up work left stuck by crashes. product.py reports product usage metrics. The report digest files summarize scheduled reports into short feed entries and avoid reprocessing reports with no useful changes.
+
+## Sub-stages
+
+- [Timers, pauses, monitors, and scheduled turns](stage-16.1.md) `stage-16.1` — 13 files
+- [Self-improvement and objective maintenance](stage-16.2.md) `stage-16.2` — 10 files
 
 ## Files in this stage
 
-### Conversation Storage Contracts
-Defines the durable transcript and compaction formats that all conversation readers and writers share.
+### Workspace metrics and selection
+These files report workspace product-state metrics and provide the safe cross-workspace discovery pattern used by background jobs.
 
-### `core/src/ufo/runtime/turns/transcript.py`
+### `core/src/ufo/product.py`
 
-`data_model` · `cross-cutting: used when turns save transcripts, when compactions are written, and when debug or evaluation tools read them back`
+`domain_logic` · `scheduled metrics tick`
 
-A running agent conversation can be long, and different parts of the system need to save and later inspect it: the turn loop writes it, debugging tools show it, and evaluation tools replay or grade it. This file is the common agreement between those parts. Think of it like a labeled filing system: it says which drawer a transcript goes in, what the papers inside must look like, and how they are packed for storage.
+This file exists so the product team can understand adoption without storing separate “funnel event” records. Instead of remembering every moment when a workspace became invited, active, paid, or connected, it looks at the database as it is now and re-computes the answer on a regular tick. That is useful because if the meaning of a funnel stage changes later, the metric can be re-derived from the real source data.
 
-The main transcript record is `Conversation`. It stores the message window for a conversation, plus optional details about the system prompt and extra context that were actually shown to the model. That matters because a debug view needs to show the full model input, not only the visible chat messages.
+The main idea is a census. For the workspace currently bound to the running task, the file asks: does this workspace have a seated member, a connector grant, an invited member, a user-made app, a member chat, recent activity, or a paid purchase? Each answer becomes a 0-or-1 metric for that workspace on this tick.
 
-The file also defines compaction records. Compaction is when an older, bulky part of a conversation is summarized so the model can keep working within its context limit. The code stores the window before compaction, the window after compaction, and a structured summary. It also records verification details, such as facts that must not be lost.
+It also reports what the workspace has attached. These are grouped by a simple kind and name: installed surfaces, proved addresses, non-member credentials, connector providers, and provisioned app names. For example, this lets the fleet count things like Slack or GitHub without hard-coding those names here.
 
-All stored blobs are JSON compressed with LZ4, a fast compression format. If bytes cannot be decompressed or no longer match the expected shape, the file raises `TranscriptDecodeError` so callers know the saved data is unusable rather than quietly wrong.
+A key safety detail is that every database query explicitly includes the workspace ID. It does not rely only on row-level security, which is a database guardrail that hides rows from the wrong workspace. If this code counted rows under the wrong workspace, the metrics would be multiplied instead of obviously failing.
 
 #### Function details
 
-##### `transcript_key`  (lines 42–43)
+##### `product_census`  (lines 50–152)
 
 ```
-def transcript_key(conversation_id: UUID) -> str
+async def product_census() -> None
 ```
 
-**Purpose**: Builds the storage path for a conversation's saved transcript. Callers use it so every part of the system looks in the same place for the same conversation.
+**Purpose**: This function takes one census of the currently bound workspace. It checks which product funnel stages the workspace has reached, finds what it has attached, and emits metrics that the monitoring system can add up across the fleet.
 
-**Data flow**: It receives a conversation ID. It places that ID into a fixed path pattern ending in `messages.json.lz4`. The result is a string key that can be used with the blob store.
+**Data flow**: It starts with the current workspace ID and the current time. It builds database questions that return yes-or-no answers for funnel stages, such as whether the workspace has invited members, recent member chats, connector grants, or paid purchases. It also builds one combined database question for attached items, such as surfaces, proved addresses, credentials, connectors, and apps. Inside a workspace database transaction, it runs those questions. The stage answers come back as booleans and are turned into 1 or 0 metric values. The attached items come back as kind/name pairs and are emitted as attachment metrics. The function does not store new rows; its visible output is the metrics it sends.
 
-**Call relations**: This is the shared naming rule for transcript blobs. Writers and readers can use this same rule to avoid inventing different paths for the same saved conversation.
+**Call relations**: This function is meant to be run by the product census scheduled job for each workspace. Inside the function, it uses the current workspace binding to know which workspace to inspect, uses SQLAlchemy query builders to describe the database checks, opens a workspace transaction with `ufo.db.workspace_tx`, and then hands the final numbers to `emit_metric` so the observability system can record them.
+
+*Call graph*: 10 external calls (now, timedelta, and_, exists, literal, select, union_all, workspace_tx, emit_metric, ws_current).
 
 
-##### `encode`  (lines 46–48)
+### `core/src/ufo/runtime/candidates.py`
+
+`domain_logic` · `main loop`
+
+This file solves a careful security problem: a job scheduler needs to know which workspaces need attention, but it must not freely read tenant data across all workspaces. In this project, workspace data is normally protected by RLS, or row-level security, which means the database only shows rows belonging to the current workspace. The one exception here is a narrow “candidate” read: it may bypass that protection only to ask, “Which workspace IDs have pending work?” It must not return the actual work data.
+
+The main idea is like checking mailbox labels in an apartment building. The scheduler may walk the hallway and note which apartment numbers have mail, but it cannot open anyone’s mail there. Later, it goes to each apartment under the proper rules.
+
+Extensions provide a small query builder that selects distinct workspace IDs from their own tables. The builder is called fresh each time the scheduler checks, so time-based rules such as “due before now” use the current time instead of an old frozen timestamp. The core code then runs that query through `owner_tx`, the special cross-workspace database path, extracts only the first column from each row, and returns those workspace IDs. The dispatcher later binds each ID with the normal workspace scope before running any job handler.
+
+#### Function details
+
+##### `owner_candidates`  (lines 27–40)
 
 ```
-def encode(conversation: Conversation) -> bytes
+def owner_candidates(due: Callable[[], sa.Select[tuple[UUID]]]) -> WorkspaceCandidates
 ```
 
-**Purpose**: Turns a `Conversation` object into compressed bytes ready to store. This keeps saved transcripts compact while preserving the exact structured fields readers expect.
+**Purpose**: This function turns a workspace-ID query builder into a callable that the scheduler can use to ask, “Which workspaces have pending work right now?” It keeps extensions away from the privileged cross-workspace database connection while still letting them describe where their work is.
 
-**Data flow**: It takes a validated conversation record. It first converts that record into plain data, then serializes it as JSON, meaning a text-based data format, and finally compresses the JSON with LZ4. The output is a bytes object suitable for the blob store.
+**Data flow**: It receives `due`, a no-argument function that builds a database `Select` query returning one column: workspace IDs. It wraps that builder in an async inner function. The result is a `WorkspaceCandidates` callable that, when run later, will execute the freshly built query and return the workspace IDs as a tuple.
 
-**Call relations**: This is the write-side companion to `decode`. Transcript-writing code can call it before saving, and later readers can reverse the process with `decode`.
-
-*Call graph*: 2 external calls (model_dump, dumps).
+**Call relations**: This is the public seam used when an extension declares how to find its pending work. It does not run the query immediately; it prepares `owner_candidates.candidates`, which the dispatcher or scheduler can call on each tick before binding and running work inside each returned workspace.
 
 
-##### `decode`  (lines 51–55)
+##### `owner_candidates.candidates`  (lines 35–38)
 
 ```
-def decode(body: bytes) -> Conversation
+async def candidates() -> tuple[UUID, ...]
 ```
 
-**Purpose**: Reads compressed transcript bytes back into a validated `Conversation`. It protects callers from corrupt or outdated stored data by raising a clear transcript-specific error.
+**Purpose**: This inner async function actually performs the privileged candidate read. It asks the database for workspace IDs only, not tenant row contents, and returns them to the scheduler.
 
-**Data flow**: It receives raw bytes from storage. It decompresses them, interprets the result as JSON, and checks that the data matches the `Conversation` shape. If that works, it returns a `Conversation`; if not, it raises `TranscriptDecodeError`.
+**Data flow**: When called, it opens `owner_tx`, the special database transaction that can read across workspaces. Inside that transaction it calls `due()` to build the current query, executes it, collects all rows, closes the transaction, and converts the first value from each row into a tuple of workspace UUIDs. It changes no application data; it only reads candidate workspace IDs.
 
-**Call relations**: This is the read-side companion to `encode`. Any reader that fetches a transcript blob can use it to get back a safe, typed conversation record instead of dealing with raw compressed bytes.
+**Call relations**: This function is created by `owner_candidates` and is later called when the runtime checks for work. Its only direct handoff is to `ufo.db.owner_tx`, which provides the controlled cross-workspace read path. After it returns workspace IDs, the wider dispatcher is expected to enter each workspace’s normal scope before any handler does real work.
+
+*Call graph*: 1 external calls (owner_tx).
+
+
+### Job scheduling and process health
+These files materialize scheduled jobs, run them inside the right workspace boundaries, and keep process and job state recoverable after crashes or cancellations.
+
+### `core/src/ufo/runtime/jobs.py`
+
+`orchestration` · `startup and scheduled background job execution`
+
+This file is the background-jobs control room for the system. At startup, core jobs and extension-provided jobs are collected, named, and registered with DBOS, the durable workflow system that stores job progress so work can resume safely after failures. Some jobs run on a schedule, like every minute. Others are one-shot jobs that are enqueued once. Either way, a scheduled “tick” first asks which workspaces actually need work, then fans out one durable job execution per workspace. That is important because one slow or stuck workspace should not block all the others.
+
+The file also contains several core job drivers. TurnDispatcher recovers queued or parked conversation turns and puts them back onto the correct execution queues, while preserving the rule that only one turn in a conversation runs at a time. PageChangeRunner finds extension hooks that want to hear about changed pages, keeps a separate cursor for each hook, and replays page changes in batches. JobRunner is the main registrar and dispatcher: it registers schedules, deduplicates repeated enqueues, builds the right ExtensionContext for each job, provisions agents for a workspace if needed, and logs failures clearly.
+
+Without this file, background work would either not start, run in the wrong tenant workspace, duplicate unsafe work, or stall across the whole fleet when one workspace misbehaved.
+
+#### Function details
+
+##### `ResultDeliverer.run`  (lines 85–85)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: This is a contract method for a result-delivery sweep. A concrete implementation uses it to find finished child-agent results and deliver them back to the parent conversation.
+
+**Data flow**: It takes no explicit input beyond the implementing object → the implementation performs the delivery sweep → it returns nothing, but may update conversation state elsewhere.
+
+**Call relations**: The jobs layer does not implement this work directly. core_jobs wraps this method as a core scheduled job, so JobRunner can run it through the same workspace-scoped background-job path as every other job.
+
+
+##### `ResultDeliverer.candidate_workspaces`  (lines 87–87)
+
+```
+async def candidate_workspaces(self) -> tuple[UUID, ...]
+```
+
+**Purpose**: This is a contract method that tells the job system which workspaces have result-delivery work waiting. It lets the scheduler avoid opening workspaces that have nothing to do.
+
+**Data flow**: It takes no explicit input beyond the implementing object → the implementation checks its source of pending result deliveries → it returns a tuple of workspace IDs.
+
+**Call relations**: core_jobs uses this method as the candidate finder for the result-delivery job. JobRunner.tick calls the candidate finder before enqueueing per-workspace job executions.
+
+
+##### `TurnDispatcher.run`  (lines 155–191)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: This sweeps for conversation turns that should be started or resumed and offers them to the correct durable execution queue. It also keeps parked turns blocked if seats, spending rules, or balance checks still say they cannot run.
+
+**Data flow**: It reads dispatchable turn rows for the current workspace → for parked turns, it checks required seated members, spend permission, and account balance → eligible turns are stamped and enqueued; ineligible parked turns are left alone.
+
+**Call relations**: JobRunner.fire runs this through the scheduled turn-dispatch core job. It first asks _dispatchable_turns for possible work, then hands each allowed turn to _enqueue so DBOS can start the turn workflow.
+
+*Call graph*: calls 2 internal fn (_dispatchable_turns, _enqueue); 7 external calls (__init__, __init__, __init__, select, workspace_tx, authority_member_id, turn_authority).
+
+
+##### `TurnDispatcher.candidate_workspaces`  (lines 193–201)
+
+```
+async def candidate_workspaces(self) -> tuple[UUID, ...]
+```
+
+**Purpose**: This finds workspaces that have queued or parked turns ready, or stale enough, to be considered for dispatch. It prevents the turn-dispatch job from running in workspaces with no relevant turns.
+
+**Data flow**: It computes a grace-period cutoff time → reads the owner-level database view for distinct workspace IDs with eligible turns → returns those workspace IDs.
+
+**Call relations**: core_jobs registers this as the candidate finder for the turn-dispatch job. JobRunner.tick uses it before creating one per-workspace job execution.
+
+*Call graph*: calls 1 internal fn (_eligible); 4 external calls (now, timedelta, select, owner_tx).
+
+
+##### `TurnDispatcher._dispatchable_turns`  (lines 203–244)
+
+```
+async def _dispatchable_turns(self) -> tuple[_DispatchTurn, ...]
+```
+
+**Purpose**: This gathers the actual turn rows in the current workspace that the dispatcher may try to enqueue. It limits the batch so one sweep cannot take unbounded work.
+
+**Data flow**: It computes a stale-dispatch cutoff → queries queued or parked turns that pass the eligibility rules, ordered so older queued work is preferred → converts database rows into _DispatchTurn records.
+
+**Call relations**: TurnDispatcher.run calls this at the start of a workspace sweep. The eligibility test is delegated to _eligible so the same rule can be shared with candidate_workspaces.
+
+*Call graph*: calls 1 internal fn (_eligible); called by 1 (run); 6 external calls (__init__, now, timedelta, case, select, workspace_tx).
+
+
+##### `TurnDispatcher._enqueue`  (lines 246–275)
+
+```
+async def _enqueue(self, turn: _DispatchTurn) -> None
+```
+
+**Purpose**: This safely marks one turn as offered for execution and then enqueues the DBOS workflow for that turn. The database stamp acts like a claim ticket so two sweepers do not both launch the same turn.
+
+**Data flow**: It receives a _DispatchTurn → atomically updates that turn only if it is still in the same state, still stale, and still first in line → if claimed, it builds enqueue options and asks DBOS to run the turn workflow.
+
+**Call relations**: TurnDispatcher.run calls this after any needed parked-turn checks pass. It uses _first_in_status and _stale to repeat the safety checks at claim time, not just at scan time.
+
+*Call graph*: calls 2 internal fn (_first_in_status, _stale); called by 1 (run); 6 external calls (now, timedelta, update, workspace_tx, turn_queue_for, uuid4).
+
+
+##### `TurnDispatcher._eligible`  (lines 277–297)
+
+```
+def _eligible(self, cutoff: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: This builds the database rule for which turns are safe to consider for dispatch. The rule protects conversation order and avoids starting a new turn while another turn in the same conversation is running.
+
+**Data flow**: It receives a cutoff time → creates a SQL condition for queued or parked turns whose dispatch stamp is missing or old, with no running sibling and no earlier same-status turn → returns that condition for use in queries.
+
+**Call relations**: candidate_workspaces uses this to find workspaces with possible turn work. _dispatchable_turns uses the same rule to fetch the specific turn rows inside one workspace.
+
+*Call graph*: calls 2 internal fn (_first_in_status, _stale); called by 2 (_dispatchable_turns, candidate_workspaces); 4 external calls (and_, exists, or_, select).
+
+
+##### `TurnDispatcher._stale`  (lines 299–303)
+
+```
+def _stale(self, cutoff: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: This builds the small part of the turn-dispatch rule that says an enqueue attempt is either missing or old enough to retry. It is the recovery valve for a process that stamped a turn but crashed before enqueueing it.
+
+**Data flow**: It receives a cutoff time → compares each turn's dispatch_enqueued_at value with that cutoff, also allowing empty values → returns a database condition.
+
+**Call relations**: _eligible uses it while scanning for possible work. _enqueue uses it again during the atomic claim so stale information from an earlier scan cannot cause an unsafe enqueue.
+
+*Call graph*: called by 2 (_eligible, _enqueue); 1 external calls (or_).
+
+
+##### `TurnDispatcher._first_in_status`  (lines 305–314)
+
+```
+def _first_in_status(self, status: TurnStatus) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: This builds the rule that only the earliest queued turn, or earliest parked turn, in a conversation may be offered. It prevents later turns from overtaking earlier ones.
+
+**Data flow**: It receives a turn status such as queued or parked → looks for any earlier turn in the same workspace and conversation with that status → returns a database condition that is true only when none exists.
+
+**Call relations**: _eligible uses this to filter scans. _enqueue uses it again when claiming a turn, so a race with another process cannot accidentally dispatch a later turn first.
+
+*Call graph*: called by 2 (_eligible, _enqueue); 2 external calls (exists, select).
+
+
+##### `_page_beyond_cursor`  (lines 317–322)
+
+```
+def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool
+```
+
+**Purpose**: This answers whether a page change comes after a saved cursor. A cursor is a bookmark that records the last page position a consumer has processed.
+
+**Data flow**: It receives a page revision, page ID, and stored cursor → if there is no cursor, it treats the page as pending; otherwise it parses the cursor and compares revision and ID → returns true when the page is newer than the cursor.
+
+**Call relations**: PageChangeRunner.workspaces_with_changes uses this while deciding which workspaces have page changes waiting for a particular page-change consumer.
+
+*Call graph*: called by 1 (workspaces_with_changes); 1 external calls (page_cursor).
+
+
+##### `PageChangeConsumer.spec_name`  (lines 343–345)
+
+```
+def spec_name(self) -> str
+```
+
+**Purpose**: This gives one page-change consumer its unique job-spec name. The name separates different hooks, even when they belong to the same extension.
+
+**Data flow**: It reads the consumer's extension name and discriminator → formats them with the page-change job prefix → returns the job-spec name string.
+
+**Call relations**: PageChangeRunner.consumers creates PageChangeConsumer objects. core_jobs later reads this property when registering one core job for each consumer.
+
+
+##### `PageChangeConsumer.job`  (lines 348–353)
+
+```
+def job(self) -> str
+```
+
+**Purpose**: This gives the full job key used for model-spend and latency attribution for this page-change consumer. It says that the runner is core-owned while still naming the extension hook being driven.
+
+**Data flow**: It reads the consumer's computed spec name → prefixes it with the core namespace → returns a binding-style job key string.
+
+**Call relations**: PageChangeRunner._context_for uses this when building the ExtensionContext, so work done by a page-change hook is attributed to the correct logical job.
+
+
+##### `PageChangeRunner.consumers`  (lines 396–420)
+
+```
+def consumers(self) -> tuple[PageChangeConsumer, ...]
+```
+
+**Purpose**: This discovers every registered extension hook that listens for page changes and turns each one into an independent consumer. It also rejects duplicate handler names inside the same extension because those would collide on cursor storage.
+
+**Data flow**: It reads all active manifests → filters their hooks to the page_change event, records declared credential slots, and checks uniqueness → returns a tuple of PageChangeConsumer objects.
+
+**Call relations**: core_jobs calls this while building the list of core jobs. Each returned consumer becomes its own scheduled page-change job with its own candidates and cursor.
+
+*Call graph*: called by 1 (core_jobs); 1 external calls (__init__).
+
+
+##### `PageChangeRunner.workspaces_with_changes`  (lines 422–487)
+
+```
+async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]
+```
+
+**Purpose**: This finds the workspaces where a particular page-change consumer has unread page changes. It avoids running page-change jobs in quiet workspaces.
+
+**Data flow**: It reads each workspace's newest page and that consumer's saved cursor from owner-level database access → compares newest page positions to cursors, treating bad cursors as pending and warning about them → returns workspace IDs with pending changes.
+
+**Call relations**: core_jobs wraps this as the candidate finder for each page-change consumer. JobRunner.tick calls that wrapper before enqueueing per-workspace page-change runs.
+
+*Call graph*: calls 1 internal fn (_page_beyond_cursor); 3 external calls (select, owner_tx, warn).
+
+
+##### `PageChangeRunner.drive`  (lines 489–539)
+
+```
+async def drive(self, consumer: PageChangeConsumer) -> None
+```
+
+**Purpose**: This runs one page-change consumer inside the currently bound workspace. It reads changed pages in batches, calls the extension's hook, and advances the consumer's cursor only after the hook succeeds.
+
+**Data flow**: It builds an extension context and reads the stored cursor → repeatedly fetches a batch of changed pages, passes them to the hook, and conditionally writes the next cursor → returns when there is no more work, the batch is short, or another writer already advanced the cursor; on hook failure it logs and raises without moving the cursor.
+
+**Call relations**: The per-consumer job created by core_jobs calls this through its nested handler. It relies on _context_for for the extension context and on the page feed for batched changes.
+
+*Call graph*: calls 1 internal fn (_context_for); 6 external calls (__init__, __init__, emit_metric, formatted_stack, log_error, ws_current).
+
+
+##### `PageChangeRunner._context_for`  (lines 541–559)
+
+```
+def _context_for(self, consumer: PageChangeConsumer) -> ExtensionContext
+```
+
+**Purpose**: This builds the ExtensionContext used by a page-change hook. The context is the hook's toolbox: storage, page feed, model access, blob store, invoker, and observability probes as configured.
+
+**Data flow**: It reads the current workspace ID and runner dependencies → optionally creates a turn invoker and swaps in the background model registry → returns an ExtensionContext scoped to the consumer's extension and job key.
+
+**Call relations**: PageChangeRunner.drive calls this before invoking a hook. It uses _background_registry so background page-change work can use the configured background model.
+
+*Call graph*: calls 1 internal fn (_background_registry); called by 1 (drive); 2 external calls (context_for, ws_current).
+
+
+##### `_background_registry`  (lines 562–573)
+
+```
+def _background_registry(registry: ModelRegistry | None, background_model: str | None) -> ModelRegistry | None
+```
+
+**Purpose**: This adjusts model selection for background jobs. If a separate background model is configured, it returns a copy of the model registry whose default model points there.
+
+**Data flow**: It receives an optional registry and optional background model name → if either is missing, it returns the registry unchanged; otherwise it copies the registry with auto_model replaced → returns the registry to use for the job context.
+
+**Call relations**: PageChangeRunner._context_for uses it for page-change hook contexts. JobRunner.fire uses it for normal jobs unless a job explicitly needs the deploy's default model.
+
+*Call graph*: called by 2 (fire, _context_for); 1 external calls (replace).
+
+
+##### `core_jobs`  (lines 576–681)
+
+```
+def core_jobs(sync_driver: SyncDriver, turn_dispatcher: TurnDispatcher, page_change_runner: PageChangeRunner, delivery_sweep: ResultDeliverer, preview_renderer: PreviewRenderer | None) -> tuple[JobSpe
+```
+
+**Purpose**: This builds the list of built-in jobs that every deployment should know about. These include source syncing, page-change fan-out, turn dispatch, result delivery, product census, and optional preview rendering.
+
+**Data flow**: It receives the core service objects needed by those jobs → wraps their methods in JobSpec handlers and candidate finders, also creating one JobSpec for each page-change consumer → returns a tuple of JobSpec objects.
+
+**Call relations**: Startup code can pass this output into bindings_from along with extension manifests. The nested wrapper functions inside core_jobs are later called by JobRunner.fire when their jobs execute.
+
+*Call graph*: calls 1 internal fn (consumers); 2 external calls (__init__, seated_member_workspaces).
+
+
+##### `core_jobs._sync_sources`  (lines 600–601)
+
+```
+async def _sync_sources(context: ExtensionContext) -> None
+```
+
+**Purpose**: This small wrapper runs the source-sync driver as a job handler. It exists so the source-sync method fits the standard JobSpec handler shape.
+
+**Data flow**: It receives an ExtensionContext, which it does not need → calls the sync driver to poll and land source pages → returns nothing after the sync completes.
+
+**Call relations**: core_jobs installs this as the handler for the source-sync core job. JobRunner.fire calls it when that job is executed for a candidate workspace.
+
+
+##### `core_jobs._dispatch_turns`  (lines 603–604)
+
+```
+async def _dispatch_turns(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs the TurnDispatcher as a job handler. It adapts the dispatcher to the common job interface.
+
+**Data flow**: It receives an unused ExtensionContext → asks the turn dispatcher to sweep the current workspace → returns nothing after dispatching eligible turns.
+
+**Call relations**: core_jobs installs this as the handler for the turn-dispatch core job. JobRunner.fire calls it inside a workspace selected by TurnDispatcher.candidate_workspaces.
+
+
+##### `core_jobs._deliver_results`  (lines 606–607)
+
+```
+async def _deliver_results(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs the result-delivery sweep as a job handler. It lets result hand-back work use the same job runner as all other background work.
+
+**Data flow**: It receives an unused ExtensionContext → calls the delivery sweep's run method → returns nothing after delivery work completes.
+
+**Call relations**: core_jobs installs this as the handler for the result-delivery job. JobRunner.fire calls it for each workspace reported by the delivery sweep's candidate finder.
+
+
+##### `core_jobs._census_product`  (lines 609–610)
+
+```
+async def _census_product(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs the product census job, which counts product usage and funnel state. It is a core job because it reads broad core schema data.
+
+**Data flow**: It receives an unused ExtensionContext → calls product_census → returns nothing once census collection finishes.
+
+**Call relations**: core_jobs installs this as the product-census handler. Its candidates come from seated_member_workspaces, and JobRunner.fire runs it through the same workspace binding path.
+
+*Call graph*: 1 external calls (product_census).
+
+
+##### `core_jobs._render_previews`  (lines 612–614)
+
+```
+async def _render_previews(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs preview rendering when a preview renderer is configured. It turns pending preview work into a standard scheduled job.
+
+**Data flow**: It receives an unused ExtensionContext → confirms a preview renderer exists, then calls its run method → returns nothing after previews are rendered.
+
+**Call relations**: core_jobs includes this handler only when preview_renderer is not None. JobRunner.fire calls it for workspaces returned by _preview_candidates.
+
+
+##### `core_jobs._preview_candidates`  (lines 616–618)
+
+```
+async def _preview_candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: This wrapper asks the preview renderer which workspaces have preview work waiting. It keeps the preview job from running everywhere unnecessarily.
+
+**Data flow**: It reads the configured preview renderer → asks it for candidate workspace IDs → returns those IDs.
+
+**Call relations**: core_jobs uses this as the candidate finder for the optional render-previews job. JobRunner.tick calls it before enqueueing preview-rendering workflows.
+
+
+##### `core_jobs._drive_consumer`  (lines 620–626)
+
+```
+def _drive_consumer(consumer: PageChangeConsumer) -> Callable[[ExtensionContext], Awaitable[None]]
+```
+
+**Purpose**: This creates a job handler for one page-change consumer. It captures which consumer should be driven when the scheduled job fires.
+
+**Data flow**: It receives a PageChangeConsumer → creates an async handler that calls PageChangeRunner.drive for that consumer → returns that handler function.
+
+**Call relations**: core_jobs calls this while creating per-consumer page-change JobSpecs. The returned _handler is later invoked by JobRunner.fire.
+
+
+##### `core_jobs._drive_consumer._handler`  (lines 623–624)
+
+```
+async def _handler(context: ExtensionContext) -> None
+```
+
+**Purpose**: This is the actual job handler for one page-change consumer. It runs that consumer's cursor loop in the current workspace.
+
+**Data flow**: It receives an ExtensionContext, which the page-change runner rebuilds in its own way → calls page_change_runner.drive with the captured consumer → returns when that consumer has caught up or stops for safety.
+
+**Call relations**: JobRunner.fire invokes this handler for a page-change JobSpec. The handler delegates the real batching, hook call, and cursor update to PageChangeRunner.drive.
+
+
+##### `core_jobs._consumer_candidates`  (lines 628–632)
+
+```
+def _consumer_candidates(consumer: PageChangeConsumer) -> WorkspaceCandidates
+```
+
+**Purpose**: This creates a candidate finder for one page-change consumer. It captures which consumer's cursor should be checked.
+
+**Data flow**: It receives a PageChangeConsumer → creates an async candidate function that asks PageChangeRunner for workspaces with changes for that consumer → returns that function.
+
+**Call relations**: core_jobs uses this when creating per-consumer page-change JobSpecs. JobRunner.tick later calls the returned _candidates function.
+
+
+##### `core_jobs._consumer_candidates._candidates`  (lines 629–630)
+
+```
+async def _candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: This candidate finder returns workspaces where the captured page-change consumer has pending page changes. It is the per-consumer bridge into PageChangeRunner's workspace scan.
+
+**Data flow**: It takes no explicit input → calls page_change_runner.workspaces_with_changes for the captured consumer → returns the workspace IDs that need a page-change run.
+
+**Call relations**: JobRunner.tick calls this before enqueueing page-change workflows. It hands the workspace selection decision to PageChangeRunner.workspaces_with_changes.
+
+
+##### `bindings_from`  (lines 693–724)
+
+```
+def bindings_from(manifests: tuple[Manifest, ...], core_jobs: tuple[JobSpec, ...], disabled: frozenset[str]=frozenset()) -> tuple[_Binding, ...]
+```
+
+**Purpose**: This assigns every job a full binding key and connects it to the extension namespace and credential slots it should use. It also applies a disabled-job list and rejects disabled names that were never registered.
+
+**Data flow**: It receives manifests, core JobSpecs, and optional disabled job keys → creates core bindings under the core namespace and extension bindings under each manifest's name → returns only bindings not disabled, or raises if the disabled set names unknown jobs.
+
+**Call relations**: Startup code uses this before creating JobRunner. JobRunner later uses the returned bindings to register schedules, find candidates, and build the correct ExtensionContext for each job.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `compaction_key`  (lines 141–142)
+##### `JobRunner.launch`  (lines 754–778)
 
 ```
-def compaction_key(conversation_id: UUID, index: int, half: CompactionHalf) -> str
+def launch(self) -> None
 ```
 
-**Purpose**: Builds the storage path for one part of one compaction record. A compaction has separate saved pieces: the window before, the window after, and the summary.
+**Purpose**: This publishes all known jobs to DBOS at startup. Scheduled jobs are registered with cron-like schedules, and one-shot jobs are enqueued once with deduplication.
 
-**Data flow**: It receives a conversation ID, a compaction index, and which half or piece is wanted: `before`, `after`, or `summary`. It combines them into a fixed blob-store key ending in `.json.lz4`.
+**Data flow**: It stores this runner in the module-level firing slot → walks every binding, either enqueueing an immediate tick or collecting a schedule definition → applies schedules to DBOS and logs what was registered or skipped.
 
-**Call relations**: The compaction-reading functions call this whenever they fetch compaction data. Because they all use the same path builder, the system has one consistent layout for compaction records.
+**Call relations**: This is the setup step that makes job_tick able to find the active JobRunner. The DBOS scheduler and queue later call job_tick using the keys registered here.
 
-*Call graph*: called by 2 (read_compaction_after, read_compaction_record).
-
-
-##### `decode_compaction`  (lines 145–154)
-
-```
-def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -> CompactionRecord
-```
-
-**Purpose**: Turns the three stored byte blobs for a compaction into one usable `CompactionRecord`. It reconstructs the before window, after window, and structured summary together.
-
-**Data flow**: It receives the compaction index and three compressed byte strings: before, after, and summary. It decompresses and validates each piece, pulls out the message windows, and returns a `CompactionRecord`. If any piece is unreadable or has the wrong shape, it raises `TranscriptDecodeError`.
-
-**Call relations**: `read_compaction_record` fetches the three blobs from storage and then hands them to this function. This keeps fetching separate from decoding, like separating picking up envelopes from reading and checking their contents.
-
-*Call graph*: called by 1 (read_compaction_record); 2 external calls (__init__, __init__).
+*Call graph*: 6 external calls (now, apply_schedules, ScheduleInput, SetEnqueueOptions, log, warn).
 
 
-##### `read_compaction_after`  (lines 157–170)
+##### `JobRunner.tick`  (lines 780–802)
 
 ```
-async def read_compaction_after(blob: BlobStore, conversation_id: UUID, index: int) -> tuple[Message, ...] | None
+async def tick(self, scheduled_time: datetime, key: str) -> None
 ```
 
-**Purpose**: Fetches only the `after` window for a specific compaction. This is a lighter read when a caller only needs the compacted replacement window, not the full before-and-summary record.
+**Purpose**: This handles one scheduled firing of a job key. It fans the job out to the workspaces that currently have work and deduplicates each workspace execution so repeated ticks do not pile up.
 
-**Data flow**: It receives a blob store, a conversation ID, and a compaction index. It builds the key for the `after` piece and asks the blob store for it. If the blob is missing, it returns `None`; otherwise it decompresses and validates the saved message window and returns the messages.
+**Data flow**: It receives the scheduled time and job key → skips unknown keys, otherwise asks for candidate workspaces → enqueues one job_workflow per workspace using a deduplication ID made from job key and workspace ID.
 
-**Call relations**: This function calls `compaction_key` to find the right blob and `BlobStore.get` to fetch it. It is useful for readers that want to check the installed compacted window without paying the cost of loading the whole compaction record.
+**Call relations**: The DBOS workflow function job_tick calls this. It uses candidates to choose workspaces, and each successful enqueue later runs job_workflow and job_fire.
 
-*Call graph*: calls 2 internal fn (get, compaction_key); 1 external calls (__init__).
-
-
-##### `read_compaction_record`  (lines 173–184)
-
-```
-async def read_compaction_record(blob: BlobStore, conversation_id: UUID, index: int) -> CompactionRecord | None
-```
-
-**Purpose**: Fetches and reconstructs one complete compaction record. It returns `None` when that compaction index does not exist.
-
-**Data flow**: It receives a blob store, a conversation ID, and an index. It builds keys for the `before`, `after`, and `summary` pieces, fetches all three from storage, and if any piece is missing returns `None`. If all are present, it passes the bytes to `decode_compaction` and returns the resulting record.
-
-**Call relations**: This is the shared per-index read path for tools that need full compaction details, such as debugging or evaluation. `read_compaction_records` repeatedly calls it to walk through all saved compactions.
-
-*Call graph*: calls 3 internal fn (get, compaction_key, decode_compaction); called by 1 (read_compaction_records).
+*Call graph*: calls 2 internal fn (_registered, candidates); 2 external calls (SetEnqueueOptions, warn).
 
 
-##### `read_compaction_records`  (lines 187–197)
+##### `JobRunner.candidates`  (lines 804–805)
 
 ```
-async def read_compaction_records(blob: BlobStore, conversation_id: UUID) -> tuple[CompactionRecord, ...]
+async def candidates(self, key: str) -> tuple[UUID, ...]
 ```
 
-**Purpose**: Reads all compaction records for one conversation in order. It stops when it reaches the first missing index.
+**Purpose**: This asks a registered job which workspaces need it. It is a thin safety wrapper around the job binding's own candidate finder.
 
-**Data flow**: It receives a blob store and a conversation ID. Starting at index 1, it asks `read_compaction_record` for each record. Each found record is added to a list; the first `None` means there are no more sequential records. It returns the collected records as an immutable tuple.
+**Data flow**: It receives a job key → looks up the binding or raises if missing → calls the JobSpec's candidates function → returns workspace IDs.
 
-**Call relations**: This function builds on `read_compaction_record` to provide the higher-level view: not just one compaction, but the conversation's whole compaction history from oldest to newest.
+**Call relations**: JobRunner.tick calls this after checking that the key is registered. It relies on _binding to turn the key into the correct JobSpec.
 
-*Call graph*: calls 1 internal fn (read_compaction_record).
+*Call graph*: calls 1 internal fn (_binding); called by 1 (tick).
 
 
-### Storage Transports and Durable Serialization
-Provides blob storage, workspace-scoped database access, and resilient object serialization for durable workflow state.
+##### `JobRunner.fire`  (lines 807–841)
 
-### `core/src/ufo/blob.py`
+```
+async def fire(self, key: str, workspace_id: UUID) -> None
+```
 
-`io_transport` · `cross-cutting storage access during request handling, background work, and asset publishing`
+**Purpose**: This runs one job handler inside one specific workspace. It prepares workspace scope, applies agent provisioning once per workspace, builds the extension context, and logs failures.
 
-A “blob” here means an opaque bundle of bytes, such as an uploaded file, a generated artifact, a transcript record, or a static web asset. This file hides where those bytes actually live. Other code can ask to put, get, stream, delete, or list blobs without caring whether the backing store is a folder on disk or an S3 bucket.
+**Data flow**: It receives a job key and workspace ID → finds the binding, enters that workspace, provisions agents if needed, builds the context with the right services and model registry → awaits the job handler; on error it logs details and re-raises.
 
-The file has three layers. First, BlobStore describes the common promise all blob stores must keep. Second, FilesystemBlobStore and S3BlobStore implement that promise for local files and S3. The filesystem version writes through a temporary file and then swaps it into place, so readers do not see half-written data. The S3 version uses the async S3 client, streams large objects in chunks, and can create short-lived signed URLs so another process can upload or download directly.
+**Call relations**: job_fire calls this as the durable DBOS step for per-workspace job execution. It uses _binding for lookup and _background_registry for most background-job model selection.
 
-Third, WorkspaceBlobStore and FleetBlobStore add safety rails. WorkspaceBlobStore automatically prefixes keys with the current workspace, like giving each tenant its own locked filing cabinet. FleetBlobStore only allows a few deployment-wide prefixes, such as static assets and terminal data. Without these wrappers, a bug could accidentally read or overwrite data belonging to another workspace.
+*Call graph*: calls 2 internal fn (_binding, _background_registry); 6 external calls (__init__, failed_statement, formatted_stack, log_error, context_for, ws).
+
+
+##### `JobRunner._registered`  (lines 843–844)
+
+```
+def _registered(self, key: str) -> _Binding | None
+```
+
+**Purpose**: This checks whether the current process knows a job key. It returns nothing instead of raising because old schedules may still exist for jobs this process no longer owns.
+
+**Data flow**: It receives a job key → searches the runner's bindings → returns the matching binding or None.
+
+**Call relations**: JobRunner.tick uses this to skip stale or foreign schedules safely. JobRunner._binding uses it as the lookup step before deciding whether to raise.
+
+*Call graph*: called by 2 (_binding, tick).
+
+
+##### `JobRunner._binding`  (lines 846–853)
+
+```
+def _binding(self, key: str) -> _Binding
+```
+
+**Purpose**: This returns the binding for a job key, or raises if the key is not registered in this process. It is used when the code is about to do real work and missing registration is a fault.
+
+**Data flow**: It receives a job key → calls _registered → returns the binding if found, otherwise raises a RuntimeError.
+
+**Call relations**: JobRunner.candidates and JobRunner.fire call this when they need the JobSpec and context metadata. It builds on _registered's safe lookup behavior.
+
+*Call graph*: calls 1 internal fn (_registered); called by 2 (candidates, fire).
+
+
+##### `job_tick`  (lines 860–864)
+
+```
+async def job_tick(scheduled_time: datetime, key: str) -> None
+```
+
+**Purpose**: This is the durable DBOS workflow for a scheduled job tick. It hands the tick to the active JobRunner.
+
+**Data flow**: It receives a scheduled time and job key from DBOS → reads the module-level JobRunner set during launch → calls runner.tick, or raises if jobs were never registered.
+
+**Call relations**: JobRunner.launch registers or enqueues this workflow for every job key. DBOS invokes it, and it delegates all fan-out decisions to JobRunner.tick.
+
+
+##### `job_workflow`  (lines 868–869)
+
+```
+async def job_workflow(scheduled_time: datetime, key: str, workspace_id: str) -> None
+```
+
+**Purpose**: This is the durable DBOS workflow for one job running in one workspace. It exists so each workspace execution has its own durable workflow record.
+
+**Data flow**: It receives the scheduled time, job key, and workspace ID string → forwards the job key and workspace ID to job_fire → returns when the step completes.
+
+**Call relations**: JobRunner.tick enqueues this workflow once per candidate workspace. It immediately hands off to job_fire, which is the step that calls JobRunner.fire.
+
+*Call graph*: calls 1 internal fn (job_fire).
+
+
+##### `job_fire`  (lines 873–877)
+
+```
+async def job_fire(key: str, workspace_id: str) -> None
+```
+
+**Purpose**: This is the DBOS step that actually fires a job handler for one workspace. Marking it as a step lets DBOS avoid re-running a completed handler during recovery.
+
+**Data flow**: It receives a job key and workspace ID string → reads the active JobRunner, converts the workspace ID to a UUID → calls runner.fire; it raises if no runner was launched.
+
+**Call relations**: job_workflow calls this for every per-workspace job execution. It is the final bridge from DBOS durable workflow plumbing into JobRunner.fire's workspace-scoped handler execution.
+
+*Call graph*: called by 1 (job_workflow); 1 external calls (UUID).
+
+
+### `core/src/ufo/runtime/runtime_instance.py`
+
+`orchestration` · `background during serve process lifetime`
+
+Think of every serve process as a worker wearing a badge. This file writes that badge into the database, refreshes it every few seconds, and removes it when the process shuts down cleanly. Other processes use those badges to tell who is still alive.
+
+That liveness signal matters because durable work is tied to an executor id, which is the same id as the runtime instance. If a workflow is still waiting under an executor whose badge is no longer fresh, the process probably died. The executor recovery loop finds those stranded workflows and asks DBOS, the durable workflow system, to recover them.
+
+The file also runs two turn cleanup loops. A “turn” is a unit of conversation or agent work. The cancel reconciler makes cancellation flow down a turn tree: if a parent turn is cancelled, dependent child turns are eventually cancelled too. The stranded turn reconciler catches a different problem: a turn marked running, but whose workflow has ended or disappeared, so nothing can ever advance it. It cancels those rows after a grace period.
+
+All these loops are deliberately periodic and forgiving. A single database or DBOS error is logged, not allowed to kill the loop. Every serve process runs the same sweeps, so if one process dies, another survivor can clean up after it.
 
 #### Function details
 
-##### `BlobStore.put`  (lines 54–54)
+##### `record_fleet_seat`  (lines 42–57)
 
 ```
-async def put(self, key: str, data: bytes) -> None
+async def record_fleet_seat(instance_id: UUID) -> None
 ```
 
-**Purpose**: Defines the standard operation for saving a complete byte payload under a string key. Code uses this when the whole object is already in memory.
+**Purpose**: This writes the current serve process into the shared runtime table before DBOS starts running work. It gives the rest of the fleet an immediate sign that this executor is alive.
 
-**Data flow**: A key and bytes go in. A concrete store, such as the filesystem or S3 version, writes those bytes at that key. Nothing is returned, but the stored object should be available afterward.
+**Data flow**: It receives an instance id. It opens an owner-level database transaction, inserts a runtime_instance row with no workspace, current timestamps, and that id, then logs that the fleet seat was recorded. The database now has a fresh liveness record for this process.
 
-**Call relations**: This is part of the shared BlobStore promise. Web asset publishing calls on this promise so it can save assets without knowing which storage backend is underneath.
+**Call relations**: This is the first half of the liveness story. Later, Heartbeat.beat keeps the same row fresh, and ExecutorRecovery._live_executors reads these rows to avoid recovering work that belongs to a still-live process.
 
-*Call graph*: called by 1 (_publish_assets).
+*Call graph*: 3 external calls (insert, owner_tx, log).
 
 
-##### `BlobStore.get`  (lines 56–56)
+##### `Heartbeat.run`  (lines 70–80)
 
 ```
-async def get(self, key: str) -> bytes
+async def run(self) -> None
 ```
 
-**Purpose**: Defines the standard operation for reading a complete stored object into memory. It is the simple read counterpart to put.
+**Purpose**: This is the never-ending heartbeat loop for one process. It keeps calling the single heartbeat update so peers know the process is still alive.
 
-**Data flow**: A key goes in. The concrete backend looks up the object and returns its bytes, or raises BlobNotFound if it is absent. The store itself is not changed.
+**Data flow**: It uses the Heartbeat object's instance id. On each cycle it tries to write a fresh timestamp through Heartbeat.beat; if the database update fails, it logs the failure; then it waits for the configured heartbeat interval and repeats. Its output is not a return value, but an ongoing stream of freshness updates.
 
-**Call relations**: Transcript reading, Slack identity loading, and web asset serving call through this shared promise. That lets those features read stored data without depending on filesystem or S3 details.
+**Call relations**: A serve process starts this loop after its seat exists. The loop delegates the actual database write to Heartbeat.beat and uses logging only when one tick fails, so the heartbeat can survive temporary database trouble.
 
-*Call graph*: called by 4 (read_compaction_after, read_compaction_record, read_identity, _stored_asset).
+*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
 
 
-##### `BlobStore.exists`  (lines 58–58)
+##### `Heartbeat.beat`  (lines 82–92)
 
 ```
-async def exists(self, key: str) -> bool
+async def beat(self) -> None
 ```
 
-**Purpose**: Defines the standard operation for checking whether a key currently has an object. It is used to avoid unnecessary reads or uploads.
+**Purpose**: This performs one heartbeat update. It stamps the process's runtime row with the current database time so other processes can treat it as alive.
 
-**Data flow**: A key goes in. The backend checks its storage and returns true or false. No blob data is returned and nothing is modified.
+**Data flow**: It reads the Heartbeat object's instance id. It opens a database transaction and updates the matching runtime_instance row's heartbeat and updated timestamps. Afterward, that row looks fresh to recovery sweeps.
 
-**Call relations**: Slack identity loading and web asset code call this before deciding whether to read or publish something. The concrete backend supplies the actual check.
+**Call relations**: Heartbeat.run calls this on every tick. ExecutorRecovery._live_executors later reads the timestamp this function writes and uses it to decide which executors must not be recovered.
 
-*Call graph*: called by 3 (read_identity, _publish_assets, _stored_asset).
+*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
 
 
-##### `BlobStore.delete`  (lines 60–62)
+##### `Heartbeat.retire`  (lines 94–100)
 
 ```
-async def delete(self, key: str) -> None
+async def retire(self) -> None
 ```
 
-**Purpose**: Defines the standard operation for removing an object. Deleting a missing object is allowed, so retrying a delete is safe.
+**Purpose**: This removes the process's liveness row during graceful shutdown. It lets other processes see right away that this seat is gone instead of waiting for the heartbeat to become stale.
 
-**Data flow**: A key goes in. The backend removes the stored object if it exists. Nothing is returned, and an already-missing key remains missing.
+**Data flow**: It reads the Heartbeat object's instance id. It opens a database transaction and deletes the runtime_instance row with that id. The visible result is that the process no longer appears in the live fleet table.
 
-**Call relations**: This is part of the common storage contract that concrete stores follow. Higher-level wrappers can expose deletion without teaching callers backend-specific behavior.
+**Call relations**: The serve shutdown path calls this through ufo.serve._stop_executor. It is the clean exit counterpart to record_fleet_seat and Heartbeat.beat.
 
+*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
 
-##### `BlobStore.get_stream`  (lines 64–64)
 
-```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Defines the standard operation for reading a blob piece by piece instead of all at once. This matters for large files, where loading everything into memory would be wasteful or unsafe.
-
-**Data flow**: A key goes in. The backend opens the object and yields chunks of bytes over time. The caller receives a stream of chunks and can process them as they arrive.
-
-**Call relations**: This method is the streaming read part of the BlobStore promise. Filesystem, S3, workspace, and fleet stores provide concrete versions so large content can flow through the system without a whole-file buffer.
-
-
-##### `BlobStore.put_stream`  (lines 66–66)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Defines the standard operation for writing a blob from chunks. It is used when the data is produced gradually or may be too large to hold in memory.
-
-**Data flow**: A key and an async stream of byte chunks go in. The backend consumes the chunks and writes one complete object. Nothing is returned, but the object should exist afterward if the stream finishes successfully.
-
-**Call relations**: This is the streaming write part of the shared storage promise. Concrete backends decide how to turn the incoming chunks into a local file or S3 object.
-
-
-##### `BlobStore.list`  (lines 68–72)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Defines the standard operation for listing stored objects under a required key prefix. It gives callers a bounded view of one area instead of allowing a whole-store scan.
-
-**Data flow**: A prefix goes in. The backend finds matching objects, gathers each key, size, and modification time, sorts or returns them in a stable bounded set, and gives back BlobEntry records.
-
-**Call relations**: Web asset publishing calls this promise to inspect existing stored assets. Concrete stores implement the details for walking a directory tree or paging through S3 results.
-
-*Call graph*: called by 1 (_publish_assets).
-
-
-##### `FilesystemBlobStore.put`  (lines 81–86)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: Saves a complete byte payload as a file under the configured blob root. It writes to a temporary file first and then replaces the final file, so callers do not see a half-written object.
-
-**Data flow**: A key and bytes go in. The key is resolved to a safe path, parent folders are created, bytes are written to a temporary file, and the temporary file is moved into the final location. Nothing is returned.
-
-**Call relations**: This is the filesystem implementation of BlobStore.put. It relies on _resolve to keep writes inside the blob root and uses background threads for blocking file work.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.get`  (lines 88–93)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: Reads a whole blob from the local filesystem. It turns the normal file-not-found error into BlobNotFound so callers get the same missing-object signal across backends.
-
-**Data flow**: A key goes in. The key is converted to a safe file path, the file bytes are read, and those bytes are returned. If the file is missing, BlobNotFound comes out instead.
-
-**Call relations**: This is the filesystem implementation of BlobStore.get. It depends on _resolve for path safety and uses the common BlobNotFound behavior expected by higher layers.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
-
-
-##### `FilesystemBlobStore.exists`  (lines 95–97)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: Checks whether a local file exists for a blob key. It is a lightweight way to ask whether a blob is present.
-
-**Data flow**: A key goes in. The key is resolved to a safe path, that path is checked for being a file, and a true or false answer is returned. No file contents are read.
-
-**Call relations**: This is the filesystem implementation of BlobStore.exists. It calls _resolve first so even existence checks cannot probe outside the configured blob root.
-
-*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore.delete`  (lines 99–101)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: Removes a local blob file if it exists. It treats a missing file as fine, which makes repeated cleanup attempts safe.
-
-**Data flow**: A key goes in. The key is resolved to a safe path, and that file is unlinked if present. Nothing is returned.
-
-**Call relations**: This is the filesystem implementation of BlobStore.delete. It uses _resolve for containment before touching the disk.
-
-*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore.get_stream`  (lines 103–116)
-
-```
-async def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Reads a local blob in fixed-size chunks. This avoids loading a large file into memory all at once.
-
-**Data flow**: A key goes in. The file is opened safely, chunks are read one by one, and each chunk is yielded to the caller. The file handle is closed when reading finishes or if an error interrupts it.
-
-**Call relations**: This is the filesystem streaming read implementation. It calls _resolve for safety, converts missing files to BlobNotFound, and runs blocking file reads in worker threads.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
-
-
-##### `FilesystemBlobStore.put_stream`  (lines 118–131)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Writes a local blob from an incoming stream of chunks. It uses a temporary file so an interrupted write does not leave a partial final blob behind.
-
-**Data flow**: A key and chunk stream go in. The key becomes a safe path, directories are created, chunks are written to a temporary file, and the temporary file replaces the final path when complete. If anything fails, the temporary file is deleted and the error continues upward.
-
-**Call relations**: This is the filesystem streaming write implementation. It calls _resolve for safe placement and uses background threads for file operations.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.list`  (lines 133–136)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Lists local blobs under a non-empty prefix. Requiring a prefix prevents accidental full scans of the entire blob store.
-
-**Data flow**: A prefix goes in. If it is empty, an error is raised. Otherwise the directory walk is run in a worker thread and returns matching BlobEntry records.
-
-**Call relations**: This is the public filesystem list operation. It hands the actual walking work to _walk so the async event loop is not blocked by disk traversal.
-
-*Call graph*: 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore._walk`  (lines 138–159)
-
-```
-def _walk(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Does the actual directory traversal for listing filesystem blobs. It filters out temporary files and only reports keys that match the requested prefix.
-
-**Data flow**: A prefix goes in. The blob root and starting directory are found, files under that area are inspected, matching files become BlobEntry records with size and modification time, and a sorted capped tuple is returned.
-
-**Call relations**: FilesystemBlobStore.list delegates to this helper. It uses _contained_root and _resolve to stay inside the configured storage root while it walks the disk.
-
-*Call graph*: calls 2 internal fn (_contained_root, _resolve); 4 external calls (__init__, fromtimestamp, walk, Path).
-
-
-##### `FilesystemBlobStore._resolve`  (lines 161–166)
-
-```
-def _resolve(self, key: str) -> Path
-```
-
-**Purpose**: Turns a blob key into an absolute filesystem path and rejects keys that would escape the blob root. This is the main guard against path tricks like '../secret'.
-
-**Data flow**: A key goes in. The store root is canonicalized, the key is joined to it and resolved, and the resulting path is returned only if it stays inside the root. Unsafe keys raise ValueError.
-
-**Call relations**: All filesystem read, write, delete, stream, and walk operations call this before touching paths. It relies on _contained_root to know the trusted base directory.
-
-*Call graph*: calls 1 internal fn (_contained_root); called by 7 (_walk, delete, exists, get, get_stream, put, put_stream).
-
-
-##### `FilesystemBlobStore._contained_root`  (lines 168–181)
-
-```
-def _contained_root(self) -> Path
-```
-
-**Purpose**: Finds the real blob root directory used for filesystem containment checks. It allows the root to be a symlink, which is common in deployments, but still refuses roots configured as non-directories.
-
-**Data flow**: The configured root path is read from the store. The containment helper is asked to validate and canonicalize it; if the path does not exist yet, the resolved intended path is returned so the first write can create it.
-
-**Call relations**: _resolve and _walk call this whenever they need the trusted base path. It connects blob storage safety to the shared containment checks used elsewhere in the system.
-
-*Call graph*: called by 2 (_resolve, _walk); 1 external calls (configured_root).
-
-
-##### `_is_missing_key`  (lines 184–185)
-
-```
-def _is_missing_key(error: ClientError) -> bool
-```
-
-**Purpose**: Recognizes S3 error codes that mean an object was not found. It keeps S3's different missing-object names behind one simple check.
-
-**Data flow**: An S3 ClientError goes in. The function reads the error code from the response and returns true if it matches known not-found codes, otherwise false.
-
-**Call relations**: S3BlobStore.get, exists, and get_stream call this when S3 raises an error. It lets those methods translate missing objects into BlobNotFound or false while re-raising real failures.
-
-*Call graph*: called by 3 (exists, get, get_stream).
-
-
-##### `S3BlobStore.put`  (lines 207–209)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: Saves a complete byte payload as one S3 object. It is the cloud-storage version of the simple put operation.
-
-**Data flow**: A key and bytes go in. The store gets its async S3 client, sends a put-object request to the configured bucket, and returns nothing when S3 accepts it.
-
-**Call relations**: This implements BlobStore.put for S3. It first calls _client so client creation and reuse are centralized.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.get`  (lines 211–221)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: Reads a whole S3 object into memory. It presents missing S3 objects as BlobNotFound, matching the filesystem backend.
-
-**Data flow**: A key goes in. The S3 object is requested, its response body is read fully, and bytes are returned. If S3 reports the key is missing, BlobNotFound is raised.
-
-**Call relations**: This implements BlobStore.get for S3. It uses _client for access and _is_missing_key to translate S3-specific errors into the shared blob behavior.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.exists`  (lines 223–231)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: Checks whether an S3 object exists without downloading it. It uses S3's metadata lookup rather than reading the body.
-
-**Data flow**: A key goes in. The store asks S3 for the object's headers. A successful answer becomes true; a missing-key error becomes false; other S3 errors are passed upward.
-
-**Call relations**: This implements BlobStore.exists for S3. It gets the shared client through _client and uses _is_missing_key for consistent missing-object handling.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key).
-
-
-##### `S3BlobStore.delete`  (lines 233–235)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: Deletes an object from the S3 bucket. Like S3 itself, deleting something absent is not treated as a problem here.
-
-**Data flow**: A key goes in. The async S3 client sends a delete-object request for that bucket and key. Nothing is returned.
+##### `ExecutorRecovery.run`  (lines 120–126)
 
-**Call relations**: This implements BlobStore.delete for S3. It relies on _client to provide the correctly configured S3 connection.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.get_stream`  (lines 237–248)
-
-```
-async def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Reads an S3 object chunk by chunk. This is useful for large blobs because callers can forward or process data without storing the whole object in memory.
-
-**Data flow**: A key goes in. The S3 object is opened, its body yields fixed-size chunks, and those chunks are passed to the caller. Missing keys become BlobNotFound, and the response body is closed afterward.
-
-**Call relations**: This implements BlobStore.get_stream for S3. It uses _client to reach S3 and _is_missing_key to keep missing-object behavior consistent with other backends.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.put_stream`  (lines 250–294)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Writes a streamed blob to S3, using S3 multipart upload for large data. Multipart upload means the object is sent in separate parts and finalized only when all parts arrive.
-
-**Data flow**: A key and stream of chunks go in. Small data is buffered and sent as one object; larger data starts a multipart upload, sends parts, records their part identifiers, and completes the upload at the end. If an error interrupts a multipart upload, it is aborted so unfinished parts do not linger.
-
-**Call relations**: This implements BlobStore.put_stream for S3. It gets the S3 client through _client and then chooses between simple upload and multipart upload based on accumulated size.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.presigned_put`  (lines 296–320)
-
-```
-async def presigned_put(self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a short-lived upload URL for exactly one measured object. The signed URL fixes the key, size, and SHA-256 checksum, so an untrusted holder cannot upload different bytes under that permission.
-
-**Data flow**: A key, expected byte size, base64 SHA-256 checksum, and expiry time go in. The S3 client signs a put-object URL with those constraints. The resulting URL string comes out.
-
-**Call relations**: WorkspaceBlobStore.presigned_put can forward workspace-scoped requests here when the backend is S3. This method calls _client so the URL is signed by the same configured client that talks to S3.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.presigned_put_unmeasured`  (lines 322–332)
-
-```
-async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a short-lived upload URL for a fixed key without fixing the body size or checksum. It is for trusted producers that do not know their final output length before they generate it.
-
-**Data flow**: A key and expiry time go in. The S3 client signs a put-object URL tied to that key and expiry. The URL string is returned.
-
-**Call relations**: WorkspaceBlobStore.presigned_put_unmeasured delegates here for S3-backed workspace storage. This method still uses _client so signing follows the store's endpoint and region settings.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.presigned_get`  (lines 334–341)
-
-```
-async def presigned_get(self, key: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a short-lived download URL for one S3 object. Anyone holding the URL can read that object until the URL expires.
-
-**Data flow**: A key and expiry time go in. The S3 client signs a get-object request for that key. The signed URL string is returned.
-
-**Call relations**: WorkspaceBlobStore.presigned_get delegates here when workspace blobs are stored in S3. The method relies on _client for correct signing.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.put_host`  (lines 343–354)
-
-```
-async def put_host(self) -> str
-```
-
-**Purpose**: Reports the hostname that presigned upload URLs will contact. The sandbox egress proxy can allow that host so uploads work without opening broader network access.
-
-**Data flow**: No explicit input beyond the store configuration. The method reads the S3 client's endpoint URL, extracts its hostname, adjusts for AWS virtual-hosted bucket style when needed, and returns the hostname. If no hostname exists, it raises an error.
-
-**Call relations**: This method calls _client so the reported host matches the actual signing client. It uses URL parsing to avoid guessing from configuration by hand.
-
-*Call graph*: calls 1 internal fn (_client); 1 external calls (urlsplit).
-
-
-##### `S3BlobStore.list`  (lines 356–373)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Lists S3 objects under a required prefix. It returns a bounded set of object summaries rather than scanning without limits.
-
-**Data flow**: A prefix goes in. Empty prefixes are rejected. The method pages through S3 list results, turns each object into a BlobEntry with key, size, and UTC modification time, stops at the configured cap, and returns a tuple.
-
-**Call relations**: This implements BlobStore.list for S3. It uses _client for the S3 paginator and produces the same BlobEntry shape as the filesystem backend.
-
-*Call graph*: calls 1 internal fn (_client); 1 external calls (__init__).
-
-
-##### `S3BlobStore.close`  (lines 375–381)
-
-```
-async def close(self) -> None
-```
-
-**Purpose**: Closes the cached S3 client for the current async event loop. This is cleanup for long-lived client resources such as HTTP connections.
-
-**Data flow**: The current event loop is read. Any cached client and lock for that loop are removed from the store, and the client is closed if one existed. Nothing is returned.
-
-**Call relations**: This is the teardown partner to _client. It only affects the client owned by the running event loop, because S3 clients here are loop-specific.
-
-*Call graph*: 1 external calls (get_running_loop).
-
-
-##### `S3BlobStore._client`  (lines 383–409)
-
-```
-async def _client(self) -> AioBaseClient
 ```
-
-**Purpose**: Returns the one async S3 client for the current event loop, creating it if needed. Reusing clients avoids expensive setup and keeps each client tied to the loop it is safe to use on.
-
-**Data flow**: The running event loop and store configuration go in implicitly. If a client is already cached for that loop, it is returned. Otherwise a per-loop lock prevents duplicate creation, a configured S3 client is opened, cached, and returned.
-
-**Call relations**: Every S3 operation calls this before talking to S3 or generating signed URLs. It centralizes endpoint style, signing version, region, and client reuse so individual methods do not duplicate that delicate setup.
-
-*Call graph*: called by 11 (delete, exists, get, get_stream, list, presigned_get, presigned_put, presigned_put_unmeasured, put, put_host (+1 more)); 3 external calls (get_session, Lock, get_running_loop).
-
-
-##### `WorkspaceBlobStore.put`  (lines 422–423)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: Saves bytes under the current workspace's private blob prefix. Callers use workspace-relative keys and do not choose the workspace part themselves.
-
-**Data flow**: A workspace-relative key and bytes go in. _full adds the current workspace prefix, then the backend saves the bytes at that full key. Nothing is returned.
-
-**Call relations**: Environment document and file storage call this to save workspace-owned data. It delegates actual storage to the configured filesystem or S3 backend after adding the workspace boundary.
-
-*Call graph*: calls 1 internal fn (_full); called by 2 (store_environment_document, store_environment_file).
-
-
-##### `WorkspaceBlobStore.get`  (lines 425–426)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: Reads bytes from the current workspace's private blob area. It prevents callers from accidentally reading another workspace by constructing the full key itself.
-
-**Data flow**: A workspace-relative key goes in. _full adds the current workspace prefix, the backend reads the object, and the bytes are returned. Missing data is reported by the backend.
-
-**Call relations**: Environment loading uses this to fetch workspace-owned documents and files. The method is a safety wrapper around the backend get operation.
-
-*Call graph*: calls 1 internal fn (_full); called by 2 (load_environment_document, load_environment_file).
-
-
-##### `WorkspaceBlobStore.exists`  (lines 428–429)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: Checks whether a blob exists inside the current workspace. It keeps the existence check scoped to the active workspace.
-
-**Data flow**: A workspace-relative key goes in. _full turns it into a full workspace key, the backend checks for that object, and true or false is returned.
-
-**Call relations**: This mirrors the common exists operation but adds workspace scoping first. It uses _full for the boundary and then delegates to the backend.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.delete`  (lines 431–432)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: Deletes a blob from the current workspace's storage area. The caller gives only the workspace-relative key.
-
-**Data flow**: A workspace-relative key goes in. _full adds the workspace prefix, and the backend deletes that full key if present. Nothing is returned.
-
-**Call relations**: This wraps backend deletion with workspace safety. It relies on _full to prevent cross-workspace key construction.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.get_stream`  (lines 434–438)
-
-```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Starts a streaming read from the current workspace. It resolves the workspace key immediately, so the returned stream remains tied to the workspace even if the surrounding workspace scope ends later.
-
-**Data flow**: A workspace-relative key goes in. _full immediately builds the full key, and the backend returns a stream of byte chunks for that object. The caller later consumes those chunks.
-
-**Call relations**: Runtime extension context code uses this to read member blob text. The method delegates streaming to the backend after capturing the workspace prefix at call time.
-
-*Call graph*: calls 1 internal fn (_full); called by 1 (_member_blob_text).
-
-
-##### `WorkspaceBlobStore.put_stream`  (lines 440–441)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Writes streamed data into the current workspace's blob area. It is the workspace-scoped version of large or gradual uploads.
-
-**Data flow**: A workspace-relative key and an async chunk stream go in. _full adds the current workspace prefix, and the backend consumes the chunks into that full key. Nothing is returned.
-
-**Call relations**: This wraps backend streaming writes with workspace scoping. It calls _full before handing the stream to the backend.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.list`  (lines 443–448)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Lists blobs under a prefix inside the current workspace and returns keys relative to that workspace. This lets callers see their own names, not the internal storage prefix.
-
-**Data flow**: A workspace-relative prefix goes in. Empty prefixes are rejected. The workspace root prefix is added, the backend lists full keys, and each returned BlobEntry is copied with the workspace prefix removed from its key.
-
-**Call relations**: This combines _full, the backend list operation, and dataclass replacement to preserve metadata while hiding internal workspace prefixes from callers.
-
-*Call graph*: calls 1 internal fn (_full); 1 external calls (replace).
-
-
-##### `WorkspaceBlobStore.presigned_put`  (lines 450–461)
-
+async def run(self) -> None
 ```
-async def presigned_put(self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int) -> str
-```
 
-**Purpose**: Creates a measured presigned S3 upload URL for a blob in the current workspace. It is only valid when the backend is S3.
+**Purpose**: This is the repeating loop that looks for durable workflows owned by dead executors. It keeps recovery running in the background for the whole serve process.
 
-**Data flow**: A workspace-relative key, size, checksum, and expiry go in. The key is expanded with _full, then the S3 backend signs an upload URL for that full key. If the backend is not S3, a TypeError is raised.
+**Data flow**: It uses the configured interval on the ExecutorRecovery object. Each cycle waits, calls ExecutorRecovery.sweep, logs database or DBOS workflow-system errors if they happen, and then continues. It produces no direct return value; its effect is continued recovery attempts over time.
 
-**Call relations**: This is the workspace-safe wrapper around S3BlobStore.presigned_put. It ensures the signed permission cannot target another workspace.
+**Call relations**: Every serve process can run this loop. It delegates one recovery pass to ExecutorRecovery.sweep, so any surviving process can clean up work left by a crashed peer.
 
-*Call graph*: calls 1 internal fn (_full).
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
 
 
-##### `WorkspaceBlobStore.presigned_put_unmeasured`  (lines 463–469)
+##### `ExecutorRecovery.sweep`  (lines 128–136)
 
 ```
-async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str
+async def sweep(self) -> None
 ```
 
-**Purpose**: Creates an unmeasured presigned S3 upload URL for a fixed key in the current workspace. It is used when the writer is trusted but cannot know the final size ahead of time.
+**Purpose**: This performs one pass of executor recovery. It finds executors with pending workflows but no fresh heartbeat, then asks DBOS to recover their work.
 
-**Data flow**: A workspace-relative key and expiry go in. _full adds the workspace prefix, then the S3 backend signs an upload URL. Non-S3 backends cause a TypeError.
+**Data flow**: It gathers two sets: executor ids with pending workflows, and executor ids with fresh runtime_instance rows. It subtracts live executors from pending executors; for each remaining stranded executor, it calls DBOS recovery in a worker thread and logs how many workflows were recovered.
 
-**Call relations**: This wraps S3BlobStore.presigned_put_unmeasured with workspace scoping. It refuses to pretend local filesystem storage can issue S3 URLs.
+**Call relations**: ExecutorRecovery.run calls this on each interval. It relies on ExecutorRecovery._pending_executors to learn where pending work exists and ExecutorRecovery._live_executors to avoid touching work that belongs to a live process.
 
-*Call graph*: calls 1 internal fn (_full).
+*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
 
 
-##### `WorkspaceBlobStore.presigned_get`  (lines 471–478)
+##### `ExecutorRecovery._pending_executors`  (lines 138–150)
 
 ```
-async def presigned_get(self, key: str, ttl_seconds: int) -> str
+async def _pending_executors(self) -> set[str]
 ```
 
-**Purpose**: Creates a short-lived S3 download URL for a blob in the current workspace. It is only available when the backend is S3.
+**Purpose**: This asks DBOS which executors currently hold pending workflows. These are candidates for recovery if their owning process is no longer alive.
 
-**Data flow**: A workspace-relative key and expiry go in. _full builds the full workspace key, the S3 backend signs a download URL, and the URL is returned. If storage is not S3, a TypeError is raised.
+**Data flow**: It calls DBOS.list_workflows in a thread, filtering for workflows with status PENDING and limiting the scan size. It logs if the scan hits the limit, then returns the executor ids found on those workflows. The result is a set of executor id strings.
 
-**Call relations**: This is the workspace-safe wrapper around S3BlobStore.presigned_get. It keeps signed read access inside the active workspace.
+**Call relations**: ExecutorRecovery.sweep calls this before comparing against live executors. Its result is only a candidate list; ExecutorRecovery._live_executors decides which of those candidates are safe to recover.
 
-*Call graph*: calls 1 internal fn (_full).
+*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
 
 
-##### `WorkspaceBlobStore._full`  (lines 480–483)
+##### `ExecutorRecovery._live_executors`  (lines 152–162)
 
 ```
-def _full(self, key: str) -> str
+async def _live_executors(self) -> set[str]
 ```
 
-**Purpose**: Builds the real storage key for a workspace-relative key. It is the small but important gate that prevents callers from supplying an already workspace-prefixed key.
+**Purpose**: This reads the database to find executor ids whose heartbeat is still fresh. It protects live processes from having their work recovered by mistake.
 
-**Data flow**: A key goes in. If it already starts with the internal workspace prefix, ValueError is raised. Otherwise the current workspace id is read and combined into a full key like workspaces/<id>/<key>.
+**Data flow**: It calculates a cutoff time using the current time minus the stale threshold. It selects runtime_instance rows whose heartbeat is newer than that cutoff and returns their ids as strings. The result is the set of executors considered alive.
 
-**Call relations**: Every WorkspaceBlobStore operation calls this before touching the backend. It gets the active workspace from ws_current, so workspace binding is enforced at the point of use.
+**Call relations**: ExecutorRecovery.sweep calls this alongside ExecutorRecovery._pending_executors. The sweep subtracts this live set from the pending set before invoking DBOS recovery.
 
-*Call graph*: called by 10 (delete, exists, get, get_stream, list, presigned_get, presigned_put, presigned_put_unmeasured, put, put_stream); 1 external calls (ws_current).
+*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
 
 
-##### `FleetBlobStore.put`  (lines 494–495)
+##### `CancelReconciler.run`  (lines 186–192)
 
 ```
-async def put(self, key: str, data: bytes) -> None
+async def run(self) -> None
 ```
 
-**Purpose**: Saves deployment-wide bytes under an allowed fleet namespace. Fleet data is shared by the deployment rather than owned by a workspace.
+**Purpose**: This is the repeating loop that makes cancellation spread through dependent turns. It ensures cancellation is eventually applied even if the original canceller did not or could not walk the whole tree immediately.
 
-**Data flow**: A key and bytes go in. _checked verifies the key starts with an allowed fleet prefix, then the backend writes the bytes. Nothing is returned.
+**Data flow**: It uses the configured interval and DBOS client on the CancelReconciler object. Each cycle waits, calls CancelReconciler.sweep, logs database or DBOS errors, and repeats. Its effect is eventual cleanup of live descendant turns under cancelled ancestors.
 
-**Call relations**: This wraps backend put with a namespace check. It prevents fleet storage from becoming a back door into workspace data.
+**Call relations**: Every serve process can run this loop. It delegates one reconciliation pass to CancelReconciler.sweep, which finds and cancels the affected turns.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
 
 
-##### `FleetBlobStore.get`  (lines 497–498)
+##### `CancelReconciler.sweep`  (lines 194–201)
 
 ```
-async def get(self, key: str) -> bytes
+async def sweep(self) -> None
 ```
 
-**Purpose**: Reads a deployment-wide blob from an allowed fleet namespace. It refuses keys outside the small set reserved for fleet data.
+**Purpose**: This performs one cancellation reconciliation pass. It finds non-finished turns that depend on a cancelled ancestor and cancels them one by one.
 
-**Data flow**: A key goes in. _checked validates the prefix, the backend reads the object, and bytes are returned. Invalid prefixes raise ValueError.
+**Data flow**: It builds and runs the orphan query in a database transaction. For each returned turn id and workspace id, it enters that workspace context, calls cancel_one_turn through the DBOS client, and logs if the turn was actually cancelled. The database changes happen through cancel_one_turn, not directly in this function.
 
-**Call relations**: This wraps backend get with fleet namespace protection. It delegates actual storage access only after _checked approves the key.
+**Call relations**: CancelReconciler.run calls this periodically. This function uses CancelReconciler._orphans_query to identify targets, ws to switch into the right workspace, and cancel_one_turn to apply the same cancellation primitive used elsewhere.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
 
 
-##### `FleetBlobStore.exists`  (lines 500–501)
+##### `CancelReconciler._orphans_query`  (lines 203–243)
 
 ```
-async def exists(self, key: str) -> bool
+def _orphans_query(self) -> sa.Select
 ```
 
-**Purpose**: Checks whether an allowed deployment-wide blob exists. It applies the same namespace rules as fleet reads and writes.
+**Purpose**: This builds the database query that finds live turns with a cancelled dependent ancestor. It is the search map used by the cancellation sweep.
 
-**Data flow**: A key goes in. _checked validates that the key belongs to a fleet prefix, the backend checks for it, and true or false is returned.
+**Data flow**: It starts from all non-terminal turns, then recursively walks upward through dependent parent links. If the walk reaches a cancelled ancestor, the original live turn is selected with its workspace id. The output is a SQLAlchemy Select object, which is a database query description rather than immediate data.
 
-**Call relations**: This wraps backend exists with _checked. The check keeps callers from probing arbitrary blob keys.
+**Call relations**: CancelReconciler.sweep calls this and then executes the query. This function calls CancelReconciler._dependent_parent to decide which parent links count as cancellation-dependent and which should stop the climb.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 1 internal fn (_dependent_parent); called by 1 (sweep); 1 external calls (select).
 
 
-##### `FleetBlobStore.delete`  (lines 503–504)
+##### `CancelReconciler._dependent_parent`  (lines 245–255)
 
 ```
-async def delete(self, key: str) -> None
+def _dependent_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement
 ```
 
-**Purpose**: Deletes a deployment-wide blob from an allowed fleet namespace. Invalid namespaces are rejected before the backend is touched.
+**Purpose**: This defines which parent relationship should carry cancellation upward for the orphan search. It keeps independent spawned agents from being cancelled just because their spawner was cancelled.
 
-**Data flow**: A key goes in. _checked approves or rejects it. If approved, the backend deletes that key if present, and nothing is returned.
+**Data flow**: It receives a turn table or alias. It builds a SQL expression: return the parent_turn_id when the turn is a dependent subagent turn or an admitted intent, otherwise return null. The result becomes part of the recursive cancellation query.
 
-**Call relations**: This wraps backend delete with fleet namespace enforcement. It uses _checked as the gatekeeper.
+**Call relations**: CancelReconciler._orphans_query uses this helper while building both the starting query and the recursive parent climb. It is the small rule that shapes the whole cancellation boundary.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: called by 1 (_orphans_query); 3 external calls (case, null, or_).
 
 
-##### `FleetBlobStore.get_stream`  (lines 506–507)
+##### `StrandedTurnReconciler.run`  (lines 289–295)
 
 ```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
+async def run(self) -> None
 ```
 
-**Purpose**: Streams a deployment-wide blob from an allowed fleet namespace. This is the fleet-safe version of chunked reads.
+**Purpose**: This is the repeating loop that looks for running turns whose workflow can no longer advance them. It prevents conversation state from being stuck forever on work that has no active carrier.
 
-**Data flow**: A key goes in. _checked validates the prefix, then the backend returns a chunk stream for that key. The caller consumes chunks later.
+**Data flow**: It uses the configured interval and DBOS client on the StrandedTurnReconciler object. Each cycle waits, calls StrandedTurnReconciler.sweep, logs database or DBOS errors, and repeats. Its ongoing effect is to cancel turns that are truly stranded.
 
-**Call relations**: This wraps backend get_stream with _checked. It allows large fleet blobs to be read without loosening namespace boundaries.
+**Call relations**: Every serve process can run this loop. It delegates each pass to StrandedTurnReconciler.sweep, which performs the actual scan and cancellation decisions.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
 
 
-##### `FleetBlobStore.put_stream`  (lines 509–510)
+##### `StrandedTurnReconciler.sweep`  (lines 297–313)
 
 ```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+async def sweep(self) -> None
 ```
 
-**Purpose**: Writes streamed data into an allowed deployment-wide namespace. It is used when fleet-owned data may be large or produced in pieces.
+**Purpose**: This performs one pass looking for running turns whose recorded workflow attempt is no longer active. It cancels those turns because nothing is left that can finish them normally.
 
-**Data flow**: A key and chunk stream go in. _checked validates the key, then the backend consumes the stream into that key. Nothing is returned.
+**Data flow**: It runs the claimed-turn query to get old RUNNING turns with a running_attempt value. It logs if the scan hits its limit. It asks DBOS which of those attempts are still advancing; for any row whose attempt is not in that active set, it enters the row's workspace, calls cancel_one_turn, and logs if cancellation happened.
 
-**Call relations**: This wraps backend put_stream with fleet namespace checks. The real write is still performed by the filesystem or S3 backend.
+**Call relations**: StrandedTurnReconciler.run calls this periodically. It uses StrandedTurnReconciler._claimed_query to find possible stranded rows and StrandedTurnReconciler._advancing_attempts to separate still-live workflow attempts from dead or missing ones.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (_advancing_attempts, _claimed_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
 
 
-##### `FleetBlobStore.list`  (lines 512–513)
+##### `StrandedTurnReconciler._claimed_query`  (lines 315–332)
 
 ```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+def _claimed_query(self) -> sa.Select
 ```
 
-**Purpose**: Lists deployment-wide blobs under an allowed fleet prefix. It does not allow listing outside the reserved fleet areas.
+**Purpose**: This builds the database query for old running turns that have claimed a workflow attempt. These are the only turns the stranded-turn sweep should inspect.
 
-**Data flow**: A prefix goes in. _checked confirms it starts with an allowed fleet prefix, then the backend returns BlobEntry records under that prefix.
+**Data flow**: It calculates a cutoff time using the current time minus the grace window. It builds a query for turns with status RUNNING, a non-empty running_attempt, and an updated_at older than the cutoff, ordered oldest first and capped at the scan limit. The output is a SQLAlchemy Select object to be executed by the sweep.
 
-**Call relations**: This wraps backend list with _checked. It gives fleet features listing power only inside their approved namespaces.
+**Call relations**: StrandedTurnReconciler.sweep calls this before reading candidate rows. The grace window in this query protects very recent claims from being mistaken for stranded work.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: called by 1 (sweep); 3 external calls (now, timedelta, select).
 
 
-##### `FleetBlobStore._checked`  (lines 515–518)
+##### `StrandedTurnReconciler._advancing_attempts`  (lines 334–345)
 
 ```
-def _checked(self, key: str) -> str
+async def _advancing_attempts(self, attempts: list[str]) -> set[str]
 ```
-
-**Purpose**: Verifies that a fleet blob key belongs to one of the allowed deployment-wide prefixes. This is the fleet store's main safety rail.
-
-**Data flow**: A key goes in. If it starts with an allowed prefix such as static/, term/, or apps/, the same key is returned. Otherwise ValueError is raised.
 
-**Call relations**: Every FleetBlobStore operation calls this before delegating to the backend. It keeps fleet storage separate from workspace-prefixed storage.
+**Purpose**: This asks DBOS which workflow attempts from a given list are still able to move forward. It prevents the sweep from cancelling a turn whose workflow is merely waiting or delayed.
 
-*Call graph*: called by 7 (delete, exists, get, get_stream, list, put, put_stream).
-
-
-##### `blob_store_for`  (lines 521–533)
-
-```
-def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore
-```
+**Data flow**: It receives a list of workflow attempt ids. If the list is empty, it returns an empty set without querying DBOS. Otherwise it asks DBOS for workflows with those ids in advancing states such as pending, enqueued, or delayed, then returns the workflow ids found.
 
-**Purpose**: Builds the concrete blob backend requested by configuration. It turns a BlobConfig into either local filesystem storage or S3 storage.
+**Call relations**: StrandedTurnReconciler.sweep calls this after collecting candidate running turns. The sweep uses the returned set as a safety filter: attempts in the set are left alone, and only missing or non-advancing attempts are cancelled.
 
-**Data flow**: A BlobConfig goes in. If it names the filesystem backend, the root path is required and a FilesystemBlobStore is returned. If it names S3, the bucket is required and an S3BlobStore is returned with endpoint and region settings.
+*Call graph*: called by 1 (sweep).
 
-**Call relations**: Startup or setup code can call this to create the storage backend used elsewhere. WorkspaceBlobStore and FleetBlobStore can then wrap the returned backend to add scope and namespace safety.
 
-*Call graph*: 2 external calls (__init__, __init__).
+### Report digest generation
+These files define concise report digest entries and generate them from recently published scheduled reports while avoiding repeated work on unchanged reports.
 
+### `extensions/report_digest/ufo_ext_report_digest/digest.py`
 
-### `core/src/ufo/db.py`
+`domain_logic` · `digest creation`
 
-`io_transport` · `startup, request handling, background jobs, migrations, teardown`
+This file is the “quality gate” for report digests. A report may be long, but the digest should be only the smallest useful preview: a title, a short summary, and up to two distinct points. Without this file, digest entries could become too long, repeat themselves, include malformed data from a model provider, or charge an external text-writing API for more report text than needed.
 
-This module solves two closely related problems: opening database connections efficiently, and making sure every normal database read or write is scoped to the current workspace. A workspace is like a customer’s separate room in a shared building. The code sets a PostgreSQL session setting called app.workspace_id at the start of each workspace transaction, and database row-level security then uses that value to decide which rows are visible. If no workspace was set, the database fails closed instead of showing everything.
+The file uses Pydantic models, which are Python classes that validate and clean data as it is created. `DigestPoint` represents one finding line and an optional actor, meaning the person, group, or system the report says did something. `DigestEntry` represents the whole digest for one report.
 
-The file keeps database engines private and exposes transaction helpers instead. workspace_tx is the normal path: it opens a transaction, pins the current workspace for that transaction, and yields a connection. owner_tx is the special exception for background jobs that must first list work across all workspaces; callers are expected to re-enter the correct workspace before reading real contents.
+The main rules are practical. Text fields are clipped to fixed lengths, but on word boundaries so they do not end in broken words. Titles are cut before a semicolon because the title is meant to carry only the top finding. Points and summaries are checked against what has already been said. If a line mostly repeats the title or summary, it is removed. Think of this like packing a small lunchbox: every item must earn its space.
 
-The module also builds one connection pool per event loop, because async database connections belong to the event loop that created them. It includes startup checks, cleanup paths, SQLite-specific setup, logging helpers for failed SQL, and Alembic migration support. Without this file, database access would be less reliable, harder to shut down cleanly, and much easier to get wrong in a multi-workspace service.
+The file also provides `bounded`, which limits how much of a report the digest writer may read, and `writing_standard`, which assembles the instructions given to the writer from prompt and skill files.
 
 #### Function details
 
-##### `_build_engine`  (lines 108–118)
+##### `_clipped`  (lines 96–107)
 
 ```
-def _build_engine(url: str, pool: _Pool) -> AsyncEngine
+def _clipped(value: str, ceiling: int) -> str
 ```
 
-*Call graph*: calls 1 internal fn (_pool_kwargs); called by 2 (_engine_for, verify_db_reachable); 1 external calls (create_async_engine).
+**Purpose**: Shortens a piece of prose to a maximum length without rejecting the whole digest. It cuts at a word boundary so the result still looks intentional and readable.
+
+**Data flow**: It receives a text value and a character limit. It trims surrounding spaces, checks whether the text already fits, and if not, cuts it down before the limit and removes any dangling punctuation or separators. It returns the cleaned, shortened string.
+
+**Call relations**: The field validators for digest titles, summaries, point text, and actors call this helper whenever those fields are created. It gives all prose fields the same gentle trimming behavior instead of letting one overlong field spoil the whole entry.
+
+*Call graph*: called by 4 (_summary, _title, _actor, _text).
 
 
-##### `_pool_kwargs`  (lines 121–141)
-
-```
-def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]
-```
-
-*Call graph*: calls 1 internal fn (_driver_kwargs); called by 1 (_build_engine); 1 external calls (make_url).
-
-
-##### `_driver_kwargs`  (lines 144–171)
+##### `_stem`  (lines 110–117)
 
 ```
-def _driver_kwargs(driver: str, pool: _Pool) -> dict[str, Any]
+def _stem(word: str) -> str
 ```
 
-*Call graph*: called by 1 (_pool_kwargs).
+**Purpose**: Reduces a word to a short root-like form so similar word forms can be compared as the same idea. For example, this helps treat related words like a repeated concept rather than as totally new text.
+
+**Data flow**: It receives one word. It focuses on the last part after a hyphen when that part is long enough, removes known endings such as plural or past-tense endings when safe, then returns only the first few characters of the result. The output is a compact comparison key for that word.
+
+**Call relations**: `_content` calls this for every meaningful word it finds. The digest repetition check depends on these shortened forms to notice when a later line is mostly saying what an earlier line already said.
+
+*Call graph*: called by 1 (_content).
 
 
-##### `_engine_for`  (lines 174–190)
-
-```
-def _engine_for(url: str, pool: _Pool) -> AsyncEngine
-```
-
-*Call graph*: calls 1 internal fn (_build_engine); called by 2 (owner_tx, workspace_tx); 1 external calls (get_running_loop).
-
-
-##### `init_db`  (lines 193–197)
+##### `_content`  (lines 120–121)
 
 ```
-def init_db(url: str) -> None
+def _content(text: str) -> tuple[str, ...]
 ```
 
+**Purpose**: Pulls out the meaningful words from a piece of text for comparison. It ignores common filler words such as “the” and “and,” then normalizes the remaining words so repetition is easier to spot.
 
-##### `init_owner_db`  (lines 200–214)
+**Data flow**: It receives a text string. It lowercases the text, finds word-like pieces, skips stopwords, and passes each remaining word through `_stem`. It returns a tuple of compact word roots that represent the content of the text.
 
-```
-def init_owner_db(url: str) -> None
-```
+**Call relations**: `_adds_to` uses this to judge whether a line contains new information. `DigestEntry._said_once` also uses it to remember what the title and surviving lines have already said.
 
-
-##### `verify_db_reachable`  (lines 217–237)
-
-```
-async def verify_db_reachable() -> None
-```
-
-*Call graph*: calls 1 internal fn (_build_engine).
+*Call graph*: calls 1 internal fn (_stem); called by 2 (_said_once, _adds_to).
 
 
-##### `dispose_db`  (lines 240–263)
+##### `_adds_to`  (lines 124–126)
 
 ```
-async def dispose_db() -> None
+def _adds_to(text: str, said: set[str]) -> bool
 ```
 
-*Call graph*: calls 1 internal fn (_hand_off); 1 external calls (get_running_loop).
+**Purpose**: Decides whether a line adds enough new information to be worth keeping. It protects the digest from wasting a row on a sentence that mostly repeats earlier text.
+
+**Data flow**: It receives a text string and a set of content words that have already appeared. It turns the new text into content words, counts how many were not already known, and compares that share against the minimum novelty rule. It returns true if the line is meaningfully new, otherwise false.
+
+**Call relations**: `DigestEntry._said_once` calls this while reading the digest from top to bottom. It is the small decision-maker that tells the entry validator whether the summary or each point earns its place.
+
+*Call graph*: calls 1 internal fn (_content); called by 1 (_said_once).
 
 
-##### `_hand_off`  (lines 266–273)
-
-```
-def _hand_off(loop: asyncio.AbstractEventLoop, engine: AsyncEngine) -> None
-```
-
-*Call graph*: called by 1 (dispose_db); 1 external calls (call_soon_threadsafe).
-
-
-##### `_dispose_on_this_loop`  (lines 276–283)
+##### `DigestPoint._text`  (lines 139–140)
 
 ```
-def _dispose_on_this_loop(engine: AsyncEngine) -> None
+def _text(cls, value: str) -> str
 ```
 
-*Call graph*: 2 external calls (ensure_future, dispose).
+**Purpose**: Keeps the text of a single digest point within the allowed length. This makes each finding fit the compact digest format.
+
+**Data flow**: It receives the proposed point text during `DigestPoint` validation. It sends that text to `_clipped` with the point-text limit, then stores the shortened readable result as the point’s text.
+
+**Call relations**: Pydantic calls this validator when a `DigestPoint` is built. It relies on `_clipped` so point text follows the same word-safe trimming rule used elsewhere in the digest.
+
+*Call graph*: calls 1 internal fn (_clipped).
 
 
-##### `dispose_loop_engines`  (lines 286–296)
-
-```
-async def dispose_loop_engines() -> None
-```
-
-*Call graph*: 1 external calls (get_running_loop).
-
-
-##### `_stopping`  (lines 299–306)
+##### `DigestPoint._actor`  (lines 144–145)
 
 ```
-def _stopping() -> bool
+def _actor(cls, value: str) -> str
 ```
 
-*Call graph*: called by 1 (_opened); 1 external calls (current_task).
+**Purpose**: Keeps the actor field short enough for the digest. The actor is optional, but when present it should not crowd out the finding.
+
+**Data flow**: It receives the proposed actor text during `DigestPoint` validation. It clips the text to the actor length limit and returns the cleaned value that will be stored on the point.
+
+**Call relations**: Pydantic calls this validator when creating a `DigestPoint`. It uses `_clipped`, matching the same readable shortening behavior used for point text, titles, and summaries.
+
+*Call graph*: calls 1 internal fn (_clipped).
 
 
-##### `_await_opening`  (lines 309–320)
-
-```
-async def _await_opening(opening: asyncio.Future[AsyncConnection]) -> tuple[AsyncConnection, asyncio.CancelledError | None]
-```
-
-*Call graph*: called by 1 (_opened); 1 external calls (shield).
-
-
-##### `_await_close`  (lines 323–331)
+##### `DigestEntry._decoded`  (lines 161–167)
 
 ```
-async def _await_close(close: asyncio.Future[bool | None]) -> asyncio.CancelledError | None
+def _decoded(cls, value: object) -> object
 ```
 
-*Call graph*: called by 1 (_opened); 1 external calls (shield).
+**Purpose**: Accepts point data even when a provider returns it as JSON text instead of a normal nested list. This makes the digest parser tolerant of a common formatting mistake from external model services.
+
+**Data flow**: It receives the raw value supplied for `points` before normal validation. If the value is a string, it parses it as JSON. If that parsed value is a dictionary containing `points`, it extracts that field; otherwise it uses the parsed value itself. Non-string values pass through unchanged.
+
+**Call relations**: Pydantic calls this before validating the `points` field of a `DigestEntry`. It hands cleaned point input onward so the normal `DigestPoint` validation can proceed instead of failing only because the provider wrapped the data oddly.
+
+*Call graph*: 1 external calls (loads).
 
 
-##### `_opened`  (lines 335–399)
-
-```
-async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 3 internal fn (_await_close, _await_opening, _stopping); called by 2 (owner_tx, workspace_tx); 7 external calls (Lock, ensure_future, AsyncExitStack, begin, monotonic, emit_histogram, emit_metric).
-
-
-##### `workspace_tx`  (lines 403–413)
+##### `DigestEntry._title`  (lines 171–172)
 
 ```
-async def workspace_tx() -> AsyncIterator[AsyncConnection]
+def _title(cls, value: str) -> str
 ```
 
-*Call graph*: calls 2 internal fn (_engine_for, _opened); 1 external calls (text).
+**Purpose**: Cleans and limits the digest title. It keeps only the first finding before a semicolon and makes sure the title fits the expected short headline length.
+
+**Data flow**: It receives the proposed title. It splits the title at the first semicolon and keeps the part before it, then sends that text to `_clipped` with the title limit. It returns the final title to store on the entry.
+
+**Call relations**: Pydantic calls this when validating a `DigestEntry`. It uses `_clipped` so titles stay readable, and it enforces the file’s rule that the title should not try to carry multiple findings.
+
+*Call graph*: calls 1 internal fn (_clipped).
 
 
-##### `failed_statement`  (lines 416–436)
-
-```
-def failed_statement(error: BaseException) -> dict[str, str]
-```
-
-
-##### `owner_tx`  (lines 440–453)
-
-```
-async def owner_tx() -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 2 internal fn (_engine_for, _opened).
-
-
-##### `apply_migrations`  (lines 456–494)
+##### `DigestEntry._summary`  (lines 176–177)
 
 ```
-def apply_migrations(url: str, pack: str | None=None) -> None
+def _summary(cls, value: str) -> str
 ```
 
-*Call graph*: calls 1 internal fn (_seal_sqlite_journal); 7 external calls (__init__, upgrade, from_config, Path, migration_locations, catch_warnings, simplefilter).
+**Purpose**: Keeps the digest summary short enough to be a single compact clause. This helps the digest stay skimmable.
+
+**Data flow**: It receives the proposed summary text. It clips the summary to the summary length limit using `_clipped`, then returns the cleaned summary for the entry.
+
+**Call relations**: Pydantic calls this during `DigestEntry` validation. Later, `DigestEntry._said_once` may remove the summary entirely if it does not add enough new information beyond the title.
+
+*Call graph*: calls 1 internal fn (_clipped).
 
 
-##### `_seal_sqlite_journal`  (lines 497–513)
-
-```
-def _seal_sqlite_journal(url: str) -> None
-```
-
-*Call graph*: called by 1 (apply_migrations); 2 external calls (make_url, connect).
-
-
-##### `core_migration_head`  (lines 516–524)
+##### `DigestEntry._titled`  (lines 180–183)
 
 ```
-def core_migration_head() -> str
+def _titled(self) -> 'DigestEntry'
 ```
 
-*Call graph*: 2 external calls (__init__, from_config).
+**Purpose**: Makes sure any digest entry that claims there is a real change has a title. A change without a title would give the reader no useful hook for deciding whether to open the report.
+
+**Data flow**: It receives the fully built `DigestEntry` after field validation. It checks whether `holds_a_change` is true and the title is empty. If so, it raises an error; otherwise it returns the entry unchanged.
+
+**Call relations**: Pydantic calls this after the individual fields have been cleaned. It acts as a final consistency check before the entry is accepted.
 
 
-##### `_sqlite_on_connect`  (lines 527–533)
-
-```
-def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
-```
-
-
-##### `_sqlite_begin_immediate`  (lines 536–538)
+##### `DigestEntry._said_once`  (lines 186–205)
 
 ```
-def _sqlite_begin_immediate(connection: sa.Connection) -> None
+def _said_once(self) -> 'DigestEntry'
 ```
 
-*Call graph*: 1 external calls (exec_driver_sql).
+**Purpose**: Removes summary and point lines that mostly repeat what the reader has already seen. It keeps the digest dense: title first, then only genuinely new supporting lines.
+
+**Data flow**: It starts with the content words from the title as already known. It checks whether the summary adds enough new words; if not, it clears the summary. Then it walks through the proposed points in order, keeping only points that add enough new information, and stops after the maximum number of points. It updates the entry’s summary and points, then returns the entry.
+
+**Call relations**: Pydantic calls this after a `DigestEntry` has been created and basic fields have been validated. It uses `_content` to remember what has already been said and `_adds_to` to decide whether each later line deserves space.
+
+*Call graph*: calls 2 internal fn (_adds_to, _content).
 
 
-### `core/src/ufo/harness/durability.py`
+##### `bounded`  (lines 208–210)
 
-`io_transport` · `cross-cutting persistence and crash recovery`
+```
+def bounded(report: str) -> str
+```
 
-DBOS stores workflow inputs, step results, and final errors in a database so work can resume after a crash. The hard part is that the code reading old records may not be the same version that wrote them. A normal Python pickle, which is Python’s built-in object-saving format, can restore a Pydantic model without running its usual validation or default-filling logic. That means a model field added later may simply be missing, and recovery can fail in a confusing place.
+**Purpose**: Limits how much of a long report is sent to the digest writer. This keeps the digest based on the front part of the report and controls the amount of text sent to an external service.
 
-This file solves that by defining a custom serializer called ReplaySafeSerializer. When it sees a Pydantic BaseModel, it saves the model’s class plus its current field values. When the object is loaded again, it rebuilds the model through Pydantic’s normal validation path. New fields can receive defaults, removed fields can be ignored, and truly missing required fields fail in a clearer way.
+**Data flow**: It receives the full report text. It takes only the first fixed number of characters and returns that shortened report text. It does not change the original report.
 
-It also protects against renamed modules. Old saved records contain old module paths, like an old street address. MOVED_MODULES is the forwarding-address book: during loading, old paths are translated to the current ones. Without this file, recovery could silently return raw strings, fail to find moved classes, or revive model objects in a broken shape.
+**Call relations**: Code that prepares a report for digest writing can call this before sending text to the writer. It is a simple boundary line between the full report and the smaller input the digest process is allowed to read.
+
+
+##### `writing_standard`  (lines 213–227)
+
+```
+def writing_standard() -> str
+```
+
+**Purpose**: Builds the instruction text used by the digest writer. It combines the digest prompt, the delivery rules, and the skill instructions into one standard that tells the writer how to produce entries.
+
+**Data flow**: It reads the skill file from disk, removes its frontmatter section, reads the digest prompt file, adds the shared delivery register text, and joins these pieces with blank lines. It returns the combined instruction string.
+
+**Call relations**: The digest-writing setup calls this when it needs the exact rules to give to the writer. It pulls in prompt and skill files from disk and includes `DELIVERY_REGISTER_BLOCK` so generated digest entries follow the same delivery standard as the rest of the system.
+
+
+### `extensions/report_digest/ufo_ext_report_digest/writer.py`
+
+`domain_logic` · `scheduled background tick and rebuild maintenance`
+
+This file is the background writer for report digests. Scheduled app runs can publish Markdown reports, but raw reports may be long and hard to scan. The writer looks for recent finished scheduled runs that shared a Markdown report and do not already have a digest row. For each one, it reads a limited amount of the report from blob storage, asks the model to produce a structured digest, and stores the result in the database.
+
+The file is careful about cost and fairness. It only processes a small batch per tick, so switching the feature on for a workspace with many old reports does not spend everything at once. It only looks back seven days, so a broken or missing report cannot block the job forever. It also records “unchanged” reports in a separate table. That is like putting a sticky note on a document saying “already checked; nothing new here,” so future ticks can skip it.
+
+The main class, DigestWriter, performs one scheduled pass: find due reports, read each body, decide who the digest is written for, ask the model for a DigestEntry, then store either the entry or the unchanged marker. DigestRebuild is a reset tool: it deletes recent digest rows and unchanged markers so they can be recreated, for example after the digest-writing rules change. The standalone undigested_workspaces query helps the scheduler find only workspaces that actually have work waiting.
 
 #### Function details
 
-##### `replay_safe_client`  (lines 176–180)
+##### `DigestWriter.run`  (lines 117–126)
 
 ```
-def replay_safe_client(system_database_url: str) -> DBOSClient
+async def run(self) -> None
 ```
 
-**Purpose**: This is the approved way to create a DBOS client for this project. It makes sure the client uses the replay-safe serializer, so data written by the workflow engine can also be read back correctly.
+**Purpose**: Runs one digest-writing pass. It finds reports that still need digest work and tries to process each one without letting one bad report stop the rest.
 
-**Data flow**: It takes a database URL as input. It creates a ReplaySafeSerializer and gives both the URL and serializer to DBOSClient. The result is a DBOS client connected to the system database and configured to encode and decode this project’s saved records correctly.
+**Data flow**: It starts with the writer’s context, model access, and blob store. It asks _unwritten for the current batch of due reports, then sends each report to _digest. If any single report fails because its blob is gone, the model refuses, or something else goes wrong, the error is swallowed and the loop moves on, leaving that report for a future tick while later reports still get a chance.
 
-**Call relations**: Startup or setup code calls this when it needs a DBOS client. Instead of letting DBOS use its default serializer, this function hands DBOS a ReplaySafeSerializer, which is what later saves and restores workflow data.
+**Call relations**: This is the top-level method for the writer’s scheduled pass. It first calls DigestWriter._unwritten to learn what work exists, then calls DigestWriter._digest for each report in that batch.
 
-*Call graph*: 2 external calls (__init__, DBOSClient).
-
-
-##### `_rebuild`  (lines 183–184)
-
-```
-def _rebuild(model_class: type[BaseModel], fields: dict[str, object]) -> BaseModel
-```
-
-**Purpose**: This rebuilds a saved Pydantic model using the model class’s current rules. It exists so old saved model data can be interpreted by today’s model definition rather than being blindly restored.
-
-**Data flow**: It receives a Pydantic model class and a dictionary of saved field values. It asks the model class to validate those values and construct a fresh model object. The output is a normal Pydantic model, with current defaults and validation applied.
-
-**Call relations**: _ModelPickler.reducer_override records this function inside the pickle instructions for Pydantic models. Later, during deserialization, Python’s pickle machinery calls this function to turn the saved class-and-fields pair back into a live model object.
+*Call graph*: calls 2 internal fn (_digest, _unwritten).
 
 
-##### `_ModelPickler.reducer_override`  (lines 188–191)
+##### `DigestWriter._digest`  (lines 128–139)
 
 ```
-def reducer_override(self, obj: object) -> tuple[Callable[..., object], tuple[object, ...]]
+async def _digest(self, report: Report) -> None
 ```
 
-**Purpose**: This customizes how Pydantic models are written into the pickle stream. Instead of saving them in the fragile default way, it saves instructions to rebuild them safely later.
+**Purpose**: Processes one report from start to finish. It reads the report, asks the model for a digest, and stores either the digest or a note that the report contained no change worth summarizing.
 
-**Data flow**: It receives each object that the pickler is about to save. If the object is a Pydantic BaseModel, it turns it into a pair: the _rebuild function and the model’s class plus current field dictionary. If the object is not a Pydantic model, it leaves normal pickle behavior in charge.
+**Data flow**: A Report object goes in. The method reads its body with _body; if the body cannot be read, it stops. It builds a human description of the intended reader with _reader, sends the body and reader to _written, then looks at the returned DigestEntry. If the entry says the report has a real change, _store writes it to the digest table. If it says there is no change, _store_unchanged records that this report has already been checked.
 
-**Call relations**: ReplaySafeSerializer.serialize uses _ModelPickler to write data. As that pickler walks through the object graph, this method intercepts Pydantic models and redirects them through _rebuild so recovery gets validated, current-version objects.
+**Call relations**: DigestWriter.run calls this once for each candidate report. This method is the central handoff point between reading from blob storage, asking the model, and writing the database result.
 
-
-##### `_CompatUnpickler.find_class`  (lines 195–196)
-
-```
-def find_class(self, module: str, name: str) -> object
-```
-
-**Purpose**: This helps old saved records find classes after code has been moved between modules. It translates an old module path to the current module path before loading the class.
-
-**Data flow**: It receives the module name and class or function name recorded in the saved pickle. It checks whether the module has a newer location in MOVED_MODULES. It then asks the normal unpickler to load the named symbol from the translated module path and returns that symbol.
-
-**Call relations**: ReplaySafeSerializer.deserialize uses _CompatUnpickler when reading saved data. Whenever the pickle stream names a class or function, this method gets a chance to apply the module forwarding table before normal loading continues.
+*Call graph*: calls 5 internal fn (_body, _reader, _store, _store_unchanged, _written); called by 1 (run).
 
 
-##### `ReplaySafeSerializer.name`  (lines 202–203)
+##### `DigestWriter._unwritten`  (lines 141–213)
 
 ```
-def name(self) -> str
+async def _unwritten(self) -> tuple[Report, ...]
 ```
 
-**Purpose**: This gives DBOS the stable name for this serializer. DBOS records serializer names with stored rows, so the name must stay consistent for old data to remain readable.
+**Purpose**: Finds the reports that are due to be digested in this tick. It returns only recent, successful scheduled runs that published a Markdown report and have not already been digested or marked unchanged.
 
-**Data flow**: It takes no outside data beyond the serializer object itself. It returns the fixed string stored in SERIALIZATION_NAME. It does not change anything.
+**Data flow**: It reads the workspace id from the extension context and builds a database query. The query joins turns, conversations, agents, members, and shared artifacts so each result includes the report’s turn id, blob key, app name, audience, and owner email. It filters out old reports, failed runs, non-Markdown artifacts, reports that already have digest entries, and reports already marked unchanged. The output is a tuple of Report objects, limited to the batch size.
 
-**Call relations**: DBOS calls this as part of its serializer interface when recording or reading rows. The returned name identifies records written in this project’s replay-safe format.
+**Call relations**: DigestWriter.run calls this at the start of each tick. The Report objects it returns become the input to DigestWriter._digest.
 
-
-##### `ReplaySafeSerializer.serialize`  (lines 205–208)
-
-```
-def serialize(self, data: object) -> str
-```
-
-**Purpose**: This turns a Python object into a text string that can be stored in the database. It uses the custom pickler so Pydantic models are saved in the safer class-plus-fields form.
-
-**Data flow**: It receives any Python object. It creates an in-memory byte buffer, pickles the object into that buffer using _ModelPickler, then base64-encodes the bytes into plain UTF-8 text. The output is a string suitable for database storage.
-
-**Call relations**: DBOS calls this when it needs to persist workflow inputs, outputs, or errors. During the pickling step, _ModelPickler.reducer_override may take over for Pydantic models so that later replay can rebuild them safely.
-
-*Call graph*: 3 external calls (__init__, b64encode, BytesIO).
+*Call graph*: called by 1 (run); 3 external calls (__init__, now, select).
 
 
-##### `ReplaySafeSerializer.deserialize`  (lines 210–211)
+##### `DigestWriter._body`  (lines 215–228)
 
 ```
-def deserialize(self, serialized_data: str) -> object
+async def _body(self, report: Report) -> str | None
 ```
 
-**Purpose**: This turns a stored database string back into the original Python data. It uses the compatibility unpickler so old module names can still resolve after files have moved.
+**Purpose**: Reads the Markdown report text from blob storage, while enforcing size limits so very large files do not overload the process or the model request.
 
-**Data flow**: It receives a base64 text string from storage. It decodes the text back into bytes, wraps those bytes in an in-memory stream, and loads the pickle using _CompatUnpickler. The output is the restored Python object or data structure.
+**Data flow**: A Report goes in, mainly for its blob key. The method streams bytes from the blob store in chunks, stops once it reaches the read ceiling, decodes the bytes into text, and then passes the text through bounded to enforce the model-facing character limit. If the blob is missing, it returns None instead of raising an error.
 
-**Call relations**: DBOS calls this when replaying or recovering stored workflow data. As objects are loaded, _CompatUnpickler.find_class translates old module paths, and any saved Pydantic model rebuild instructions call _rebuild to construct current-version models.
+**Call relations**: DigestWriter._digest calls this before doing any model work. Its output is the report text that DigestWriter._written will later send to the model.
 
-*Call graph*: 3 external calls (__init__, b64decode, BytesIO).
-
-
-### Schema Records and Tables
-Declares the importable schema package, shared runtime record contracts, and SQLAlchemy database table layout.
-
-### `core/src/ufo/schema/__init__.py`
-
-`other` · `import time`
-
-In Python, a folder usually needs an `__init__.py` file to be treated as an importable package. This file plays that role for the `ufo.schema` area of the project. A “schema” usually means a formal description of what data should look like, such as the expected fields in a message or configuration object. Even though this file is empty, it still matters because it gives the project a stable package location for schema code. Without it, imports that expect `ufo.schema` to be a normal Python package could fail or behave differently depending on the Python version and tooling. Think of it like a labeled drawer in a filing cabinet: the drawer may not contain instructions itself, but its label lets everyone find the papers inside in a predictable way.
+*Call graph*: called by 1 (_digest); 1 external calls (bounded).
 
 
-### `core/src/ufo/schema/records.py`
-
-`data_model` · `cross-cutting: turn admission, queueing, execution, completion, and record loading`
-
-This file is like the project’s official form cabinet for agent work. A “turn” is one unit of conversation or action: someone asks something, an agent runs, and the system eventually records a finished result, failure, cancellation, or request for more input. The models here make sure every part of the system writes and reads that information in the same shape.
-
-Most records are Pydantic models, which are Python objects that also validate their data. That matters because these records cross boundaries: web clients, workers, databases, sandboxes, billing, and account-connection flows all touch them. Without these shared definitions, one component could mark a turn finished while another still thinks it is running, or a bad timezone or unsafe text could break prompt rendering later.
-
-The file also contains small decision helpers. Some choose which queue a turn should enter, some create stable UUIDs from workspace and turn data, and one picks a readable icon for a new agent. Several validators protect important invariants: terminal data must match terminal status, timestamps are treated as UTC, runtime image information must be complete, and context text is flattened so user-supplied text cannot fake markup. In short, this file keeps the project’s durable records boring, predictable, and safe.
-
-#### Function details
-
-##### `auto_agent_icon`  (lines 177–196)
+##### `DigestWriter._reader`  (lines 230–239)
 
 ```
-def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon
+def _reader(self, report: Report) -> str
 ```
 
-**Purpose**: Chooses a starting icon for a new agent based on its name and the icons already used in the workspace. It tries to pick something meaningful first, then something stable and visually distinct.
+**Purpose**: Builds a plain-language description of who the digest is meant for. This helps the model write a summary with the right audience in mind.
 
-**Data flow**: It receives an agent name and a collection of already-taken icon names. It lowercases and splits the name into simple tokens, looks for a keyword such as “billing” or “code,” and uses that matching icon if it is free. If not, it hashes the name with SHA-256 and uses that number to pick from unused icons; if every icon is already taken, it allows a repeat. It returns one icon name.
+**Data flow**: A Report goes in with its audience, owner email, and app name. If the report belongs to a specific member conversation and an owner email is available, the method returns a sentence naming that member as the reader. Otherwise, it returns a workspace-level reader description. The output is just text.
 
-**Call relations**: This helper stands at agent creation time, when the system needs a default visual mark. Its only outside call is to the standard SHA-256 hash function, used so the same name tends to get the same fallback icon instead of a random one.
+**Call relations**: DigestWriter._digest calls this after reading the body and before asking the model to write the digest. The reader text is passed into DigestWriter._written and later stored with the digest entry.
 
-*Call graph*: 1 external calls (sha256).
-
-
-##### `admits_spent_balance`  (lines 221–235)
-
-```
-def admits_spent_balance(intent: ToolIntent) -> bool
-```
-
-**Purpose**: Checks whether a prepared tool action should still be allowed even when a workspace has spent its balance. The special allowed action is opening workspace billing, because blocking it would prevent the user from fixing the billing problem.
-
-**Data flow**: It receives a ToolIntent, which is a pre-made tool call that will be run exactly as submitted. It checks whether the tool is an object action, and whether its kind and action are exactly the workspace billing action. It returns true only for that one case, and changes nothing.
-
-**Call relations**: Billing gates can call this when deciding whether to reject a prepared intent. This function does not hand work off to another project function; it simply answers the narrow policy question: “Is this the billing-management action that must remain available?”
+*Call graph*: called by 1 (_digest).
 
 
-##### `turn_queue_for`  (lines 249–257)
+##### `DigestWriter._written`  (lines 241–278)
 
 ```
-def turn_queue_for(parent_turn_id: UUID | None, admission_source: 'TurnAdmissionSource') -> str
+async def _written(self, body: str, reader: str) -> DigestEntry | None
 ```
 
-**Purpose**: Decides which work queue a turn should use. Normal top-level agent turns go to the regular turns queue, while child turns and prepared intents go to the faster express queue to avoid deadlocks and unnecessary waiting.
+**Purpose**: Asks the language model to turn a report into a structured DigestEntry. It only accepts the model’s answer if it comes back through the expected tool-shaped response, which is a structured format rather than loose prose.
 
-**Data flow**: It receives an optional parent turn id and the turn’s admission source. If there is a parent turn, or if the turn came from a prepared intent, it returns the express queue name. Otherwise it returns the normal turns queue name.
+**Data flow**: The report body and reader description go in. The method creates a ModelRequest containing the digest-writing instructions, a JSON message with the report and reader, a token limit, and a required tool schema based on DigestEntry. It sends that request through the model. If the model replies as ordinary text, the method returns None. If the model calls the expected finish tool, the tool input is validated as a DigestEntry and returned.
 
-**Call relations**: This is used when a surface or internal workflow admits a turn. It gives the queueing layer the right queue name so workers can start the turn under the right capacity rules.
+**Call relations**: DigestWriter._digest calls this after preparing the report body and reader. This method relies on writing_standard for the instruction text and DigestEntry’s schema and validation rules to keep the model output in a reliable shape.
 
-
-##### `turn_id_for`  (lines 266–268)
-
-```
-def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID
-```
-
-**Purpose**: Creates the stable id for a turn from its workspace, conversation, and sequence number. The same inputs always produce the same UUID, which helps retries avoid creating duplicate turns.
-
-**Data flow**: It receives a workspace id, conversation id, and turn sequence number. It combines them into a string and passes that string to UUID version 5, which creates a deterministic UUID from a namespace and name. It returns that UUID.
-
-**Call relations**: Turn admission code can call this before storing or starting a turn. It hands off to the standard UUID function so the resulting id can also be used as the durable workflow identity.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: called by 1 (_digest); 7 external calls (__init__, __init__, __init__, model_json_schema, model_validate, dumps, writing_standard).
 
 
-##### `ledger_id_for`  (lines 271–276)
+##### `DigestWriter._store_unchanged`  (lines 280–286)
 
 ```
-def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: str='') -> UUID
+async def _store_unchanged(self, report: Report) -> None
 ```
 
-**Purpose**: Creates a stable billing-ledger id for one turn, one billing dimension, and one run attempt. This lets repeated replay of the same attempt collapse into one billing row, while a resumed attempt can be billed separately.
+**Purpose**: Records that a report was read and found to contain no meaningful change. This prevents the same quiet report from being reread and billed again on every scheduled tick.
 
-**Data flow**: It receives a workspace id, turn id, billing dimension such as a token category, and an optional attempt id. It builds a string from those values and turns it into a deterministic UUID. It returns that UUID and does not modify anything.
+**Data flow**: A Report goes in. The method opens a database transaction and inserts the workspace id and turn id into the report_digest_unchanged table. It does not return a value; the lasting effect is the new database row.
 
-**Call relations**: Billing-writing code can call this when recording usage for a turn. It relies on the standard UUID version 5 function so replayed workflow steps write to the same ledger identity instead of duplicating charges.
+**Call relations**: DigestWriter._digest calls this when the model returns a valid digest result whose holds_a_change flag is false. Future calls to DigestWriter._unwritten and undigested_workspaces use this marker to skip the report.
 
-*Call graph*: 1 external calls (uuid5).
-
-
-##### `mid_turn_reply_id_for`  (lines 279–290)
-
-```
-def mid_turn_reply_id_for(turn_id: UUID, round_index: int, span_index: int, attempt: str='') -> UUID
-```
-
-**Purpose**: Creates a stable id for a reply that is sent before a turn fully ends. This prevents a recovered workflow from delivering the same mid-turn message twice, while still allowing a later resumed run to produce new messages.
-
-**Data flow**: It receives the turn id, the round number, the span position inside that round, and an optional run attempt id. It combines those into a deterministic UUID name and returns the UUID created from it.
-
-**Call relations**: Code that records or delivers partial replies during a running turn can call this. It hands off to UUID version 5 so repeated replay of the same attempt points to the same delivery record.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: called by 1 (_digest); 1 external calls (insert).
 
 
-##### `RuntimeIdentity._artifact_pair`  (lines 446–449)
+##### `DigestWriter._store`  (lines 288–301)
 
 ```
-def _artifact_pair(self) -> 'RuntimeIdentity'
+async def _store(self, report: Report, entry: DigestEntry, reader: str) -> None
 ```
 
-**Purpose**: Validates that runtime revision and image digest are either both present or both absent. This prevents a record from naming only half of the deployed artifact it ran on.
+**Purpose**: Writes a finished digest entry into the database. This is what makes the summarized report available to the feed or other readers.
 
-**Data flow**: It reads the RuntimeIdentity being built. If exactly one of revision or image digest is missing, it raises a validation error. If the pair is complete or entirely absent, it returns the same object.
+**Data flow**: A Report, a DigestEntry, and the reader text go in. The method opens a database transaction and inserts a row containing the workspace id, turn id, digest title, summary, bullet points, reader description, model name, and current write time. It returns nothing; the database row is the output.
 
-**Call relations**: Pydantic calls this automatically after creating a RuntimeIdentity. Other code benefits because any accepted RuntimeIdentity has a consistent description of the service image and configuration used for a turn.
+**Call relations**: DigestWriter._digest calls this when the model says the report contains a change worth showing. Future candidate searches then see that this turn already has an entry and skip it.
 
-
-##### `TurnRuntimeConfig._pinned_values`  (lines 468–476)
-
-```
-def _pinned_values(self) -> 'TurnRuntimeConfig'
-```
-
-**Purpose**: Checks that per-turn runtime overrides are concrete and well-formed. A turn may pin a real model id or a stored environment document digest, but not vague values such as “auto.”
-
-**Data flow**: It reads the TurnRuntimeConfig being built. If the model field is the string “auto,” it raises an error because a pinned turn must name a specific model. If an environment value exists, it must match the expected SHA-256 digest format. Valid data is returned unchanged.
-
-**Call relations**: Pydantic runs this during TurnRuntimeConfig construction. Turn execution code can then trust that any runtime override attached to a turn is specific enough to reproduce and audit.
+*Call graph*: called by 1 (_digest); 2 external calls (now, insert).
 
 
-##### `TurnContext._tag_safe_line`  (lines 533–537)
+##### `DigestRebuild.run`  (lines 321–339)
 
 ```
-def _tag_safe_line(cls, value: str | None) -> str | None
+async def run(self) -> int
 ```
 
-**Purpose**: Cleans surface-provided text so it can be safely placed into prompt context. It removes angle brackets and collapses the text to one line, which stops the text from pretending to be structured markup.
+**Purpose**: Clears recent digest rows and unchanged markers so the writer can recreate them. This is useful when the digest rules or model prompt change and recent reports should be summarized again.
 
-**Data flow**: It receives one optional string field, such as sender, question, or source. If the value is missing, it stays missing. Otherwise the function removes “<” and “>”, splits whitespace, rejoins it with single spaces, and returns the cleaned line, or null if nothing remains.
+**Data flow**: It reads the workspace id from the context and defines the same seven-day window used by the writer. Inside a transaction, it deletes digest entries for turns in that window, then deletes unchanged markers for the same set of turns. It returns the total number of deleted rows, combining both deletes.
 
-**Call relations**: Pydantic calls this automatically for selected TurnContext fields. Prompt-building code later reads those fields knowing they are plain one-line facts rather than text that can forge tags.
+**Call relations**: This method is separate from the normal writer tick. After it runs, DigestWriter._unwritten can see those recent reports as due again, so later DigestWriter.run calls rebuild their digest state.
 
-
-##### `TurnContext._known_zone`  (lines 541–548)
-
-```
-def _known_zone(cls, value: str | None) -> str | None
-```
-
-**Purpose**: Validates that a timezone name is real. This catches bad timezone data at the boundary, before a turn is running and needs to format times.
-
-**Data flow**: It receives an optional timezone string. If there is no value, it returns no value. If there is a value, it asks Python’s timezone database to load it; unknown names cause a validation error, while known names are returned unchanged.
-
-**Call relations**: Pydantic calls this when TurnContext is created. It uses the standard ZoneInfo lookup, so later engine code can rely on the timezone string being one the system understands.
-
-*Call graph*: 1 external calls (ZoneInfo).
+*Call graph*: 3 external calls (now, delete, select).
 
 
-##### `Turn.spawned`  (lines 583–586)
+##### `undigested_workspaces`  (lines 342–366)
 
 ```
-def spawned(self) -> bool
+def undigested_workspaces() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Answers whether this turn was created as a child of another turn. In this system, a spawned turn is identified by having a parent turn id.
+**Purpose**: Builds a database query that finds workspaces with at least one report waiting for digest work. A scheduler can use this to avoid waking the writer for quiet workspaces.
 
-**Data flow**: It reads the Turn’s parent_turn_id field. If that field is present, it returns true; otherwise it returns false. It does not change the turn.
+**Data flow**: No live database rows are read inside the function itself; it returns a SQLAlchemy Select object, which is a database query description. The query looks for recent successful scheduled turns with Markdown artifacts, then excludes turns that already have a digest entry or an unchanged marker. The result, when executed elsewhere, is a grouped list of workspace ids that have pending digest work.
 
-**Call relations**: Other code can read this property when it needs to treat spawned child turns differently from top-level turns, such as for queueing, result delivery, or parent-child bookkeeping.
+**Call relations**: This is a helper for the broader scheduling flow rather than for DigestWriter.run directly. It mirrors the writer’s own due-work rules so scheduling and actual processing agree about what counts as undigested.
 
-
-##### `Turn._nothing_created`  (lines 590–593)
-
-```
-def _nothing_created(cls, value: object) -> object
-```
-
-**Purpose**: Normalizes a missing created-objects column into an empty tuple. This lets the rest of the code treat “nothing was created” as an empty list-like value instead of worrying about database nulls.
-
-**Data flow**: It receives the raw value for created_refs before normal validation. If the value is null, it returns an empty tuple. Any other value is passed through for normal parsing.
-
-**Call relations**: Pydantic calls this while loading or building a Turn. Storage may return SQL NULL for no created objects, and this validator turns that into the safer in-memory shape expected by turn and cancellation logic.
-
-
-##### `Turn._aware_utc`  (lines 597–602)
-
-```
-def _aware_utc(cls, value: datetime | None) -> datetime | None
-```
-
-**Purpose**: Ensures turn timestamps carry UTC timezone information. This avoids accidentally interpreting database timestamps as local machine time.
-
-**Data flow**: It receives a created_at or updated_at datetime, or no value. Missing values stay missing. If the datetime already has timezone information, it is returned as-is; if not, the function marks it as UTC using datetime.replace.
-
-**Call relations**: Pydantic calls this for Turn timestamp fields. Database drivers can sometimes return timestamps without timezone markers, and this validator repairs that before scheduling, display, or comparison code uses the time.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `Turn._terminal_matches_status`  (lines 605–610)
-
-```
-def _terminal_matches_status(self) -> 'Turn'
-```
-
-**Purpose**: Checks that a turn’s status and terminal result agree. A running, queued, or parked turn must not have a terminal frame, and a finished, failed, or cancelled turn must have one with the same status.
-
-**Data flow**: It reads the whole Turn after its fields are built. If the status is non-terminal but terminal data exists, or if the status is terminal but terminal data is missing, it raises a validation error. It also rejects terminal data whose own status does not match the turn status. Valid turns are returned unchanged.
-
-**Call relations**: Pydantic runs this after Turn creation or loading. Downstream code can then rely on one clear rule: terminal details are present exactly when the turn is truly finished, failed, or cancelled.
-
-
-### `core/src/ufo/schema/tables.py`
-
-`data_model` · `database setup and any runtime code that builds or queries tables`
-
-This file is the project’s database blueprint. Like an architect’s floor plan, it does not store the data itself; it describes where every kind of data belongs and which rules the database must enforce. Without it, different parts of the system could disagree about what a workspace, member, agent, conversation, turn, billing record, connector, source, or synced page should look like.
-
-The file creates one shared SQLAlchemy metadata object. Metadata is SQLAlchemy’s collection of table definitions. Each table then describes a real concept in the product: workspaces contain members; members and agents participate in conversations; conversations contain turns; billing usage goes into a ledger; external services are represented through connections, sources, grants, cursors, and listener claims.
-
-A lot of the value here is in the guardrails. Foreign keys link rows that must belong together, such as a conversation pointing to its workspace and agent. Unique rules prevent duplicates, such as two members with the same email in one workspace. Check constraints stop invalid states, such as a turn having an impossible status or an archived main agent. Indexes help the database find common records quickly, such as pending work, live turns, or due writebacks.
-
-The file also includes one small defaulting helper for conversation audience. When a conversation row is inserted, it can derive whether the conversation is shared or tied to a specific member.
-
-#### Function details
-
-##### `_conversation_audience`  (lines 12–13)
-
-```
-def _conversation_audience(context: DefaultExecutionContext) -> str
-```
-
-**Purpose**: This function supplies a default value for a conversation’s audience when a new conversation is inserted. It turns the current row’s member ID, if any, into the standard audience string used by the rest of the system.
-
-**Data flow**: It receives SQLAlchemy’s execution context, which is the database toolkit’s snapshot of the row currently being written. It reads the pending row values, pulls out `member_id`, passes that to `conversation_audience`, and returns the resulting audience as text. The database insert then uses that text as the conversation’s audience value.
-
-**Call relations**: This helper is attached to the `conversation` table’s `audience` column as a Python-side default. When SQLAlchemy inserts a conversation and no audience was explicitly supplied, SQLAlchemy calls this function. The function delegates the actual audience-format decision to `ufo.runtime.turns.audience.conversation_audience`, so this schema file stays aligned with the runtime’s audience rules.
-
-*Call graph*: 2 external calls (get_current_parameters, conversation_audience).
+*Call graph*: 2 external calls (now, select).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The merged settings that tell the whole system how it should run in this deployment.
-- `reg-durable-database` — The main long-term database where shared business and runtime records are stored.
-- `reg-workspace-member-agent-state` — The saved list of workspaces, people, memberships, seats, and agents.
-- `reg-agent-configuration` — Each agent’s saved settings, such as model choice, reasoning mode, tools, visibility, internet access, sandbox size, and setup needs.
-- `reg-extension-install-store` — The saved record of which extensions are installed, removed, or holding extension-specific data.
-- `reg-surface-routing` — The shared routing state that maps browser, Slack, iMessage, terminal, site, and object requests to the right workspace, agent, and conversation.
-- `reg-credential-connections` — The encrypted accounts, secrets, connection grants, and credential fulfillments that let agents use outside services safely.
-- `reg-access-permissions-audience` — The shared rules for who may read, use, share, or act on workspace content and conversations.
-- `reg-egress-policy-proxy` — The network allowlist and proxy state that decide which outside hosts sandboxed work may contact.
-- `reg-billing-spend-ledger` — The shared accounting state for spend caps, usage charges, prepaid balances, BYOK billing, and ledger exports.
-- `reg-memory-index-state` — The stored knowledge, embeddings, chunks, and memory indexes that agents can search later.
-- `reg-source-config-sync-state` — The configured external sources plus their sync progress, errors, backoff, ownership, and access grants.
-- `reg-skill-prompt-library` — The reusable instructions, skills, prompt rules, and agent setup guidance loaded into turns.
-- `reg-conversation-turn-queue` — The durable state of conversations and turns, including admission, ordering, current runner, lifecycle status, and queued work.
-- `reg-inbound-message-queue` — The saved queue of incoming external messages waiting to be rendered, ordered, deduplicated, and admitted as turns.
-- `reg-transcript-history` — The saved conversation transcript, summaries, compactions, and access records that preserve what happened in a chat.
-- `reg-sandbox-runtime` — The durable sandbox and browser workspace handles where agent commands, files, web browsing, and hosted previews run safely.
-- `reg-blob-artifact-store` — The shared file, blob, artifact, preview, download, and hosted media storage used by turns and surfaces.
-- `reg-presentation-slots` — The shared conversation display slots for showing artifacts, sources, tasks, sites, automations, image previews, and other side-panel content.
-- `reg-background-jobs` — The shared job schedule, due-work candidates, claims, retries, and worker state for background and autonomous work.
-- `reg-runtime-fleet-heartbeats` — The fleet-wide record of which runtime processes are alive and what work they may be responsible for.
-- `reg-delegation-workflows` — The saved state for subagents, parent-child turns, objectives, workflow checkpoints, pending deliveries, and recovery.
-- `reg-object-journal` — The shared naming and change history for workspace objects such as tasks, prompts, skills, monitors, memories, and reports.
-- `reg-observability-trace` — The logs, metrics, traces, health signals, and trace links used to understand what the system is doing.
-- `reg-schema-migration-version` — The Alembic/database schema version state that records which migrations have been applied and gates safe startup against the expected database shape.
-- `reg-database-connection-pool` — The shared SQLAlchemy engine/session and connection-pool state used by requests, turns, workers, migrations, and persistence helpers to access the database safely.
-- `reg-surface-listener-leases` — The stored claims/leases that coordinate which runtime instance is allowed to listen on a shared surface installation or address, avoiding duplicate external listeners.
-- `reg-outbound-surface-delivery-queue` — The durable outgoing reply/writeback state, including mid-turn replies and surface deliveries that must be claimed, sent, retried, and acknowledged exactly once.
-- `reg-conversation-workspace-change-state` — The persisted record of file/workspace changes detected for a conversation sandbox, used for commit summaries, artifact presentation, recovery, and debugging.
-- `reg-workspace-object-store` — The current persisted workspace object records, such as tasks, monitors, todos, reports, prompts, and site metadata, read and mutated through object APIs, tools, jobs, and slots.
-- `reg-turn-runtime-snapshot` — The per-turn frozen runtime configuration and generated references used to run, recover, bill, and debug a turn consistently after settings change.
-- `reg-execution-step-log` — The structured persisted model, tool, and workflow execution records that power debugger timelines and post-run inspection beyond the user transcript.
-- `reg-source-page-corpus` — The canonical stored page/document records fetched from sources, including content and browse metadata before they are chunked, embedded, searched, or displayed.
-- `reg-proposal-approval-state` — Persisted proposed changes with before/after payloads, authoring information, and pending/approved/rejected status used for review and application workflows.
+- `reg-extension-registry` — The live catalog of installed extensions and the capabilities each one has registered.
+- `reg-database-schema` — The durable database layout and connection layer used to store and retrieve system records safely.
+- `reg-workspace-directory` — The saved list of workspaces, members, agents, admins, and workspace-level settings.
+- `reg-acting-authority` — The shared record of whether work is acting as a member, an agent, or only the workspace.
+- `reg-billing-ledger` — The shared meter and wallet state for usage costs, spend caps, prepaid balances, and billing identity.
+- `reg-turn-queue` — The durable queue of conversation turns waiting, running, parked, resumed, or blocked as duplicates.
+- `reg-live-workflow-state` — The shared run-state for active turns, including locks, progress, retry guards, cancellation, and completion markers.
+- `reg-source-index-memory` — The saved external pages, search chunks, embeddings, memories, and recall indexes used as workspace knowledge.
+- `reg-scheduled-jobs` — The durable background work list for timers, recurring conversations, monitors, reports, and long-running tasks.
+- `reg-surface-routing` — The saved routing state that maps web, Slack, iMessage, terminal, and other surfaces to workspaces and agents.
+- `reg-inbound-message-queue` — The durable inbox of external messages waiting to be admitted into conversations exactly once.
+- `reg-object-system` — The common address book and audit trail for durable workspace objects such as agents, members, artifacts, and connectors.
+- `reg-extension-store` — The per-workspace storage area where extensions keep their own durable settings and small JSON records.
+- `reg-runtime-instances` — The shared record of which server processes are alive and which background or surface duties they have claimed.
+- `reg-observability-trace` — The tracing, metrics, health, logs, and saved step history used to understand what the system did.
+- `reg-conversation-slots-ui` — The shared side-panel and workspace UI state for artifacts, sources, tasks, sites, automations, and app home screens.
+- `reg-source-sync-state` — The source-ingestion control state: source definitions, cursors/change-feed positions, error counters, backoff or parked status, and removal markers.
+- `reg-objective-state` — The durable goal/objective records holding plans, steps, evidence, blockers, and progress used by objective tools and background follow-up.
+- `reg-self-improvement-state` — The saved failure cases, prompt-change proposals, evaluation results, and approval status used by the self-improvement loop.
+- `reg-ledger-export-state` — Saved progress and options for exporting billing/ledger records, including BYOK-related export bookkeeping.
+- `reg-runtime-message-bus` — Shared Redis/pub-sub or message-hub connection state used to coordinate live updates, workers, and cross-process runtime events.

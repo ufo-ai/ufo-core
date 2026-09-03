@@ -1,1743 +1,1448 @@
-# Prompt, Skill, and Tool Catalog Construction  `stage-8.1`
+# Model provider request/stream adapters  `stage-8.1`
 
-This stage prepares the “workspace desk” an agent uses for a single turn. Before the model starts working, the host environment is assembled: prompts, tools, skills, setup files, and any safe changes from environment documents. These documents are stored by hash, meaning the exact same contents can be replayed later.
+This stage is shared behind-the-scenes support for talking to AI model services. UFO has its own internal shape for a model request and for streamed reply events. These files translate between that common shape and the different outside providers, like plug adapters for different wall sockets.
 
-The prompt renderer fills in the final system message and fingerprints it so changes are traceable. Delivery rules add shared writing guidance for replies and subagent reports. The tool registry checks that every callable tool has a clear name, safe description, and valid declaration, while object views decide which actions are safe to show.
+The package file simply makes the models folder importable. The catalog is a built-in list of directly supported Anthropic and OpenAI models, including their names, limits, prices, and which API key setting to use. The registry is the main lookup desk: when the system needs a model, it finds the model ID, provider, price rules, and builds the right client.
 
-The skill system reads reusable instruction folders, registers them, loads selected ones, and avoids duplicates. User-created skills are saved in a persistent skill store, while skill selection ranks or shortens saved skills so the prompt does not overflow. A model-catalog skill lists available AI models from live registry data. The spawn catalog creates up-to-date help text for delegating work to subagents. Package marker files simply make these areas importable by the rest of the system.
+The Anthropic adapter turns UFO messages into Claude Messages API calls, then converts Claude’s streaming output back into UFO events, including tool calls, images, reasoning text, retries, and usage counts. The OpenAI adapter does the same for OpenAI-style services, including Chat Completions, Responses, and Codex backends. The OpenRouter extension adds another provider bridge, including chat plus image and video generation tools.
 
 ## Files in this stage
 
-### Host Environment Foundations
-Defines the host environment package and the persisted environment documents that can safely shape a model turn.
+### Model package catalog
+Package scaffolding and the built-in model catalog establish the known direct Anthropic and OpenAI model definitions.
 
-### `core/src/ufo/host/__init__.py`
-
-`other` · `cross-cutting`
-
-This file does not contain executable code. Its job is to label and introduce a package: a folder of related Python files. The short module comment explains the purpose of this part of the project. In plain terms, `ufo.host` is where the project gathers the outside-facing resources that shape what an agent can do during one step of its work. That includes extensions, which add extra abilities; tools, which let the agent take actions; skills, which are reusable capabilities; and prompts, which are instructions or text templates that guide behavior.
-
-You can think of this package like the workbench prepared before someone starts a task. The agent does not act in an empty room; it is given certain instruments, instructions, and helper abilities. This package is where those surrounding pieces belong.
-
-Because this file only contains a docstring, nothing would directly fail at runtime if its text changed. But it matters as a signpost for readers and maintainers. It tells them what kind of code should live under `ufo.host` and how to understand that folder’s role in the larger system.
-
-
-### `core/src/ufo/host/environment.py`
-
-`config` · `config load and turn setup`
-
-An environment document is like a sealed instruction sheet for an experiment. It can say, for example, “use this prompt wording,” “hide this tool,” “rename this tool description,” “replace this skill text,” or “place this file in the workspace before the model runs.” This file describes what those instruction sheets are allowed to contain, checks that they are safe and well formed, and saves or reloads them from blob storage.
-
-The safety rule is important: these documents may narrow what the platform already offers, but they must not silently grant extra power. The one special addition is a `run` tool, but even that runs only inside the turn’s existing sandbox, so it cannot escape the sandbox’s limits.
-
-The file uses Pydantic models, which are Python classes that validate incoming data, to reject confusing or unsafe combinations. For example, a prompt override must be either a full replacement or a set of exact text edits, not both. A disabled tool cannot also have a new description. File destinations must be relative paths inside the workspace, not absolute paths or path tricks like escaping with `..`.
-
-When a document is stored, it is first converted into canonical JSON: a stable byte-for-byte form. The code then computes a SHA-256 hash, which is a fingerprint of the content. That digest becomes the name used to pin and later verify the document. If stored bytes do not match the claimed digest, loading fails loudly instead of trusting corrupted or wrong content.
-
-#### Function details
-
-##### `PromptOverride._one_form`  (lines 59–62)
-
-```
-def _one_form(self) -> 'PromptOverride'
-```
-
-**Purpose**: This validator makes sure a prompt override has exactly one clear meaning. It must either provide a whole new prompt text or provide a list of find-and-replace edits, but it cannot do both and it cannot do neither.
-
-**Data flow**: It reads the `text` field and the `replace` edits already parsed into the prompt override. If exactly one style is present, it leaves the object unchanged. If the object is ambiguous or empty, it raises an error so the document is rejected before a turn can use it.
-
-**Call relations**: This runs automatically while Pydantic is building a `PromptOverride` from an environment document. It protects later prompt assembly code from having to guess whether the author meant a full replacement or small edits.
-
-
-##### `ToolOverride._one_meaning`  (lines 91–104)
-
-```
-def _one_meaning(self) -> 'ToolOverride'
-```
-
-**Purpose**: This validator makes sure each tool override says one sensible thing. It prevents combinations such as disabling a tool while also trying to edit it, or defining input fields without a command to run.
-
-**Data flow**: It reads the parsed tool override fields: description changes, parameter-description changes, enabled/disabled status, custom input fields, and any sandbox command. Valid combinations pass through unchanged. Invalid combinations become clear validation errors, so a bad tool experiment fails before it reaches the model.
-
-**Call relations**: This runs automatically when an environment document contains a tool override. It prepares clean, unambiguous tool instructions for the code that later builds the tool list shown to the model.
-
-
-##### `EnvironmentDocument._entries_parse`  (lines 150–171)
-
-```
-def _entries_parse(self) -> 'EnvironmentDocument'
-```
-
-**Purpose**: This validator checks the parts of an environment document that need deeper safety checks: replacement skills and files that will be copied into the workspace. It makes sure added skill text really parses as a skill and that file destinations cannot escape the workspace.
-
-**Data flow**: It reads the document’s `skills` and `files` maps. For full skill replacements, it asks the skill parser to confirm the supplied `SKILL.md` text is valid. For files, it checks that each destination is a non-empty relative workspace path, asks the containment helper to catch unsafe paths, and checks that each referenced file value looks like a SHA-256 digest. If all checks pass, the document is returned unchanged; otherwise validation stops with an error.
-
-**Call relations**: This runs as part of constructing an `EnvironmentDocument`, including when `parse_environment_document` validates uploaded YAML or JSON and when `load_environment_document` rebuilds a stored document. It hands off skill text to `parse_skill_content`, path safety to `contained_relative`, and digest-shape checking to `ENVIRONMENT_DOCUMENT_RE.fullmatch`.
-
-*Call graph*: 3 external calls (contained_relative, parse_skill_content, fullmatch).
-
-
-##### `parse_environment_document`  (lines 174–190)
-
-```
-def parse_environment_document(body: bytes) -> tuple[EnvironmentDocument, bytes, str]
-```
-
-**Purpose**: This function turns an uploaded YAML or JSON environment document into a validated `EnvironmentDocument`, plus the exact canonical bytes that should be stored. It also computes the digest that will identify those bytes forever.
-
-**Data flow**: It receives raw document bytes. First it rejects documents over the size limit. Then it parses the bytes as YAML, which also covers JSON syntax, validates the loaded data against `EnvironmentDocument`, converts the validated document into stable JSON with sorted keys, and hashes those canonical bytes with SHA-256. It returns the parsed document, the canonical stored bytes, and the `sha256:...` digest.
-
-**Call relations**: This is the front door for accepting authored environment documents. `store_environment_document` calls it before writing anything to blob storage, so only validated and canonicalized documents are stored.
-
-*Call graph*: called by 1 (store_environment_document); 3 external calls (sha256, dumps, safe_load).
-
-
-##### `store_environment_document`  (lines 193–196)
-
-```
-async def store_environment_document(blob: WorkspaceBlobStore, body: bytes) -> str
-```
-
-**Purpose**: This function saves an environment document into workspace blob storage under a name derived from its content. It returns the digest that future turns can use to pin and reload the exact same document.
-
-**Data flow**: It receives a workspace blob store and raw document bytes. It calls `parse_environment_document`, which validates the document, creates canonical JSON bytes, and computes the digest. Then it writes those canonical bytes to the blob store using an `environment/` key based on the digest, and returns the digest to the caller.
-
-**Call relations**: This is used when a client or host needs to persist an environment document. It relies on `parse_environment_document` for validation and hashing, then hands the finished bytes to `WorkspaceBlobStore.put` for storage.
-
-*Call graph*: calls 2 internal fn (put, parse_environment_document).
-
-
-##### `load_environment_document`  (lines 199–205)
-
-```
-async def load_environment_document(blob: WorkspaceBlobStore, digest: str) -> EnvironmentDocument
-```
-
-**Purpose**: This function retrieves a previously stored environment document by digest and proves that the stored bytes still match that digest. It prevents the system from accidentally using the wrong or corrupted document.
-
-**Data flow**: It receives a blob store and a digest string. It first checks that the digest has the expected `sha256:...` shape. Then it reads the stored canonical bytes from the `environment/` blob key, hashes those bytes again, and compares the result with the requested digest. If they match, it parses the JSON bytes back into an `EnvironmentDocument`; if not, it raises an error.
-
-**Call relations**: This is used when a turn refers to an already pinned environment document. It calls `WorkspaceBlobStore.get` to fetch the bytes, uses SHA-256 to verify them, and lets `EnvironmentDocument` validation run again when rebuilding the model object.
-
-*Call graph*: calls 1 internal fn (get); 2 external calls (sha256, fullmatch).
-
-
-##### `store_environment_file`  (lines 208–217)
-
-```
-async def store_environment_file(blob: WorkspaceBlobStore, body: bytes) -> str
-```
-
-**Purpose**: This function saves a raw file that an environment document can later place into a turn’s sandbox. Unlike environment documents, the file is not parsed; it is stored exactly as uploaded and addressed by its content hash.
-
-**Data flow**: It receives a blob store and raw file bytes. It rejects files over the file-size limit, computes a SHA-256 digest of the bytes, writes the bytes to the blob store under an `environment/files/` key based on that digest, and returns the digest.
-
-**Call relations**: This is used when a document refers to an external file that must be uploaded first. It hands the raw bytes to `WorkspaceBlobStore.put`, and the returned digest can then appear in the document’s `files` section.
-
-*Call graph*: calls 1 internal fn (put); 1 external calls (sha256).
-
-
-##### `load_environment_file`  (lines 220–224)
-
-```
-async def load_environment_file(blob: WorkspaceBlobStore, digest: str) -> bytes
-```
-
-**Purpose**: This function retrieves a stored environment file and verifies that its bytes still match the requested digest. It gives the caller the exact file content that should be written into the sandbox.
-
-**Data flow**: It receives a blob store and a digest. It reads the stored bytes from the `environment/files/` blob key, hashes them with SHA-256, and compares the result with the digest. If the check passes, it returns the raw bytes; if not, it raises an error.
-
-**Call relations**: This is used later when a turn is preparing sandbox files named by an environment document. It calls `WorkspaceBlobStore.get` to fetch the file and uses digest verification before handing the bytes back for use.
-
-*Call graph*: calls 1 internal fn (get); 1 external calls (sha256).
-
-
-### `core/src/ufo/host/ext/__init__.py`
+### `core/src/ufo/harness/models/__init__.py`
 
 `other` · `import time`
 
-This is an empty package marker file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, it makes the `core/src/ufo/host/ext` directory part of the `ufo.host.ext` namespace, so nearby extension-related modules can be imported using normal Python import paths. Think of it like a label on a drawer: the label does not contain the tools, but it lets the rest of the system find the drawer reliably. Because this file is empty, it does not run setup code, expose shortcuts, or change how the extension modules behave. If it were missing in environments that still rely on package marker files, imports from this folder could fail or become less predictable.
+This is an empty Python package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means code elsewhere in the project can refer to this folder using normal import paths, such as importing things from `ufo.harness.models` or its child modules.
+
+Think of it like a label on a drawer: the drawer may hold useful files, but this label tells Python that the drawer is part of the organized code system. Without this file, some Python environments or tooling might not recognize the `models` directory as a package, which could make imports fail or behave differently.
+
+Because the file is empty, it does not create objects, run setup steps, or re-export names. Its value is structural: it helps define the shape of the project’s module tree.
 
 
-### Prompt and Delivery Text
-Provides prompt rendering, prompt package structure, and shared delivery-writing guidance for agents and subagents.
+### `core/src/ufo/harness/models/catalog.py`
 
-### `core/src/ufo/runtime/prompts/__init__.py`
+`config` · `startup / config load`
 
-`other` · `cross-cutting`
+This catalog gives the rest of the system one reliable place to look up facts about built-in models. Without it, the program could pick the wrong network API, bill usage at the wrong price, or send a request shape that the provider rejects.
 
-This is an empty Python package marker file. In Python projects, a file named `__init__.py` tells Python that the folder should be treated as an importable package. Here, it means code elsewhere can refer to modules inside `core/src/ufo/runtime/prompts` using normal package-style imports.
+The file defines shared names for API key locations, default context window sizes, and whether a model supports “reasoning” features, meaning extra thinking controls that can be combined with tool use. It then provides two small builders: one for Anthropic models and one for OpenAI models. Each builder creates a ModelSpec, which is like a recipe card saying: this is the model id, this is the provider, this is the price, this is the knowledge cutoff, this is how large a conversation can get, and this is the function to use when making a live client.
 
-There is no executable logic in this file: no functions, classes, settings, or startup work. Its value is structural. It is like a label on a drawer: the label does not contain the tools, but it lets the rest of the workshop find the drawer reliably.
-
-Without this file, depending on the Python version and packaging setup, imports from this folder could be less predictable or fail in some environments. Keeping it present makes the project layout explicit and helps prompt-related runtime code live under a clear namespace.
-
-
-### `core/src/ufo/runtime/prompts/render.py`
-
-`domain_logic` · `prompt construction before model calls`
-
-A system prompt is the instruction sheet the project gives to the model before asking it to work. This file is the prompt assembly table: it takes fixed markdown templates shipped with the code, adds the agent’s own instructions, adds available skills, adds capability sections from packs, adds citation rules, and inserts the model’s knowledge cutoff date in a human-readable form.
-
-The important safety feature is strict checking. Prompt text can contain placeholders such as {{some_var}}. This renderer makes sure every placeholder in the agent prompt has a supplied value, and every supplied value was actually declared. After all filling is done, it checks again for any leftover {{...}} text. If anything remains, it raises an error instead of sending a broken instruction to the model. That matters because an unfilled prompt hole could confuse the model or silently remove an important rule.
-
-It also normalizes extra blank lines and trims the end, so the final prompt is tidy. Finally, it calculates a SHA-256 digest, which is a stable fingerprint of the exact prompt content. Like a receipt number for a document, this lets logs and observability tools show exactly which prompt version was used.
+The main function, core_model_specs, returns all built-in model recipe cards. It includes special details where they matter: for example, some GPT-5.6 models must use OpenAI’s “responses” API surface because the normal chat endpoint cannot accept one combination of options. At import time, the file also turns these specs into lookup tables for prices and a pricing digest, so accounting code can stamp charges consistently.
 
 #### Function details
 
-##### `rendered_prompt`  (lines 61–62)
+##### `_anthropic_client`  (lines 32–35)
 
 ```
-def rendered_prompt(content: str) -> RenderedPrompt
+def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient
 ```
 
-**Purpose**: Wraps finished prompt text together with a digest, which is a fingerprint of the exact content. This lets the system send the text to the model while also recording a stable identifier for debugging and auditing.
+**Purpose**: Creates a ready-to-use Anthropic model client for a particular model spec and credential. It also notices whether the credential is an OAuth-style credential, so the Anthropic wrapper can treat it correctly.
 
-**Data flow**: It receives a finished prompt string. It turns that text into bytes, computes a SHA-256 hash from it, prefixes the hash with "sha256:", and returns a RenderedPrompt object containing both the digest and the original content.
+**Data flow**: It receives a ModelSpec and a key string. It first builds the underlying Anthropic SDK client from the key, checks what kind of credential the key is, and then wraps both pieces together with the spec. The result is an AnthropicClient object that later code can use to talk to that model.
 
-**Call relations**: This is the final packaging step used by render_template. After render_template has filled and checked the prompt, it calls rendered_prompt so the completed text leaves this file with its tracking fingerprint attached.
+**Call relations**: This function is not used while merely listing the catalog; it is stored inside Anthropic ModelSpec objects as the way to create a live client later. When some later part of the system chooses an Anthropic model, the spec can call this factory, which in turn relies on anthropic_sdk_client and is_oauth_credential before constructing AnthropicClient.
 
-*Call graph*: called by 1 (render_template); 2 external calls (__init__, sha256).
-
-
-##### `render_system_prompt`  (lines 65–82)
-
-```
-def render_system_prompt(agent_prompt: str, sections: Sequence[tuple[str, str]], skills: Sequence[tuple[str, str]]=(), *, knowledge_cutoff: str) -> RenderedPrompt
-```
-
-**Purpose**: Builds the main agent’s system prompt from the project’s standard shell template. It also converts the model’s machine-style knowledge cutoff, such as "2026-02", into readable text, such as "February 2026".
-
-**Data flow**: It receives the agent’s prompt text, contributed sections, optional skills, and a required knowledge cutoff date. It parses the cutoff date, inserts the readable version into the knowledge-cutoff block, places that block into the shell template, and passes the result onward to render_template. It returns the final RenderedPrompt.
-
-**Call relations**: This is the higher-level entry for building the normal agent prompt. It prepares the special knowledge-cutoff piece first, then hands the actual slot filling and validation to render_template.
-
-*Call graph*: calls 1 internal fn (render_template); 1 external calls (strptime).
+*Call graph*: 3 external calls (__init__, anthropic_sdk_client, is_oauth_credential).
 
 
-##### `render_template`  (lines 85–103)
+##### `_openai_client`  (lines 38–42)
 
 ```
-def render_template(template: str, agent_prompt: str, variables: Mapping[str, str], skills: Sequence[tuple[str, str]], sections: Sequence[tuple[str, str]]) -> RenderedPrompt
+def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient
 ```
 
-**Purpose**: Fills a prompt template with all of its major pieces and refuses to return a prompt if any placeholder is left unresolved. This is the main guardrail that prevents half-rendered instructions from reaching the model.
+**Purpose**: Creates a ready-to-use OpenAI model client for a particular model spec and credential. It chooses between the normal OpenAI client and a Codex-style client depending on what kind of account information is found in the key.
 
-**Data flow**: It receives a template, agent prompt text, variable values for that agent prompt, a skill list, and section bodies. First it substitutes variables inside the agent prompt. Then it checks that a non-empty agent prompt has a place to go. Next it replaces the skill, citation, section, and agent-prompt slots. It looks for any remaining {{...}} placeholders, raises an error if it finds any, cleans up long blank-line runs, trims the end, and returns a RenderedPrompt.
+**Data flow**: It receives a ModelSpec and a key string. It asks chatgpt_account_id whether the key contains a ChatGPT account id. If not, it builds a normal OpenAI SDK client and wraps it in OpenAIClient. If an account id is present, it builds a Codex SDK client for that account and marks the wrapper as codex-enabled. The output is an OpenAIClient ready for later requests.
 
-**Call relations**: render_system_prompt calls this after preparing the shell template. Inside, render_template asks _substitute_vars to safely fill agent-prompt variables, asks render_skill_index to format the available skills block, and finally asks rendered_prompt to attach the digest to the completed text.
+**Call relations**: Like the Anthropic client factory, this function is saved inside OpenAI ModelSpec objects rather than called during catalog construction. Later, when the system needs to contact an OpenAI-backed model, the spec can call this function, which then hands off to openai_sdk_client or codex_sdk_client before creating OpenAIClient.
 
-*Call graph*: calls 3 internal fn (_substitute_vars, render_skill_index, rendered_prompt); called by 1 (render_system_prompt).
-
-
-##### `render_workspace_facts`  (lines 115–128)
-
-```
-def render_workspace_facts(lines: Sequence[str]) -> str
-```
-
-**Purpose**: Formats a short block telling the model which workspace capabilities are already set up. This helps stop the model from offering setup steps for things the workspace already has.
-
-**Data flow**: It receives a list of capability lines. If the list is empty, it returns an empty string. Otherwise, it wraps the lines in a named workspace-capabilities block and adds one shared closing instruction: "Already set up — do not offer again."
-
-**Call relations**: This helper stands on its own in this file. Other prompt-building code can use it to create a ready-to-insert section, avoiding repeated wording from every extension that contributes a capability line.
+*Call graph*: 4 external calls (__init__, chatgpt_account_id, codex_sdk_client, openai_sdk_client).
 
 
-##### `render_skill_index`  (lines 131–140)
+##### `_anthropic`  (lines 45–65)
 
 ```
-def render_skill_index(skills: Sequence[tuple[str, str]]) -> str
+def _anthropic(id: str, price: ModelPrice, cutoff: str, key_env: str, *, context_window: int=ANTHROPIC_CONTEXT_WINDOW, reasoning: ReasoningSupport=REASONS_WITH_TOOLS) -> ModelSpec
 ```
 
-**Purpose**: Turns the available skills list into a simple prompt block the model can read. If there are no skills, it produces no block at all.
+**Purpose**: Builds the catalog entry for one Anthropic model. It keeps Anthropic-specific defaults in one place so each model row only needs to state what is different, such as its id, price, cutoff date, or larger context window.
 
-**Data flow**: It receives pairs of skill name and description. With no skills, it returns an empty string. With skills, it creates an <available_skills> block where each skill appears as a bullet with its description, then returns that text.
+**Data flow**: It receives the model id, pricing, knowledge cutoff, API key environment-variable name, and optional choices for context size and reasoning support. It combines those with Anthropic defaults: the provider name, the Anthropic client factory, the Anthropic key slot, and the chat API surface. The output is a ModelSpec describing exactly how this model should be used and billed.
 
-**Call relations**: render_template calls this when it reaches the skill slot in the template. The formatted block is inserted into the final prompt alongside the agent instructions, citation rules, and contributed sections.
+**Call relations**: core_model_specs calls this helper once for each built-in Anthropic model. The helper does the repetitive ModelSpec construction, so the main catalog can stay readable and focus on the model facts.
 
-*Call graph*: called by 1 (render_template).
+*Call graph*: called by 1 (core_model_specs); 1 external calls (__init__).
 
 
-##### `_substitute_vars`  (lines 143–150)
+##### `_openai`  (lines 68–82)
 
 ```
-def _substitute_vars(template: str, variables: Mapping[str, str]) -> str
+def _openai(id: str, price: ModelPrice, cutoff: str, key_env: str, *, api_surface: ApiSurface='chat') -> ModelSpec
 ```
 
-**Purpose**: Safely fills small named variables inside the agent prompt. It is strict on purpose: missing variables and extra variables are both treated as mistakes.
+**Purpose**: Builds the catalog entry for one OpenAI model. It applies OpenAI-specific defaults, including the provider name, key slot, context window, reasoning support, and which OpenAI API surface to use.
 
-**Data flow**: It receives prompt text that may contain {{variable_name}} placeholders and a mapping of variable names to replacement text. It scans the prompt to find declared variables, compares them with the supplied names, raises an error for anything missing or unexpected, and then replaces each placeholder with its matching value.
+**Data flow**: It receives the model id, pricing, knowledge cutoff, API key environment-variable name, and optionally an API surface such as chat or responses. It combines those inputs with OpenAI defaults and returns a ModelSpec. That spec says how to create the client, how large the conversation may grow for billing-safe compaction, and how usage should be priced.
 
-**Call relations**: render_template calls this before inserting the agent prompt into the larger shell. By doing this early, render_template can be sure the agent’s own instructions are complete before it checks the whole final prompt for unresolved slots.
+**Call relations**: core_model_specs calls this helper for each built-in OpenAI model. For models that need the responses API rather than the chat API, core_model_specs passes that choice in, and this helper stores it in the resulting ModelSpec.
 
-*Call graph*: called by 1 (render_template).
-
-
-### `core/src/ufo/runtime/turns/delivery_register.py`
-
-`config` · `startup and prompt construction`
-
-This file is like a house style card that every agent carries. The project has a separate Markdown document, `delivery_register.md`, that explains the accepted “registers,” meaning the allowed tone and format for delivered text. This Python file reads that document once and exposes it as `DELIVERY_REGISTER_BLOCK`, so other parts of the system can insert the same rules into prompts instead of copying them by hand.
-
-It also sets two size limits. `DIRECT_PROSE_RESULT_MAX_CHARS` caps short direct prose results, and `SUBAGENT_RESULT_MAX_WORDS` caps what a subagent is allowed to send back to its parent. These limits help keep internal agent-to-agent messages focused and prevent a helper agent from dumping a long answer where only a brief handoff is wanted.
-
-The longer `SUBAGENT_RESULT_DESCRIPTION` is instruction text for a subagent’s final visible result. It tells the subagent to choose the right writing style from the shared delivery register, call `finish` when done, avoid writing the result twice, and use a file path rather than restating a full artifact when an artifact is required. Without this file, different agents could drift into inconsistent wording, overly long handoffs, or duplicate final messages.
+*Call graph*: called by 1 (core_model_specs); 1 external calls (__init__).
 
 
-### Tool and Action Exposure
-Defines safe model-facing descriptions for actions and validates the runtime tools available during a turn.
+##### `core_model_specs`  (lines 85–190)
 
-### `core/src/ufo/runtime/object_views.py`
+```
+def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[ModelSpec, ...]
+```
 
-`domain_logic` · `model discovery and portal/request handling`
+**Purpose**: Returns the complete set of built-in model specifications for core. This is the central list that tells the system which Anthropic and OpenAI models exist by default and what their operational and pricing rules are.
 
-The system has actions attached to objects, but the outside world should not see the raw internal objects directly. This file acts like a display card maker: it takes a real action and produces an `ActionView`, a frozen data record that says what the action is called, what it does, what input shape it expects, and a pre-filled call template for invoking it later.
+**Data flow**: It receives the names of the environment variables that should hold the Anthropic and OpenAI keys. It creates ModelPrice objects for each model, then passes those prices and model facts into the Anthropic and OpenAI helper builders. The output is a tuple of ModelSpec objects. The module immediately uses that tuple to build CORE_MODEL_SPECS, price lookup data, a pricing table, and a digest that can identify the exact pricing set.
 
-This matters because model discovery and portal controls need the same clean view of actions. Without this layer, each caller would need to know the internal action layout, repeat filtering rules, and risk exposing actions that should stay hidden.
+**Call relations**: This is the top-level catalog builder in the file. It calls _anthropic and _openai repeatedly, and those helpers produce the ModelSpec entries that the rest of the model registry and billing ledger can rely on.
 
-The file also separates ordinary actions from actions meant to be presented as portal controls. A “presented” action is one with presentation information, such as a label or confirmation message, and it must not be marked as profile-only. The helper functions use that rule to build ordered lists of visible controls for a target object.
+*Call graph*: calls 2 internal fn (_anthropic, _openai); 1 external calls (__init__).
 
-Finally, the file computes which action IDs may be called from an embedded app page, also known as a frame. It combines suitable global tools with suitable object-bound actions and returns a sorted, duplicate-free list. In short, this file is the translator between internal action wiring and the carefully limited action menu exposed to models, portals, and frames.
+
+### Direct provider adapters
+Anthropic and OpenAI bridges translate UFO model requests into provider calls and convert streamed responses back into UFO events.
+
+### `core/src/ufo/harness/models/anthropic.py`
+
+`io_transport` · `request handling`
+
+This file lets the rest of the system talk to Anthropic without needing to know Anthropic's exact wire format. Think of it like a translator at a live conversation: it rewrites outgoing messages into the provider's language, listens to the streamed answer piece by piece, and translates each piece back into the system's shared event format.
+
+It covers three main jobs. First, it builds the Anthropic SDK client using either an API key or an OAuth access token, because those authenticate differently. Second, it converts UFO's message content, such as text, images, tool calls, tool results, and saved reasoning, into Anthropic content blocks. Third, it runs the streaming request and emits internal events for visible text, tool calls, stream start, hidden reasoning blocks, and final token usage.
+
+A large part of the file is defensive behavior around provider failures. Before any visible output has been sent, temporary network or provider errors can be retried with increasing delays. After visible output has started, the file raises a special interruption error so the wider engine can throw away the partial answer and rerun the round safely. It also treats max-token cutoffs, refusals, rejected keys, rate limits, and empty responses in specific ways so callers get meaningful failures instead of vague SDK errors.
 
 #### Function details
 
-##### `action_view`  (lines 27–53)
+##### `anthropic_sdk_client`  (lines 56–72)
 
 ```
-def action_view(kind: str, bound: 'BoundAction', *, name: str | None=None, agent: str | None=None, generation: UUID | None=None, presented: bool=False) -> ActionView
+def anthropic_sdk_client(credential: str) -> anthropic.AsyncAnthropic
 ```
 
-**Purpose**: Builds an `ActionView`, which is a plain description of an action plus a ready-to-use call template. Someone uses it when an internal bound action needs to be shown or offered safely to a model or portal.
+**Purpose**: Creates the Anthropic asynchronous SDK client that will make API calls. It chooses the right authentication style depending on whether the credential is an OAuth token or a normal API key, and it disables the SDK's built-in retries so this file's own retry rules stay in charge.
 
-**Data flow**: It receives the kind of target, a bound action, and optional details such as object name, agent, generation ID, and whether portal presentation details should be included. It copies the action name, description, input schema, and builds a call dictionary with the action target already filled in and an empty input area. It returns an immutable `ActionView` containing that public-facing action card.
+**Data flow**: It receives one credential string. It checks whether that string looks like an Anthropic OAuth token, then builds and returns an Anthropic client configured with either bearer-token OAuth headers or an API key, plus a shared timeout and no automatic SDK retries.
 
-**Call relations**: This is the construction step used by `presented_action_views`. After `presented_action_views` has filtered down to actions that are allowed to appear, it calls `action_view` to turn each chosen internal action into the clean view that other parts of the system can consume.
+**Call relations**: This is the setup doorway for Anthropic access. It asks is_oauth_credential to classify the credential, then hands the chosen settings to Anthropic's SDK constructor so later code can use the returned client inside AnthropicClient.
 
-*Call graph*: called by 1 (presented_action_views); 1 external calls (__init__).
-
-
-##### `presented`  (lines 56–58)
-
-```
-def presented(bound: 'BoundAction') -> bool
-```
-
-**Purpose**: Answers whether an action should be treated as a portal-visible control. It only says yes when the action has presentation information and is not limited to profile-only use.
-
-**Data flow**: It receives a bound action and reads two pieces of information from the underlying action: whether presentation settings exist, and whether the action is marked profile-only. It returns `true` if the action can be presented as a control, otherwise `false`; it does not change anything.
-
-**Call relations**: This is the shared gatekeeper for visibility. `presented_action_views` uses it before building portal action views, and `frame_admissible_ids` uses it before allowing object-bound actions to be called from an embedded frame.
-
-*Call graph*: called by 2 (frame_admissible_ids, presented_action_views).
+*Call graph*: calls 1 internal fn (is_oauth_credential); 1 external calls (AsyncAnthropic).
 
 
-##### `presented_action_views`  (lines 61–77)
+##### `is_oauth_credential`  (lines 75–77)
 
 ```
-def presented_action_views(actions: 'Mapping[str, Mapping[str, BoundAction]]', kind: str, binding: 'ActionBinding', *, name: str | None=None, generation: UUID | None=None) -> tuple[ActionView, ...]
+def is_oauth_credential(credential: str) -> bool
 ```
 
-**Purpose**: Builds the list of portal-presentable action views for one target object or action kind. It applies the rules for the requested binding and optional object name, then returns the matching actions in a predictable order.
+**Purpose**: Decides whether a credential is an Anthropic OAuth access token rather than a standard API key. This matters because the same API uses different headers for those two cases.
 
-**Data flow**: It receives all known actions grouped by kind, the kind to look at, the required binding type, and optional target details such as name and generation ID. It looks only at actions for that kind, sorts them by their short name, rejects actions that are not properly bound, bound to the wrong place, bound to a different name, or not presentable, and converts the survivors with `action_view`. It returns a tuple of `ActionView` records ready for display or discovery.
+**Data flow**: It receives a credential string, checks whether it starts with the known OAuth token prefix, and returns true or false.
 
-**Call relations**: This function sits between the raw action registry and the portal/model-facing view. It relies on `presented` to enforce the visibility rule, then hands each accepted action to `action_view` so the rest of the system receives uniform, pre-bound action descriptions.
+**Call relations**: It is used by anthropic_sdk_client during client creation. Its answer controls which authentication path that setup function takes.
 
-*Call graph*: calls 2 internal fn (action_view, presented).
-
-
-##### `frame_admissible_ids`  (lines 80–97)
-
-```
-def frame_admissible_ids(tools: 'Iterable[ToolDef]', actions: 'Mapping[str, Mapping[str, BoundAction]]') -> tuple[str, ...]
-```
-
-**Purpose**: Creates the list of action IDs that an embedded app page is allowed to call. This is a safety and routing helper: it names only actions explicitly marked as usable from a frame.
-
-**Data flow**: It receives global tools and object-bound actions. From the tools, it keeps only unbound tools that have presentation settings marked for frame use. From the object actions, it keeps only presented actions whose presentation also allows frame use, then takes their canonical IDs. It removes duplicates, sorts the result, and returns the allowed IDs as a tuple of strings.
-
-**Call relations**: This function uses `presented` as its first visibility check for object-bound actions, then adds the extra rule that the action must be frame-enabled. It brings together both global tools and object-specific actions so embedded pages get one clear allow-list rather than needing to inspect all runtime action data themselves.
-
-*Call graph*: calls 1 internal fn (presented).
+*Call graph*: called by 1 (anthropic_sdk_client).
 
 
-### `core/src/ufo/runtime/tools/registry.py`
-
-`domain_logic` · `startup validation and tool dispatch`
-
-The system lets the model call named tools, such as reading data, acting on an object, or asking a final question. This file describes those tools in a structured way so the rest of the runtime can trust what each tool means. A `ToolDef` is like a labeled appliance in a workshop: it has a name, instructions, an input form, and the function that actually runs it. It also carries safety labels, such as whether its output may contain untrusted outside text, whether it changes the outside world, and whether calls can safely run at the same time.
-
-Some tools are global, but others are actions attached to objects, such as an action for one visible item. Those bound object actions get a special canonical identity like `action:<kind>:<name>` and are deliberately kept out of the normal wire registry. This avoids confusing ordinary tool names with object-specific actions.
-
-`ToolRegistry` is the frozen catalog used by the engine when dispatching tool calls. When it is created, it checks for duplicate names, forbidden prefixes, reserved input fields, invalid object bindings, and invalid presentation or final-act declarations. Without these checks, the model could be shown misleading tool schemas, dispatch could pick the wrong callable, or a dangerous action could be exposed through the wrong route.
-
-#### Function details
-
-##### `ToolDef.canonical_id`  (lines 95–100)
+##### `_anthropic_image`  (lines 80–84)
 
 ```
-def canonical_id(self) -> str
+def _anthropic_image(source: ImageSource) -> dict[str, object]
 ```
 
-**Purpose**: Gives a tool its stable system-wide identity. A normal tool is identified by its name, while an object-bound action is identified with an `action:` prefix that includes the object kind.
+**Purpose**: Turns UFO's internal image source into the image block shape Anthropic expects. It is a small conversion helper for messages and tool results that include images.
 
-**Data flow**: It reads the tool definition, especially its name and optional object binding. If there is no binding, it returns the plain name. If there is a binding, it builds and returns a string in the form `action:<kind>:<tool name>`.
+**Data flow**: It receives an image source containing a media type and base64 image data. It wraps those fields in a dictionary using Anthropic's expected names and returns that dictionary.
 
-**Call relations**: Other parts of the runtime can use this identity for allowlists, logging, idempotency, and object-action dispatch. It keeps global tools and object actions in separate name spaces so they do not accidentally collide.
+**Call relations**: It is called when full message content is converted by anthropic_content, and also when a tool result part is converted by _anthropic_tool_result_part. It keeps image formatting consistent in both places.
+
+*Call graph*: called by 2 (_anthropic_tool_result_part, anthropic_content).
 
 
-##### `ToolDef.schema`  (lines 102–115)
+##### `_anthropic_tool_result_part`  (lines 87–92)
 
 ```
-def schema(self, *, include_requested_by: bool=True) -> ToolSchema
+def _anthropic_tool_result_part(part: ToolResultContent) -> dict[str, object]
 ```
 
-**Purpose**: Builds the tool description that can be sent over the wire to the model client. This tells the client the tool name, what it does, and what input shape it expects.
+**Purpose**: Converts one piece of a tool result into Anthropic's format. Tool results can include plain text or images, and this function handles those two supported cases.
 
-**Data flow**: It starts with the Pydantic input model, which can produce a JSON schema, meaning a machine-readable description of expected fields. If requested, it adds a reserved `requested_by` field used to tie a call to the message that explicitly authorized it. It then packages the name, description, and input schema into a `ToolSchema` object.
+**Data flow**: It receives one tool-result content block. If it is text, it returns a text dictionary; if it is an image, it delegates the image conversion and returns the resulting image dictionary.
 
-**Call relations**: This function calls `ToolSchema.__init__` to create the final schema object. `ToolRegistry.schemas` relies on each tool’s `schema` method when it needs to expose the registered tools as client-facing tool definitions.
+**Call relations**: It is used inside anthropic_content when a tool result contains multiple structured parts. For images, it hands off to _anthropic_image so image formatting is not duplicated.
+
+*Call graph*: calls 1 internal fn (_anthropic_image); called by 1 (anthropic_content).
+
+
+##### `anthropic_content`  (lines 95–129)
+
+```
+def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, object]]
+```
+
+**Purpose**: Converts UFO's internal message content into the content format Anthropic's Messages API accepts. It preserves Anthropic-compatible text, images, tool calls, tool results, and reasoning blocks, while dropping reasoning blocks that belong to another provider's format.
+
+**Data flow**: It receives either a plain string or a tuple of internal content blocks. A string is returned unchanged; structured blocks are walked one by one and turned into Anthropic dictionaries. Image blocks and image tool-result parts go through the shared image conversion helpers. The output is either the original string or a list of Anthropic-ready content dictionaries.
+
+**Call relations**: AnthropicClient._request_kwargs calls this while building the outgoing API request. This function sits at the boundary between UFO's shared model representation and Anthropic's provider-specific message format.
+
+*Call graph*: calls 2 internal fn (_anthropic_image, _anthropic_tool_result_part); called by 1 (_request_kwargs).
+
+
+##### `_AnthropicRetry.transport`  (lines 139–174)
+
+```
+async def transport(self, error: Exception, yielded: bool) -> _AnthropicRetry
+```
+
+**Purpose**: Decides what to do after a network-style streaming failure, such as a timeout or dropped connection. It retries if it is still safe, or raises a clear interruption/failure when retrying would be unsafe or exhausted.
+
+**Data flow**: It receives the error and a flag saying whether any visible output was already yielded. It increases the attempt count, logs what happened, may emit a retry metric, waits for the current backoff delay, and returns an updated retry state with a longer next delay. If output had already been shown, or the retry budget is spent, it raises instead.
+
+**Call relations**: AnthropicClient.complete calls this when the stream fails due to transport problems. If nothing user-visible has gone out yet, it gives complete a new retry state so the request can be sent again; if a partial answer escaped, it raises ModelStreamInterrupted so the wider round logic can discard and rerun the partial round.
+
+*Call graph*: calls 1 internal fn (__init__); 4 external calls (sleep, replace, emit_metric, log).
+
+
+##### `_AnthropicRetry.status`  (lines 176–230)
+
+```
+async def status(self, error: anthropic.APIStatusError, yielded: bool) -> _AnthropicRetry
+```
+
+**Purpose**: Decides what to do after Anthropic reports an API status error. It separates rejected credentials, rate limits, retryable provider trouble, and deterministic client mistakes so each case gets the right response.
+
+**Data flow**: It receives an Anthropic status error and a flag saying whether output was already yielded. It checks the HTTP status code, logs the outcome, may convert rejected keys or rate limits into project-specific errors, may wait using the provider's retry-after header, and returns an updated retry state when retrying is allowed. Otherwise it raises the appropriate error.
+
+**Call relations**: AnthropicClient.complete calls this when the Anthropic stream or request reports a status failure. It uses ModelStreamInterrupted for unsafe mid-stream failures, and otherwise hands complete either a new retry state or a final exception.
+
+*Call graph*: calls 1 internal fn (__init__); 4 external calls (sleep, replace, emit_metric, log).
+
+
+##### `_AnthropicStream.__init__`  (lines 234–245)
+
+```
+def __init__(self) -> None
+```
+
+**Purpose**: Creates a fresh state tracker for one Anthropic streaming response. It starts with no emitted output, no tool-call IDs, no reasoning blocks, and zero usage counts.
+
+**Data flow**: It takes no outside data beyond the new object being created. It initializes dictionaries and counters that will be filled as Anthropic stream events arrive.
+
+**Call relations**: AnthropicClient.complete creates one of these for each request attempt. The rest of the stream-processing methods update this object as events arrive and later use it to produce final reasoning and usage information.
+
+*Call graph*: called by 1 (complete).
+
+
+##### `_AnthropicStream.accept`  (lines 247–291)
+
+```
+def accept(self, event: object) -> tuple[ModelEvent, ...]
+```
+
+**Purpose**: Reads one raw Anthropic stream event and turns any user-visible part into UFO model events. It also quietly records hidden state such as token usage, tool-call IDs, reasoning text, reasoning signatures, and stop reasons.
+
+**Data flow**: It receives one event from Anthropic's stream. Depending on the event kind, it may update usage counters, remember a tool-call ID, emit a text delta, emit a tool-call start or tool-call JSON fragment, collect thinking text, store redacted reasoning, or record the final stop reason. It returns a tuple of zero or more UFO events, and marks the stream as having yielded visible output when it emits something.
+
+**Call relations**: AnthropicClient.complete feeds every raw stream event into this method. When the event starts usage tracking, accept calls _record_input_usage; when a thinking block ends, it calls _close_thinking. The events it returns are immediately yielded back to the model engine.
+
+*Call graph*: calls 2 internal fn (_close_thinking, _record_input_usage); 4 external calls (__init__, __init__, __init__, __init__).
+
+
+##### `_AnthropicStream._record_input_usage`  (lines 293–301)
+
+```
+def _record_input_usage(self, usage: Any) -> None
+```
+
+**Purpose**: Stores the input-side token counts reported by Anthropic. This includes normal input tokens and cache-related token counts, which matter for accounting and cost tracking.
+
+**Data flow**: It receives Anthropic's usage object from the start of a message. It copies input token counts into the stream state, treating missing cache values as zero and supporting both older and newer Anthropic cache-reporting shapes.
+
+**Call relations**: _AnthropicStream.accept calls this when it sees the message-start event. Later, has_usage and usage use these stored counts to decide whether and what usage record should be yielded.
+
+*Call graph*: called by 1 (accept).
+
+
+##### `_AnthropicStream._close_thinking`  (lines 303–312)
+
+```
+def _close_thinking(self, index: int) -> None
+```
+
+**Purpose**: Finalizes one Anthropic reasoning, or thinking, block after all its streamed pieces have arrived. It combines the pieces and stores them with the required signature so the reasoning can be echoed back correctly in later turns.
+
+**Data flow**: It receives the index of a thinking block. It retrieves and removes the collected text pieces and signature for that index, checks that the signature is present, joins the text, creates a ThinkingBlock, and appends it to the ordered reasoning list.
+
+**Call relations**: _AnthropicStream.accept calls this when Anthropic says a thinking block has stopped. The completed reasoning blocks are later yielded by AnthropicClient.complete after the stream closes, just before final usage.
+
+*Call graph*: called by 1 (accept); 1 external calls (__init__).
+
+
+##### `_AnthropicStream.has_usage`  (lines 314–320)
+
+```
+def has_usage(self) -> bool
+```
+
+**Purpose**: Reports whether this stream has collected any input-side usage information yet. This is useful when an error happens before the normal final usage event can be produced.
+
+**Data flow**: It reads the stored input and cache token counters. If any of them are nonzero, it returns true; otherwise it returns false.
+
+**Call relations**: AnthropicClient.complete uses this during error paths and unusual endings to decide whether it can still yield a useful usage record before raising or retrying.
+
+
+##### `_AnthropicStream.usage`  (lines 322–329)
+
+```
+def usage(self) -> Usage
+```
+
+**Purpose**: Builds UFO's standard usage record from the token counts collected during the Anthropic stream. This is the final accounting summary for the model call.
+
+**Data flow**: It reads the stream state's input tokens, output tokens, and cache token counters. It creates and returns a Usage object, using zero for output tokens if Anthropic has not supplied them yet.
+
+**Call relations**: AnthropicClient.complete yields this at the end of successful streams and sometimes before retrying or raising after failures. It packages the state collected by accept and _record_input_usage into the shared record format used elsewhere.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `validate_tool_declaration`  (lines 118–142)
+##### `AnthropicClient._request_kwargs`  (lines 338–384)
 
 ```
-def validate_tool_declaration(tool: ToolDef[Any], label: str) -> None
+def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]
 ```
 
-**Purpose**: Checks that one tool declaration follows the system’s safety and consistency rules. It catches bad tool definitions early, before they can be shown to the model or used by dispatch.
+**Purpose**: Builds the keyword arguments for Anthropic's messages.create API call from UFO's ModelRequest. It is where model name, system prompt, messages, tools, cache settings, reasoning settings, and streaming mode are assembled into Anthropic's expected request shape.
 
-**Data flow**: It receives a `ToolDef` and a human-readable label for error messages. It inspects optional presentation settings, object binding settings, and final-act settings. If something is inconsistent, such as an empty button label, a collection action pinned to a single item, or a final-act model the terminal frame cannot carry, it raises a `ValueError`; otherwise it changes nothing and returns nothing.
+**Data flow**: It receives a ModelRequest. It trims images as needed, converts each message's content with anthropic_content, adds the system prompt and optional OAuth system prefix, sets token and cache options, translates reasoning effort into Anthropic thinking settings, and adds tool definitions plus tool-choice rules when tools are available. It returns a dictionary ready to pass to the Anthropic SDK.
 
-**Call relations**: ToolRegistry.__post_init__ calls this for every tool after doing registry-wide checks. This makes per-tool validation part of registry construction, so invalid declarations fail during setup rather than later during a model call.
+**Call relations**: AnthropicClient.complete calls this immediately before starting an API stream. It is the main outgoing translation step, using anthropic_content for message bodies and trim_images to keep image history within expected limits.
 
-*Call graph*: called by 1 (__post_init__).
-
-
-##### `ToolRegistry.__post_init__`  (lines 149–169)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: Runs the registry’s startup gatekeeping after the frozen `ToolRegistry` object is created. It refuses tool catalogs that would be ambiguous, unsafe, or routed through the wrong path.
-
-**Data flow**: It reads the tuple of tools in the registry. It looks for duplicate names, bound object actions that were mistakenly placed in the wire registry, names using the reserved `action:` prefix, and input models that define the reserved `requested_by` field themselves. If any problem is found, it raises a clear `ValueError`; if the broad checks pass, it validates each individual tool declaration.
-
-**Call relations**: This method calls `validate_tool_declaration` for each tool. Because it runs as part of dataclass construction, any code that creates a `ToolRegistry` automatically gets these checks before the registry can be used for schemas or lookups.
-
-*Call graph*: calls 1 internal fn (validate_tool_declaration).
+*Call graph*: calls 1 internal fn (anthropic_content); called by 1 (complete); 1 external calls (trim_images).
 
 
-##### `ToolRegistry.schemas`  (lines 171–172)
+##### `AnthropicClient.complete`  (lines 386–476)
 
 ```
-def schemas(self, *, include_requested_by: bool=True) -> tuple[ToolSchema, ...]
+async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Returns the wire-ready schemas for every tool in the registry. This is how the registered catalog is turned into the form a model client can understand.
+**Purpose**: Runs one streaming Anthropic completion and yields UFO model events as they happen. It also owns the provider-specific retry policy, final reasoning delivery, usage reporting, and special errors for truncation, refusal, rejected keys, rate limits, and interrupted streams.
 
-**Data flow**: It reads the registry’s tuple of tool definitions and the `include_requested_by` option. For each tool, it asks the tool to build its schema using the same option, then returns all those schemas as an immutable tuple.
+**Data flow**: It receives a ModelRequest. It builds Anthropic request arguments, opens a streaming API call, yields a stream-start marker when the first event arrives, sends each raw event through _AnthropicStream.accept, and yields the resulting text or tool-call events. After the stream ends, it checks the stop reason, yields hidden reasoning blocks in order, yields final usage, and returns. If temporary errors happen before visible output, it waits and retries; if errors happen after visible output, it raises an interruption so the partial round can be discarded.
 
-**Call relations**: This function sits between the frozen registry and whatever part of the engine needs to advertise tools to the model client. It delegates the details of each schema to `ToolDef.schema`, keeping the registry focused on collecting the results.
+**Call relations**: This is the main method other model-running code uses to talk to Anthropic. It creates _AnthropicStream state for each attempt, calls _request_kwargs to prepare the provider call, relies on _AnthropicRetry methods to decide retry behavior, emits metrics for empty retries, and yields the shared ModelEvent objects consumed by the rest of the harness.
 
-
-##### `ToolRegistry.get`  (lines 174–178)
-
-```
-def get(self, name: str) -> ToolDef[Any]
-```
-
-**Purpose**: Finds the registered tool definition for a given tool name. The dispatch path can use it when a model asks to call a named tool.
-
-**Data flow**: It receives a name string and scans the registry’s tool tuple. If it finds a tool with that exact name, it returns the full `ToolDef`, including its input model, safety flags, and handler. If no tool matches, it raises a `KeyError` saying the tool is unknown.
-
-**Call relations**: This is the registry’s lookup doorway for normal global tools. It depends on `ToolRegistry.__post_init__` having already rejected duplicate names, so a successful lookup can return one clear tool definition instead of choosing between conflicting entries.
+*Call graph*: calls 2 internal fn (_request_kwargs, __init__); 5 external calls (__init__, __init__, __init__, __init__, emit_metric).
 
 
-### Skill Runtime and User Skills
-Defines the skill system, persists user-created workspace skills, and selects saved skills for prompt inclusion.
+### `core/src/ufo/harness/models/openai.py`
 
-### `core/src/ufo/runtime/skills/__init__.py`
+`io_transport` · `request handling during model calls and streaming`
 
-`other` · `import time`
+This file lets the rest of the system talk to OpenAI-like model providers without caring about each provider's exact wire format. UFO has its own plain internal shapes for messages, images, tool calls, tool results, reasoning, streamed text, and token usage. OpenAI has two different APIs for similar work: Chat Completions and Responses. This file translates between those worlds.
 
-This is an empty `__init__.py` file. In Python, a file with this name tells the interpreter that the surrounding folder should be treated as a package, meaning its contents can be imported by name from elsewhere in the program. You can think of it like a label on a drawer: the drawer may contain many useful tools, and the label lets the rest of the system find that drawer reliably.
+The main class, OpenAIClient, chooses the correct API surface for a model. It can also override that choice when the credential is a ChatGPT account token, because that token goes to the ChatGPT Codex backend rather than the normal OpenAI API. Think of this file like a travel adapter: the appliance is the same conversation, but the plug shape changes depending on the wall socket.
 
-Because this file has no code, it does not run any setup, create any objects, or change program state. Its value is structural. Without it, depending on the Python version and packaging setup, imports involving `ufo.runtime.skills` might fail or behave less predictably. Keeping the file also makes the project layout clear to humans: `skills` is intended to be a named part of the runtime system.
+It also takes care of streaming. As text and tool calls arrive piece by piece, helper stream classes convert provider chunks into ModelEvent objects that the engine understands. At the end, they report token usage and raise clear errors for truncation, refusal, rate limits, rejected keys, or broken streams.
 
-
-### `core/src/ufo/runtime/skills/runtime.py`
-
-`domain_logic` · `startup and skill loading during agent turns`
-
-A skill is a small bundle of guidance for the agent: a folder with a `SKILL.md` file, plus optional extra files. The `SKILL.md` starts with YAML frontmatter, which is structured metadata such as the skill name, description, dependencies, and target agents, followed by the actual instructions the agent should read.
-
-This file is the “library desk” for those bundles. It reads skill folders from disk or memory, checks that they are shaped correctly, and turns them into `RuntimeSkill` objects. It also builds a registry of all skills the system can load: built-in deploy skills, pack-provided skills, generated skills, and user/member-saved skills. When the agent asks for a skill, the registry expands that request to include any declared dependencies, like gathering a recipe plus the tools it says it needs.
-
-The file also prepares loaded skills for two audiences. For the agent, it creates a prompt section containing each skill’s instructions and a compact tree of the files made available. For the sandbox, it packages the skill files so they appear under `$UFO_HOME/skills/<name>/`. It carefully tracks which skill instructions are already in the conversation context, so repeated loads do not waste space by printing the same workflow again.
+A major responsibility here is safe retry behavior. Before any visible output is yielded, temporary network or server problems can be retried. After output has already been shown, a broken stream becomes an interrupted round so the engine can discard partial output rather than mixing two attempts together.
 
 #### Function details
 
-##### `skill_root`  (lines 51–53)
+##### `_cache_write_tokens`  (lines 112–120)
 
 ```
-def skill_root(name: str) -> str
+def _cache_write_tokens(details: PromptTokensDetails | InputTokensDetails | None) -> int
 ```
 
-**Purpose**: Builds the stable runtime path where a named skill should appear inside the agent’s environment. It gives the rest of the system one consistent place to refer to skill files.
+**Purpose**: Reads OpenAI's optional count of tokens written into the prompt cache. This matters because cached tokens can be priced differently, so usage accounting needs to split them out correctly.
 
-**Data flow**: It receives a skill name, joins it onto the fixed skills root `$UFO_HOME/skills`, and returns that path as text.
+**Data flow**: It receives token-detail data from an OpenAI usage object. It looks inside the extra provider fields for cache_write_tokens, treats missing data as zero, verifies the value is a real integer, and returns that integer. If the provider sends a malformed value, it raises an error instead of silently producing bad billing data.
 
-**Call relations**: When a `RuntimeSkill` needs to report its root folder, `RuntimeSkill.root` calls this helper so every skill path is formed the same way.
+**Call relations**: The chat and Responses usage converters both call this helper while turning provider-specific usage reports into UFO's shared Usage record.
 
-*Call graph*: called by 1 (root).
-
-
-##### `RuntimeSkill.all_files`  (lines 89–90)
-
-```
-def all_files(self) -> dict[str, bytes]
-```
-
-**Purpose**: Returns every file that belongs to a skill, including its original `SKILL.md`. This is used whenever the system needs the complete skill package, not just the instructions.
-
-**Data flow**: It reads the skill’s stored raw `SKILL.md` text and its asset files, then returns a dictionary from file path to file bytes.
-
-**Call relations**: Digesting and sandbox transfer both need the full file set. `RuntimeSkill.content_digest` uses it to fingerprint the skill, and `_wire_skill` uses it to prepare files for loading.
-
-*Call graph*: called by 2 (content_digest, _wire_skill).
+*Call graph*: called by 2 (_chat_usage, _responses_usage).
 
 
-##### `RuntimeSkill.root`  (lines 92–93)
+##### `_responses_usage`  (lines 123–137)
 
 ```
-def root(self) -> str
+def _responses_usage(raw: ResponseUsage, cache_write_30m_priced: bool) -> Usage
 ```
 
-**Purpose**: Reports where this skill should live inside `$UFO_HOME/skills`. Other code uses this path when preparing safe file locations.
+**Purpose**: Converts token usage from the OpenAI Responses API into UFO's common Usage format. It separates normal input tokens, cache reads, cache writes, and output tokens.
 
-**Data flow**: It reads the skill’s name, passes that name to `skill_root`, and returns the resulting path string.
+**Data flow**: It receives a Responses API usage object and a flag saying whether 30-minute cache writes should count as separately priced. It reads total input, output, cached, and cache-write tokens, checks that the pieces do not add up to more than the total, and returns a Usage object. Bad provider totals cause a runtime error.
 
-**Call relations**: It is called by `_wire_skill` while turning a skill into the format expected by the sandbox loader.
+**Call relations**: _ResponsesStream.accept calls this when a completed or failed Responses stream reports usage, and _ResponsesStream._record_incomplete calls it when an incomplete response still includes usage.
 
-*Call graph*: calls 1 internal fn (skill_root); called by 1 (_wire_skill).
+*Call graph*: calls 1 internal fn (_cache_write_tokens); called by 2 (_record_incomplete, accept); 1 external calls (__init__).
 
 
-##### `RuntimeSkill.card`  (lines 95–103)
+##### `_chat_usage`  (lines 140–154)
 
 ```
-def card(self) -> SkillCard
+def _chat_usage(raw: openai.types.CompletionUsage, cache_write_30m_priced: bool) -> Usage
 ```
 
-**Purpose**: Creates the lightweight “routing card” for a skill. The card contains enough information to choose and expand skills without carrying the full instruction body.
+**Purpose**: Converts token usage from the OpenAI Chat Completions API into UFO's common Usage format. It gives the rest of the system one consistent way to count tokens no matter which OpenAI API was used.
 
-**Data flow**: It reads the skill’s name, description, dependencies, and target agents, then returns a `SkillCard` with those fields.
+**Data flow**: It receives a Chat Completions usage object and a cache-pricing flag. It extracts prompt tokens, completion tokens, cached prompt tokens, and cache-write tokens, validates the counts, and returns a Usage object with the prompt total adjusted to exclude separately tracked cache tokens.
 
-**Call relations**: Registries use these cards when listing or resolving deploy skills, so dependency lookup can happen without rereading full skill content.
+**Call relations**: _ChatStream.accept calls this when a streaming chat chunk includes final usage information.
+
+*Call graph*: calls 1 internal fn (_cache_write_tokens); called by 1 (accept); 1 external calls (__init__).
+
+
+##### `openai_sdk_client`  (lines 157–170)
+
+```
+def openai_sdk_client(api_key: str, base_url: str | None=None, default_headers: dict[str, str] | None=None) -> openai.AsyncOpenAI
+```
+
+**Purpose**: Builds the OpenAI Python SDK client with UFO's chosen timeout and retry policy. The SDK's own retries are disabled because this file implements retries in a way that understands streaming and partial output.
+
+**Data flow**: It receives an API key, an optional base URL, and optional default headers. It creates and returns an asynchronous OpenAI SDK client configured for that endpoint, with a fixed provider timeout and no SDK-level retries.
+
+**Call relations**: codex_sdk_client uses this helper to make a Codex-specific client. Other OpenAI-compatible providers can also use the same construction pattern with their own base URL and headers.
+
+*Call graph*: called by 1 (codex_sdk_client); 1 external calls (AsyncOpenAI).
+
+
+##### `chatgpt_account_id`  (lines 173–186)
+
+```
+def chatgpt_account_id(credential: str) -> str | None
+```
+
+**Purpose**: Detects whether a credential is a ChatGPT account token and, if so, extracts the account id inside it. This lets the system distinguish a member's ChatGPT login token from a normal OpenAI platform API key.
+
+**Data flow**: It receives a credential string. If it looks like a three-part JWT token, it decodes the middle payload, reads the ChatGPT auth claims, and returns the embedded account id. If the credential is not a JWT, cannot be decoded, or lacks the expected claim, it returns None.
+
+**Call relations**: This helper is used when deciding whether a credential should talk to the normal OpenAI API or to the ChatGPT Codex backend.
+
+*Call graph*: 2 external calls (urlsafe_b64decode, loads).
+
+
+##### `codex_sdk_client`  (lines 189–205)
+
+```
+def codex_sdk_client(credential: str, account: str) -> openai.AsyncOpenAI
+```
+
+**Purpose**: Builds an OpenAI SDK client pointed at the ChatGPT Codex backend for account-token credentials. That backend needs special headers on every request, not just a bearer token.
+
+**Data flow**: It receives the member credential and the ChatGPT account id. It prepares the required Codex headers, including account id, originator, beta flag, and streaming accept header, then returns an SDK client aimed at the Codex base URL.
+
+**Call relations**: It delegates the actual SDK construction to openai_sdk_client, adding the Codex-specific endpoint and headers before doing so.
+
+*Call graph*: calls 1 internal fn (openai_sdk_client).
+
+
+##### `_status_retry_wait`  (lines 208–214)
+
+```
+def _status_retry_wait(error: openai.APIStatusError, delay: float) -> float
+```
+
+**Purpose**: Chooses how long to wait before retrying an HTTP status error. It respects the provider's retry-after header when present, but never waits less than the current backoff delay.
+
+**Data flow**: It receives an OpenAI status error and the current planned delay. It tries to parse the response's retry-after header as seconds, falls back to the given delay if missing or invalid, and returns the larger safe wait time.
+
+**Call relations**: _OpenAIRetry.status calls this when deciding the pause before another try after a rate limit or server error.
+
+*Call graph*: called by 1 (status).
+
+
+##### `_openai_image`  (lines 217–221)
+
+```
+def _openai_image(source: ImageSource) -> dict[str, object]
+```
+
+**Purpose**: Turns UFO's internal image data into the image-url shape expected by OpenAI chat messages. The image bytes are carried as a base64 data URL.
+
+**Data flow**: It receives an ImageSource containing a media type and base64 data. It wraps those fields in OpenAI's expected image_url dictionary and returns that dictionary.
+
+**Call relations**: openai_messages uses it for user images, and _openai_tool_result uses it when a tool result contains images that must be sent back to the model.
+
+*Call graph*: called by 2 (_openai_tool_result, openai_messages).
+
+
+##### `_openai_tool_result`  (lines 224–240)
+
+```
+def _openai_tool_result(result: str | tuple[ToolResultContent, ...]) -> tuple[str, list[dict[str, object]]]
+```
+
+**Purpose**: Splits a tool result into text and images for the Chat Completions API. This is needed because OpenAI chat tool messages are text-only, while images must be sent separately as user content.
+
+**Data flow**: It receives either a plain string tool result or a tuple of content blocks. It gathers text blocks into one newline-joined string and converts image blocks into OpenAI image dictionaries. It returns both the text and the list of images.
+
+**Call relations**: openai_messages calls this while translating internal ToolResultBlock values into OpenAI chat messages.
+
+*Call graph*: calls 1 internal fn (_openai_image); called by 1 (openai_messages).
+
+
+##### `openai_messages`  (lines 243–302)
+
+```
+def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str, object]]
+```
+
+**Purpose**: Converts UFO's conversation history into the message list required by OpenAI Chat Completions. It preserves text, images, tool calls, and tool results where that API can represent them.
+
+**Data flow**: It receives the system prompt and prior UFO messages. It trims images as needed, drops reasoning blocks because Chat Completions has no place for them, converts text and images into OpenAI content parts, serializes tool-call arguments as JSON, and emits tool-result messages. Tool-result images are lifted into a following user message because chat tool messages cannot contain images.
+
+**Call relations**: OpenAIClient._chat_kwargs calls this when building the request body for the Chat Completions streaming call.
+
+*Call graph*: calls 2 internal fn (_openai_image, _openai_tool_result); called by 1 (_chat_kwargs); 2 external calls (dumps, trim_images).
+
+
+##### `responses_input`  (lines 305–406)
+
+```
+def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemParam]
+```
+
+**Purpose**: Converts UFO's conversation history into the richer input item list expected by OpenAI's Responses API. Unlike Chat Completions, this format can carry reasoning items back to the provider.
+
+**Data flow**: It receives prior UFO messages. It trims images, converts ordinary text and images into Responses input parts, preserves OpenAI reasoning items with their encrypted content and summaries, serializes tool calls as function-call items, and converts tool results into function-call-output items. Anthropic-style thinking blocks are skipped because they are not the Responses wire format.
+
+**Call relations**: responses_request calls this to fill the input field of a Responses API request.
+
+*Call graph*: called by 1 (responses_request); 13 external calls (dumps, ResponseReasoningItemParam, EasyInputMessageParam, ResponseFunctionToolCallParam, ResponseInputImageContentParam, ResponseInputImageParam, FunctionCallOutput, ResponseInputTextContentParam, ResponseInputTextParam, ResponseOutputTextParam (+3 more)).
+
+
+##### `responses_request`  (lines 409–448)
+
+```
+def responses_request(request: ModelRequest, effort: OpenAIEffort, codex: bool=False) -> dict[str, Any]
+```
+
+**Purpose**: Builds the full request body for OpenAI's Responses API. It includes the model, instructions, conversation input, streaming choice, reasoning settings, tools, and tool-choice rules.
+
+**Data flow**: It receives a ModelRequest, a resolved reasoning effort, and a flag saying whether the request is going to the Codex backend. It converts messages with responses_input, adds streaming and encrypted-reasoning options, includes token limits except for Codex, adds reasoning when allowed, and describes available tools if any. It returns a dictionary ready to pass to the SDK.
+
+**Call relations**: OpenAIClient._complete_responses calls this immediately before starting a Responses stream.
+
+*Call graph*: calls 1 internal fn (responses_input); called by 1 (_complete_responses); 1 external calls (FunctionToolParam).
+
+
+##### `_OpenAIRetry.transport`  (lines 458–493)
+
+```
+async def transport(self, error: Exception, yielded: bool) -> _OpenAIRetry
+```
+
+**Purpose**: Decides what to do after a network-level streaming problem, such as a timeout or dropped connection. It retries only while it is still safe to do so.
+
+**Data flow**: It receives the exception and a flag saying whether any visible model output has already been yielded. If output has already appeared, it raises ModelStreamInterrupted so the partial round can be discarded. If no output appeared and retries remain, it logs the retry, emits a metric, sleeps, and returns a new retry state with a larger delay. If retries are exhausted, it re-raises the original error.
+
+**Call relations**: Both OpenAIClient._complete_chat and OpenAIClient._complete_responses use this retry helper when transport errors happen during provider streaming.
+
+*Call graph*: calls 1 internal fn (__init__); 4 external calls (sleep, replace, emit_metric, log).
+
+
+##### `_OpenAIRetry.status`  (lines 495–543)
+
+```
+async def status(self, error: openai.APIStatusError, yielded: bool) -> _OpenAIRetry
+```
+
+**Purpose**: Decides what to do after the provider returns an HTTP error status. It turns common provider failures into clearer UFO errors and retries temporary failures when safe.
+
+**Data flow**: It receives an OpenAI status error and a flag saying whether output was already yielded. A rejected key becomes the model spec's credential error immediately. Rate limits and server errors can be retried before visible output, using retry-after-aware backoff. If output was already yielded, retryable errors become ModelStreamInterrupted. Exhausted rate limits become the spec's rate-limit error; other non-retryable statuses are raised as-is.
+
+**Call relations**: The chat and Responses streaming methods call this when the OpenAI SDK reports an API status error. It uses _status_retry_wait to choose the sleep time.
+
+*Call graph*: calls 2 internal fn (_status_retry_wait, __init__); 4 external calls (sleep, replace, emit_metric, log).
+
+
+##### `_ChatStream.__init__`  (lines 547–552)
+
+```
+def __init__(self, cache_write_30m_priced: bool) -> None
+```
+
+**Purpose**: Creates a small state holder for one Chat Completions stream. It remembers partial tool-call ids, whether anything visible has been emitted, final usage, and the provider's finish reason.
+
+**Data flow**: It receives a flag describing cache-write pricing. It initializes empty state for tool calls, usage, finish reason, and the yielded-output marker. Nothing is returned beyond the new object.
+
+**Call relations**: OpenAIClient._complete_chat creates one _ChatStream for each attempt at a chat completion.
+
+*Call graph*: called by 1 (_complete_chat).
+
+
+##### `_ChatStream.accept`  (lines 554–582)
+
+```
+def accept(self, chunk: ChatCompletionChunk) -> tuple[ModelEvent, ...]
+```
+
+**Purpose**: Turns one streamed Chat Completions chunk into zero or more UFO model events. It is the parser for incremental chat text and incremental tool-call arguments.
+
+**Data flow**: It receives a provider chunk. If the chunk carries usage, it converts and stores it. If it carries text, it emits a TextDelta. If it carries a new tool call, it emits ToolCallStart, then emits ToolCallDelta pieces as arguments arrive. It updates its own state and returns the events it found.
+
+**Call relations**: OpenAIClient._complete_chat calls this for every chunk from the SDK stream, then yields the returned events to the rest of the engine.
+
+*Call graph*: calls 1 internal fn (_chat_usage); 3 external calls (__init__, __init__, __init__).
+
+
+##### `_ChatStream.finish`  (lines 584–599)
+
+```
+def finish(self) -> tuple[Usage, Exception | None]
+```
+
+**Purpose**: Finishes interpreting a Chat Completions stream and reports final usage plus any terminal problem. It treats max-token truncation as a recoverable model-response error.
+
+**Data flow**: It reads the stream state accumulated by accept. If the finish reason was length, it prepares a ModelResponseTruncated error. If usage was never reported, it raises either that truncation error or a missing-usage runtime error. Otherwise it returns the Usage object and the optional terminal error.
+
+**Call relations**: OpenAIClient._complete_chat calls this after the provider stream ends to decide whether to yield usage, raise truncation, retry an empty response, or finish normally.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `RuntimeSkill.content_digest`  (lines 105–111)
+##### `_ResponsesStream.__init__`  (lines 603–610)
 
 ```
-def content_digest(self) -> str
+def __init__(self, cache_write_30m_priced: bool) -> None
 ```
 
-**Purpose**: Creates a stable fingerprint for a skill’s full contents. This lets caches and sandboxes know whether two skill bundles are exactly the same.
+**Purpose**: Creates a state holder for one Responses API stream. It tracks visible output, tool-call ids, completed reasoning items, usage, and any terminal error reported by the provider.
 
-**Data flow**: It gathers all files, sorts them by path, hashes each path and each file’s bytes with SHA-256, then returns a `sha256:` digest string.
+**Data flow**: It receives a cache-write pricing flag. It initializes empty maps and sets for tool calls, an empty reasoning list, no usage, no terminal error, and a false yielded-output marker. The new object stores state for one streaming attempt.
 
-**Call relations**: _wire_skill` uses this digest when sending a skill to the sandbox, and system bundles use the same idea to identify immutable skill archives.
+**Call relations**: OpenAIClient._complete_responses creates one _ResponsesStream for each attempt at a Responses API completion.
 
-*Call graph*: calls 1 internal fn (all_files); called by 1 (_wire_skill); 1 external calls (sha256).
-
-
-##### `SystemSkillBundle.from_skills`  (lines 123–148)
-
-```
-def from_skills(cls, skills: Iterable[RuntimeSkill]) -> 'SystemSkillBundle'
-```
-
-**Purpose**: Builds a deterministic ZIP archive for the deploy-time system skills. Deterministic means the same skills produce the same bytes and the same cache identity.
-
-**Data flow**: It receives runtime skills, checks that duplicate names do not hide different content, creates a manifest describing each skill and file, writes all files into a ZIP archive, and returns a bundle containing the digest, archive bytes, and manifest bytes.
-
-**Call relations**: Startup and serving code call this when preparing shared system skills for the runtime, terminal cache, or sandbox image.
-
-*Call graph*: called by 4 (init_runtime, _mount_shared_surfaces, run, system_skill_bundle); 4 external calls (sha256, BytesIO, dumps, ZipFile).
+*Call graph*: called by 1 (_complete_responses).
 
 
-##### `SystemSkillBundle._write`  (lines 151–154)
+##### `_ResponsesStream.accept`  (lines 612–651)
 
 ```
-def _write(archive: zipfile.ZipFile, path: str, content: bytes) -> None
+def accept(self, event: ResponseStreamEvent) -> tuple[ModelEvent, ...]
 ```
 
-**Purpose**: Writes one file into the system-skill ZIP archive with fixed metadata. Fixed timestamps and permissions help keep the archive reproducible.
+**Purpose**: Turns one OpenAI Responses stream event into UFO model events or stored final state. It understands text deltas, tool calls, reasoning items, refusals, completion, failure, and incomplete responses.
 
-**Data flow**: It receives a ZIP archive, a path, and bytes, creates a ZIP entry with a fixed date and file mode, and writes the content into the archive.
+**Data flow**: It receives a Responses event. Text events become TextDelta objects. Function-call starts and argument deltas become ToolCallStart and ToolCallDelta objects. Finished reasoning items are recorded for later. Completed events store usage; refused, failed, errored, or incomplete events store an appropriate terminal error. It returns only the events that should be shown immediately.
 
-**Call relations**: It is the low-level helper used by `SystemSkillBundle.from_skills` for the manifest and every bundled skill file.
+**Call relations**: OpenAIClient._complete_responses calls this for every event from the provider stream. It hands reasoning and incomplete-response details to _record_reasoning and _record_incomplete when needed.
 
-*Call graph*: 2 external calls (writestr, ZipInfo).
-
-
-##### `LoadedSkill.prompt_body`  (lines 167–177)
-
-```
-def prompt_body(self) -> str
-```
-
-**Purpose**: Creates the text block that one loaded skill contributes to the agent’s context. It makes clear whether the agent directly asked for the skill or it arrived as a dependency.
-
-**Data flow**: It reads the loaded skill name, instructions, and optional dependency source, then returns a markdown header followed by the skill instructions.
-
-**Call relations**: `loaded_context` relies on this method when building the final prompt text shown to the agent.
+*Call graph*: calls 3 internal fn (_record_incomplete, _record_reasoning, _responses_usage); 4 external calls (__init__, __init__, __init__, __init__).
 
 
-##### `LoadedSkills.reseed`  (lines 203–222)
+##### `_ResponsesStream._record_reasoning`  (lines 653–662)
 
 ```
-def reseed(self, loads: Iterable[tuple[LoadedRef, ...]], preloaded: tuple[LoadedSkill, ...]=()) -> None
+def _record_reasoning(self, item: ResponseReasoningItem) -> None
 ```
 
-**Purpose**: Rebuilds the tracker of which skill instructions are already in the model’s context. This prevents the system from repeating the same skill text across turns or after transcript changes.
+**Purpose**: Stores a completed OpenAI reasoning item so it can be replayed in a future request. This is important because the Responses API may need encrypted reasoning content to continue a tool-using conversation correctly.
 
-**Data flow**: It receives previously resolved loads and optionally preloaded skills, clears the old tracker, records every skill currently in context, and separately records which ones the agent directly asked for.
+**Data flow**: It receives a provider reasoning item. It requires encrypted_content to be present, gathers the item id, encrypted body, and summary text, and appends a ReasoningItemBlock to the stream's reasoning list. If the encrypted body is missing, it raises an error.
 
-**Call relations**: It starts by calling `LoadedSkills.reset`. Later, `loaded_context` can use this tracked state to suppress repeated instruction blocks.
+**Call relations**: _ResponsesStream.accept calls this when it sees a completed reasoning output item.
 
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.drain`  (lines 224–229)
-
-```
-def drain(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the skills the agent directly asked for and then clears the tracker. This is useful at a boundary where old skill bodies may be dropped but the system wants to remember what should be reloadable.
-
-**Data flow**: It sorts the `asked_for` names, clears both tracking sets, and returns the saved names as a tuple.
-
-**Call relations**: It calls `LoadedSkills.reset` after taking the snapshot, so the next context-tracking phase starts fresh.
-
-*Call graph*: calls 1 internal fn (reset).
+*Call graph*: called by 1 (accept); 1 external calls (__init__).
 
 
-##### `LoadedSkills.reset`  (lines 231–233)
+##### `_ResponsesStream._record_incomplete`  (lines 664–675)
 
 ```
-def reset(self) -> None
+def _record_incomplete(self, response: Any) -> None
 ```
 
-**Purpose**: Clears all remembered loaded-skill state. It is the shared cleanup step for reseeding or draining the tracker.
+**Purpose**: Interprets an incomplete Responses API result and turns its reason into a clear terminal error. It distinguishes truncation, content-filter refusal, and other incomplete failures.
 
-**Data flow**: It empties the set of skills in context and the set of skills directly requested by the agent. It returns nothing.
+**Data flow**: It receives the incomplete response object. If usage is present, it converts and stores it. It then reads the incomplete reason: max_output_tokens becomes ModelResponseTruncated, content_filter becomes ModelRefusal, and anything else becomes a generic runtime error.
 
-**Call relations**: `LoadedSkills.reseed` calls it before rebuilding state, and `LoadedSkills.drain` calls it after extracting requested skill names.
+**Call relations**: _ResponsesStream.accept calls this when the provider sends a ResponseIncompleteEvent.
 
-*Call graph*: called by 2 (drain, reseed).
-
-
-##### `_split_frontmatter`  (lines 236–242)
-
-```
-def _split_frontmatter(text: str) -> tuple[str, str]
-```
-
-**Purpose**: Separates the structured metadata at the top of `SKILL.md` from the instruction body below it. It also enforces that the file really starts and ends its metadata block correctly.
-
-**Data flow**: It receives the full text of `SKILL.md`, checks for the opening `---` fence, finds the closing fence, and returns the metadata text and body text. If the fences are missing, it raises an error.
-
-**Call relations**: `parse_skill_content` calls this before reading the YAML metadata and building a `RuntimeSkill`.
-
-*Call graph*: called by 1 (parse_skill_content).
+*Call graph*: calls 1 internal fn (_responses_usage); called by 1 (accept); 2 external calls (__init__, __init__).
 
 
-##### `_child_skill_dirs`  (lines 245–250)
+##### `_ResponsesStream.finish`  (lines 677–685)
 
 ```
-def _child_skill_dirs(skill_dir: Path) -> list[Path]
+def finish(self) -> tuple[Usage, Exception | None]
 ```
 
-**Purpose**: Finds immediate child folders that are themselves skills. A child skill is identified by having its own `SKILL.md` file.
+**Purpose**: Finishes interpreting a Responses stream and returns final usage plus any terminal error. It preserves the specific error class for truncation or refusal even when usage is missing.
 
-**Data flow**: It receives a directory path, scans its direct children, keeps only directories containing `SKILL.md`, sorts them, and returns the list.
+**Data flow**: It reads the usage and terminal error collected during streaming. If usage is missing and a terminal error exists, it raises that terminal error. If both usage and terminal error are missing, it raises a missing-usage runtime error. Otherwise it returns the usage and optional terminal error.
 
-**Call relations**: `parse_skill` uses this to keep child skill files out of the parent’s asset bundle, and `discover_skills` uses it to recurse into nested skills.
-
-*Call graph*: called by 2 (discover_skills, parse_skill); 1 external calls (iterdir).
+**Call relations**: OpenAIClient._complete_responses calls this after the stream closes to decide whether to yield usage, raise a provider outcome, retry an empty response, or emit saved reasoning blocks.
 
 
-##### `parse_skill_content`  (lines 253–290)
+##### `OpenAIClient.complete`  (lines 700–703)
 
 ```
-def parse_skill_content(dir_name: str, files: Mapping[str, bytes], registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
+def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Turns an in-memory set of files into a validated `RuntimeSkill`. This is used when skill files come from storage or another source instead of directly from disk.
+**Purpose**: Chooses which OpenAI-style API path to use for a model request. It hides the Chat Completions versus Responses split from the rest of the engine.
 
-**Data flow**: It receives a directory name, file bytes, and optional registry naming details. It reads `SKILL.md`, splits metadata from body, parses YAML, checks that the skill name matches the folder, validates agent targeting, gathers asset files, and returns a `RuntimeSkill`.
+**Data flow**: It receives a ModelRequest. If this client is for Codex, or if the model spec says to use the Responses API, it returns the Responses streaming iterator. Otherwise it returns the Chat Completions streaming iterator.
 
-**Call relations**: `parse_skill` calls this after reading files from disk. It delegates frontmatter splitting to `_split_frontmatter`.
+**Call relations**: This is the public entry point on OpenAIClient. Callers ask complete for model events, and it routes the work to _complete_chat or _complete_responses.
 
-*Call graph*: calls 1 internal fn (_split_frontmatter); called by 1 (parse_skill); 3 external calls (__init__, PurePosixPath, safe_load).
-
-
-##### `parse_skill`  (lines 293–302)
-
-```
-def parse_skill(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Reads one skill directory from disk and turns it into a `RuntimeSkill`. It treats nested child-skill folders as separate skills rather than as ordinary parent assets.
-
-**Data flow**: It receives a filesystem path, finds immediate child skill folders, reads all regular files except those inside child skill folders, and passes the collected bytes to `parse_skill_content`.
-
-**Call relations**: `discover_skills` calls this for each skill directory it visits while building a flattened map of skills.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill_content); called by 1 (discover_skills); 1 external calls (rglob).
+*Call graph*: calls 2 internal fn (_complete_chat, _complete_responses).
 
 
-##### `discover_skills`  (lines 305–323)
+##### `OpenAIClient._reasoning_effort`  (lines 705–724)
 
 ```
-def discover_skills(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> dict[str, RuntimeSkill]
+def _reasoning_effort(self, request: ModelRequest) -> OpenAIEffort
 ```
 
-**Purpose**: Discovers a skill and all of its nested child skills, returning them in one name-to-skill map. Child skills get path-like names such as `parent/child`.
+**Purpose**: Decides what reasoning-effort value, if any, should be sent to OpenAI. It protects the caller from accidentally letting a reasoning model use its default reasoning when the request intended reasoning to be off.
 
-**Data flow**: It receives a skill directory and optional parent naming details, parses the current skill, then scans child skill directories and recursively discovers each one.
+**Data flow**: It reads the request's reasoning setting, tools, and the model spec's reasoning rules. If the model should not receive a reasoning parameter, it returns None. If the request asks for off, it converts that to OpenAI's none value. If the spec says the provider cannot accept a needed off setting alongside tools, it raises an error rather than sending an unsafe request.
 
-**Call relations**: `_load_core_skills` calls this while collecting built-in skills from the source tree. It uses `parse_skill` for the current directory and `_child_skill_dirs` to find children.
+**Call relations**: OpenAIClient._chat_kwargs uses this for Chat Completions, and OpenAIClient._complete_responses uses it before building a Responses request.
 
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill); called by 1 (_load_core_skills).
-
-
-##### `_load_core_skills`  (lines 326–333)
-
-```
-def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Loads the built-in core skills that ship with the project. These are the baseline skills available before packs or member-saved skills are added.
-
-**Data flow**: It receives a root directory, scans visible child directories, discovers skills inside each one, and returns a dictionary keyed by skill name.
-
-**Call relations**: This function is used at module import time to populate the core skill registry.
-
-*Call graph*: calls 1 internal fn (discover_skills); 1 external calls (iterdir).
+*Call graph*: called by 2 (_chat_kwargs, _complete_responses).
 
 
-##### `SkillRegistry.__post_init__`  (lines 360–362)
+##### `OpenAIClient._chat_kwargs`  (lines 726–755)
 
 ```
-def __post_init__(self) -> None
+def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]
 ```
 
-**Purpose**: Fills in the default set of bundled deploy skills after the registry is created. If no explicit bundle list is given, all deploy skills are considered bundled.
+**Purpose**: Builds the request arguments for a Chat Completions streaming call. It translates UFO's request fields into the names and shapes that OpenAI's chat endpoint expects.
 
-**Data flow**: It checks whether `bundled_names` is missing. If so, it sets it to the names currently present in `by_name`.
+**Data flow**: It receives a ModelRequest. It converts conversation messages with openai_messages, adds model name, token budget, streaming options, and usage-in-stream options. It adds reasoning effort when appropriate, and converts available tools and tool-choice settings into OpenAI chat format. It returns the keyword-argument dictionary for the SDK call.
 
-**Call relations**: This runs automatically when a `SkillRegistry` is constructed, including the core registry and registries made by merge methods.
+**Call relations**: OpenAIClient._complete_chat calls this immediately before starting the provider stream. It depends on _reasoning_effort and openai_messages for the tricky translations.
 
-
-##### `SkillRegistry.named`  (lines 364–368)
-
-```
-def named(self, name: str) -> RuntimeSkill
-```
-
-**Purpose**: Looks up a deploy skill by exact name. If the name is unknown, it raises a helpful error instead of silently failing.
-
-**Data flow**: It receives a name, tries to return the matching `RuntimeSkill` from the deploy-skill dictionary, and on failure asks `_unknown` to build an explanatory error.
-
-**Call relations**: Callers use this when they need an actual deploy skill object rather than just a routing card.
-
-*Call graph*: calls 1 internal fn (_unknown).
+*Call graph*: calls 2 internal fn (_reasoning_effort, openai_messages); called by 1 (_complete_chat).
 
 
-##### `SkillRegistry._unknown`  (lines 370–373)
+##### `OpenAIClient._complete_chat`  (lines 757–831)
 
 ```
-def _unknown(self, name: str) -> ValueError
+async def _complete_chat(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Creates a clear error message for an unknown skill name, including close matches when possible. This helps users recover from typos.
+**Purpose**: Runs a full Chat Completions streaming request and yields UFO model events as they arrive. It also applies the file's retry, interruption, truncation, empty-output, and usage-reporting rules.
 
-**Data flow**: It receives a missing name, compares it with all known names, builds a short suggestion hint, and returns a `ValueError`.
+**Data flow**: It receives a ModelRequest. For each attempt, it builds chat request arguments, starts the SDK stream, yields ModelStreamStart when the stream begins, converts chunks through _ChatStream.accept, and yields text or tool-call events. If temporary errors happen before output, it retries with backoff. If errors happen after output, it raises ModelStreamInterrupted. When the stream ends, it yields Usage, raises terminal truncation if needed, retries limited empty completions, or returns normally.
 
-**Call relations**: `SkillRegistry.named` and `SkillRegistry._card` use this whenever lookup fails.
+**Call relations**: OpenAIClient.complete routes chat-surface requests here. This method uses _chat_kwargs to prepare the request, _ChatStream to parse the stream, and _OpenAIRetry to make retry decisions.
 
-*Call graph*: calls 1 internal fn (known_names); called by 2 (_card, named); 1 external calls (get_close_matches).
-
-
-##### `SkillRegistry._card`  (lines 375–382)
-
-```
-def _card(self, name: str) -> SkillCard
-```
-
-**Purpose**: Finds the routing card for a skill, whether it is a deploy skill or a member-saved skill. A routing card is enough to resolve dependencies without loading full content.
-
-**Data flow**: It receives a name, first checks deploy skills, then member cards, and returns the matching card. If neither tier contains the name, it raises the unknown-skill error.
-
-**Call relations**: `SkillRegistry.closure` and its inner dependency walk call this whenever they need to expand a requested skill or dependency.
-
-*Call graph*: calls 1 internal fn (_unknown); called by 2 (closure, add).
+*Call graph*: calls 3 internal fn (_chat_kwargs, __init__, __init__); called by 1 (complete); 3 external calls (__init__, __init__, emit_metric).
 
 
-##### `SkillRegistry.known_names`  (lines 384–387)
+##### `OpenAIClient._complete_responses`  (lines 833–900)
 
 ```
-def known_names(self) -> frozenset[str]
+async def _complete_responses(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Returns every skill name this registry can resolve. This combines deploy skills and member-saved skill cards.
+**Purpose**: Runs a full Responses API streaming request and yields UFO model events as they arrive. It is the Responses counterpart to the chat path, with added support for preserving OpenAI reasoning items.
 
-**Data flow**: It reads the deploy-skill names and member-card names, combines them into one frozen set, and returns it.
+**Data flow**: It receives a ModelRequest. It resolves reasoning effort, builds the Responses request, starts the SDK stream, yields ModelStreamStart, converts provider events through _ResponsesStream.accept, and yields live text or tool-call events. It retries safe temporary failures, interrupts unsafe mid-stream failures, and after a successful stream yields stored reasoning blocks followed by Usage. Empty visible output is retried a few times before being accepted.
 
-**Call relations**: `SkillRegistry._unknown` uses this list to suggest close matches for a missing name.
+**Call relations**: OpenAIClient.complete routes Responses-surface and Codex requests here. It uses responses_request to build the wire request, _ResponsesStream to parse events, _reasoning_effort for reasoning rules, and _OpenAIRetry for retry behavior.
 
-*Call graph*: called by 1 (_unknown).
-
-
-##### `SkillRegistry.all_cards`  (lines 389–394)
-
-```
-def all_cards(self) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: Returns routing cards for all loadable skills. Search and selection code can use these compact cards without reading every full skill body.
-
-**Data flow**: It turns each deploy skill into a card, appends the stored member cards, and returns them as a tuple.
-
-**Call relations**: This provides the registry-wide view used by skill search and selection flows.
+*Call graph*: calls 4 internal fn (_reasoning_effort, __init__, responses_request, __init__); called by 1 (complete); 3 external calls (__init__, __init__, emit_metric).
 
 
-##### `SkillRegistry.bundled_skills`  (lines 396–399)
+### Model registry
+The registry centralizes model lookup, pricing, provider selection, and client construction for runtime turns.
 
-```
-def bundled_skills(self) -> tuple[RuntimeSkill, ...]
-```
+### `core/src/ufo/harness/models/registry.py`
 
-**Purpose**: Returns the deploy skills that are included in the static terminal archive and sandbox image. These are the skills the sandbox can refer to by digest instead of receiving full file bytes every time.
+`domain_logic` · `startup and model request handling`
 
-**Data flow**: It reads the bundled-name set, filters the deploy skills to those names, and returns the matching `RuntimeSkill` objects.
+The rest of the system should not have to guess what a model ID means. This file makes one reliable place to ask. It gathers the built-in model definitions and any model definitions contributed by extensions, checks that no two models claim the same ID, and refuses to start if important configured model names are unknown. That turns a typo into an early, clear boot error instead of a confusing failure halfway through a conversation.
 
-**Call relations**: Serving setup calls this when mounting shared skill surfaces for the runtime.
+It also connects model choice to credentials and billing. When code asks for a client for a model, the registry looks up the model’s facts, finds the right key from the current workspace or environment, checks that the key can be sent safely to the provider, and returns both the client and who is paying. This matters because some calls may be paid by the platform, while others use a member’s own connected account.
 
-*Call graph*: called by 1 (_mount_shared_surfaces).
+There are two safety mechanisms for member-owned accounts. If a provider rejects a token before any response is streamed, the registry can rebuild the client once, which lets a refreshed token be used. If a member connected multiple provider accounts, a serving turn can move to the next account when the current one is rate-limited, while keeping billing honest.
 
+#### Function details
 
-##### `SkillRegistry.closure`  (lines 401–425)
+##### `_RebuiltOnRejection.complete`  (lines 57–72)
 
 ```
-def closure(self, *names: str) -> tuple[LoadedRef, ...]
+async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Expands requested skill names into the full set that must be loaded, including dependencies. It keeps the requested skills first and avoids loading any skill twice.
+**Purpose**: This method runs a model request through an already-built client, but gives it one careful second chance if the provider rejects the credential before any answer has started. It prevents long-running turns from dying just because a token expired at an unlucky moment.
 
-**Data flow**: It receives one or more skill names, creates direct `LoadedRef` entries for them, walks each skill’s dependency list, records who pulled each dependency, and returns the ordered tuple of references.
+**Data flow**: It receives a model request and starts streaming events from the existing client. If events have already been delivered, any credential failure is passed upward because replaying would duplicate part of the answer. If the credential is rejected before the first event, it asks the registry to build a fresh client for the same model, checks that the payer and funding type did not change, and then streams the retry’s events back out.
 
-**Call relations**: The runtime engine calls this when determining what a load request really means. It uses `_card` for lookups and its inner `add` helper for dependency recursion.
-
-*Call graph*: calls 1 internal fn (_card); called by 1 (_loaded_skill_closures); 1 external calls (__init__).
-
-
-##### `SkillRegistry.closure.add`  (lines 415–420)
-
-```
-def add(card: SkillCard, dependency_of: str | None) -> None
-```
-
-**Purpose**: Adds one dependency and its own dependencies to a closure walk. It is careful not to revisit names already seen, which also prevents dependency cycles from causing endless recursion.
-
-**Data flow**: It receives a skill card and the name of the skill that depended on it, skips it if already recorded, otherwise stores a `LoadedRef` and recursively processes its dependencies.
-
-**Call relations**: This helper lives inside `SkillRegistry.closure` and is called while expanding each requested skill’s dependency chain.
-
-*Call graph*: calls 1 internal fn (_card); 1 external calls (__init__).
-
-
-##### `SkillRegistry.materialize`  (lines 427–449)
-
-```
-async def materialize(self, refs: Sequence[LoadedRef]) -> tuple[LoadedSkill, ...]
-```
-
-**Purpose**: Turns resolved skill references into full loaded skills with instruction bodies and files. This is the point where member-saved skills are actually read.
-
-**Data flow**: It receives a sequence of `LoadedRef` objects, looks up deploy skills directly, asks the async materializer for member skills when needed, checks that returned names match, and returns `LoadedSkill` objects.
-
-**Call relations**: It follows `SkillRegistry.closure`: closure decides what names are needed, then materialize fetches the real skill contents for loading.
+**Call relations**: This wrapper is created when ModelRegistry.client_for builds a client for a member-routed model call. If the retry would silently switch who pays, it raises ModelFundingChanged so the wider turn does not continue under different billing rules.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `SkillRegistry.index`  (lines 451–460)
+##### `MemberAccounts.next`  (lines 95–105)
 
 ```
-def index(self) -> tuple[tuple[str, str], ...]
+async def next(self) -> tuple[ModelSpec, ModelClient]
 ```
 
-**Purpose**: Builds the skill index shown in the system prompt. It includes only top-level deploy skills, so the prompt stays stable and member-saved content does not alter it.
+**Purpose**: This method chooses the next connected member account to try when the current one is no longer usable. It is the account failover step for a turn that is supposed to stay on the member’s own paid accounts.
 
-**Data flow**: It scans deploy skills in registration order, keeps only those without a parent, and returns pairs of skill name and description.
+**Data flow**: It reads the stored list of alternate model IDs. If the list is empty, it raises the prepared “all accounts are exhausted” error. Otherwise it removes the first alternate, looks up that model’s specification, builds a client for it, and verifies that the funding type and payer still match the member-owned route the turn was allowed to use. It returns the new model facts and client.
 
-**Call relations**: Prompt-building code calls this to fill the `skill_index` area that tells the agent what built-in skills are available.
+**Call relations**: ServingModel.move calls this when a turn is allowed to move to another member account. During the check it consults the current workspace through ws_current, and if the route changed to a different payer class it raises ModelFundingChanged rather than letting billing drift.
 
-*Call graph*: called by 2 (_prompt_skill_index, prompt_index).
-
-
-##### `SkillRegistry.merged_with`  (lines 462–483)
-
-```
-def merged_with(self, generated: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
-```
-
-**Purpose**: Returns a new registry with generated deploy-controlled skills added. It refuses name shadowing so existing deploy skills keep their meaning.
-
-**Data flow**: It copies deploy skills, appends generated skills unless their names already exist, logs refused collisions, removes member cards that now collide with deploy names, and returns a new `SkillRegistry`.
-
-**Call relations**: Turn setup can use this when generated skills, such as spawn or setup skills, need to join the base registry.
-
-*Call graph*: 2 external calls (__init__, log).
+*Call graph*: 2 external calls (__init__, ws_current).
 
 
-##### `SkillRegistry.with_member`  (lines 485–504)
+##### `ServingModel.move`  (lines 130–137)
 
 ```
-def with_member(self, cards: Sequence[SkillCard], materialize: SkillMaterializer) -> 'SkillRegistry'
+async def move(self) -> bool
 ```
 
-**Purpose**: Returns a new registry that includes a bound agent’s saved member skills. Member skills are allowed to add choices but not replace deploy skills.
+**Purpose**: This method moves an active turn from its current model client to the next eligible member account, if such a move is available. It gives the turn a clean way to continue after a provider-level refusal before any output was streamed.
 
-**Data flow**: It receives member skill cards and a materializer function, drops any member card whose name collides with a deploy skill while logging that refusal, and returns a registry with the remaining member cards.
+**Data flow**: It starts with the serving model’s current model ID, model specification, client, and optional account failover state. If there are no member accounts attached, it returns false and changes nothing. If accounts exist, it asks them for the next model and client, replaces its own stored model facts with the new ones, and returns true.
 
-**Call relations**: This is used when a turn is prepared for a specific agent, so that agent’s saved skills can be searched and loaded.
-
-*Call graph*: 2 external calls (__init__, log).
+**Call relations**: It relies on MemberAccounts.next to enforce the billing and payer rules. Code running a turn can call this after a rate-limit-style failure to decide whether to replay the round on another connected account or treat the failure as final.
 
 
-##### `_loaded_tree`  (lines 510–528)
+##### `ModelRegistry.resolve`  (lines 151–154)
 
 ```
-def _loaded_tree(loaded: Sequence[LoadedSkill]) -> str
+def resolve(self, model: str) -> str
 ```
 
-**Purpose**: Creates a compact text tree of all files made available by a skill load. This shows the agent where files are located without printing every full path repeatedly.
+**Purpose**: This method turns the special model name “auto” into the concrete default model configured for the deployment. If the model name is already specific, it leaves it unchanged.
 
-**Data flow**: It receives loaded skills, gathers every file path under each skill name, sorts them, builds an indented directory tree under `$UFO_HOME/skills/`, and returns it as text.
+**Data flow**: It receives a model ID string. If that string is the project’s automatic-model sentinel, it returns the registry’s configured auto model ID. Otherwise it returns the original string.
 
-**Call relations**: `loaded_context` calls this at the end of the prompt text so the agent can see the loaded file layout.
+**Call relations**: ModelRegistry.key_slot_for and ModelRegistry.model_key_env call this before answering questions about credentials, because a stored “auto” choice must be interpreted as the real model that will run.
 
-*Call graph*: called by 1 (loaded_context); 1 external calls (PurePosixPath).
-
-
-##### `loaded_context`  (lines 531–544)
-
-```
-def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
-```
-
-**Purpose**: Builds the full text that a skill load contributes to the agent’s context. It includes new skill instructions, notes any already-present instructions that were not repeated, and lists loaded files.
-
-**Data flow**: It receives loaded skills and an optional set of names already in context. It collects prompt bodies for new skills, adds a short note for repeated ones, appends the loaded file tree, and returns one combined string.
-
-**Call relations**: Both normal `load_skill` behavior and subagent preloading use this, so skills read the same way whether loaded by a tool result or preloaded into a prompt.
-
-*Call graph*: calls 1 internal fn (_loaded_tree).
+*Call graph*: called by 2 (key_slot_for, model_key_env).
 
 
-##### `_wire_skill`  (lines 547–554)
+##### `ModelRegistry.spec`  (lines 156–162)
 
 ```
-def _wire_skill(skill: RuntimeSkill) -> dict[str, object]
+def spec(self, model: str) -> ModelSpec
 ```
 
-**Purpose**: Converts a runtime skill into the wire format expected by the sandbox loader. It safely names each file and base64-encodes its bytes so they can travel as text.
+**Purpose**: This method retrieves the official facts for a model ID. It is the registry’s strict lookup point, so unknown models fail with one clear error.
 
-**Data flow**: It receives a `RuntimeSkill`, gathers all files, checks and normalizes each path relative to the skill root, encodes file bytes with URL-safe base64, adds the content digest, and returns a dictionary.
+**Data flow**: It receives a model ID and looks in the registry’s dictionary of model specifications. If it finds one, it returns that ModelSpec. If not, it raises a ValueError that names the missing ID.
 
-**Call relations**: `install_skill` uses it for one skill, and `load_skills` uses it for non-bundled loaded skills before calling the sandbox.
+**Call relations**: ModelRegistry.client_for uses it before building a provider client, ModelRegistry.provider_for uses it to report the serving provider, and ModelRegistry.model_key_env uses it to decide which key environment variable onboarding should require.
 
-*Call graph*: calls 3 internal fn (all_files, content_digest, root); called by 2 (install_skill, load_skills); 2 external calls (urlsafe_b64encode, contained_relative).
-
-
-##### `install_skill`  (lines 557–561)
-
-```
-async def install_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None
-```
-
-**Purpose**: Installs one materialized skill into the sandbox under the runtime skills directory. It is a focused helper for loading a single user-style skill package.
-
-**Data flow**: It receives a sandbox session and a skill, converts the skill with `_wire_skill`, asks the sandbox to load it, and raises an error if the sandbox does not report a path for that skill.
-
-**Call relations**: It hands off the actual file placement to `Sandbox.load_skills`, using `_wire_skill` to prepare the payload.
-
-*Call graph*: calls 2 internal fn (load_skills, _wire_skill).
+*Call graph*: called by 3 (client_for, model_key_env, provider_for).
 
 
-##### `load_skills`  (lines 564–571)
+##### `ModelRegistry.client_for`  (lines 164–199)
 
 ```
-async def load_skills(sandbox: Sandbox, loaded: Sequence[LoadedSkill]) -> None
+async def client_for(self, model: str) -> ResolvedModelClient
 ```
 
-**Purpose**: Installs a whole resolved set of loaded skills into the sandbox. Bundled deploy skills are referenced by digest, while non-bundled skills are sent with their file contents.
+**Purpose**: This method builds a ready-to-use client for one model and records who is paying for it. It is the place where model choice, credentials, workspace billing, and provider client construction meet.
 
-**Data flow**: It receives a sandbox and loaded skills, separates bundled entries from user/file-backed entries, wires non-bundled skills, calls the sandbox loader, and raises an error if any requested skill path is missing afterward.
+**Data flow**: It receives a model ID, looks up the model specification, and checks whether the model needs a credential. For keyless models it returns a client marked as platform-funded. For keyed models it asks the current workspace for the right credential, turns missing slots into a clear setup error, rejects non-ASCII keys that cannot safely travel over the provider connection, and builds the provider client. If the call is routed through a member’s own account, it wraps the client so one credential rejection can trigger a rebuild. The output is a ResolvedModelClient containing the client, funding class, and payer.
 
-**Call relations**: After a registry has resolved and materialized a skill load, this function performs the sandbox-side installation through `Sandbox.load_skills`.
+**Call relations**: Many model calls flow through this method when they need an actual provider client. It calls ModelRegistry.spec for the model facts, uses ws_current to read workspace credentials and routing rules, may create a _RebuiltOnRejection wrapper for member-routed calls, and returns the ResolvedModelClient used by the caller.
 
-*Call graph*: calls 2 internal fn (load_skills, _wire_skill).
+*Call graph*: calls 1 internal fn (spec); 4 external calls (__init__, __init__, __init__, ws_current).
 
 
-### `extensions/skill_create/ufo_ext_skill_create/store.py`
+##### `ModelRegistry.provider_for`  (lines 201–205)
 
-`domain_logic` · `request handling and skill loading`
+```
+def provider_for(self, model: str) -> str
+```
 
-A “skill” here is a small bundle of files, usually including a main SKILL.md file, that teaches an agent how to do something. This file stores those bundles in the database, one row per skill name per workspace. Without it, user-authored skills would either disappear after a run or risk overwriting each other when two edits happen at the same time.
+**Purpose**: This method answers which provider, such as OpenAI or Anthropic, serves a model. It is useful for logging, metering, and splitting usage by backend.
 
-The file also protects the shared workspace. Skill names must be safe lowercase slugs, so a name cannot act like a file path or collide with system-owned skills. Saved file bytes are turned into base64 text so they can live safely inside a database text column. The content is parsed when saved, and the parsed description, dependencies, agent routing rules, and pinned state are stored beside it. That means the quick “card” used for choosing skills stays in step with the actual files.
+**Data flow**: It receives a model ID, retrieves that model’s specification, and returns the provider field from it. If the model ID is unknown, the strict specification lookup raises an error.
 
-A key idea is the “generation,” which works like a version stamp on a document. When a caller edits a skill, it must provide the generation it previously read. If someone else changed or deleted the skill first, the save is refused instead of silently replacing their work. The store also enforces workspace limits, including the total number of user skills and the number of pinned skills. Loading paths are deliberately different: loading one named skill fails loudly if its stored bundle is corrupt, while loading all skills skips bad rows with a warning so one broken skill does not hide the rest.
+**Call relations**: It is a small public doorway over ModelRegistry.spec. Callers that only need the provider do not have to inspect the full model specification themselves.
+
+*Call graph*: calls 1 internal fn (spec).
+
+
+##### `ModelRegistry.key_slot_for`  (lines 207–218)
+
+```
+def key_slot_for(self, model: str) -> str | None
+```
+
+**Purpose**: This method tells which bring-your-own-key slot would pay for a model, if any. It is intentionally forgiving for old or unknown model names so reports can still label usage instead of crashing.
+
+**Data flow**: It receives a model ID, first resolving “auto” to the configured concrete model. It then does a non-strict lookup in the registry. If the model is missing or has no key slot, it returns null. Otherwise it returns the key slot name.
+
+**Call relations**: It calls ModelRegistry.resolve because billing and exports may see the stored value “auto” even though the actual key belongs to the concrete configured model. Unlike ModelRegistry.spec, this path avoids a loud failure so historical billing data remains readable.
+
+*Call graph*: calls 1 internal fn (resolve).
+
+
+##### `ModelRegistry.model_key_env`  (lines 220–230)
+
+```
+def model_key_env(self, model: str, config: Config) -> str | None
+```
+
+**Purpose**: This method tells onboarding which environment variable should be set before a model’s first use. It only answers for the core providers whose key variable names are known in configuration.
+
+**Data flow**: It receives a model ID and the project configuration. It resolves “auto,” looks up the model specification, reads the provider, and returns the configured Anthropic or OpenAI key environment variable when applicable. For contributed providers that resolve keys later, it returns null.
+
+**Call relations**: It uses ModelRegistry.resolve so the check matches the model that will actually run, then uses ModelRegistry.spec for the provider facts. Startup or onboarding code can call it to give users an early, concrete setup instruction.
+
+*Call graph*: calls 2 internal fn (resolve, spec).
+
+
+##### `model_registry`  (lines 233–266)
+
+```
+def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry
+```
+
+**Purpose**: This function builds the project’s complete model registry at startup. It combines built-in models with extension-provided models, checks for conflicts and bad configuration, and prepares pricing data.
+
+**Data flow**: It receives configuration and a group of manifests from extensions. It asks the core catalog for built-in model specifications, adds every contributed model specification, and rejects duplicate IDs. It then verifies that the configured automatic, ambient-reply, and background-job models all exist. Finally it builds a price table from the registered models and returns a ModelRegistry containing the specs, pricing, and configured auto model.
+
+**Call relations**: This is the construction step for the whole file’s registry object. It calls core_model_specs to get built-in models, pricing_from to merge their prices into a pricing helper, and ModelRegistry.__init__ to create the registry used later by lookup and client-building methods.
+
+*Call graph*: 3 external calls (__init__, core_model_specs, pricing_from).
+
+
+### OpenRouter extension
+The OpenRouter extension adds an alternate provider bridge plus image and video generation tools.
+
+### `extensions/openrouter/ufo_ext_openrouter.py`
+
+`io_transport` · `model request handling and tool execution`
+
+OpenRouter is a service that routes one API call to many possible AI model providers. This file makes that router look like a normal UFO model client, so the rest of the system can ask for text completions, tool calls, and usage costs in the same shape it expects from built-in providers. It also exposes image and video generation as tools, because those APIs do not behave like chat models and are billed by image or by video second instead of by token.
+
+The file has three main jobs. First, it defines the OpenRouter model list, including prices, context windows, reasoning support, and credentials. Second, it translates UFO chat requests into OpenAI-style chat completion calls, because OpenRouter speaks that wire format. While streaming results back, it watches for text, tool calls, token usage, provider errors, truncated answers, and retryable failures. Third, it defines `generate_image` and `generate_video` tools. These validate model-specific limits, call OpenRouter, save returned files into the workspace, and record costs when the platform key paid for the work.
+
+A useful analogy is a travel agent. UFO asks for a trip in its own language; this file books through OpenRouter, watches for cancellations or delays, records the bill, and hands back tickets in UFO's standard format.
 
 #### Function details
 
-##### `_save_lock_key`  (lines 54–56)
+##### `openrouter_slug`  (lines 279–289)
 
 ```
-def _save_lock_key(workspace_id: UUID) -> int
+def openrouter_slug(model: str) -> str
 ```
 
-**Purpose**: Creates a stable numeric lock key from a workspace ID. The save path uses this key to ask PostgreSQL to serialize skill writes for the same workspace, so two writers cannot race past limits or version checks.
+**Purpose**: This turns a model name into the provider/model name OpenRouter expects. It adds an OpenAI or Anthropic prefix when a familiar bare model name is used, and leaves already-qualified names alone.
 
-**Data flow**: It receives a workspace UUID, turns it into text, hashes that text with SHA-256, takes the first eight bytes of the hash, and converts them into a signed integer. The output is a repeatable number: the same workspace always gets the same lock key, while different workspaces are very unlikely to share one.
+**Data flow**: It receives a model string. It checks whether the string already contains a slash, starts like an OpenAI model, or starts like a Claude model. It returns the OpenRouter slug that should be sent over the network.
 
-**Call relations**: UserSkillStore.save calls this before writing to the database. The returned key is handed to PostgreSQL’s advisory transaction lock when that database is in use, making the rest of the save behave like a one-at-a-time checkout counter for that workspace.
+**Call relations**: When a chat request is prepared, `OpenRouterModelClient._create_kwargs` calls this so the API receives the right model id. `_openrouter_messages` also uses it to decide whether special Google-message cleanup is needed.
 
-*Call graph*: called by 1 (save); 1 external calls (sha256).
+*Call graph*: called by 2 (_create_kwargs, _openrouter_messages).
 
 
-##### `UserSkillStore.save`  (lines 123–238)
+##### `_chunk_provider`  (lines 292–297)
 
 ```
-async def save(self, name: str, files: Mapping[str, bytes], registry_names: frozenset[str], pinned: bool=False, generation: UUID | None=None) -> RuntimeSkill
+def _chunk_provider(chunk: ChatCompletionChunk) -> str | None
 ```
 
-**Purpose**: Validates and saves one user-created workspace skill. It protects against unsafe names, overwriting someone else’s edit, shadowing built-in skills, and exceeding workspace skill or pinned-skill limits.
+**Purpose**: This reads which upstream provider OpenRouter chose for a streamed response chunk. That matters because a provider that returns an empty answer can be excluded on a retry.
 
-**Data flow**: It receives a skill name, a map of file paths to file bytes, the names already owned by core or pack skills, a pinned flag, and optionally the generation previously read by the caller. It checks the name, parses the skill files, encodes the files as base64 JSON, computes a content digest, and prepares the database columns used for later listing and routing. Inside a transaction, it checks the current database row and compares its generation with the caller’s generation. If everything is allowed, it inserts a new row or updates the existing row with a fresh generation. It returns the parsed RuntimeSkill object and changes the database.
+**Data flow**: It receives one streamed chat chunk. It looks in OpenRouter's extra metadata for a provider name. It returns that provider as text, or nothing if the chunk does not say.
 
-**Call relations**: This is the main write doorway for the store. It calls _save_lock_key to serialize concurrent saves on PostgreSQL, uses _count when a new skill may exceed the workspace cap, and uses _pinned_count when pinning might exceed the pinned limit. It also relies on parse_skill_content and StoredSkill so the saved database row and the runtime skill view are based on the same files.
+**Call relations**: `_OpenRouterStream.accept` calls this while reading the live stream. The provider it extracts can later help `OpenRouterModelClient.complete` reroute away from a dead upstream.
 
-*Call graph*: calls 3 internal fn (_count, _pinned_count, _save_lock_key); 16 external calls (__init__, __init__, __init__, __init__, __init__, __init__, b64encode, sha256, dumps, cast (+6 more)).
+*Call graph*: called by 1 (accept).
 
 
-##### `UserSkillStore.cards`  (lines 240–281)
+##### `_usage_of`  (lines 300–321)
 
 ```
-async def cards(self) -> tuple[SkillCard, ...]
+def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage
 ```
 
-**Purpose**: Returns lightweight routing cards for all saved skills in the current workspace. These cards let the system know which skills exist and when they may be useful without loading every full file bundle.
+**Purpose**: This converts OpenRouter/OpenAI token usage into UFO's standard usage record. It separates normal input tokens, output tokens, cached input tokens, and cache-write tokens so billing can be accurate.
 
-**Data flow**: It reads the current workspace ID, queries the database for each skill’s name, description, dependencies, allowed agents, and pinned flag, and sorts by name. For each row with a real description, it decodes the JSON dependency and agent lists and builds a SkillCard. Rows with an empty description are skipped with a warning. The output is a tuple of SkillCard objects, and the database is not changed.
+**Data flow**: It receives the API's usage object and a flag showing whether cache writes should count. It validates that cached and cache-write tokens do not exceed the prompt total. It returns a `Usage` object in the system's own accounting shape.
 
-**Call relations**: This is used when the system needs the catalog-style view of workspace skills. Unlike record, files, or materialize, it does not read or parse the stored file content, so a corrupt stored bundle does not stop the card list from being produced.
+**Call relations**: `_OpenRouterStream.accept` calls this when a stream chunk includes usage. The resulting usage is later yielded by `OpenRouterModelClient.complete` as the final cost and token report.
 
-*Call graph*: 4 external calls (__init__, loads, select, agent_current).
+*Call graph*: called by 1 (accept); 1 external calls (__init__).
 
 
-##### `UserSkillStore.listing`  (lines 283–307)
+##### `_contains_json_reference`  (lines 336–348)
 
 ```
-async def listing(self) -> tuple[SkillListing, ...]
+def _contains_json_reference(value: object) -> bool
 ```
 
-**Purpose**: Returns the simple list shown to users or tools: each saved skill’s name, description, and whether it is pinned. It is the human-facing summary view of the workspace skill set.
+**Purpose**: This checks whether a JSON-like value contains schema reference keys such as `$ref`. It exists because some Google models behind OpenRouter reject tool-result messages containing those references.
 
-**Data flow**: It reads the current workspace ID, queries the database for name, description, and pinned state, and orders the rows by name. It turns rows with non-empty descriptions into SkillListing objects and skips empty-description rows. The result is a tuple of listings, with no database changes.
+**Data flow**: It receives any nested value made of dictionaries, lists, and simple values. It walks through the nested structure until it finds `$ref` or `$dynamicRef`, or reaches the end. It returns true or false.
 
-**Call relations**: This sits beside cards as another lightweight read path. cards prepares routing information for the agent, while listing prepares display information for object-list style views.
+**Call relations**: `_openrouter_messages` calls this only after it has decoded a tool result as JSON. If references are found, that caller wraps the text differently before sending it to OpenRouter.
 
-*Call graph*: 3 external calls (__init__, select, agent_current).
+*Call graph*: called by 1 (_openrouter_messages).
 
 
-##### `UserSkillStore.record`  (lines 309–340)
+##### `_openrouter_messages`  (lines 351–388)
 
 ```
-async def record(self, name: str) -> SkillRecord | None
+def _openrouter_messages(model: str, system: str, messages: tuple[Message, ...], accepts_image_input: bool) -> list[dict[str, object]]
 ```
 
-**Purpose**: Loads the full stored record for one named skill, including its files, version generation, pin state, and timestamps. This is the detailed read used before viewing or editing a specific skill.
+**Purpose**: This prepares chat messages for OpenRouter. It removes images when the chosen model cannot read them, translates messages into OpenAI format, and applies a Google-specific workaround for troublesome JSON tool results.
 
-**Data flow**: It receives a skill name and reads the current workspace ID. It queries the matching database row for stored content and metadata. If no row exists, it returns None. If a row exists, it validates the stored JSON, base64-decodes each file back into bytes, and returns a SkillRecord containing those files plus description, generation, pinned state, created time, and updated time.
+**Data flow**: It receives the model name, system prompt, conversation messages, and whether image input is allowed. It may strip images, renders the messages into OpenAI-style dictionaries, then rewrites certain Google tool-result messages if they contain JSON schema references. It returns the list of message dictionaries to send to the API.
 
-**Call relations**: This is the full-detail counterpart to listing. Its generation value is especially important because UserSkillStore.save expects callers to pass that generation back when editing, which prevents silent overwrites.
+**Call relations**: `OpenRouterModelClient._create_kwargs` calls this while building the network request. It relies on `openrouter_slug`, `omit_images`, `openai_messages`, JSON parsing, and `_contains_json_reference` to produce messages OpenRouter will accept.
 
-*Call graph*: 4 external calls (__init__, b64decode, select, agent_current).
+*Call graph*: calls 2 internal fn (_contains_json_reference, openrouter_slug); called by 1 (_create_kwargs); 4 external calls (dumps, loads, omit_images, openai_messages).
 
 
-##### `UserSkillStore.materialize`  (lines 342–349)
+##### `_OpenRouterRetry.status`  (lines 399–435)
 
 ```
-async def materialize(self, name: str) -> RuntimeSkill | None
+async def status(self, error: openai.APIStatusError, yielded: bool) -> '_OpenRouterRetry'
 ```
 
-**Purpose**: Turns one saved skill back into a RuntimeSkill object that the agent can actually use. If the skill is not saved in this workspace, it returns None.
+**Purpose**: This decides whether to retry after OpenRouter returns an HTTP status error, such as rate limiting or a server error. It retries only before visible model output has been shown, so users do not see duplicated partial answers.
 
-**Data flow**: It receives a skill name, asks files for that skill’s stored file bytes, and stops with None if no files are found. If files are found, it parses them with parse_skill_content and returns the resulting RuntimeSkill. It does not change the database.
+**Data flow**: It receives an API status error and whether any output has already been yielded. It checks the status code, retry count, and retry-after header. It may log, emit a metric, sleep, and return an updated retry state; otherwise it raises the original error.
 
-**Call relations**: This function builds on UserSkillStore.files instead of repeating the database read. It is the named-skill load path, so corrupt content is allowed to raise an error rather than being treated as a missing skill.
+**Call relations**: `OpenRouterModelClient.complete` uses this inside its streaming loop when the API rejects a request with a status error. This method hands back a new retry plan or stops the flow by raising.
 
-*Call graph*: calls 1 internal fn (files); 1 external calls (parse_skill_content).
+*Call graph*: 4 external calls (sleep, replace, emit_metric, log).
 
 
-##### `UserSkillStore.materialize_all`  (lines 351–379)
+##### `_OpenRouterRetry.stream_error`  (lines 437–460)
 
 ```
-async def materialize_all(self) -> tuple[RuntimeSkill, ...]
+def stream_error(self, error: openai.APIError, yielded: bool) -> '_OpenRouterRetry'
 ```
 
-**Purpose**: Loads every saved skill in the current workspace as RuntimeSkill objects. It is designed to be tolerant: one broken stored skill is logged and skipped instead of stopping all the others from loading.
+**Purpose**: This handles errors injected into the live streaming response. It has one special retry for a known Gemini abort case, and otherwise turns stream failures into a standard interruption signal.
 
-**Data flow**: It reads the current workspace ID, queries every saved skill’s name and stored content, and sorts by name. For each row, it validates the stored JSON, base64-decodes the files, and parses the files into a RuntimeSkill. If any row cannot be decoded or parsed, it logs a warning and continues. The output is a tuple of successfully loaded RuntimeSkill objects, with no database changes.
+**Data flow**: It receives an OpenAI API error and whether output has already appeared. If the exact known Gemini abort happens before output and has not been retried, it records that and returns updated retry state. Otherwise it raises `ModelStreamInterrupted`, which tells the engine the round should be discarded and retried.
 
-**Call relations**: This is the bulk load path used when the workspace’s saved skills need to be made available together. It differs from materialize: named loads fail loudly on corruption, while this all-skills path keeps going so one bad bundle does not remove the rest of the workspace’s skills.
+**Call relations**: `OpenRouterModelClient.complete` calls this when the streaming API raises an API error. The method either allows one more loop attempt or hands off failure handling to the wider engine through `ModelStreamInterrupted`.
 
-*Call graph*: 4 external calls (b64decode, select, agent_current, parse_skill_content).
+*Call graph*: calls 1 internal fn (__init__); 3 external calls (replace, emit_metric, log).
 
 
-##### `UserSkillStore.files`  (lines 381–396)
+##### `_OpenRouterStream.__init__`  (lines 464–471)
 
 ```
-async def files(self, name: str) -> dict[str, bytes] | None
+def __init__(self, cache_write_30m_priced: bool) -> None
 ```
 
-**Purpose**: Returns the raw files for one saved skill as bytes. This is useful when another part of the system wants the stored bundle itself rather than the parsed RuntimeSkill or display metadata.
+**Purpose**: This creates a small state tracker for one streamed model response. It remembers whether anything useful has been yielded, which tool calls are in progress, usage totals, finish reason, provider, and generation id.
 
-**Data flow**: It receives a skill name and reads the current workspace ID. It queries the database for the stored content for that name. If no row exists, it returns None. If a row exists, it validates the stored JSON and base64-decodes each saved file into bytes, returning a dictionary from relative path to file bytes.
+**Data flow**: It receives whether cache-write tokens should be priced. It initializes empty fields for stream progress and later accounting. It returns a fresh stream-state object.
 
-**Call relations**: UserSkillStore.materialize calls this first, then parses the returned files into a runtime skill. record performs a similar decode but also returns metadata such as generation and timestamps.
+**Call relations**: `OpenRouterModelClient.complete` creates one of these for each attempt to stream a response. As chunks arrive, `accept` fills in the state.
 
-*Call graph*: called by 1 (materialize); 3 external calls (b64decode, select, agent_current).
+*Call graph*: called by 1 (complete).
 
 
-##### `UserSkillStore.delete`  (lines 398–420)
+##### `_OpenRouterStream.accept`  (lines 473–503)
 
 ```
-async def delete(self, name: str) -> None
+def accept(self, chunk: ChatCompletionChunk) -> tuple[ModelEvent, ...]
 ```
 
-**Purpose**: Deletes one saved skill from the workspace and cleans up its search index entries if an index is available. It carefully orders the steps so a crash does not leave behind unowned indexed chunks.
+**Purpose**: This turns one raw streamed OpenRouter chunk into UFO model events. It extracts text pieces, tool-call starts, tool-call argument fragments, usage, finish reason, provider, and generation id.
 
-**Data flow**: It receives a skill name and reads the current workspace ID. If an index exists, it first marks the skill’s indexed digest as missing in the database, then asks the index to delete entries for that skill’s scope. After that, it deletes the database row for the workspace and name. The result is no returned value, but the database and possibly the index are changed.
+**Data flow**: It receives a chat completion chunk. It updates stored metadata, converts usage if present, and builds zero or more events such as text deltas or tool-call deltas. It returns those events and marks the stream as having yielded if any visible event appeared.
 
-**Call relations**: This is the removal path for saved skills. It uses IndexScope to tell the indexing system exactly which skill-owned entries to prune, then removes the stored row so future listing, loading, and card reads no longer see the skill.
+**Call relations**: `OpenRouterModelClient.complete` calls this for every chunk in the stream. It uses `_chunk_provider` and `_usage_of`, then hands standard `ModelEvent` objects back to the caller.
 
-*Call graph*: 4 external calls (__init__, delete, update, agent_current).
+*Call graph*: calls 2 internal fn (_chunk_provider, _usage_of); 3 external calls (__init__, __init__, __init__).
 
 
-##### `UserSkillStore._count`  (lines 422–430)
+##### `OpenRouterModelClient.complete`  (lines 540–595)
 
 ```
-async def _count(self, connection: AsyncConnection) -> int
+async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Counts how many user skills are currently saved in the workspace. It is a helper used to enforce the maximum number of saved user skills.
+**Purpose**: This is the main chat-completion path for OpenRouter. It sends the request, streams text and tool-call events back, reports usage, and deals carefully with retries, dead providers, truncation, and broken streams.
 
-**Data flow**: It receives an open async database connection and reads the current workspace ID. It runs a count query over the user_skill table for that workspace and returns the number as an integer. It does not change the database.
+**Data flow**: It receives a `ModelRequest`. It builds OpenRouter request arguments, opens a streaming chat completion, converts chunks into standard events, and yields those events as they arrive. At the end it yields usage; if the stream was cut short, empty, truncated, or failed in a retryable way, it retries or raises the appropriate system error.
 
-**Call relations**: UserSkillStore.save calls this only when creating a new skill. If the count is already at the workspace limit, save refuses the insert with TooManyUserSkills.
+**Call relations**: The wider model engine calls this when an agent is using an OpenRouter-backed model. It delegates request building to `_create_kwargs`, chunk tracking to `_OpenRouterStream`, retry choices to `_OpenRouterRetry`, and final accounting to `_finish_usage`.
 
-*Call graph*: called by 1 (save); 3 external calls (execute, select, agent_current).
+*Call graph*: calls 4 internal fn (__init__, _create_kwargs, _finish_usage, __init__); 4 external calls (__init__, __init__, __init__, emit_metric).
 
 
-##### `UserSkillStore._pinned_count`  (lines 432–444)
+##### `OpenRouterModelClient._finish_usage`  (lines 597–603)
 
 ```
-async def _pinned_count(self, connection: AsyncConnection, excluding: str) -> int
+async def _finish_usage(self, state: _OpenRouterStream) -> Usage
 ```
 
-**Purpose**: Counts the currently pinned user skills in the workspace, excluding one named skill. This lets the save path decide whether adding a new pin would exceed the pinned-skill limit.
+**Purpose**: This makes sure a completed stream has a usable token usage record. If the stream itself did not include usage, it tries OpenRouter's generation lookup endpoint as a backup.
 
-**Data flow**: It receives an open async database connection and the skill name to exclude. It reads the current workspace ID, counts rows in that workspace where pinned is true and the name is not the excluded name, and returns that count. It does not change the database.
+**Data flow**: It receives the stream state after streaming ends. It first uses usage already captured from chunks; if missing, it looks up the generation by id and finish reason. It returns a `Usage` object or raises if no usage can be found.
 
-**Call relations**: UserSkillStore.save calls this when the requested save would pin a skill that was not already pinned. Excluding the current name means re-saving an already considered skill does not accidentally count itself as an extra pin.
+**Call relations**: `OpenRouterModelClient.complete` calls this after a stream finishes normally. It may call `_generation_usage` to recover accounting information that was not included in the stream.
 
-*Call graph*: called by 1 (save); 3 external calls (execute, select, agent_current).
+*Call graph*: calls 1 internal fn (_generation_usage); called by 1 (complete).
 
 
-### `core/src/ufo/runtime/skills/selection.py`
+##### `OpenRouterModelClient._generation_usage`  (lines 605–662)
 
-`domain_logic` · `request handling`
-
-Agents can use saved skills, but the model can only read a limited amount of text at once. This file is the rulebook for fitting those skill cards into that limited space. Think of it like packing a notice board: if there are only a few cards, pin all of them on the main board; if there are too many, make a separate section; if even that is too crowded, show the most relevant details and keep the rest as names so the agent still knows they exist.
-
-The file works only with in-memory skill cards. It does no disk, network, or database work, so it is predictable and safe to run on every turn. Each skill can become a short line with its name and description. The code first checks whether all saved member skills are small enough to fold into the system prompt beside built-in skills. If not, it builds a `<saved_skills>` block for the current turn.
-
-That block follows a clear order. Pinned skills, which are treated as especially important, come first. If the whole catalog fits, every skill gets a full line. If not, the file uses simple word matching against the current query to pick a small top set for full descriptions, while the remaining skills still appear by name. If the block is still too long, it removes items from the end and adds a note saying how many were omitted and that `skill_search` can find them.
-
-#### Function details
-
-##### `_query_terms`  (lines 35–42)
-
-```
-def _query_terms(query: str) -> tuple[str, ...]
-```
-
-**Purpose**: Turns a user query into a clean set of searchable words. It lowers the text, splits on punctuation or spaces, ignores very short words, removes duplicates, and caps how much query text is considered.
-
-**Data flow**: It receives a query string. It looks only at the first fixed-size portion, breaks that text into terms, filters out terms shorter than the minimum length, and keeps the first occurrence of each term. It returns those terms as an ordered tuple.
-
-**Call relations**: This is the shared preparation step for matching queries to skills. `lexical_score` uses it when scoring one card, and `select_top_k` uses it once before ranking many cards.
-
-*Call graph*: called by 2 (lexical_score, select_top_k).
-
-
-##### `_term_hits`  (lines 45–47)
-
-```
-def _term_hits(terms: Sequence[str], card: SkillCard) -> int
-```
-
-**Purpose**: Counts how many prepared query words appear in a skill card's name or description. This gives a simple relevance score based on plain text matching.
-
-**Data flow**: It receives a sequence of query terms and one skill card. It combines the card name and description into one lowercase search area, checks each term against it, and returns the number of terms found.
-
-**Call relations**: This is the actual matching step after `_query_terms` has cleaned the query. `lexical_score` calls it to turn prepared terms and a card into a score.
-
-*Call graph*: called by 1 (lexical_score).
-
-
-##### `lexical_score`  (lines 50–55)
-
-```
-def lexical_score(query: str, card: SkillCard) -> int
-```
-
-**Purpose**: Gives one skill card a simple relevance score for a query. Someone can use it to ask, 'How many meaningful words from this query show up in this skill?'
-
-**Data flow**: It receives a raw query and a skill card. It first asks `_query_terms` to clean the query, then asks `_term_hits` to count matches inside the card's name and description. It returns that count as an integer score.
-
-**Call relations**: This function combines the query-cleaning and card-matching helpers into a public scoring operation. It does not drive the main block rendering itself, but it uses the same matching logic that the ranking path relies on.
-
-*Call graph*: calls 2 internal fn (_query_terms, _term_hits).
-
-
-##### `select_top_k`  (lines 58–66)
-
-```
-def select_top_k(query: str, cards: Sequence[SkillCard]) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: Chooses the most relevant unpinned skill cards for a query. It is used when there are too many saved skills to show every description, so only a small number get full detail.
-
-**Data flow**: It receives the current query and a sequence of skill cards. It prepares the query terms once, removes pinned cards from consideration, ranks the remaining cards by how many query terms they match, and returns up to the configured top number. When scores tie, the original card order is preserved by the stable sort behavior.
-
-**Call relations**: When `member_visibility` cannot fit the full catalog, it calls `select_top_k` to decide which unpinned cards deserve full lines. The result feeds directly into the saved-skills block, while other unpinned skills can still appear by name.
-
-*Call graph*: calls 1 internal fn (_query_terms); called by 1 (member_visibility).
-
-
-##### `skill_line`  (lines 69–71)
-
-```
-def skill_line(card: SkillCard) -> str
-```
-
-**Purpose**: Turns one skill card into the short display line used in prompts and saved-skill blocks. It also caps the line length so one long description cannot crowd out many other skills.
-
-**Data flow**: It receives a skill card. It formats the card as `- name: description`, then cuts the result to the maximum allowed line length. It returns that single string.
-
-**Call relations**: This is the common formatting step for nearly every size decision in the file. `folds_into_prompt`, `prompt_index`, `catalog_fits`, and `member_visibility` all depend on this exact rendering so measurement and display stay consistent.
-
-*Call graph*: called by 4 (catalog_fits, folds_into_prompt, member_visibility, prompt_index).
-
-
-##### `folds_into_prompt`  (lines 74–78)
-
-```
-def folds_into_prompt(cards: Sequence[SkillCard]) -> bool
-```
-
-**Purpose**: Answers whether all member skill cards are small enough to be included directly in the main system prompt. This keeps small saved-skill collections simple and visible in the same place as deployed skills.
-
-**Data flow**: It receives a sequence of cards. It turns each card into a capped `skill_line`, measures the total joined size, and compares that size with the prompt-fold budget. It returns `true` if the cards fit and `false` otherwise.
-
-**Call relations**: This function relies on `skill_line` for the exact text being measured and `_joined_size` for the total. `prompt_index` calls it before deciding whether member skills join the normal prompt index or must be shown elsewhere.
-
-*Call graph*: calls 2 internal fn (_joined_size, skill_line); called by 1 (prompt_index).
-
-
-##### `prompt_index`  (lines 81–93)
-
-```
-def prompt_index(registry: SkillRegistry) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Builds the list of skills that should appear in the prompt's normal skill index for a turn. It includes deployed skills, and also includes member saved skills when that member set is small enough to fit.
-
-**Data flow**: It receives a skill registry, reads its member cards, and checks whether those cards fold into the prompt. If they do not fit, it returns only the registry's normal deployed-skill index. If they do fit, it returns that deployed index plus each member skill as a name and capped description pair.
-
-**Call relations**: This function is the bridge between the registry and the prompt-building code. It calls the registry's `index()` for deployed skills, uses `folds_into_prompt` to make the placement decision, and uses `skill_line` so member descriptions are capped the same way they were measured.
-
-*Call graph*: calls 3 internal fn (index, folds_into_prompt, skill_line).
-
-
-##### `catalog_fits`  (lines 96–99)
-
-```
-def catalog_fits(cards: Sequence[SkillCard]) -> bool
-```
-
-**Purpose**: Answers whether every saved skill can be shown as a full line inside the separate saved-skills block. It is the check for the 'show everything in detail' case.
-
-**Data flow**: It receives a sequence of cards. It formats every card with `skill_line`, measures the size those lines would take inside the block wrapper, and compares that size with the block budget. It returns a boolean.
-
-**Call relations**: This is a standalone version of a decision also made inside `member_visibility`. It uses `_block_size` to measure the wrapped block and `skill_line` for the exact displayed lines.
-
-*Call graph*: calls 2 internal fn (_block_size, skill_line).
-
-
-##### `member_visibility`  (lines 113–146)
-
-```
-def member_visibility(query: str, cards: Sequence[SkillCard]) -> MemberVisibility
-```
-
-**Purpose**: Makes the complete saved-skill visibility decision for one turn. It decides whether member skills fold into the prompt, whether the full catalog fits in a block, and what block text should be sent if needed.
-
-**Data flow**: It receives the current query and the member skill cards. It renders each card line once, measures whether the set fits the system prompt and then the saved-skills block, and returns a `MemberVisibility` object with those decisions plus the final block text. If the catalog is too large, it keeps pinned cards first, asks `select_top_k` for relevant unpinned cards, shows remaining unpinned skills as names, trims from the end if needed, and adds a dropped-count note when anything was removed.
-
-**Call relations**: This is the central flow of the file. `member_block` calls it when it only needs the rendered block, and internally it uses the sizing helpers, `skill_line`, `select_top_k`, and `_render` to keep measuring, ranking, and final text generation in sync.
-
-*Call graph*: calls 5 internal fn (_block_size, _joined_size, _render, select_top_k, skill_line); called by 1 (member_block); 1 external calls (__init__).
-
-
-##### `member_block`  (lines 149–157)
-
-```
-def member_block(query: str, cards: Sequence[SkillCard]) -> str
-```
-
-**Purpose**: Returns just the saved-skills text block for a turn. It is a convenient wrapper for callers that do not need the extra visibility details.
-
-**Data flow**: It receives the query and member cards. It delegates the full decision to `member_visibility`, then extracts and returns only the `block` field. The result is either an empty string, when no separate block is needed, or a formatted `<saved_skills>` block.
-
-**Call relations**: This function sits at the edge of the file's main logic. It calls `member_visibility` and hands its rendered block to whatever prompt or turn-message builder asked for saved-skill text.
-
-*Call graph*: calls 1 internal fn (member_visibility).
-
-
-##### `_joined_size`  (lines 163–164)
-
 ```
-def _joined_size(lines: Sequence[str]) -> int
+async def _generation_usage(self, generation_id: str, finish_reason: str) -> Usage | None
 ```
 
-**Purpose**: Measures how many characters a list of lines would use when joined with newline characters. This lets the file compare displayed text against strict size budgets.
+**Purpose**: This asks OpenRouter's generation ledger for token usage after a stream ends. It exists because usage may be missing from the live stream, and the ledger may take a few seconds to index the generation.
 
-**Data flow**: It receives a sequence of already-rendered lines. It adds each line's length plus the newline space between lines, while treating an empty list as size zero. It returns the total character count.
+**Data flow**: It receives a generation id and expected finish reason. It repeatedly GETs the generation endpoint, retrying short-lived 404s and transport faults. If the record matches and was not cancelled, it converts native token counts into `Usage`; if the lookup never becomes available, it raises a stream interruption.
 
-**Call relations**: This is a low-level measuring helper. `folds_into_prompt`, `_block_size`, and `member_visibility` call it so all budget checks count joined lines the same way.
+**Call relations**: `_finish_usage` calls this as the fallback accounting path. It reports retry metrics while waiting and returns usage to `complete`, which then yields it to the engine.
 
-*Call graph*: called by 3 (_block_size, folds_into_prompt, member_visibility).
+*Call graph*: calls 1 internal fn (__init__); called by 1 (_finish_usage); 4 external calls (__init__, sleep, AsyncClient, emit_metric).
 
 
-##### `_block_size`  (lines 167–168)
+##### `OpenRouterModelClient._create_kwargs`  (lines 664–712)
 
 ```
-def _block_size(lines: Sequence[str]) -> int
+def _create_kwargs(self, request: ModelRequest, ignore_providers: frozenset[str]) -> dict[str, Any]
 ```
 
-**Purpose**: Measures how large a saved-skills block would be after adding its opening and closing tags. It answers, 'Will these lines fit once wrapped as a block?'
+**Purpose**: This builds the exact keyword arguments sent to the OpenAI-style chat completion API. It adds OpenRouter-specific settings such as session id, reasoning controls, and ignored providers.
 
-**Data flow**: It receives a sequence of rendered lines. It asks `_joined_size` for the body size, then adds the fixed wrapper text and the extra newline used when the block has content. It returns the total character count.
+**Data flow**: It receives a model request and any providers to avoid. It checks that the request has a session id, prepares reasoning and provider routing options, converts messages, adds tools and forced tool choice when needed, and returns a dictionary ready for the SDK call.
 
-**Call relations**: This helper builds on `_joined_size`. `catalog_fits` and `member_visibility` use it before deciding whether the whole catalog can be displayed as full lines.
+**Call relations**: `OpenRouterModelClient.complete` calls this before every API attempt. It uses `openrouter_slug` and `_openrouter_messages` to translate UFO's request into OpenRouter's expected wire format.
 
-*Call graph*: calls 1 internal fn (_joined_size); called by 2 (catalog_fits, member_visibility).
+*Call graph*: calls 2 internal fn (_openrouter_messages, openrouter_slug); called by 1 (complete).
 
 
-##### `_render`  (lines 171–172)
+##### `_model_client`  (lines 715–720)
 
 ```
-def _render(lines: tuple[str, ...]) -> str
+def _model_client(spec: ModelSpec, key: str) -> OpenRouterModelClient
 ```
 
-**Purpose**: Creates the final saved-skills block text from already-chosen lines. It wraps the lines between the fixed opening and closing tags.
+**Purpose**: This creates an `OpenRouterModelClient` for a model spec and API key. It is the factory the model registry can call when it needs a live client.
 
-**Data flow**: It receives a tuple of line strings. It places the opening tag first, then all lines, then the closing tag, joins them with newlines, and returns the finished string.
+**Data flow**: It receives a `ModelSpec` and a key. It creates an OpenAI-compatible SDK client pointed at OpenRouter's base URL, wraps it with OpenRouter-specific behavior, and returns the model client.
 
-**Call relations**: This is the last formatting step in the main path. `member_visibility` calls it after deciding exactly which lines fit and in what order.
+**Call relations**: `_openrouter` stores this factory in each `ModelSpec`. Later, when the registry activates one of those specs, this function provides the concrete client.
 
-*Call graph*: called by 1 (member_visibility).
+*Call graph*: 2 external calls (__init__, openai_sdk_client).
 
 
-### Generated Catalog Skills
-Builds live, model-readable catalog skills for available models and spawnable agents.
+##### `_openrouter`  (lines 723–743)
 
-### `core/src/ufo/harness/models/catalog_skill.py`
-
-`domain_logic` · `startup`
-
-This file solves a documentation trust problem. A system may support many AI models, and each model has details that matter: who provides it, how much text it can read at once, what it costs, whether it supports reasoning, and which API style it uses. If those facts were written by hand in a separate guide, they could easily drift away from what the program actually uses. This file avoids that by generating the catalog directly from the same live registry the runtime uses to route requests and calculate prices.
-
-The main function, `model_catalog_skill`, takes a `ModelRegistry`, which is the system’s current list of known model specifications. It sorts those models by id, turns each one into a row in a Markdown table, and wraps that table in a `RuntimeSkill`. A runtime skill is a chunk of instructions or reference material the system can load and show to the AI or user when needed.
-
-A small helper, `_per_mtok`, formats stored price numbers into readable dollars per million tokens. A token is a small piece of text used by AI models for counting input and output size. The result is like a restaurant menu generated straight from the kitchen’s inventory system: users see what is truly available, not what someone remembered to update.
-
-#### Function details
-
-##### `_per_mtok`  (lines 18–19)
-
-```
-def _per_mtok(micro_usd_per_mtok: int) -> str
-```
-
-**Purpose**: This helper turns an internal price value into a readable dollar amount per million tokens. It exists so the catalog table shows prices in a form humans can quickly compare, such as `$1.25`, instead of a tiny accounting unit.
-
-**Data flow**: It receives a price stored as an integer count of micro-dollars per million tokens. It divides that by the constant number of micro-dollars in one dollar, formats the result with two decimal places, and returns a string with a dollar sign. It does not change any outside state.
-
-**Call relations**: `model_catalog_skill` calls this helper while building each model’s table row. It uses it once for the input price and once for the output price, so the final catalog can show both costs clearly.
-
-*Call graph*: called by 1 (model_catalog_skill).
-
-
-##### `model_catalog_skill`  (lines 22–50)
-
 ```
-def model_catalog_skill(registry: ModelRegistry) -> RuntimeSkill
+def _openrouter(id: str, price: ModelPrice, cutoff: str, context_window: int=OPENROUTER_CONTEXT_WINDOW, reasoning: ReasoningSupport=_REASONS, accepts_image_input: bool=True) -> ModelSpec
 ```
 
-**Purpose**: This function builds the complete model catalog as a runtime skill. Someone would use it during startup to create a trustworthy, automatically generated reference page for all models available in the current deployment.
+**Purpose**: This is a helper for declaring one OpenRouter model in the manifest. It keeps repeated provider, credential, API surface, and capability fields consistent.
 
-**Data flow**: It receives a `ModelRegistry`, which contains model records. It reads those records, sorts them by model id, formats their facts into a Markdown table, and combines that table with a name and description. It then creates and returns a `RuntimeSkill` containing both the display instructions and the raw Markdown form of the skill.
+**Data flow**: It receives a model id, price, knowledge cutoff, and optional capability settings. It packages them into a `ModelSpec` that the rest of UFO can register and select. It returns that spec.
 
-**Call relations**: This is the main builder in the file. As it turns registry records into table rows, it calls `_per_mtok` to make prices readable. At the end, it hands the finished content to `RuntimeSkill.__init__`, producing the object that the wider runtime can load as the `model-catalog` skill.
+**Call relations**: The file uses this repeatedly to build `OPENROUTER_MODEL_SPECS`. Those specs are then returned by `manifest` so the extension can advertise its available chat models.
 
-*Call graph*: calls 1 internal fn (_per_mtok); 1 external calls (__init__).
+*Call graph*: 1 external calls (__init__).
 
 
-### `core/src/ufo/host/spawn_catalog.py`
+##### `GenerateImageInput._within_model_limits`  (lines 855–879)
 
-`domain_logic` · `per-turn skill assembly`
-
-When an agent wants to delegate a task, it needs to know two things: what can I spawn, and what information must I send? This file creates that answer fresh for each turn. That matters because some targets are fixed profiles from the live subagent registry, while others are agents stored in the current workspace database. Workspace agents can change, be archived, or be visible only to certain members.
-
-Think of it like printing a current restaurant menu right before someone orders, rather than relying on an old menu taped to the wall. The catalog lists each available target, labels it as either a built-in profile or a workspace agent, and shows the payload keys the target accepts.
-
-The file also applies visibility rules. A normal member sees their own workspace agents. An admin sees all active agents in the workspace, including ownerless ones. If a workspace agent has the same name as a built-in profile, the agent is listed with an `agent:` prefix, because that is the exact name spawn must use to avoid confusion.
-
-The final result is returned as a `RuntimeSkill`, which is a skill-like document the running agent can load and read before choosing a spawn target.
-
-#### Function details
-
-##### `_profile_payload`  (lines 29–36)
-
 ```
-def _profile_payload(profile: SubagentProfile) -> str
+def _within_model_limits(self) -> 'GenerateImageInput'
 ```
-
-**Purpose**: This helper turns a built-in subagent profile’s input model into a short human-readable list of payload fields. It marks which fields are required and which are optional, so the catalog can tell the agent what to send.
 
-**Data flow**: It receives one subagent profile. It reads the profile’s input model fields. If there are no fields, it returns “(no fields)”. Otherwise, it sorts the field names and returns a comma-separated text list, marking optional fields with “(optional)”. It does not change anything outside itself.
+**Purpose**: This validates that an image-generation request fits the chosen model's real limits. It catches bad combinations before sending them to OpenRouter, so the model can correct the request instead of receiving a remote API error.
 
-**Call relations**: The main catalog builder, `spawn_catalog_skill`, calls this while writing the profile rows of the table. Its output becomes the payload column for each built-in profile.
+**Data flow**: It reads the already-parsed image arguments: model, number of images, aspect ratio, and resolution. It compares them with the allowlisted limits for that model, fills in the default resolution when needed, and returns the updated input object or raises a clear validation error.
 
-*Call graph*: called by 1 (spawn_catalog_skill).
+**Call relations**: Pydantic calls this automatically when building `GenerateImageInput`. `OpenRouterImages.generate` can then trust that the request is within the known model bounds.
 
 
-##### `_schema_payload`  (lines 39–49)
+##### `_reported_cost_micro_usd`  (lines 887–899)
 
 ```
-def _schema_payload(schema: Mapping[str, object] | None) -> str
+def _reported_cost_micro_usd(usage: object) -> int | None
 ```
 
-**Purpose**: This helper turns a workspace agent’s stored input schema into a short list of payload keys. It is used for agents whose expected input is described by a schema saved in the database.
+**Purpose**: This extracts a positive reported cost from OpenRouter usage data and converts it to micro-dollars. A micro-dollar is one millionth of a US dollar, used here for precise billing.
 
-**Data flow**: It receives either a schema-like mapping or no schema. If there is no schema, it falls back to the default task input fields. If the schema has no useful `properties`, it returns “(no fields)”. Otherwise, it reads the property names and the schema’s `required` list, then returns sorted field names with optional ones marked. It only produces text; it does not edit the schema.
+**Data flow**: It receives a usage-like object. It looks for `cost`, then for an upstream inference cost used by bring-your-own-key cases. If it finds a positive number, it converts dollars to micro-USD and returns it; otherwise it returns nothing.
 
-**Call relations**: `spawn_catalog_skill` calls this for each workspace agent row it read from the database. The returned text becomes the payload column for that agent in the generated catalog.
+**Call relations**: Image and video charging both use this. `OpenRouterImages._charge` uses it directly, and `OpenRouterVideos._job` stores its result on the video job for later billing.
 
-*Call graph*: called by 1 (spawn_catalog_skill).
+*Call graph*: called by 2 (_charge, _job).
 
 
-##### `spawn_catalog_skill`  (lines 52–112)
+##### `OpenRouterImages.generate`  (lines 932–969)
 
 ```
-async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None) -> RuntimeSkill
+async def generate(self, ctx: ToolContext, args: GenerateImageInput) -> ToolResult
 ```
 
-**Purpose**: This is the main builder for the spawn catalog skill. It gathers the current built-in subagent profiles and the workspace agents this member is allowed to spawn, then turns them into a markdown table wrapped as a `RuntimeSkill`.
+**Purpose**: This runs one image-generation tool call from start to finish. It calls OpenRouter, saves the returned images, records cost when appropriate, and returns both file paths and image data to the agent.
 
-**Data flow**: It receives the live subagent registry and the current member’s ID, if there is one. It reads profile names from the registry, opens a workspace database transaction, checks whether the member is an admin, and queries active agent rows for the current workspace. Admins get all active rows; non-admins get only their own rows. It then formats profile rows and agent rows, using `_profile_payload` and `_schema_payload` to describe the expected payload. The output is a `RuntimeSkill` containing the catalog name, description, instructions, and raw markdown.
+**Data flow**: It receives a tool context and validated image arguments. It gets the OpenRouter key, posts the request, turns provider errors into tool errors, decodes returned images, writes them into the workspace, calculates cost, optionally meters that cost, and returns a `ToolResult` containing JSON metadata plus image content.
 
-**Call relations**: This function is called when the runtime needs to make the spawn catalog available to an agent for the current turn. Inside, it asks the workspace context for the current workspace, uses the database transaction helper to read agent rows safely, calls `member_is_admin` to apply visibility rules, uses SQLAlchemy to build the database query, and finally constructs a `RuntimeSkill` that the agent can load before using spawn.
+**Call relations**: The `_generate_image` tool handler calls this. Inside, it relies on `_refusal`, `_images`, `_save`, and `_charge` to break the work into understandable steps.
 
-*Call graph*: calls 2 internal fn (_profile_payload, _schema_payload); 5 external calls (__init__, select, workspace_tx, member_is_admin, ws_current).
+*Call graph*: calls 5 internal fn (meter_images, _charge, _images, _refusal, _save); 6 external calls (__init__, __init__, __init__, model_dump, AsyncClient, dumps).
 
 
-### Turn Environment Assembly
-Combines prompts, tools, skills, environment documents, and setup files into the complete per-turn host environment.
+##### `OpenRouterImages._refusal`  (lines 971–986)
 
-### `core/src/ufo/host/assemble.py`
-
-`orchestration` · `per-turn environment assembly before the model runs`
-
-Before an agent or subagent can answer, the runtime needs a carefully prepared “room” for it to work in. This file sets up that room. It gathers contributions from installed manifests, such as prompt sections, tools, hooks, credentials, workspace facts, and skills. Then it filters them through the agent’s grants and the audience for the turn, so the model only sees and can use what it is allowed to use.
-
-An optional environment document can reshape the room. It can edit or replace prompt text, remove tools, change tool descriptions, adjust parameter descriptions, add seed files, or define a special `run` tool that executes a shell command inside the turn’s sandbox. Importantly, this document cannot widen permissions. If it tries to refer to a scoped tool that was not already offered, the turn fails clearly instead of silently doing something unsafe.
-
-The main class, `HostEnvironment`, is the composition point. Think of it like a stage manager: it collects props from many departments, checks the rules, applies last-minute script notes, and hands the final stage setup to the actor. The helper functions do the focused work of editing prompts and skills, describing tool inputs, and creating sandboxed command tools.
-
-#### Function details
-
-##### `HostEnvironment.assemble`  (lines 113–223)
-
 ```
-async def assemble(self, request: AssembleRequest) -> AssembledTurn
+def _refusal(self, args: GenerateImageInput, response: httpx.Response) -> str
 ```
 
-**Purpose**: Builds the full environment for one turn: prompt, tools, hooks, skills, preload material, seeded files, and visibility information. This is the central function that decides what the model will read and what it may call.
+**Purpose**: This creates a clear error message when OpenRouter refuses or fails an image request. It keeps the provider's explanation but trims it so an oversized response does not flood the tool result.
 
-**Data flow**: It starts with an assemble request containing the turn, agent, profile, audience, skills, grants, and optional environment document. It loads the document if present, gathers tools and hooks from manifests, adds workspace and member skills when allowed, builds the right prompt for either the main agent or a subagent, applies document edits, loads any requested files, and finally returns an `AssembledTurn` containing the finished environment.
+**Data flow**: It receives the original image arguments and an HTTP response. It tries to read a JSON error message, otherwise falls back to the response text. It returns a short string saying the model produced no image and why.
 
-**Call relations**: This function calls the smaller collection methods on `HostEnvironment` to fetch tools, hooks, member skills, and environment-document storage. It then hands specific rewrite jobs to `_skills_with_document` and `_applied_document`, and packages everything into the object the runtime uses for the turn.
+**Call relations**: `OpenRouterImages.generate` calls this when the image POST returns an error status. The returned text becomes an error `ToolResult` that the agent can react to.
 
-*Call graph*: calls 6 internal fn (_document_blob, hooks, member_skills, tools, _applied_document, _skills_with_document); 21 external calls (__init__, __init__, __init__, span, load_environment_document, load_environment_file, turn_workspace_facts, spawn_catalog_skill, setup_skill, render_system_prompt (+11 more)).
+*Call graph*: called by 1 (generate); 1 external calls (json).
 
 
-##### `HostEnvironment.tools`  (lines 225–239)
+##### `OpenRouterImages._images`  (lines 988–1018)
 
 ```
-def tools(self, *, audience: Audience, scheduled_member_id: UUID | None) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]
+def _images(self, args: GenerateImageInput, body: object) -> tuple[GeneratedImage, ...]
 ```
 
-**Purpose**: Collects the tools available for this turn from extension manifests. A tool is an action the model may call, such as querying an index or using a connector.
+**Purpose**: This extracts usable images from OpenRouter's response. It decodes base64 image data, assigns a media type, and rejects images that are too large to save safely.
 
-**Data flow**: It receives the audience and, for scheduled turns, an optional member identity. It combines the host’s manifests, credentials, index, embedding client, URLs, artifact secret, and blob store, then returns tool definitions, extension context for those tools, and the allowed object actions.
+**Data flow**: It receives the image arguments and the parsed response body. It scans the `data` list for base64 image strings, decodes each into bytes, checks its size, and returns `GeneratedImage` objects. If no valid image appears, or an image is too large, it raises an image error.
 
-**Call relations**: It is called during `HostEnvironment.assemble` near the start of turn setup. It delegates the actual manifest reading and tool construction to the extension loader, then the assembled result is later filtered by agent or subagent grants.
+**Call relations**: `OpenRouterImages.generate` calls this after a successful HTTP response. Its output is then passed to `_save` for disk writing and included as image content in the tool result.
 
-*Call graph*: called by 1 (assemble); 1 external calls (turn_tools).
+*Call graph*: called by 1 (generate); 3 external calls (__init__, __init__, b64decode).
 
 
-##### `HostEnvironment.hooks`  (lines 241–250)
+##### `OpenRouterImages._save`  (lines 1020–1027)
 
 ```
-def hooks(self, *, audience: Audience) -> HookChain
+async def _save(self, ctx: ToolContext, args: GenerateImageInput, index: int, image: GeneratedImage) -> str
 ```
 
-**Purpose**: Collects turn hooks from extension manifests. Hooks are extension callbacks that can run around parts of a turn, like observers or extra behavior attached to the runtime.
+**Purpose**: This writes one generated image into the workspace. It chooses a file extension based on the image media type.
 
-**Data flow**: It takes the turn audience and reads the host’s manifests, credentials, index, embedding client, tailer, and public URL. It returns a `HookChain`, which is the ordered set of hooks the runtime can use for this turn.
+**Data flow**: It receives the tool context, original arguments, an image index, and the decoded image. It builds a path under `generated-images/`, writes the bytes through the workspace sandbox, and returns the saved path.
 
-**Call relations**: It is called by `HostEnvironment.assemble` while building the turn package. The heavy lifting is delegated to the extension loader, and the resulting hook chain is placed into the final `AssembledTurn`.
+**Call relations**: `OpenRouterImages.generate` calls this once for each decoded image. The returned paths are reported back to the agent so files can later be shared.
 
-*Call graph*: called by 1 (assemble); 1 external calls (turn_hooks).
+*Call graph*: called by 1 (generate).
 
 
-##### `HostEnvironment.member_skills`  (lines 252–261)
+##### `OpenRouterImages._charge`  (lines 1029–1036)
 
 ```
-async def member_skills(self, *, agent_name: str) -> tuple[tuple[SkillCard, ...], SkillMaterializer]
+def _charge(self, body: object, args: GenerateImageInput, images: int) -> int
 ```
 
-**Purpose**: Loads skills contributed by workspace members for a named agent. These are user- or member-authored instructions and materials that can become part of the agent’s skill set when workspace skills are enabled.
+**Purpose**: This calculates what an image generation should cost in micro-USD. It prefers the actual cost reported by OpenRouter, and falls back to the model's list price per image.
 
-**Data flow**: It receives an agent name and reads manifests plus optional credentials, index, and embedding client. It returns visible skill cards and a materializer, which is the piece that can later load the full skill contents when needed.
+**Data flow**: It receives the response body, image arguments, and number of images. It looks for usage cost with `_reported_cost_micro_usd`; if none is available, it multiplies the model's fallback image price by the image count. It returns the final charge.
 
-**Call relations**: It is called by `HostEnvironment.assemble` only when the agent is allowed to use workspace skills. The returned skill cards are merged into the turn’s skill registry and later used to decide what member-authored skills the current inbound message can see.
+**Call relations**: `OpenRouterImages.generate` calls this after images are successfully saved. The result is included in the tool result and may be sent to `ctx.meter_images`.
 
-*Call graph*: called by 1 (assemble); 1 external calls (turn_member_skills).
+*Call graph*: calls 1 internal fn (_reported_cost_micro_usd); called by 1 (generate).
 
 
-##### `HostEnvironment.environment_model`  (lines 263–267)
+##### `_generate_image`  (lines 1039–1044)
 
 ```
-async def environment_model(self, environment: str, profile: str | None) -> str | None
+async def _generate_image(ctx: ToolContext, args: GenerateImageInput) -> ToolResult
 ```
 
-**Purpose**: Looks up which model an environment document requests for one target. This lets the runtime ask, before full assembly, whether the main agent or a named profile should use a specific model.
+**Purpose**: This is the registered tool handler for `generate_image`. It connects the generic tool system to the OpenRouter image generator.
 
-**Data flow**: It receives an environment document identifier and an optional profile name. It loads the document from the blob store, chooses either the main block or the named profile block, and returns that block’s model name, or `None` if no model is specified.
+**Data flow**: It receives a tool context and validated image arguments. It checks that extension context exists, builds an `OpenRouterImages` helper with credentials and optional test transport, and returns that helper's generated `ToolResult`.
 
-**Call relations**: It uses `_document_blob` to find the storage for environment documents and then calls the environment loader. Unlike `assemble`, it only reads the model choice; it does not build prompts, tools, or skills.
+**Call relations**: The `GENERATE_IMAGE_TOOL` definition points to this function. When an agent calls the tool, the tool runtime invokes this handler, which delegates the real work to `OpenRouterImages.generate`.
 
-*Call graph*: calls 1 internal fn (_document_blob); 1 external calls (load_environment_document).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `HostEnvironment.clis`  (lines 269–270)
+##### `GenerateVideoInput._within_model_limits`  (lines 1100–1124)
 
 ```
-def clis(self) -> dict[str, CliCredential]
+def _within_model_limits(self) -> 'GenerateVideoInput'
 ```
-
-**Purpose**: Returns command-line connector credentials advertised by manifests. These are credentials intended for connector command-line tools rather than direct model tools.
 
-**Data flow**: It reads the host’s manifests and extracts a mapping of connector CLI names to their credential descriptions. The returned dictionary tells other setup code which connector CLIs can receive credentials.
+**Purpose**: This validates that a video-generation request fits the selected video model. It also chooses the default resolution so billing and generation use the same explicit tier.
 
-**Call relations**: It delegates to the extension loader’s connector CLI reader. It stands apart from turn assembly, but uses the same manifest source as the rest of this file.
+**Data flow**: It reads the parsed video arguments: model, duration, aspect ratio, and resolution. It checks the duration and aspect ratio against the model's limits, fills in the model's default resolution if missing, and rejects unsupported resolutions. It returns the updated input object or raises a clear validation error.
 
-*Call graph*: 1 external calls (connector_clis).
+**Call relations**: Pydantic runs this while creating `GenerateVideoInput`. `OpenRouterVideos.generate` receives only requests that match known provider limits.
 
 
-##### `HostEnvironment.slots`  (lines 272–273)
+##### `OpenRouterVideos.generate`  (lines 1166–1207)
 
 ```
-def slots(self) -> tuple[CredentialSlot, ...]
+async def generate(self, ctx: ToolContext, args: GenerateVideoInput) -> ToolResult
 ```
 
-**Purpose**: Returns the credential slots that extensions want filled. A credential slot is a named place where a secret or login token may be injected if the deployment provides it.
+**Purpose**: This runs one video-generation tool call from request to saved MP4. Because video generation is asynchronous, it starts a job, waits for completion, downloads the result, saves it, and records cost.
 
-**Data flow**: It reads the host’s manifests and returns the tuple of requested credential slots. It does not fetch the credentials themselves; it only reports what slots exist.
+**Data flow**: It receives a tool context and validated video arguments. It gets credentials, posts the video request, returns a tool error if OpenRouter rejects it, polls the job until it settles, returns a tool error if generation failed, downloads the MP4, saves it in the workspace, computes cost, optionally meters it, and returns metadata with the saved file path.
 
-**Call relations**: It delegates to the extension loader’s slot discovery function. Other parts of the host can use this information during credential setup before turns are assembled.
+**Call relations**: The `_generate_video` tool handler calls this. It coordinates `_refusal`, `_job`, `_settled`, `_failure`, `_download`, `_save`, and `_charge` to cover the whole lifecycle of a video job.
 
-*Call graph*: 1 external calls (injecting_slots).
+*Call graph*: calls 8 internal fn (meter_videos, _charge, _download, _failure, _job, _refusal, _save, _settled); 5 external calls (__init__, __init__, model_dump, AsyncClient, dumps).
 
 
-##### `HostEnvironment._document_blob`  (lines 275–278)
+##### `OpenRouterVideos._refusal`  (lines 1209–1224)
 
 ```
-def _document_blob(self) -> WorkspaceBlobStore
+def _refusal(self, args: GenerateVideoInput, response: httpx.Response) -> str
 ```
 
-**Purpose**: Provides the blob store used to load environment documents and environment files. A blob store is shared storage for content addressed by an identifier or digest.
+**Purpose**: This creates a readable error message when OpenRouter refuses to start a video job. It preserves the provider's reason while keeping the text bounded.
 
-**Data flow**: It reads `self.blob`. If a blob store exists, it returns it. If not, it raises an error saying the host cannot load environment documents.
+**Data flow**: It receives the video arguments and HTTP response. It tries to read a JSON error message, otherwise uses the response text, trims it, and returns a sentence explaining that no video was generated.
 
-**Call relations**: It is used by `HostEnvironment.assemble` and `HostEnvironment.environment_model` before they load document content. It keeps the failure clear and early when document loading is requested but no storage was configured.
+**Call relations**: `OpenRouterVideos.generate` calls this when the initial video POST returns an error status. The text becomes the content of an error tool result.
 
-*Call graph*: called by 2 (assemble, environment_model).
+*Call graph*: called by 1 (generate); 1 external calls (json).
 
 
-##### `_skills_with_document`  (lines 281–310)
+##### `OpenRouterVideos._job`  (lines 1226–1241)
 
 ```
-def _skills_with_document(skills: SkillRegistry, document: EnvironmentDocument | None) -> SkillRegistry
+def _job(self, body: object) -> VideoJob
 ```
 
-**Purpose**: Applies skill changes from an environment document to the existing skill registry. It can replace a known skill’s `SKILL.md`, apply exact text edits to it, or add a new document-defined skill.
+**Purpose**: This turns an OpenRouter video job response into the file's internal `VideoJob` record. It verifies that there is a job id and a status, because without those the job cannot be polled or downloaded.
 
-**Data flow**: It receives the current skill registry and an optional environment document. If there are no document skills, it returns the registry unchanged. Otherwise it copies the registry’s named skills, applies replacements or exact edits, parses the resulting skill files back into loaded skill objects, removes document-touched skills from the bundled set, and returns an updated registry.
+**Data flow**: It receives a parsed response body. It reads the job id, status, optional error message, and optional reported cost. It returns a `VideoJob`, or raises a video error if the response does not describe a usable job.
 
-**Call relations**: It is called by `HostEnvironment.assemble` before prompts and tools are finalized. When it needs to edit existing skill text, it relies on `_edited`; when it has new skill files, it hands them to the skill parser so the rest of the runtime sees normal skill objects.
+**Call relations**: `OpenRouterVideos.generate` calls this after the initial accepted response, and `_settled` calls it after each poll. It uses `_reported_cost_micro_usd` so completed jobs can carry their actual cost forward.
 
-*Call graph*: calls 1 internal fn (_edited); called by 1 (assemble); 2 external calls (replace, parse_skill_content).
+*Call graph*: calls 1 internal fn (_reported_cost_micro_usd); called by 2 (_settled, generate); 2 external calls (__init__, __init__).
 
 
-##### `_applied_document`  (lines 313–369)
+##### `OpenRouterVideos._settled`  (lines 1243–1264)
 
 ```
-def _applied_document(prompt: RenderedPrompt, tools: ToolRegistry, scoped: EnvironmentOverrides | None, global_tools: dict[str, ToolOverride]) -> tuple[RenderedPrompt, ToolRegistry, bool]
+async def _settled(self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob) -> VideoJob
 ```
 
-**Purpose**: Applies one environment document block to the already assembled prompt and tool offer. It can remove tools, rewrite tool descriptions, adjust parameter help text, add sandboxed `run` tools, and edit or replace the prompt.
+**Purpose**: This waits for an asynchronous video job to stop being pending or in progress. It prevents the tool call from waiting forever by enforcing a timeout.
 
-**Data flow**: It receives the current rendered prompt, current tool registry, optional scoped overrides for the main agent or profile, and top-level tool overrides. It checks that scoped tool names are valid, merges global and scoped tool changes, rewrites the tool map, applies prompt changes if present, and returns the new prompt, new registry, and a flag saying whether the prompt was fully replaced.
+**Data flow**: It receives video arguments, an HTTP client, and the current job. While the job is still pending or running, it sleeps, polls OpenRouter, validates the poll response, and updates the job. It returns the final job state or raises an error if polling fails or takes too long.
 
-**Call relations**: It is called by `HostEnvironment.assemble` after the base prompt and tools have been selected under platform grants. It uses `_run_tool` to create command tools, `_described_model` to alter parameter descriptions, and `_applied_prompt` to rewrite the prompt.
+**Call relations**: `OpenRouterVideos.generate` calls this after creating a job. It repeatedly calls `_job` to interpret each poll response, then hands the settled job back so generation can either report failure or download the file.
 
-*Call graph*: calls 3 internal fn (_applied_prompt, _described_model, _run_tool); called by 1 (assemble); 2 external calls (__init__, replace).
+*Call graph*: calls 1 internal fn (_job); called by 1 (generate); 4 external calls (__init__, sleep, get, monotonic).
 
 
-##### `_applied_prompt`  (lines 372–375)
+##### `OpenRouterVideos._failure`  (lines 1266–1270)
 
 ```
-def _applied_prompt(content: str, override: PromptOverride) -> RenderedPrompt
+def _failure(self, args: GenerateVideoInput, job: VideoJob) -> str
 ```
 
-**Purpose**: Turns a prompt override into a new rendered prompt. It either replaces the whole prompt or applies exact text edits to the existing prompt.
+**Purpose**: This turns a settled but unsuccessful video job into a message the agent can understand. It uses the provider's own error when available.
 
-**Data flow**: It receives the current prompt text and a prompt override. If the override contains full replacement text, that text becomes the prompt. Otherwise each requested edit is applied to the current content, and the resulting text is wrapped as a rendered prompt.
+**Data flow**: It receives the original video arguments and the final job. It chooses the job's error message or a generic status explanation, trims it, and returns a short failure string.
 
-**Call relations**: It is called only by `_applied_document` when an environment block includes prompt changes. For edit-style changes, it delegates the safety check and replacement work to `_edited`.
+**Call relations**: `OpenRouterVideos.generate` calls this when polling ends with a status other than completed. The returned text becomes an error `ToolResult`.
 
-*Call graph*: calls 1 internal fn (_edited); called by 1 (_applied_document); 1 external calls (rendered_prompt).
+*Call graph*: called by 1 (generate).
 
 
-##### `_edited`  (lines 378–386)
+##### `OpenRouterVideos._download`  (lines 1272–1291)
 
 ```
-def _edited(content: str, edits: tuple[TextEdit, ...], subject: str) -> str
+async def _download(self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob) -> bytes
 ```
 
-**Purpose**: Applies exact find-and-replace edits while preventing ambiguous changes. Each old text fragment must appear exactly once, so the document cannot accidentally change the wrong copy.
+**Purpose**: This downloads the finished MP4 for a completed video job and checks that it is safe to save. It rejects empty or oversized content.
 
-**Data flow**: It receives source text, a list of edits, and a subject name used in error messages. For each edit, it counts occurrences of the old text. If the count is not exactly one, it raises an error; otherwise it replaces that one occurrence. It returns the final edited text.
+**Data flow**: It receives video arguments, an HTTP client, and a completed job. It GETs the job's content endpoint, checks for HTTP errors, reads the bytes, ensures they are non-empty and under the size cap, and returns the raw video bytes.
 
-**Call relations**: It is used by `_applied_prompt` for prompt edits and by `_skills_with_document` for skill edits. This shared helper is what makes document text rewrites fail loudly instead of guessing.
+**Call relations**: `OpenRouterVideos.generate` calls this only after `_settled` reports completion. The returned bytes are then passed to `_save`.
 
-*Call graph*: called by 2 (_applied_prompt, _skills_with_document).
+*Call graph*: called by 1 (generate); 2 external calls (__init__, get).
 
 
-##### `_described_model`  (lines 389–402)
+##### `OpenRouterVideos._save`  (lines 1293–1297)
 
 ```
-def _described_model(model: type[BaseModel], tool: str, parameters: dict[str, str]) -> type[BaseModel]
+async def _save(self, ctx: ToolContext, args: GenerateVideoInput, video: bytes) -> str
 ```
 
-**Purpose**: Creates a copy-like version of a tool’s input model with new descriptions for selected parameters. This changes what the model reads about the parameters, not what the tool is allowed to do.
+**Purpose**: This writes a generated video file into the workspace. It always saves the result as an MP4 under the generated-videos directory.
 
-**Data flow**: It receives a Pydantic model, which is a Python class describing valid input fields, the tool name, and a mapping of parameter names to new description text. It rejects unknown parameter names, deep-copies the matching field definitions, updates their descriptions, and returns a new model class based on the old one.
+**Data flow**: It receives the tool context, video arguments, and raw video bytes. It builds the workspace path, writes the bytes through the sandbox, and returns the saved path.
 
-**Call relations**: It is called by `_applied_document` when an environment document changes parameter descriptions for an existing tool. The resulting model is put back into the tool definition so the model sees clearer or different parameter guidance.
+**Call relations**: `OpenRouterVideos.generate` calls this after downloading the completed video. The returned path is included in the tool result so the agent can refer to or share the file.
 
-*Call graph*: called by 1 (_applied_document); 2 external calls (deepcopy, create_model).
+*Call graph*: called by 1 (generate).
 
 
-##### `_run_tool`  (lines 405–440)
+##### `OpenRouterVideos._charge`  (lines 1299–1307)
 
 ```
-def _run_tool(name: str, description: str, inputs: dict[str, ToolInput], run: str) -> ToolDef
+def _charge(self, args: GenerateVideoInput, job: VideoJob) -> int
 ```
 
-**Purpose**: Builds a tool definition for an environment-provided shell command. This is the one kind of tool an environment document may add, and it runs inside the turn’s sandbox rather than granting new host permissions.
+**Purpose**: This calculates the cost of a video generation in micro-USD. It uses OpenRouter's reported job cost when available, otherwise multiplies the model's per-second list rate by the requested duration.
 
-**Data flow**: It receives a tool name, description, input specifications, and a shell command string. It creates a Pydantic input model from the declared inputs, defines an async handler that runs the command with inputs passed as environment variables, and returns a `ToolDef` marked as side-effecting because it may change files or external state inside the sandbox.
+**Data flow**: It receives the video arguments and final job. If the job already carries a reported cost, it returns that. Otherwise it looks up the model and resolution rate, multiplies by duration, and returns the fallback charge.
 
-**Call relations**: It is called by `_applied_document` when a tool override includes a `run` command. The nested handler later runs when the model calls that generated tool.
+**Call relations**: `OpenRouterVideos.generate` calls this after saving the video. The charge is reported in the tool output and may be recorded with `ctx.meter_videos`.
 
-*Call graph*: called by 1 (_applied_document); 3 external calls (__init__, Field, create_model).
+*Call graph*: called by 1 (generate).
 
 
-##### `_run_tool.handler`  (lines 417–432)
+##### `_generate_video`  (lines 1310–1315)
 
 ```
-async def handler(ctx: ToolContext, payload: BaseModel) -> ToolResult
+async def _generate_video(ctx: ToolContext, args: GenerateVideoInput) -> ToolResult
 ```
 
-**Purpose**: Executes the generated `run` tool and converts the process result into model-readable tool output. It reports success, failure, and timeout in a consistent format.
+**Purpose**: This is the registered tool handler for `generate_video`. It connects the tool runtime to the OpenRouter video workflow.
 
-**Data flow**: It receives a tool context and a validated payload object. It turns the payload into a shell command through `_run_command`, asks the task runner to execute it, combines standard output and standard error, and returns a `ToolResult`. A timeout or nonzero exit code becomes an error result; exit code zero becomes a normal result.
+**Data flow**: It receives a tool context and validated video arguments. It checks that extension context is present, creates an `OpenRouterVideos` helper with credentials and optional transport, and returns the helper's result.
 
-**Call relations**: This handler is created inside `_run_tool` and is attached to the returned `ToolDef`. It is not used during assembly itself; it runs later if the model chooses to call that generated tool.
+**Call relations**: The `GENERATE_VIDEO_TOOL` definition points to this function. When an agent calls the video tool, this handler delegates the actual network, polling, saving, and billing work to `OpenRouterVideos.generate`.
 
-*Call graph*: calls 1 internal fn (_run_command); 3 external calls (__init__, __init__, run_task).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `_run_command`  (lines 443–451)
+##### `manifest`  (lines 1328–1344)
 
 ```
-def _run_command(run: str, payload: BaseModel) -> str
+def manifest() -> Manifest
 ```
 
-**Purpose**: Builds the actual shell command string used by a generated `run` tool. It safely turns tool inputs into environment variables before running the configured command.
+**Purpose**: This describes the extension to the UFO plugin system. It advertises the OpenRouter models, image and video tools, and the credential slot used for the API key.
 
-**Data flow**: It receives the configured command text and a Pydantic payload. It dumps the payload to plain JSON-like values, skips inputs whose value is `None`, formats the rest as `INPUT_NAME=value` environment variables with shell quoting, quotes the command itself, and returns a `sh -c ...` command string.
+**Data flow**: It takes no input. It builds a `Manifest` containing the extension name and version, registered model specs, registered tools, and credential description. It returns that manifest to the host system.
 
-**Call relations**: It is called by the generated `_run_tool.handler` immediately before execution. Its job is to bridge structured tool input into the plain text world of a shell command while quoting values to avoid accidental shell syntax problems.
+**Call relations**: The extension loader calls this to discover what the file provides. The returned manifest is how OpenRouter chat models and generation tools become available to the rest of the application.
 
-*Call graph*: called by 1 (handler); 3 external calls (dumps, model_dump, quote).
+*Call graph*: 2 external calls (__init__, __init__).

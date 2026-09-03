@@ -1,1600 +1,731 @@
-# Extension Discovery, Manifest Loading, and App Registration  `stage-4`
+# First-run onboarding, workspace creation, and shipped-agent provisioning  `stage-4`
 
-This stage is shared setup that happens before the system can use optional apps and extensions. It is like opening a toolbox, checking which tools are allowed, reading each label, and putting the tools in the right drawers. The manifest model defines the label format: how an extension declares tools, web routes, jobs, credentials, hooks, agents, skills, backends, and object types. The loader is the main doorway. It finds installed extensions, filters them, reads their manifests, and registers what they add. The store is the small app-store layer that searches the extension catalog and records installs or removals in the lockfile.
+This stage happens near the end of startup, when the system is ready to turn an empty installation into something people can use. It is the “move-in day” for a new workspace. The main onboarding flow creates the first workspace, adds the first administrator, checks that required secrets are present, creates the main assistant agent, and lets installed extensions run their own setup steps.
 
-Built-in workspace apps and packaged agents seed new workspaces with known apps such as Chat, Code, Wiki, Issues, and helper agents. Extension-provided hooks, backends, objects, and stores let add-ons react during work and add services such as connectors or Redis-backed storage.
+A small package marker makes this onboarding code importable by the rest of the project. The private onboarding control API is the trusted doorway for workspace and sign-in setup. It can create or find workspaces, seat members, list login choices, count workspaces, and read invitations, so these rules are not scattered across edge services.
 
-The individual manifest files are registration forms for concrete extensions: Slack, web portal, sites, documents, monitors, scheduled tasks, sources, iMessage, debugger, gbrain, self-improvement, skill creation, and UFO shell. Small __init__ files simply make some extension packages importable.
-
-## Sub-stages
-
-- [Built-In Workspace Apps and Packaged Agents](stage-4.1.md) `stage-4.1` — 24 files
-- [Extension-Provided Objects, Hooks, Backends, and Stores](stage-4.2.md) `stage-4.2` — 9 files
+Shipped-agent provisioning then turns agent declarations from installed extensions into real workspace agents, without overwriting agents that users changed or made themselves. Agent setup describes what those agents still need, such as connected accounts, credentials, or schedules, and reports that status to setup screens. A demo seeder can also create a rich sample conversation for testing and demos.
 
 ## Files in this stage
 
-### Extension discovery gateway
-Commands and host startup enter through the store and loader to select installed extensions and turn their declarations into runtime registrations.
+### Onboarding entrypoints
+Package-level onboarding entrypoints coordinate first-run setup and expose the importable onboard module.
 
-### `core/src/ufo/host/ext/store.py`
+### `core/src/ufo/onboard/onboarding.py`
 
-`domain_logic` · `extension management commands`
+`orchestration` · `first-run startup initialization`
 
-UFO extensions are Python packages that can add behavior to the system. This file connects two important records: a catalog, which says which extensions are available, and a lockfile, which says exactly which extensions UFO should load when it starts. The lockfile pins each extension by name, version, and a digest, which is like a fingerprint of the installed package. That fingerprint helps make startup repeatable instead of depending on whatever happens to be nearby.
+This file is the “move-in checklist” for a brand-new UFO installation. Without it, a fresh database would have no workspace, no admin user, no main agent to talk to, and extensions would not get a clean chance to prepare themselves.
 
-The file defines simple shapes for catalog data: each catalog entry has a name, version, and an optional disabled flag. Disabled entries are “bundle-only”: they may be included by bundle-building tools, but normal install refuses them.
+The central class is `Onboarding`, which is used by the first-run command. It first checks that the chosen model can actually be used. If the model needs an environment variable for its API key, this file makes sure that key is present before creating anything permanent. It also checks whether installed extensions have onboarding steps that need a credential store, so setup does not leave behind a half-created workspace.
 
-The main class, ExtensionStore, acts like a clerk at a small library desk. Search looks through the catalog and marks which matching entries are already pinned in the lockfile. Install checks that the extension is listed, not disabled, and actually installed in the current Python environment before writing a pin. Remove checks that the extension is currently pinned, then rewrites the lockfile without it.
+Once the checks pass, it opens a database transaction and creates the core records: one workspace, one admin member, and one main agent with the default name, prompt, icon, model, and reasoning setting. If the database already has a member, it raises `AlreadyInitialized` instead of creating duplicates.
 
-A key safety behavior is that the store will not pin something just because it appears in the catalog. The extension must also be discoverable in the running environment, so UFO does not write a lockfile entry it cannot later load.
+After the core setup exists, it provisions agents from installed extensions and runs each extension’s onboarding steps inside the new workspace. Extension failures are logged and skipped, so one broken add-on does not destroy the basic workspace or stop other extensions from trying.
 
 #### Function details
 
-##### `read_catalog`  (lines 48–49)
+##### `run_onboarding_steps`  (lines 51–79)
 
 ```
-def read_catalog(path: Path) -> Catalog
+async def run_onboarding_steps(manifests: tuple[Manifest, ...], workspace_id: UUID, credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Reads an extension catalog file from disk and turns it into a checked Catalog object. This gives the rest of the code a clean, predictable list of available extensions instead of raw text.
+**Purpose**: Runs the setup steps supplied by installed extensions for a newly created workspace. Each extension gets a scoped context, meaning it only sees the credential slots it declared, like giving each add-on its own labeled toolbox.
 
-**Data flow**: It takes a file path. It reads the text from that path, parses the TOML text into ordinary data, and then validates that data against the expected catalog shape. It returns a Catalog object, or validation/parsing will fail if the file is not shaped correctly.
+**Data flow**: It receives the installed extension manifests, the workspace ID, and an optional credential store. It enters the workspace context, looks through each manifest, builds the right extension context for extensions that have steps, and awaits each step’s handler. It does not return a value; its visible effects are whatever successful extension steps do, plus log messages for skipped or failed steps.
 
-**Call relations**: This is the doorway from the catalog file into the extension store. It relies on the path object to read the file and on TOML parsing to understand the file format before the store can search or install from it.
+**Call relations**: This is called after the core workspace has already been created by `Onboarding.run_steps`. During that later setup phase, it uses `ws` to mark which workspace is active, `context_for` to prepare the extension’s view of credentials, and `log` to record skipped or failed extension setup without stopping the whole onboarding flow.
 
-*Call graph*: 2 external calls (read_text, loads).
+*Call graph*: called by 1 (run_steps); 3 external calls (log, context_for, ws).
 
 
-##### `ufo_version`  (lines 52–53)
+##### `Onboarding.run`  (lines 95–98)
 
 ```
-def ufo_version() -> str
+async def run(self) -> Onboarded
 ```
 
-**Purpose**: Finds the installed version of the UFO package itself. The lockfile uses this as an anchor so the pinned extensions are tied to a particular UFO version.
+**Purpose**: Runs the full first-time setup from start to finish. It creates the core workspace first, then runs the extra setup supplied by extensions.
 
-**Data flow**: It takes no direct input. It asks Python’s package metadata system for the version of the installed package named “ufo” and returns that version string.
+**Data flow**: It starts with the `Onboarding` object’s stored settings, such as config, email, model, credentials, and manifests. It calls `create` to make the durable core records, then passes the resulting workspace and member information to `run_steps`. It returns an `Onboarded` value containing the new workspace ID and member ID.
 
-**Call relations**: ExtensionStore._write calls this when it needs to create a new lockfile and there is no existing UFO version to preserve. In that moment, this function supplies the version label that will be written beside the extension pins.
+**Call relations**: This is the top-level method for this file’s flow. It simply sequences the two major phases: `create` for the core system and `run_steps` for extension and agent provisioning work.
 
-*Call graph*: called by 1 (_write); 1 external calls (version).
+*Call graph*: calls 2 internal fn (create, run_steps).
 
 
-##### `pin_for`  (lines 56–63)
+##### `Onboarding.create`  (lines 100–106)
 
 ```
-def pin_for(name: str) -> ExtensionPin
+async def create(self) -> Onboarded
 ```
 
-**Purpose**: Builds the lockfile pin for one installed extension. A pin records the extension’s name, its manifest version, and a digest, which is a fingerprint of its source.
+**Purpose**: Creates the permanent core of a new installation, but only after checking that setup has the secrets it needs. This separation lets the system fail early before writing database records.
 
-**Data flow**: It takes an extension name. It looks in the currently discovered installed extensions for that name. If the extension is missing, it raises an error rather than creating a bad lockfile entry. If found, it reads the extension’s manifest version, computes a digest for the installed package entry, and returns an ExtensionPin.
+**Data flow**: It reads the onboarding object’s chosen model, config, credentials, extension manifests, and admin email. It first checks for the model key, then checks whether extension steps require a credential store, then creates the workspace records. It returns an `Onboarded` object with the IDs of the created workspace and admin member.
 
-**Call relations**: ExtensionStore.install calls this after checking that the catalog allows the extension. This function then bridges from “the catalog says this extension exists” to “this exact installed package can be safely pinned.”
+**Call relations**: This method is called by `Onboarding.run` before any extension onboarding happens. It delegates the safety checks to `_require_model_key` and `_require_credentials_for_steps`, then hands the actual database creation to `_create_workspace`.
 
-*Call graph*: called by 1 (install); 3 external calls (__init__, discovered, extension_digest).
+*Call graph*: calls 3 internal fn (_create_workspace, _require_credentials_for_steps, _require_model_key); called by 1 (run).
 
 
-##### `ExtensionStore.search`  (lines 73–84)
+##### `Onboarding.run_steps`  (lines 108–110)
 
 ```
-def search(self, query: str) -> tuple[StoreListing, ...]
+async def run_steps(self, onboarded: Onboarded) -> None
 ```
 
-**Purpose**: Searches the catalog by name and marks which matching extensions are already installed in the lockfile. This is what lets a user see both what is available and what is currently selected.
+**Purpose**: Runs the after-core setup for a newly created workspace. This includes provisioning agents from extensions and then running extension onboarding steps.
 
-**Data flow**: It takes a query string. It first reads the current pins from the lockfile, then scans catalog entries whose names contain the query text. For each match, it creates a StoreListing showing the catalog name, version, disabled status, and whether the lockfile already pins it. It returns all listings as a tuple.
+**Data flow**: It receives an `Onboarded` result, mainly using its workspace ID. It applies `AgentProvisioning` to that workspace, then calls `run_onboarding_steps` with the installed manifests, workspace ID, and credential store. It returns nothing; its effects are the created or configured extension-related resources.
 
-**Call relations**: This is a read-only operation in the store. It calls ExtensionStore._pins to learn the current lockfile state, then packages catalog matches into StoreListing results for a command or user interface to display.
+**Call relations**: This is called by `Onboarding.run` after `create` succeeds. It bridges the core setup to extension setup: first extension agent provisioning is applied, then `run_onboarding_steps` gives each extension a chance to perform its own startup work.
 
-*Call graph*: calls 1 internal fn (_pins); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (run_onboarding_steps); called by 1 (run); 1 external calls (__init__).
 
 
-##### `ExtensionStore.install`  (lines 86–96)
+##### `Onboarding._require_credentials_for_steps`  (lines 112–123)
 
 ```
-def install(self, name: str) -> ExtensionPin
+def _require_credentials_for_steps(self) -> None
 ```
 
-**Purpose**: Adds or replaces a lockfile pin for one extension. It refuses names that are not in the catalog, refuses bundle-only disabled entries, and refuses extensions that are not actually installed in the current environment.
+**Purpose**: Stops onboarding early if installed extensions have setup steps but no credential store is available. This prevents the system from creating a workspace and only then discovering that extension setup cannot safely store or read needed secrets.
 
-**Data flow**: It takes an extension name. It searches the catalog for that exact name. If the name is missing or disabled, it raises a clear error. Otherwise it asks pin_for to create a trustworthy pin from the installed package, removes any older pin for the same name, writes the updated pin list to the lockfile, and returns the new pin.
+**Data flow**: It reads the onboarding object’s credential store, extension manifests, and configured credential key environment name. If credentials are present, it does nothing. If credentials are missing and any extension has onboarding steps, it raises a runtime error explaining which environment setting is needed.
 
-**Call relations**: This is the main write path for installing from the store. It uses pin_for to prove and describe the installed extension, ExtensionStore._pins to keep any other existing pins, and ExtensionStore._write to save the new lockfile contents.
+**Call relations**: This check is used inside `Onboarding.create`, before database records are written. It does not call other project functions; it acts as a gatekeeper so `_create_workspace` only runs when the setup environment is acceptable.
 
-*Call graph*: calls 3 internal fn (_pins, _write, pin_for).
+*Call graph*: called by 1 (create).
 
 
-##### `ExtensionStore.remove`  (lines 98–102)
+##### `Onboarding._require_model_key`  (lines 125–133)
 
 ```
-def remove(self, name: str) -> None
+def _require_model_key(self) -> None
 ```
 
-**Purpose**: Removes an extension pin from the lockfile. This means UFO will no longer load that extension from this lockfile.
+**Purpose**: Checks whether the selected model needs an environment-provided key and refuses to continue if that key is missing. This keeps a first-run setup from producing a workspace whose main assistant cannot take its first turn.
 
-**Data flow**: It takes an extension name. It reads the current pins, checks that one of them has that name, and raises an error if not. If the pin exists, it builds a new pin list without that name and writes the changed list back to the lockfile. It returns nothing.
+**Data flow**: It asks `_model_key_env` which environment variable name, if any, is needed for the selected model. If no key is required, it exits quietly. If a key is required, it uses `deploy_env` to look for the value, and raises a runtime error if the value is absent.
 
-**Call relations**: This is the uninstall-style path for the store. It reads existing state through ExtensionStore._pins and saves the reduced state through ExtensionStore._write.
+**Call relations**: This is called by `Onboarding.create` before database creation. It relies on `_model_key_env` to identify the needed setting and on `deploy_env` to read the deployment environment in the accepted way.
 
-*Call graph*: calls 2 internal fn (_pins, _write).
+*Call graph*: calls 1 internal fn (_model_key_env); called by 1 (create); 1 external calls (deploy_env).
 
 
-##### `ExtensionStore._pins`  (lines 104–105)
+##### `Onboarding._model_key_env`  (lines 135–138)
 
 ```
-def _pins(self) -> tuple[ExtensionPin, ...]
+def _model_key_env(self) -> str | None
 ```
 
-**Purpose**: Reads the current extension pins from the lockfile, if the lockfile exists. If there is no lockfile yet, it treats the installed set as empty.
+**Purpose**: Finds the environment variable name that should contain the API key for the chosen model, if the core model registry knows one. If the model provider comes from an extension and resolves its key later, this may return nothing.
 
-**Data flow**: It uses the store’s lockfile path. If the file exists, it reads and parses the lockfile and returns its extension pins. If the file does not exist, it returns an empty tuple.
+**Data flow**: It reads the onboarding config, installed manifests, and selected model name. It builds or consults the model registry, asks it for the key environment name for that model, and returns either that string or `None`.
 
-**Call relations**: Search, install, and remove all call this helper before deciding what to show or change. It is the shared way those operations learn the current pinned-extension state.
+**Call relations**: This helper is called by `_require_model_key`. It hands that caller the exact environment variable name to check, using `model_registry` as the source of truth for model-provider configuration.
 
-*Call graph*: called by 3 (install, remove, search); 1 external calls (read_lockfile).
+*Call graph*: called by 1 (_require_model_key); 1 external calls (model_registry).
 
 
-##### `ExtensionStore._write`  (lines 107–111)
+##### `Onboarding._create_workspace`  (lines 140–167)
 
 ```
-def _write(self, pins: tuple[ExtensionPin, ...]) -> None
+async def _create_workspace(self) -> Onboarded
 ```
 
-**Purpose**: Writes a complete lockfile with a given set of extension pins. It preserves the existing UFO version anchor when possible, or uses the currently installed UFO version for a new lockfile.
+**Purpose**: Writes the core first-run records into the database: the workspace, the initial admin member, and the main agent. It also protects against running initialization twice.
 
-**Data flow**: It takes the full tuple of pins that should appear in the lockfile. It checks whether the lockfile already exists. If it does, it reads the existing UFO version from it; if not, it gets the current package version from ufo_version. It then builds a Lockfile object with that version and the supplied pins, and writes it to disk.
+**Data flow**: It opens a workspace database transaction, checks whether any member already exists, and raises `AlreadyInitialized` if so. If the database is still fresh, it generates new IDs, inserts a workspace row, creates the admin member, inserts the main agent row with default settings and the selected model, and returns an `Onboarded` object containing the new workspace and member IDs.
 
-**Call relations**: Install and remove call this after they have decided the new pin list. This helper is the final save step: it turns the store’s decision into the actual lockfile that the extension loader will later use.
+**Call relations**: This is called by `Onboarding.create` after all preflight checks pass. It uses `workspace_tx` for the database boundary, SQLAlchemy insert/select helpers for database statements, `create_member` for the member record, `uuid4` for new IDs, and returns the `Onboarded` result that later flows into `Onboarding.run_steps`.
 
-*Call graph*: calls 1 internal fn (ufo_version); called by 2 (install, remove); 3 external calls (__init__, read_lockfile, write_lockfile).
+*Call graph*: called by 1 (create); 7 external calls (__init__, __init__, insert, select, workspace_tx, create_member, uuid4).
 
 
-### `core/src/ufo/host/ext/loader.py`
-
-`orchestration` · `startup and per-turn/per-request registry building`
-
-Extensions in UFO do not register themselves by calling into the app. Instead, they publish small Python entry points, and this loader reads those entry points at startup. Think of it like a theater stage manager: each extension hands in a card saying what props, actors, and cues it provides, and this file decides what actually goes on stage.
-
-The first job is safety and consistency. If a lockfile exists, it acts like a pinned shopping list: only the named extensions load, and their installed code must match a stored SHA-256 digest, which is a fingerprint of the files. If the code changed or an extension is missing, boot stops instead of running a surprising mix.
-
-Once the active manifests are known, this file builds many views of them. It creates the tool list for a turn, binds each extension tool to an ExtensionContext, builds object registries for turns and member portal pages, collects credential injection rules, gathers hook chains for turn events and connection events, finds database migration folders, loads skills and subagents, and chooses pluggable index, embedding, and memory providers.
-
-A key theme is “fail loud early.” Duplicate names, missing credential stores, conflicting environment variables, and unknown selected providers are rejected before a user turn silently breaks.
-
-#### Function details
-
-##### `lockfile_path`  (lines 143–144)
-
-```
-def lockfile_path() -> Path
-```
-
-**Purpose**: Finds the lockfile path the loader should use. Operators can override the default by setting an environment variable.
-
-**Data flow**: It reads the UFO_LOCKFILE environment variable if present, otherwise uses ufo.lock. It turns that text into a Path object and returns it.
-
-**Call relations**: When load_manifests decides whether the deploy is pinned or in development mode, it asks this helper where to look for the lockfile.
-
-*Call graph*: called by 1 (load_manifests); 1 external calls (Path).
-
-
-##### `read_lockfile`  (lines 147–148)
-
-```
-def read_lockfile(path: Path) -> Lockfile
-```
-
-**Purpose**: Reads a lockfile from disk and turns it into a validated Lockfile object. This makes sure the pinned extension list has the expected shape before the loader trusts it.
-
-**Data flow**: It receives a file path, reads the file as text, parses the JSON with the Lockfile model, and returns the validated result.
-
-**Call relations**: load_manifests uses this after it finds a lockfile, so the pinned extension names and digests can drive extension loading.
-
-*Call graph*: called by 1 (load_manifests); 1 external calls (read_text).
-
-
-##### `write_lockfile`  (lines 151–152)
-
-```
-def write_lockfile(path: Path, lockfile: Lockfile) -> None
-```
-
-**Purpose**: Writes a Lockfile object back to disk as formatted JSON. This is the companion to reading the lockfile, used by tools that pin a deploy’s extension set.
-
-**Data flow**: It receives a path and a Lockfile object, converts the object to indented JSON, adds a final newline, and writes it to the path.
-
-**Call relations**: This function is not part of the boot read path in this file, but it preserves the same file format that read_lockfile later validates.
-
-*Call graph*: 2 external calls (model_dump_json, write_text).
-
-
-##### `discovered`  (lines 155–169)
-
-```
-def discovered() -> dict[str, tuple[Manifest, EntryPoint]]
-```
-
-**Purpose**: Finds every installed UFO extension in the current Python environment. It also blocks duplicate extension names and blocks third-party extensions from declaring privileged member-context access.
-
-**Data flow**: It reads Python package entry points in the ufo.extension group. Each entry point is loaded and called to get a Manifest, then stored by manifest name together with the entry point used to locate its code.
-
-**Call relations**: load_manifests uses this as the raw installed-extension list. migration_locations also uses it so it can connect active manifests back to their installed package folders.
-
-*Call graph*: called by 2 (load_manifests, migration_locations); 1 external calls (entry_points).
-
-
-##### `discovered_packs`  (lines 172–183)
-
-```
-def discovered_packs() -> dict[str, Pack]
-```
-
-**Purpose**: Finds installed packs, which are named bundles of extensions and extra pack-level contributions. It rejects duplicate pack names so later code can choose a pack unambiguously.
-
-**Data flow**: It reads Python entry points in the ufo.pack group, loads each one, calls it to get a Pack, and returns a dictionary keyed by pack name.
-
-**Call relations**: _pack_manifests calls this when configuration selects a pack and needs to know which extensions that pack bundles.
-
-*Call graph*: called by 1 (_pack_manifests); 1 external calls (entry_points).
-
-
-##### `_entry_spec`  (lines 186–191)
-
-```
-def _entry_spec(entry: EntryPoint) -> ModuleSpec
-```
-
-**Purpose**: Locates the import information for the top-level Python package that owns an extension entry point. This is needed to find source files and migration folders.
-
-**Data flow**: It receives an EntryPoint, extracts the first part of its module name, asks Python import machinery for that package’s module spec, and returns the spec or raises if no source can be found.
-
-**Call relations**: extension_digest uses it to find files to fingerprint. migration_locations uses it to find an extension package directory.
-
-*Call graph*: called by 2 (extension_digest, migration_locations).
-
-
-##### `_package_dir`  (lines 194–199)
-
-```
-def _package_dir(spec: ModuleSpec) -> Path
-```
-
-**Purpose**: Figures out the directory that represents an extension package. That directory is where the loader looks for a migrations folder.
-
-**Data flow**: It receives a module spec. If the extension is a package, it returns the package directory; if it is a single file module, it returns that file’s parent directory.
-
-**Call relations**: migration_locations calls this after _entry_spec so it can check whether an active extension ships database migrations.
-
-*Call graph*: called by 1 (migration_locations); 1 external calls (Path).
-
-
-##### `extension_digest`  (lines 202–218)
-
-```
-def extension_digest(entry: EntryPoint) -> str
-```
-
-**Purpose**: Computes the fingerprint used to prove an installed extension’s code matches the lockfile. It covers the whole package, not just the entry module, so hidden file changes are caught.
-
-**Data flow**: It receives an extension EntryPoint, locates the package source, gathers source files while skipping bytecode cache files, reads their bytes, and passes the named file contents to extension_content_digest. It returns a sha256-prefixed digest string.
-
-**Call relations**: load_manifests calls this for each pinned extension. If the returned digest differs from the lockfile, loading stops.
-
-*Call graph*: calls 2 internal fn (_entry_spec, extension_content_digest); called by 1 (load_manifests); 1 external calls (Path).
-
-
-##### `extension_content_digest`  (lines 221–227)
-
-```
-def extension_content_digest(files: Mapping[str, bytes]) -> str
-```
-
-**Purpose**: Builds a stable SHA-256 digest from a set of named files. Including both file names and file contents means renaming or editing files changes the fingerprint.
-
-**Data flow**: It receives a mapping from file name to bytes. It sorts names, hashes each name and each file’s contents into one combined hash, and returns the result as a sha256: string.
-
-**Call relations**: extension_digest prepares the files from an installed package and hands them here for the actual fingerprint calculation.
-
-*Call graph*: called by 1 (extension_digest); 1 external calls (sha256).
-
-
-##### `migration_locations`  (lines 230–247)
-
-```
-def migration_locations(pack: str | None=None) -> tuple[str, ...]
-```
-
-**Purpose**: Lists database migration directories contributed by active extensions. These are extra schema-change folders layered on top of UFO’s core migrations.
-
-**Data flow**: It discovers installed extensions, loads the active manifests, finds each active extension’s package directory, checks for a migrations subdirectory, and returns the existing directories as strings.
-
-**Call relations**: The migration runner can call this to know which extension migration branches to include. It relies on load_manifests so inactive installed extensions do not add database tables.
-
-*Call graph*: calls 4 internal fn (_entry_spec, _package_dir, discovered, load_manifests).
-
-
-##### `load_manifests`  (lines 250–273)
-
-```
-def load_manifests(pack: str | None=None) -> tuple[Manifest, ...]
-```
-
-**Purpose**: Decides the active extension set for this run. It either loads every discovered extension in development mode or exactly the lockfile-pinned extensions in pinned mode.
-
-**Data flow**: It discovers installed extensions, checks whether the lockfile path exists, and then either collects all manifests or reads pins and verifies each pinned extension’s digest. If a pack is requested, it narrows the result through _pack_manifests.
-
-**Call relations**: This is the main source of truth for active manifests. Many other builders in the system are expected to consume its result so tools, hooks, jobs, routes, and migrations all see the same extension set.
-
-*Call graph*: calls 5 internal fn (_pack_manifests, discovered, extension_digest, lockfile_path, read_lockfile); called by 1 (migration_locations).
-
-
-##### `_pack_manifests`  (lines 276–309)
-
-```
-def _pack_manifests(pack: str, active: dict[str, Manifest]) -> tuple[Manifest, ...]
-```
-
-**Purpose**: Turns a selected pack name into the exact manifests that pack should activate. It includes the bundled extensions plus a synthetic manifest for the pack’s own skills and onboarding content.
-
-**Data flow**: It receives a pack name and the already-active extension manifests. It finds the installed Pack, verifies every bundled extension is active, checks for name collision with the pack, creates a Manifest for pack-level contributions, and returns the ordered tuple.
-
-**Call relations**: load_manifests calls this only when configuration selects a pack. It lets pack content travel through the same manifest-processing paths as normal extension content.
-
-*Call graph*: calls 1 internal fn (discovered_packs); called by 1 (load_manifests); 1 external calls (__init__).
-
-
-##### `connector_clis`  (lines 312–321)
-
-```
-def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]
-```
-
-**Purpose**: Collects command-line credential declarations from extension connectors. These declarations tell the engine which environment variables represent connector grant sentinels.
-
-**Data flow**: It receives manifests, walks through their connectors, keeps connectors that declare a CLI credential, and returns a dictionary keyed by OAuth provider name.
-
-**Call relations**: injecting_slots uses this map while checking for environment-variable conflicts between connector credentials and injected credential slots.
-
-*Call graph*: called by 1 (injecting_slots).
-
-
-##### `injecting_slots`  (lines 324–397)
-
-```
-def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ...]
-```
-
-**Purpose**: Collects credential slots that should be injected into sandboxed work, and checks that their names, sentinels, host choices, dimensions, and environment variables do not conflict. Without these checks, one secret or host setting could silently overwrite another.
-
-**Data flow**: It receives manifests, extracts credential slots that have injection rules, builds the set of all declared slot names, adds connector CLI environment claims, and then validates each slot’s sentinel, host metering dimension, host-choice references, and exported environment names. It returns the valid injectable slots.
-
-**Call relations**: It calls connector_clis to include connector-exported variables in the same namespace. The egress proxy and sandbox export logic can then use this single checked slot list.
-
-*Call graph*: calls 1 internal fn (connector_clis).
-
-
-##### `turn_tools`  (lines 400–494)
-
-```
-def turn_tools(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, index: IndexBackend | None=None, embed: EmbedClient | None=None, blob: WorkspaceBlobStore | None=None, *, audi
-```
-
-**Purpose**: Builds the complete tool and object-action set available during one turn. It combines core tools, extension tools, connector tools, object verbs, and the extension contexts needed to run them safely.
-
-**Data flow**: It receives active manifests plus workspace services such as credential storage, indexing, embedding, blob storage, audience, and URL settings. It creates contexts for extensions that declare tools or objects, adds normal tools to the tool list, registers bound object actions separately, builds object kind and action registries, appends object-verb tools, and returns the tool definitions, tool-to-context map, and ObjectVerbs.
-
-**Call relations**: Turn execution uses this when preparing what the model or dispatcher may call. It delegates core object-kind construction to core_object_kinds and registry validation to the object and action registry builders.
-
-*Call graph*: calls 1 internal fn (core_object_kinds); 6 external calls (__init__, __init__, __init__, context_for, action_registry, object_registry).
-
-
-##### `member_object_registry`  (lines 506–571)
-
-```
-def member_object_registry(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None=None, index: IndexBackend | None=None, embed: EmbedClient | None=None, *, public_base_url: str | No
-```
-
-**Purpose**: Builds the object kinds and actions visible to member-facing pages outside a live turn. This lets the portal show rows and controls using the same extension declarations as turn-time code.
-
-**Data flow**: It receives manifests and optional service handles, creates workspace-level extension contexts for object kinds and bound actions, combines them with core object kinds and built-in actions, validates the registries, and returns a MemberObjectRegistry.
-
-**Call relations**: Portal-style readers call this when they need object metadata and actions without a conversation audience. It uses core_object_kinds so the member portal sees the same core extension, credential, surface, and artifact objects as turns do.
-
-*Call graph*: calls 1 internal fn (core_object_kinds); 6 external calls (__init__, __init__, __init__, context_for, action_registry, object_registry).
-
-
-##### `frame_admissible`  (lines 574–588)
-
-```
-def frame_admissible(manifests: tuple[Manifest, ...], registry: MemberObjectRegistry) -> frozenset[str]
-```
-
-**Purpose**: Computes which tools and object actions an embedded frame page is allowed to post back to this deploy. This is an allow-list for frame-originated calls.
-
-**Data flow**: It receives manifests and a member object registry, gathers built-in and extension-declared tools, asks frame_admissible_ids to filter them by their frame presentation settings, and returns the allowed identifiers as a frozen set.
-
-**Call relations**: The frame action lane can use this result when a browser frame posts a requested call. It depends on the registry’s action map so bound object actions are checked in their canonical form.
-
-*Call graph*: 1 external calls (frame_admissible_ids).
-
-
-##### `core_object_kinds`  (lines 591–638)
-
-```
-def core_object_kinds(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None=None, *, public_base_url: str | None=None, artifact_token_secret: str='') -> tuple[BoundKind, ...]
-```
-
-**Purpose**: Creates the core object kinds that describe credentials, installed extensions, surfaces, and artifacts. These are not owned by one extension, but they are derived from the active extension set.
-
-**Data flow**: It receives manifests, optional credential storage, and public artifact-link settings. It builds ObjectKind definitions backed by stores for declared credential slots, named extensions, registered surfaces, and artifacts, then wraps each as a BoundKind with no extension context.
-
-**Call relations**: turn_tools, member_object_registry, and validate_ext_tools call this so their registries all include the same core object views alongside extension-owned object kinds.
-
-*Call graph*: called by 3 (member_object_registry, turn_tools, validate_ext_tools); 9 external calls (__init__, __init__, __init__, __init__, __init__, named_extensions, artifact_object, registered_surfaces, declared_slots).
-
-
-##### `skill_registry`  (lines 641–665)
-
-```
-def skill_registry(manifests: tuple[Manifest, ...], generated: tuple[RuntimeSkill, ...]=()) -> SkillRegistry
-```
-
-**Purpose**: Builds the deploy’s loadable skill registry. It starts with core skills, adds skills declared by active manifests, and can also include generated skills created at boot.
-
-**Data flow**: It receives manifests and optional generated RuntimeSkill objects. It discovers skills from each declared skill path, rejects duplicate names, adds generated skills after bundled ones, and returns a SkillRegistry with the bundled-name set recorded.
-
-**Call relations**: Skill loading and prompt rendering can use this registry without doing duplicate checks themselves. The function performs synchronous disk discovery once during setup.
-
-*Call graph*: 2 external calls (__init__, discover_skills).
-
-
-##### `turn_subagents`  (lines 668–672)
-
-```
-def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ...]
-```
-
-**Purpose**: Collects subagent profiles declared by active extensions. A subagent profile describes a specialized helper agent that can be made available during serving.
-
-**Data flow**: It receives manifests, walks through each manifest’s subagents, and returns them in manifest order.
-
-**Call relations**: The serving layer can pass this result into a SubagentRegistry. Duplicate-name validation is left to that registry so boot fails clearly if two profiles collide.
-
-
-##### `durable_surfaces`  (lines 675–681)
-
-```
-def durable_surfaces(manifests: tuple[Manifest, ...]) -> frozenset[str]
-```
-
-**Purpose**: Identifies surfaces whose replies are durable, meaning they use a post handler and need writeback polling. A surface is a place or channel where a conversation can happen.
-
-**Data flow**: It receives manifests, scans their surface specs, keeps surface names that declare a post handler, and returns the names as a frozen set.
-
-**Call relations**: Admission or turn setup can use this set to decide when to register writeback rows for conversations entering those surfaces.
-
-
-##### `turn_subagent_grants`  (lines 684–694)
-
-```
-def turn_subagent_grants(manifests: tuple[Manifest, ...]) -> dict[str, frozenset[str]]
-```
-
-**Purpose**: Collects extra tool permissions that extensions grant to subagent profiles they may not own. This lets one extension widen another profile’s available tools without editing that profile.
-
-**Data flow**: It receives manifests, groups grant entries by target profile name, unions all granted tool names per profile, and returns a dictionary of frozen sets.
-
-**Call relations**: The turn loop can fold this map into each profile’s own tool list before intersecting with actually available tools. Unknown profiles or missing tools can then fall away safely later.
-
-
-##### `turn_member_skills`  (lines 697–739)
-
-```
-async def turn_member_skills(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, index: IndexBackend | None=None, embed: EmbedClient | None=None, *, agent_name: str) -> tuple[tu
-```
-
-**Purpose**: Builds the member-saved skill cards available to one agent’s turns, plus a loader that can materialize a selected card into a runtime skill. It filters out cards targeted to other agents.
-
-**Data flow**: It receives manifests, credential storage, optional index and embed services, and an agent name. For each member-skill provider, it builds an extension context, fetches cards, skips cards not meant for the agent, logs and ignores duplicate names after the first, and returns the visible cards plus a materializer function.
-
-**Call relations**: Turn setup uses this when it wants member-defined or provider-backed skills. It creates the nested turn_member_skills.materialize function so later code can load only the chosen skill by name.
-
-*Call graph*: 2 external calls (log, context_for).
-
-
-##### `turn_member_skills.materialize`  (lines 732–737)
-
-```
-async def materialize(name: str) -> RuntimeSkill | None
-```
-
-**Purpose**: Loads one member skill by name using the provider that originally advertised it. If no provider claimed the name, it returns nothing.
-
-**Data flow**: It receives a skill name, looks it up in the captured providers dictionary from turn_member_skills, and if found calls that provider’s materialize method with its saved extension context. It returns a RuntimeSkill or None.
-
-**Call relations**: turn_member_skills returns this function to the turn layer. It closes over the provider map built from cards, so routing from card name to provider stays consistent.
-
-
-##### `member_skill_listing`  (lines 742–768)
-
-```
-async def member_skill_listing(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, index: IndexBackend | None=None, embed: EmbedClient | None=None) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: Materializes all member skills for management pages. Unlike turn_member_skills, it does not filter by agent targeting, because the portal listing should show the workspace’s whole set.
-
-**Data flow**: It receives manifests, credential storage, and optional index and embed services. For each member-skill provider, it builds an extension context, asks for all materialized skills, keeps the first skill for each name, logs duplicates, and returns the listed skills.
-
-**Call relations**: Portal or management code can call this for a full saved-skill listing. It applies the same credential requirement and duplicate behavior as turn_member_skills.
-
-*Call graph*: 2 external calls (log, context_for).
-
-
-##### `index_backend`  (lines 774–794)
-
-```
-def index_backend(manifests: tuple[Manifest, ...], configured: str | None, credential_store: CredentialStore | None) -> IndexBackend
-```
-
-**Purpose**: Selects and constructs the workspace’s index backend. An index backend stores and searches indexed content, and extensions can provide named implementations.
-
-**Data flow**: It receives manifests, a configured backend name or None, and credential storage. It uses default when no name is configured, finds a matching manifest index spec, checks credentials are available if needed, creates an extension context, calls the spec factory, and returns the IndexBackend.
-
-**Call relations**: Startup or workspace setup calls this to wire indexing. If no extension registers the selected backend, it raises NotRegisteredError so bad configuration fails immediately.
-
-*Call graph*: 2 external calls (__init__, context_for).
-
-
-##### `embed_backend`  (lines 797–817)
-
-```
-def embed_backend(manifests: tuple[Manifest, ...], configured: str | None, credential_store: CredentialStore | None) -> EmbedClient
-```
-
-**Purpose**: Selects and constructs the deploy’s embedding client. An embedding client turns text into numeric vectors used by search and memory features.
-
-**Data flow**: It receives manifests, a configured backend name or None, and credential storage. It defaults the name when absent, finds the matching embed spec, checks credential availability, builds an extension context, calls the factory, and returns the EmbedClient.
-
-**Call relations**: Boot wiring calls this before passing the embed client into indexing, memory, tools, and jobs. A missing selected backend raises NotRegisteredError rather than failing later.
-
-*Call graph*: 2 external calls (__init__, context_for).
-
-
-##### `memory_search`  (lines 820–845)
-
-```
-def memory_search(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, index: IndexBackend | None=None, embed: EmbedClient | None=None, name: str=DEFAULT_MEMORY_SEARCH_PROVIDER)
-```
-
-**Purpose**: Builds one named memory search provider from extension declarations. Memory search is the feature that lets UFO retrieve relevant stored memories.
-
-**Data flow**: It receives manifests, credential storage, optional index and embed clients, and a provider name. It gathers matching providers, returns None if none exist, raises if more than one extension registers the same name, checks credentials, builds a context, constructs the provider, and wraps it in MemorySearch.
-
-**Call relations**: Runtime memory features call this to obtain the selected provider. The duplicate check ensures one provider name cannot mean two different implementations.
-
-*Call graph*: 2 external calls (__init__, context_for).
-
-
-##### `validate_ext_tools`  (lines 848–896)
-
-```
-def validate_ext_tools(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None) -> dict[str, dict[str, BoundAction]]
-```
-
-**Purpose**: Checks extension tool, object kind, and bound-action declarations at deploy boot without building per-workspace contexts. Its job is to catch collisions and missing credential setup before any user turn starts.
-
-**Data flow**: It receives manifests and optional credential storage, combines built-in tools and actions with extension-declared tools and actions, verifies credential requirements, builds a context-free object registry including core object kinds, validates action registration, creates object-verb tools, checks the final ToolRegistry, and returns the validated action registry.
-
-**Call relations**: Deployment startup can call this as a health gate. It uses core_object_kinds and the same registry builders as turn_tools, but with no workspace-specific context.
-
-*Call graph*: calls 1 internal fn (core_object_kinds); 6 external calls (__init__, __init__, __init__, __init__, action_registry, object_registry).
-
-
-##### `turn_workspace_facts`  (lines 899–939)
-
-```
-async def turn_workspace_facts(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, *, audience: Audience) -> tuple[str, ...]
-```
-
-**Purpose**: Reads short factual lines that extensions say are true for the current workspace. These lines can decorate a prompt without making one failing extension break the whole turn.
-
-**Data flow**: It receives manifests, credential storage, and an audience. For each declared workspace fact, it builds the extension’s context, calls the fact’s holds method, appends the fact line when true, and logs a warning while skipping that fact if reading fails.
-
-**Call relations**: Turn preparation can call this to gather prompt facts. The function deliberately swallows individual fact-read errors so the member’s turn can continue.
-
-*Call graph*: 2 external calls (warn, context_for).
-
-
-##### `turn_hooks`  (lines 942–991)
-
-```
-def turn_hooks(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, index: IndexBackend | None=None, embed: EmbedClient | None=None, tailer: TurnTailer | None=None, *, audience:
-```
-
-**Purpose**: Builds the hook chain for turn lifecycle events. Hooks are extension callbacks that react to moments during a turn, such as before or after processing.
-
-**Data flow**: It receives manifests, credential storage, optional index/embed/tailer services, audience, and a public base URL. It groups declared hooks by supported turn event, builds each extension’s context, binds hook specs to that context, and returns a HookChain.
-
-**Call relations**: The turn loop uses the returned HookChain when events occur. Connection-recorded hooks are excluded here because connection_hooks builds the separate connection-time chain.
-
-*Call graph*: 3 external calls (__init__, __init__, context_for).
-
-
-##### `ConnectionHookChain.fire`  (lines 1006–1017)
-
-```
-async def fire(self, connection: ConnectionRecorded) -> None
-```
-
-**Purpose**: Runs all connection_recorded hooks after a connection has landed. These hooks are observe-only: a failure is logged and swallowed so the recorded connection itself remains valid.
-
-**Data flow**: It receives a ConnectionRecorded payload. For each bound hook, it calls the hook handler with a HookContext containing the extension context and connection payload, enforces a timeout, and logs any exception or timeout without returning a value.
-
-**Call relations**: The connect flow calls this on the ConnectionHookChain built by connection_hooks. It hands each extension the same kind of scoped context used by jobs, so retry jobs can recreate work if a hook fails.
-
-*Call graph*: 3 external calls (__init__, timeout, log).
-
-
-##### `connection_hooks`  (lines 1020–1046)
-
-```
-def connection_hooks(manifests: tuple[Manifest, ...], credential_store: CredentialStore | None, index: IndexBackend | None=None, embed: EmbedClient | None=None) -> ConnectionHookChain
-```
-
-**Purpose**: Builds the hook chain that reacts when a new connection is recorded. This lets extensions create follow-up resources, such as feeds for a newly connected account.
-
-**Data flow**: It receives manifests, credential storage, and optional index/embed services. It selects only hooks whose event is connection_recorded, checks credential storage is available, builds each declaring extension’s context, binds the hooks, and returns a ConnectionHookChain.
-
-**Call relations**: The connect request path uses the returned chain and later calls ConnectionHookChain.fire. This is separate from turn_hooks because it runs during connection handling, not during a model turn.
-
-*Call graph*: 3 external calls (__init__, __init__, context_for).
-
-
-### Content and communication manifests
-These manifests declare user-facing extensions for debugging, document work, knowledge access, and messaging surfaces.
-
-### `extensions/debugger/ufo_ext_debugger/manifest.py`
-
-`config` · `startup / extension discovery`
-
-Think of this file as the debugger extension’s sign-in sheet and menu card. When the larger UFO system discovers the extension, it needs a simple answer to three questions: what is this extension called, what version is it, and what features does it provide? This file answers those questions by building a Manifest, which is the standard package of information the host expects from an extension.
-
-The extension is named "debugger" and versioned as "0.1.0". It exposes a `report_problem` tool, imported here as `REPORT_PROBLEM_TOOL_DEF`, which lets a workspace problem be sent to operators. It also exposes a debugger surface, meaning a user-facing route or small web area, described by `SurfaceSpec`. That surface uses `ROUTES` for its pages or endpoints and is named with `SURFACE_DEBUG`.
-
-A key safety detail is the `identify=resolve_operator_workspace` setting. In plain terms, the debugger surface is not just mounted everywhere blindly. The host must be able to identify the correct operator workspace before this surface is available. Without this file, the debugger extension would have no official manifest, so the host would not know to install its problem-reporting tool or its debug surface.
-
-#### Function details
-
-##### `manifest`  (lines 16–24)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the extension manifest, which is the host system’s structured description of the debugger extension. Someone would use this when loading extensions so the host can discover the extension’s name, version, tools, and surfaces.
-
-**Data flow**: It starts with the fixed constants `NAME` and `VERSION`, plus imported definitions for the reporting tool, debugger routes, debugger surface name, and workspace identifier. It packages those into a `SurfaceSpec` for the debugger surface, then puts that surface and the reporting tool into a `Manifest`. The result is a complete manifest object that the host can read to enable this extension.
-
-**Call relations**: During extension loading, the host calls `manifest` to ask this file what the debugger extension contributes. Inside, it creates a `SurfaceSpec` to describe the debugger web surface, then creates a `Manifest` to bundle that surface together with the reporting tool and extension metadata.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### `extensions/documents/ufo_ext_documents/manifest.py`
-
-`config` · `startup`
-
-This file is the registration card for the documents extension. It does not create documents itself. Instead, it lists the pieces this extension contributes so the larger UFO system can find them and load them when needed.
-
-The main contribution is a group of skills stored in the local `skills/` folder. A skill is a packaged workflow with instructions and supporting files. Here, the skills cover things like Word documents, PowerPoint presentations, Excel spreadsheets, PDFs, document review, visual themes, shared design foundations, and prose drafting. Some of these skills depend on shared style foundations, so a document can still follow a consistent house style even when the user gives little design direction.
-
-The file also registers a `writing` subagent profile, imported as `WRITING_PROFILE`. A subagent is a smaller, focused worker the main agent can call on for a specific job. In this case, it is meant for drafting and editing prose.
-
-The `manifest()` function packages all of this into a `Manifest` object: the extension name, version, subagent, and skill paths. Think of it like a table of contents for a toolbox. The tools live elsewhere, but this file tells the system what tools exist and where to look for them.
-
-#### Function details
-
-##### `manifest`  (lines 37–43)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the extension manifest, which is the system-readable summary of what the documents extension provides. Someone would use it when UFO is discovering extensions and needs to know this pack's name, version, skills, and subagents.
-
-**Data flow**: It starts with constants in this file: the extension name, version, the folder containing skills, and the list of skill folder names. For each skill name, it creates a `SkillSpec`, which points to that skill's folder. It then puts those skill specifications together with the writing subagent profile into a `Manifest` object and returns that object to the caller.
-
-**Call relations**: During extension loading, the wider system calls `manifest` to ask, 'What do you contribute?' This function answers by creating `SkillSpec` entries for each document skill and passing them into `Manifest.__init__`, along with the imported writing profile, so the loader can later make those skills and the subagent available.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### `extensions/gbrain/ufo_ext_gbrain/manifest.py`
-
-`config` · `startup`
-
-This file is like the extension’s business card. When the main system loads the gbrain extension, it asks this file: “What do you provide?” The answer is a manifest, which is a structured declaration of the extension’s name, version, supported object type, content sources, and credentials.
-
-The gbrain extension can turn Markdown files into pages from two places. One source backend reads from a GitHub repository. The other reads from a local folder, useful when serving or testing content from disk. The file also declares a credential slot named for a GitHub token. That token is only needed when the repository is private; public repositories can be read without it.
-
-The most important idea is that this file does not itself read files or talk to GitHub. Instead, it wires the extension into the host system by saying which source classes should be built when a source of each kind is requested. Without this file, the rest of the system would not know that gbrain sources exist, how to create them, or what credential to ask for when private GitHub access is needed.
-
-#### Function details
-
-##### `manifest`  (lines 16–38)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the declaration that describes the gbrain extension to the UFO system. Someone uses this so the host application can discover the extension’s object type, source backends, and optional GitHub credential.
-
-**Data flow**: It starts from fixed module-level values such as the extension name, version, Git backend name, folder backend name, object kind, and GitHub token slot. It packages these into a Manifest object, including two SourceProvider entries: one that builds a GitHub-based gbrain source using supplied credentials, and one that builds a folder-based gbrain source without credentials. The result is a complete Manifest returned to the caller; it does not change files, network state, or global data.
-
-**Call relations**: During extension loading, the host system calls this function to learn what the extension offers. Inside, it creates SourceProvider objects so the sync system later knows how to make either a GitHub source or a folder source, creates a CredentialSlot so the system knows about the optional GitHub token, and wraps everything in a Manifest for the host to register.
-
-*Call graph*: 3 external calls (__init__, __init__, __init__).
-
-
-### `extensions/imessage/ufo_ext_imessage/manifest.py`
-
-`config` · `startup / extension discovery`
-
-Think of this file as the extension’s front-desk registration form. When the larger UFO system loads extensions, it needs to know what this iMessage add-on is called, what version it is, what actions it offers, and how messages should flow in and out. Without this file, the system would not know that an iMessage surface exists, how to listen for iMessages, how to post replies, or how a workspace member can connect their phone.
-
-The file imports the pieces that do the actual work: the iMessage surface, the connect tool, and the cloud provider setup. Its single job is to assemble those pieces into a `Manifest`, which is a structured description the host system can read.
-
-The manifest exposes one tool: “Connect iMessage.” This tool is marked as side-effecting because it changes real-world state by starting or completing a phone connection. It is also marked untrusted, meaning the system should treat requests carefully rather than assuming they are harmless. The manifest also declares one surface, named for iMessage, and gives the host the functions to call when it needs to listen, post, attach files, or speak through that surface. Finally, it lists two required deployment keys, so the runtime knows which environment secrets are needed to talk to the Spectrum provider.
-
-#### Function details
-
-##### `manifest`  (lines 21–55)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the official description of the iMessage extension for the host system. Someone uses this when the system needs to discover what this extension can do and what settings it requires.
-
-**Data flow**: It starts with no caller-provided input. It creates an iMessage surface and an iMessage connection tool, both using the Spectrum project provider. It then packages their names, callbacks, input model, display label, safety flags, and required deployment secrets into a `Manifest` object, which is returned to the host system.
-
-**Call relations**: When the extension is loaded, this function is the place where the separate parts are joined together. It creates `ImessageSurface` so the system can receive and send iMessage traffic, creates `ImessageConnect` so members can prove control of a phone number, wraps that tool with `ToolDef`, describes its object binding with `ObjectBinding`, gives it a user-facing label through `ActionPresentation`, describes the surface through `SurfaceSpec`, and finally hands all of that to `Manifest` as the extension’s complete registration record.
-
-*Call graph*: 7 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__).
-
-
-### Automation and creation manifests
-These manifests register recurring work, scheduled tasks, self-improvement jobs, site creation features, and user-created skills.
-
-### `extensions/monitors/ufo_ext_monitors/manifest.py`
-
-`config` · `extension startup and scheduled job dispatch`
-
-A monitor is like a standing watch: it repeatedly runs a shell probe in a conversation’s sandbox at a set interval, and tracks whether the results are changing or failing over time. This file does not contain the probing logic itself. Instead, it declares the pieces that make that feature visible to the wider system.
-
-When the extension is loaded, `manifest()` builds a `Manifest`, which is a package label for the system: it gives the extension a name and version, registers the monitor tool that users or agents can call, registers the monitor object kind that can be stored durably, and registers a scheduled job.
-
-That scheduled job is named `monitor_runner` and is set to run every minute. The schedule string is a cron-like pattern, meaning a compact clock rule. The job does not blindly scan every workspace. Its `candidates` value comes from `due_monitor_workspaces()`, which points the job dispatcher only toward workspaces that actually have monitors ready to check. That keeps idle workspaces cheap.
-
-When the clock fires, the job calls `_probe()`. `_probe()` creates a `MonitorRunner` with the current extension context and asks it to run. In other words, this file is the wiring diagram; the runner is the worker that does the real inspection.
-
-#### Function details
-
-##### `_probe`  (lines 28–29)
-
-```
-async def _probe(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the scheduled job’s small entry function. It starts the monitor runner so any monitors that are due can be probed.
-
-**Data flow**: It receives an `ExtensionContext`, which is the system-provided bundle of services and current workspace information for an extension. It uses that context to create a `MonitorRunner`, then calls its `run()` method. Nothing is returned; the effect is that due monitor checks are performed by the runner.
-
-**Call relations**: The job declared in `manifest()` uses `_probe` as its handler. When the scheduler decides a workspace has due monitor work, it calls `_probe`, and `_probe` immediately hands control to `MonitorRunner` because that class contains the actual monitor-checking behavior.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 32–46)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function describes the monitors extension to the UFO system. It says what the extension is called, what tool and object type it contributes, and what recurring job should be scheduled.
-
-**Data flow**: It reads the constants in this file, uses `due_monitor_workspaces()` to describe which workspaces should be considered for monitor runs, wraps the scheduled runner in a `JobSpec`, and returns a complete `Manifest`. The returned manifest is the system’s map for installing and activating this extension.
-
-**Call relations**: The extension loader calls `manifest()` when it is discovering available extensions. Inside, it builds a `JobSpec` for the minute-by-minute monitor runner, calls `due_monitor_workspaces()` so the scheduler can skip workspaces with no due monitors, and places everything into a `Manifest` that the rest of the system can consume.
-
-*Call graph*: 3 external calls (__init__, __init__, due_monitor_workspaces).
-
-
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/manifest.py`
-
-`config` · `extension load and recurring scheduled jobs`
-
-This file is the doorway through which the scheduled-tasks extension introduces itself to the larger system. Without it, the system would not know that this extension can pause conversations until later, run scheduled tasks, or load the task-scheduling instructions used by the agent.
-
-The file defines a manifest, which is like a checklist handed to the host at startup. The checklist says: this extension is named "scheduled_tasks"; it provides a pause-and-wait tool; it defines a scheduled-task object; it needs the memory search extension; and it has one skill folder called "task-scheduling".
-
-It also registers two clock-based background jobs. One job looks for scheduled tasks that are due. The other looks for paused conversations that are ready to resume. They use the same once-per-minute schedule, but they are separate jobs on purpose. If one kind of work gets stuck, it should not block the other. Each job also asks only for workspaces that actually have due work, so the dispatcher does not waste time visiting empty workspaces.
-
-The two small async functions, `_run` and `_resume`, are the job entry points. They create the right runner object and tell it to do its work.
-
-#### Function details
-
-##### `_run`  (lines 35–36)
-
-```
-async def _run(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the job function used when the system wants to process scheduled tasks that are due. It starts a `ScheduledTaskRunner`, which is the part that does the actual task-running work.
-
-**Data flow**: It receives an `ExtensionContext`, which is the host-provided bundle of services and workspace information the extension needs. It gives that context to `ScheduledTaskRunner`, then waits for the runner to finish. It returns nothing directly; the useful effect is that due scheduled tasks may be found and invoked.
-
-**Call relations**: The manifest registers `_run` as the handler for the scheduled-task runner job. When the clock fires for that job, the host calls `_run`; `_run` then creates `ScheduledTaskRunner` and hands control to it.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_resume`  (lines 39–40)
-
-```
-async def _resume(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the job function used when the system wants to resume conversations that were paused until a later time. It starts a `PauseRunner`, which performs the resume work.
-
-**Data flow**: It receives an `ExtensionContext` from the host. It passes that context into `PauseRunner`, then waits while the runner processes any pauses that are due. It returns nothing directly; its effect is to wake up conversations that should continue now.
-
-**Call relations**: The manifest registers `_resume` as the handler for the pause-runner job. When that recurring job fires, the host calls `_resume`; `_resume` creates `PauseRunner` and lets it carry out the resume process.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 43–66)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function builds and returns the extension’s manifest: the complete description of what this extension contributes to the system. The host uses it to wire the extension into tools, background jobs, skills, and conversation storage.
-
-**Data flow**: It starts from constants in this file, such as the extension name, version, schedule, and skill folder. It also asks `due_task_workspaces()` and `due_pause_workspaces()` for candidate workspace selectors, so each background job only runs where there is due work. It packages all of that into `JobSpec`, `SkillSpec`, and finally a `Manifest`, which is returned to the host.
-
-**Call relations**: The host calls `manifest` while loading the extension. Inside, it creates two `JobSpec` entries: one points to `_run` for due scheduled tasks, and one points to `_resume` for due pauses. It also creates `SkillSpec` entries for the skill folders and includes the tool, object type, dependency, and conversation slot the rest of the extension needs.
-
-*Call graph*: 5 external calls (__init__, __init__, __init__, due_pause_workspaces, due_task_workspaces).
-
-
-### `extensions/self_improvement/ufo_ext_self_improvement/manifest.py`
-
-`config` · `extension load and scheduled evaluation`
-
-This file is the extension’s front door. When the larger system loads extensions, it asks this file for a manifest, which is like a small registration card: the extension’s name, version, and the timed job it wants the scheduler to run. Here, the job is called an evaluation cron. A cron is a clock-based scheduled task, meaning it runs because time passed, not because a user made a request or some data changed.
-
-The scheduled job points to `_tick`. When `_tick` runs, it first checks that a model is available. In plain terms, the self-improvement process needs access to an AI model; without it, it cannot propose changes, replay old conversations, or judge whether a candidate is better. If model access is missing, it stops with a clear error instead of failing later in a confusing way.
-
-If the model is present, `_tick` wraps it in `ModelAccessLeg`, then builds the three main pieces of the improvement loop: a proposer that suggests prompt candidates, an evaluator that replays and judges them, and an `ImproveCron` object that runs the full cycle. The manifest marks the job as needing the deploy model, meaning it should use the main production-style model rather than a cheaper background model, because replaying archived transcripts may require the same context capacity used in deployment.
-
-#### Function details
-
-##### `_tick`  (lines 26–34)
-
-```
-async def _tick(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the function the scheduler runs when the self-improvement job fires. It performs one full self-improvement evaluation pass, but only if AI model access has been wired into the extension context.
-
-**Data flow**: It receives an `ExtensionContext`, which contains shared services for the extension, including optional model access. It checks whether `ctx.model` exists; if not, it raises an error explaining that self-improvement cannot run. If model access is present, it wraps that model in `ModelAccessLeg`, gives the wrapper to a `PromptProposer` and to `CandidateEvaluation`, then creates an `ImproveCron` with those parts and awaits its run. The result is not returned as a value; the effect is that the improvement cycle is carried out.
-
-**Call relations**: The scheduler reaches this function through the job declared by `manifest`. Inside the tick, it constructs `ModelAccessLeg` so all model calls go through the intended access layer. It then builds `PromptProposer` for suggesting candidate changes and `CandidateEvaluation` for replaying and judging them, hands both to `ImproveCron`, and lets `ImproveCron` drive the actual workflow.
-
-*Call graph*: 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `manifest`  (lines 37–50)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function returns the extension declaration that the host system reads during startup. It says the extension is named `self_improvement`, gives its version, and registers one scheduled evaluation job.
-
-**Data flow**: It takes no inputs. It creates a `JobSpec` describing the scheduled job: its name, clock schedule, handler function, eligible workspaces from `trajectory_workspaces()`, and the fact that it needs the deploy model. It then wraps that job inside a `Manifest` and returns it to the host system.
-
-**Call relations**: The extension loader calls this function when discovering the extension. The function calls `trajectory_workspaces()` to say which workspaces the job can run against, creates a `JobSpec` that points at `_tick`, and returns a `Manifest` so the scheduler knows what to run and when.
-
-*Call graph*: 3 external calls (__init__, __init__, trajectory_workspaces).
-
-
-### `extensions/sites/ufo_ext_sites/manifest.py`
-
-`config` · `startup / extension load`
-
-Think of this file as the extension’s packing list and instruction label. The code here does not build websites itself. Instead, it describes all the pieces the main system should plug in when the “sites” extension is loaded.
-
-It names the extension, reads a prompt section from disk, points to the website-building skill folder, and gathers together many imported building blocks. These include tools an agent can use to create and edit hosted sites, delegation tools that let a main agent hand work to a website-building subagent, and an object kind that lets chat recognize a hosted site as something users can interact with.
-
-It also registers a “surface,” meaning a user-facing area where a hosted site can be shown, like putting a finished page into a frame. The manifest adds prompt text so the main agent knows how to use these abilities correctly.
-
-A particularly important part is the hook setup. A hook is code that runs at a certain moment, here before tool use, to enforce rules such as using the right creation route, staying in the correct builder phase, limiting repair reads, and requiring quality checks before deployment. Finally, it schedules a background job that releases a main agent’s held homepage once ownership should move on. Without this file, the system would not know that the sites extension exists or how to wire its many parts together.
-
-#### Function details
-
-##### `manifest`  (lines 64–123)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This function builds and returns the complete declaration for the sites extension. The host system calls it to learn which tools, prompts, skills, hooks, surfaces, object types, conversation slots, and scheduled jobs this extension wants to add.
-
-**Data flow**: It starts with constants and imported pieces: the extension name and version, prompt text read from the sites prompt file, tool definitions, subagent profiles, surface and object definitions, hook functions, and job settings. It packages those into manifest-related objects, including prompt, skill, hook, and job entries. The result is a single Manifest object that the larger system can load and use to activate the extension.
-
-**Call relations**: During extension loading, the host asks this function for the sites extension’s manifest. Inside that assembly step, it creates the prompt section, skill entry, hook entries, and cleanup job specification, and it asks the main-homepage helper for the workspaces that are candidates for release. The finished manifest is then handed back to the host so the host can expose the website tools, register the subagents and surface, enforce the pre-tool rules, and schedule the background cleanup work.
-
-*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, __init__, unreleased_main_homepage_workspaces).
-
-
-### `extensions/skill_create/ufo_ext_skill_create/manifest.py`
-
-`orchestration` · `extension startup, object requests, tool calls, runtime skill loading, scheduled indexing`
-
-A “skill” here is a small bundle of text files, led by a required SKILL.md file, that teaches an agent how to do something. This file makes those member-authored skills behave like first-class workspace objects: they can be created, inspected, updated, deleted, searched, and loaded in later conversations. Without this file, saved workspace skills would not be exposed to the object system, would not appear in member views, would not be searchable, and would not be made available as runtime skills.
-
-The file has three main jobs. First, it defines the shape of a saved skill: files may be supplied directly as text, copied from a workspace path, or kept unchanged by referring to their stored SHA-256 digest, which is a fingerprint of the file contents. Second, SkillObjects connects those skill specs to persistent storage through UserSkillStore, while enforcing safety rules: paths must stay inside the skill folder, files must be UTF-8 text, there are limits on file count and total size, and edits must use the expected generation so two writers do not silently overwrite each other. Third, it registers search and indexing. Search ranks skill descriptions by keyword, while the scheduled indexing job embeds stale skill cards so they can be found through the system’s index.
-
-At the bottom, manifest() announces all of this to the host application: the object kind, the search tool, the built-in authoring skill, runtime skill hooks, and the background indexing job.
-
-#### Function details
-
-##### `_require_ext`  (lines 119–122)
-
-```
-def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
-```
-
-**Purpose**: This small guard makes sure the code has an ExtensionContext, which is the workspace-aware handle it needs to read storage, run transactions, and access services. If the context is missing, it stops immediately with a clear error instead of failing later in a confusing way.
-
-**Data flow**: It receives either an ExtensionContext or nothing. If a real context comes in, it returns it unchanged; if None comes in, it raises an error saying the skill kind was called without its needed context.
-
-**Call relations**: Most SkillObjects methods call this first because they all depend on workspace-specific services. It acts like checking that you have the right key before trying to open any of the storage doors.
-
-*Call graph*: called by 8 (_resolve, apply, delete, get, list, member_detail, member_page, status).
-
-
-##### `_contained_keys`  (lines 125–132)
-
-```
-def _contained_keys(name: str, spec: UserSkillSpec) -> None
-```
-
-**Purpose**: This checks that every file path in a skill stays inside that skill’s own folder. It prevents a saved skill from naming files outside its allowed area, such as by using path tricks like ../.
-
-**Data flow**: It receives the skill name and the proposed UserSkillSpec. It computes the skill’s allowed root folder, checks each file key against that root, and either returns nothing if all paths are safe or raises a ValueError for the first unsafe path.
-
-**Call relations**: SkillObjects.apply calls this before saving. It relies on skill_root to know where the skill should live and contained_relative to prove each path remains inside that boundary.
-
-*Call graph*: called by 1 (apply); 2 external calls (contained_relative, skill_root).
-
-
-##### `_text`  (lines 135–141)
-
-```
-def _text(path: str, content: bytes) -> str
-```
-
-**Purpose**: This verifies that a skill file is readable text, specifically UTF-8 text. Skills are not allowed to bundle arbitrary binary files.
-
-**Data flow**: It receives a file path and that file’s raw bytes. It tries to decode the bytes as text; if decoding works, it returns the decoded string, and if not, it raises a ValueError explaining that the file is not text.
-
-**Call relations**: SkillObjects._resolve calls this after it has gathered each file’s bytes, whether those bytes came from inline text, existing storage, or a workspace file reference. It is the final text-only check before saving.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `SkillObjects.list`  (lines 148–149)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This returns a paged list of saved workspace skills for object-listing requests inside a tool context. It shows compact rows rather than full file contents.
-
-**Data flow**: It receives a ToolContext and a listing query. It checks for the extension context, asks _rows for all saved skill rows, applies the requested paging and filtering through object_page, and returns an ObjectPage.
-
-**Call relations**: The object system calls this when someone lists objects of kind skill. It delegates context validation to _require_ext and row construction to SkillObjects._rows.
-
-*Call graph*: calls 2 internal fn (_rows, _require_ext); 1 external calls (object_page).
-
-
-##### `SkillObjects.member_page`  (lines 151–162)
-
-```
-async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This returns the same saved-skill listing for the member portal, outside a live agent turn. Skills belong to the workspace as a whole, so the member_id and admin flag do not narrow the set here.
-
-**Data flow**: It receives an optional extension context, member identity information, an admin flag, and a listing query. It validates the context, builds the workspace’s skill rows, turns them into a page, and returns that page.
-
-**Call relations**: The member-facing object view calls this when a signed-in member browses saved skills. Like SkillObjects.list, it uses _rows and object_page, but it is shaped for portal access rather than tool access.
-
-*Call graph*: calls 2 internal fn (_rows, _require_ext); 1 external calls (object_page).
-
-
-##### `SkillObjects.get`  (lines 164–165)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None
-```
-
-**Purpose**: This fetches one saved skill’s detail for object_get-style access. It returns file fingerprints and sizes, not the actual file bodies, so large or sensitive content is not echoed into ordinary object detail.
-
-**Data flow**: It receives a ToolContext and a skill name. It validates the extension context, asks _skill for the stored detail, and returns either that ObjectDetail or None if the skill does not exist.
-
-**Call relations**: The object system calls this when a caller asks for one skill by name. It is a thin public wrapper around SkillObjects._skill.
-
-*Call graph*: calls 2 internal fn (_skill, _require_ext).
-
-
-##### `SkillObjects.member_detail`  (lines 167–185)
-
-```
-async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[UserSkillSpec] | None
-```
-
-**Purpose**: This builds the member-portal view of one saved skill, combining the row summary with the detailed spec. Like get, it exposes digests and sizes instead of raw file contents.
-
-**Data flow**: It receives an optional extension context, a skill name, member information, and an admin flag. It validates the context, looks for the matching row, fetches the detail, and returns a MemberObject containing both; if either the row or detail is missing, it returns None.
-
-**Call relations**: The member portal calls this when a user opens a specific saved skill. It uses _rows to get the display row, _skill to get the stored detail, and wraps both in MemberObject.
-
-*Call graph*: calls 3 internal fn (_rows, _skill, _require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects._rows`  (lines 187–195)
-
-```
-async def _rows(self, ext: ExtensionContext) -> tuple[ObjectRow, ...]
-```
-
-**Purpose**: This converts stored skills into small display rows. Each row includes the skill name, a shortened description, and whether it is pinned.
-
-**Data flow**: It receives an ExtensionContext. It asks UserSkillStore for the workspace’s listing, trims each description to the summary limit, builds ObjectRow values, and returns them as a tuple.
-
-**Call relations**: SkillObjects.list, SkillObjects.member_page, and SkillObjects.member_detail all use this helper whenever they need the lightweight list view of saved skills.
-
-*Call graph*: called by 3 (list, member_detail, member_page); 2 external calls (__init__, __init__).
-
-
-##### `SkillObjects._skill`  (lines 197–212)
-
-```
-async def _skill(self, ext: ExtensionContext, name: str) -> ObjectDetail[UserSkillSpec] | None
-```
-
-**Purpose**: This builds the detailed saved-skill object without exposing the raw file contents. It replaces each stored file body with a FileRef containing a SHA-256 digest and byte size.
-
-**Data flow**: It receives an ExtensionContext and a skill name. It asks UserSkillStore for the stored record; if none exists, it returns None. Otherwise it hashes each file’s bytes, builds a UserSkillSpec with FileRef entries, and returns an ObjectDetail with timestamps and generation information.
-
-**Call relations**: SkillObjects.get and SkillObjects.member_detail call this when they need the safe detailed view of one skill. The returned digests can later be passed back to apply to keep files unchanged.
-
-*Call graph*: called by 2 (get, member_detail); 5 external calls (__init__, __init__, __init__, __init__, sha256).
-
-
-##### `SkillObjects.status`  (lines 214–231)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This gives a quick factual status summary for one saved skill, such as its description, file count, total byte size, and pinned state. It also protects readers from using stale data by checking the expected generation.
-
-**Data flow**: It receives a ToolContext, a skill name, and an expected generation. It loads the stored record; if missing, it returns None. If the generation does not match, it raises an error; otherwise it returns a small dictionary of status fields.
-
-**Call relations**: The object system can call this after reading or applying an object to confirm what exists. It uses _require_ext and UserSkillStore directly rather than going through the full detail-building path.
-
-*Call graph*: calls 1 internal fn (_require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects.apply`  (lines 233–256)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: UserSkillSpec, old: UserSkillSpec | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This creates or updates a workspace skill from a submitted spec. It enforces limits, resolves file references into actual bytes, and saves the final bundle only if it is valid.
-
-**Data flow**: It receives a ToolContext, skill name, new spec, optional old spec, and expected generation. It checks the extension context, rejects too many files, verifies paths stay inside the skill, resolves inline/from/digest file values into bytes, checks total size, and saves the skill through UserSkillStore with the pinned flag and generation guard.
-
-**Call relations**: The manifest object system calls this when a user applies a skill object. It calls _contained_keys for path safety, _resolve to gather file contents, and UserSkillStore.save to persist the result.
-
-*Call graph*: calls 3 internal fn (_resolve, _contained_keys, _require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects.delete`  (lines 258–269)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This removes a saved workspace skill, while preventing accidental deletion if someone else changed it first. The generation check works like asking, “Am I deleting the same version I looked at?”
-
-**Data flow**: It receives a ToolContext, skill name, and expected generation. It loads the current record; if the skill exists but its generation differs, it raises an error. Otherwise it asks UserSkillStore to delete the skill.
-
-**Call relations**: The object system calls this for delete requests. It uses _require_ext for workspace access and UserSkillStore for both the pre-delete check and the actual deletion.
-
-*Call graph*: calls 1 internal fn (_require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects._resolve`  (lines 271–319)
-
-```
-async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]
-```
-
-**Purpose**: This turns the three allowed file value forms into actual file bytes ready to save: inline text, a copied workspace file, or an unchanged stored file referred to by digest. It is the bridge between a convenient manifest format and the final stored bundle.
-
-**Data flow**: It receives a ToolContext, skill name, and UserSkillSpec. It loads existing stored files so FileRef entries can be verified by SHA-256 digest, reads any FileFrom paths from the workspace through the sandbox, decodes the sandbox’s base64 output back into bytes, converts inline strings to bytes, checks every file is UTF-8 text, and returns a dictionary from skill-relative path to bytes.
-
-**Call relations**: SkillObjects.apply calls this before saving. It uses UserSkillStore for existing file content, the sandbox to safely read workspace files, _text for text validation, and digest checks so a caller cannot claim to keep a file that does not match storage.
-
-*Call graph*: calls 2 internal fn (_require_ext, _text); called by 1 (apply); 7 external calls (__init__, b64decode, sha256, dumps, loads, quote, workspace_path).
-
-
-##### `skill_search`  (lines 371–388)
-
-```
-async def skill_search(ctx: ToolContext, args: SkillSearchInput) -> ToolResult
-```
-
-**Purpose**: This searches all loadable skills, both built-in and workspace-saved, by matching the user’s keywords against each skill’s routing card. It returns only short name-and-description lines, not full skill bodies.
-
-**Data flow**: It receives a ToolContext and SkillSearchInput containing a query and limit. It gets all skill cards from the context, scores each one with lexical_score, sorts by best score, keeps positive matches up to the limit, and returns a ToolResult with either matching lines or a no-match message showing how many skills were searched.
-
-**Call relations**: SKILL_SEARCH_TOOL uses this as its handler when a caller invokes the skill_search action. It hands back skill names that can then be used with the normal skill-loading flow.
-
-*Call graph*: 3 external calls (__init__, __init__, lexical_score).
-
-
-##### `_member_cards`  (lines 405–406)
-
-```
-async def _member_cards(ctx: ExtensionContext) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: This returns the routing cards for member-authored workspace skills. A routing card is the small name-and-description record used to decide which skills might be useful.
-
-**Data flow**: It receives an ExtensionContext. It asks UserSkillStore for the workspace’s saved skill cards and returns them as a tuple.
-
-**Call relations**: manifest() passes this function into MemberSkillsSpec so the runtime can include workspace skills when building the set of available skill cards.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_materialize_skill`  (lines 409–410)
-
-```
-async def _materialize_skill(ctx: ExtensionContext, name: str) -> RuntimeSkill | None
-```
-
-**Purpose**: This loads one saved workspace skill into its runtime form. “Runtime” means the form the agent can actually use during a turn.
-
-**Data flow**: It receives an ExtensionContext and a skill name. It asks UserSkillStore to materialize that skill and returns either the RuntimeSkill or None if it cannot be found.
-
-**Call relations**: manifest() registers this with MemberSkillsSpec. The runtime calls it when it needs to load a specific member-authored skill by name.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_materialize_all_skills`  (lines 413–414)
-
-```
-async def _materialize_all_skills(ctx: ExtensionContext) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: This loads all saved workspace skills into runtime form. It is used when the agent needs the whole workspace skill set rather than one named skill.
-
-**Data flow**: It receives an ExtensionContext. It asks UserSkillStore to materialize every saved skill for that workspace and returns them as a tuple.
-
-**Call relations**: manifest() gives this to MemberSkillsSpec so the runtime can load the complete member skill collection when an agent is configured to use workspace skills.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `index_skills`  (lines 417–466)
-
-```
-async def index_skills(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This scheduled job keeps saved skill descriptions searchable in the system’s index. It finds skill cards whose stored digest differs from their indexed digest, embeds them, and marks them indexed only if the same version is still current.
-
-**Data flow**: It receives an ExtensionContext. It checks that both the index backend and embedding client are available, queries the database for stale skill cards in the workspace, then tries to index each one. It counts successful settlements, logs per-skill failures, and if every attempted row failed it raises the last failure so the job does not look falsely healthy.
-
-**Call relations**: manifest() registers this as the skill_index background job. For each stale row it calls _index_card, using a TextChunker plus the index and embedding services to refresh search data.
-
-*Call graph*: calls 2 internal fn (transaction, _index_card); 3 external calls (__init__, or_, select).
-
-
-##### `_index_card`  (lines 469–506)
-
-```
-async def _index_card(ctx: ExtensionContext, index: IndexBackend, embed: EmbedClient, chunker: TextChunker, row: sa.Row) -> None
-```
-
-**Purpose**: This indexes one skill’s searchable card and then carefully records that the current version was indexed. It avoids marking a skill as indexed if it changed while indexing was happening.
-
-**Data flow**: It receives the extension context, index backend, embedding client, text chunker, and one database row. It sends a short text made from the skill name and description to chunk_embed_upsert, then tries to update the database row’s indexed_digest only if the digest still matches. If the row disappeared during indexing, it deletes that skill’s index scope to clean up.
-
-**Call relations**: index_skills calls this for each stale skill row. It hands text to the indexing pipeline and uses database transactions to decide whether the index result still matches the latest saved skill.
-
-*Call graph*: calls 2 internal fn (transaction, delete); called by 1 (index_skills); 4 external calls (__init__, select, update, chunk_embed_upsert).
-
-
-##### `_skills_awaiting_index`  (lines 509–519)
-
-```
-def _skills_awaiting_index() -> sa.Select[tuple[UUID]]
-```
-
-**Purpose**: This builds the database query that finds workspaces with saved skills needing indexing. It looks for skills that have never been indexed or whose indexed digest no longer matches their current digest.
-
-**Data flow**: It takes no runtime input. It returns a SQLAlchemy Select object that selects distinct workspace IDs from the user_skill table where indexing is missing or stale.
-
-**Call relations**: manifest() passes this query builder to owner_candidates for the scheduled indexing job. That lets the job runner know which workspaces should receive an index_skills run.
-
-*Call graph*: 2 external calls (or_, select).
-
-
-##### `manifest`  (lines 522–542)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This is the extension’s registration function. It tells the host application what this extension is called, which tools and object kinds it provides, which skills it ships, how to load member skills, and which background job to run.
-
-**Data flow**: It takes no input. It constructs and returns a Manifest containing the extension name and version, the skill_search tool, the skill object kind, the built-in create-skill authoring skill, member-skill loading callbacks, and the scheduled skill_index job with its workspace candidate query.
-
-**Call relations**: The host application calls this when loading the extension. Everything else in the file becomes reachable through the Manifest it returns.
-
-*Call graph*: 5 external calls (__init__, __init__, __init__, __init__, owner_candidates).
-
-
-### Platform integration manifests
-These manifests connect UFO to external platforms, source providers, the shell client, and the web portal.
-
-### `extensions/slack/ufo_ext_slack/manifest.py`
-
-`config` · `startup and workspace connection checks`
-
-Think of this file as the Slack extension’s registration form. The core app does not automatically know how to receive Slack messages, respond to Slack buttons, or finish Slack OAuth setup. This manifest explains all of that in one place.
-
-It names the extension, lists the private Slack secrets a workspace may need, and declares a Slack “surface,” meaning a place where users can talk to the agent. That surface has routes for incoming Slack events, interactive actions like buttons, and the OAuth callback used when installing the app. It also points the core system to Slack-specific functions for posting messages, attaching context, speaking back to users, and identifying which workspace a request belongs to.
-
-The file also wires in Slack tools and hooks. Hooks are callbacks the core system runs at important moments, such as before a tool is used or when a user prompt starts. Here they are used to attribute connector sends, follow Slack thread progress during a turn, and settle setup buttons after a connection is recorded.
-
-A key detail is the workspace fact. It only says “Slack is installed” when there is both an installation record and Slack can actually reach this deployment. That avoids telling the agent Slack is ready while setup is only half-finished.
-
-#### Function details
-
-##### `_slack_answers`  (lines 73–79)
-
-```
-async def _slack_answers(ext: ExtensionContext) -> bool
-```
-
-**Purpose**: This checks whether Slack is not only registered for a workspace, but actually working. It prevents the system from treating a half-finished Slack install as live.
-
-**Data flow**: It receives an extension context, which gives access to workspace installation records. First it looks for a Slack installation record. If none exists, it returns false. If one does exist, it asks `install_is_live` to confirm that Slack can really reach this deployment, then returns that answer.
-
-**Call relations**: The workspace fact declared by `manifest` uses this function when the core system wants to know whether it should state that Slack is installed for a workspace. Inside that check, it hands off to `ufo_ext_slack.surface.install_is_live(ext)` for the final live-connection test.
-
-*Call graph*: 1 external calls (install_is_live).
-
-
-##### `manifest`  (lines 82–127)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This builds and returns the Slack extension manifest, which is the core system’s map for using Slack. It declares what Slack needs, where Slack requests arrive, what tools and hooks are available, and how setup is represented.
-
-**Data flow**: It takes no input. It gathers constants and imported Slack functions, wraps them into manifest objects such as credential slots, surface routes, hook specs, a setup skill, and a workspace fact, then returns one complete `Manifest` object. It does not run Slack itself; it describes how the rest of the system should connect to Slack.
-
-**Call relations**: The core extension loader calls this when registering the Slack extension. During construction it creates `CredentialSlot`, `SurfaceRoute`, `SurfaceSpec`, `HookSpec`, `SkillSpec`, `WorkspaceFact`, and finally `Manifest` objects so the core system can later route Slack web requests, call Slack send functions, run Slack hooks, expose Slack tools, and check `_slack_answers` when deciding whether Slack is live for a workspace.
-
-*Call graph*: 7 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__).
-
-
-### `extensions/sources/ufo_ext_sources/manifest.py`
-
-`config` · `startup / extension loading`
-
-Think of this file as the extension’s registration form. The rest of the system does not automatically know that this extension can sync pages from connected services, react to page changes, or retry unfinished setup work. This file spells that out in one place.
-
-It declares the extension name and version, then builds a Manifest, which is the object the host reads when loading the extension. The manifest says there are object kinds for sources, pages, and source triggers. It also registers two event hooks: one that reacts when a page changes, and one that reacts when a connection has just been recorded. That second hook helps a newly connected account start syncing its usual streams without the user needing another manual step.
-
-The file also defines a scheduled retry job, so if source creation did not complete cleanly the first time, the system can try again later for the relevant workspaces. For each connector in the connector registry, it creates a source provider backend. In plain terms, each registered service gets a small factory that can produce the backend used by the sync runner. Finally, it declares credential slots for bring-your-own-key API keys and registers a direct authentication proxy that reads those credentials.
-
-#### Function details
-
-##### `ConnectorSourceFactory.__call__`  (lines 41–42)
-
-```
-def __call__(self, _credentials: CredentialAccess) -> ConnectorBackend
-```
-
-**Purpose**: This turns a stored connector class into a working source backend. The credentials argument is accepted because source factories share a common shape, but this factory does not use it directly.
-
-**Data flow**: It starts with a ConnectorSourceFactory that already contains a connector class. When called, it creates a fresh connector object from that class, wraps it in a ConnectorBackend, and returns that backend for the sync system to use.
-
-**Call relations**: The manifest creates one ConnectorSourceFactory for each registered connector and gives it to a SourceProvider. Later, when the host needs a backend for that provider, it calls this factory, which hands back a ConnectorBackend ready to run that connector.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 45–82)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This builds the complete manifest for the sources extension. The host system uses it to discover everything this extension contributes: source types, page-related objects, event hooks, scheduled jobs, credential slots, and the direct auth proxy.
-
-**Data flow**: It reads the module constants and the CONNECTORS registry. From those, it creates object declarations, hook declarations, one retry job, one source provider per connector, one credential slot per connector, and a direct authentication proxy specification. All of those pieces are bundled into and returned as a Manifest.
-
-**Call relations**: The extension loader calls this function when the extension is being registered. Inside, it calls constructors for Manifest, HookSpec, JobSpec, SourceProvider, CredentialSlot, AuthProxySpec, and ConnectorSourceFactory, and asks connection_workspaces for the set of workspaces where the retry job should look for work. The finished Manifest is then what lets the wider system wire this extension into syncing, credential lookup, event handling, and scheduled retry behavior.
-
-*Call graph*: 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, connection_workspaces, items).
-
-
-### `extensions/ufo/ufo_ext_ufo/manifest.py`
-
-`config` · `startup`
-
-This is the extension’s front-door registration file. When the larger system discovers the UFO extension, it needs a small, standard description of what the extension offers. This file provides that description as a manifest, which is like a shipping label: it says what the package is called, what version it is, and where its usable interface can be found.
-
-The extension exposes one “surface,” meaning one named way for the core system to talk to it. That surface is wired to the UFO routes, which are the connection paths used by the terminal-style UFO client. It also points to `resolve_workspace`, the function used to identify which workspace a request belongs to.
-
-A notable detail is what this manifest does not include. It does not declare credential storage or a user-facing configuration switch. The comment explains that access is checked using a bearer token secret from the environment, `UFO_TOKEN_SECRET`, rather than a stored workspace credential. In plain terms: if this extension is installed, its route is mounted, and the route itself is responsible for admitting and streaming the connection.
-
-#### Function details
-
-##### `manifest`  (lines 15–20)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the official manifest object for the UFO extension. The host uses this to learn the extension’s name, version, and the surface it should mount.
-
-**Data flow**: It starts with the module constants `NAME` and `VERSION`, plus the imported surface name, route list, and workspace-identifying function. It packages those into a `SurfaceSpec`, then places that surface specification inside a `Manifest`. The result is a complete description object that the extension loader can read.
-
-**Call relations**: This function is called when the host is loading or inspecting the extension. Inside, it creates a `SurfaceSpec` to describe the UFO-facing route, then creates a `Manifest` to wrap that surface together with the extension name and version. The returned manifest is what lets the rest of the system mount the UFO surface correctly.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### `extensions/web/ufo_ext_web/manifest.py`
-
-`config` · `startup and scheduled background work`
-
-Think of this file as the web extension’s registration form. The core system does not guess what the web portal can do; this manifest states it clearly. It gives the extension a name and version, says that it connects to member accounts, and lists the tools the web surface is allowed to use.
-
-It also describes the browser-facing surface itself: the portal has routes, a way to identify the current workspace, and it claims the main home page so the bare web host opens the portal. The file lists feature flags too. A feature flag is an on/off switch controlled outside the code, often per environment. These flags decide whether portal areas such as Code, Issues, Memory, Skills, or admin screens appear.
-
-Finally, it registers two repeating background jobs. One gives untitled conversations readable names by summarizing their opening exchange. This matters across all surfaces, not just the web portal, because the conversation rail may show chats from Slack, CLI, or the portal together. The other seeds homepage content for agent workspaces that have not been seeded yet. Without this file, the web extension would not be mounted properly, its routes and flags would not be known, and its scheduled portal upkeep would not run.
-
-#### Function details
-
-##### `manifest`  (lines 64–90)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the web extension’s complete manifest, which is the object the core system reads to know how to install and run this extension. Someone would use it during extension loading so the portal can announce its routes, tools, flags, and jobs in one place.
-
-**Data flow**: It starts with constants and imported portal pieces: the extension name, version, routes, feature flags, workspace resolver, tool permissions, conversation slots, and job handlers. It packages those into a Manifest object. The result is a single description of the web extension, including its browser surface, scheduled jobs, visible feature switches, and permission to read member context.
-
-**Call relations**: When the core system asks this extension what it provides, this function creates the answer. As part of that answer, it creates a web SurfaceSpec so the portal can be mounted, creates JobSpec entries so recurring work can be scheduled, and asks the jobs helper functions for the sets of workspaces that need title summaries or homepage seeding.
-
-*Call graph*: 5 external calls (__init__, __init__, __init__, unseeded_agent_workspaces, untitled_conversation_workspaces).
-
-
-### Manifest schema and packages
-The runtime manifest model defines the extension declaration contract, while package markers make selected extension modules importable.
-
-### `core/src/ufo/runtime/ext/manifest.py`
-
-`data_model` · `startup and cross-cutting extension loading`
-
-This file is mostly a set of frozen data shapes. “Frozen” means that once an extension declares something, the runtime treats it as a fixed promise rather than a live object to mutate. The main idea is simple: an extension should not call into core systems to register itself piece by piece. Instead, it returns a Manifest, like handing over a completed application form. The runtime then reads that form at startup and wires the extension into the rest of the product.
-
-The declarations cover many parts of the system. Some say what tools an agent may use. Some define background jobs, HTTP routes, credential slots, connector providers, sandbox backends, search providers, browser providers, feature flags, prompt text, onboarding steps, shipped agents, subagents, and skills. There is also a Pack declaration, which bundles a coherent set of extensions and pack-level additions.
-
-A few small functions validate global rules that cannot be checked inside one declaration alone. For example, conversation slot IDs must be unique across all active extensions, and there can be only one open connector namespace because it is the catch-all owner for otherwise unknown connector names. Without this file, extensions would have no stable, shared vocabulary for telling the runtime what they provide, and boot-time checks would miss conflicts that would later turn into confusing runtime failures.
-
-#### Function details
-
-##### `PreToolUse.__post_init__`  (lines 427–429)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This fills in the semantic tool-call name for a “before tool runs” hook event when the caller did not provide one. It makes ordinary tools default to using their tool name as their identity.
-
-**Data flow**: A PreToolUse object is created with a tool name, validated tool input, and possibly an empty call field. After creation, this method checks whether call is blank. If it is blank, the object is still frozen to normal code, but this initializer sets call to the tool name so later hook matching has a stable value to compare.
-
-**Call relations**: This runs automatically when a PreToolUse event object is constructed. Later hook filtering can use the call value without having to remember the fallback rule itself.
-
-
-##### `PostToolUse.__post_init__`  (lines 445–447)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This gives a successful “after tool ran” hook event a default semantic call name. If no special call identity was supplied, the tool’s own name becomes that identity.
-
-**Data flow**: A PostToolUse object starts with the tool name, the tool input, the output text, and maybe no call value. This method checks the call field right after construction. If it is empty, it writes the tool name into call, so the finished event carries the same kind of identity as the pre-tool event.
-
-**Call relations**: This is triggered by dataclass construction. It supports the hook system by making post-tool hook matching consistent with pre-tool hook matching.
-
-
-##### `PostToolUseFailure.__post_init__`  (lines 465–467)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This gives a failed tool-call event a default call identity. It keeps failure hooks from needing special logic when a tool is identified simply by its name.
-
-**Data flow**: A PostToolUseFailure object is created with the failed tool name, input, error output, and optionally a call field. The initializer checks whether call was left empty. If so, it stores the tool name there, leaving the event ready for later matching by hooks.
-
-**Call relations**: This runs automatically after a PostToolUseFailure object is made. It lets the same hook selection idea work for successful and failed tool calls.
-
-
-##### `HookSpec.__post_init__`  (lines 612–614)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This enforces a safety rule for best-effort hooks. Only hooks on user prompt submission may be marked best effort, because other hook types are part of stricter tool or lifecycle control.
-
-**Data flow**: A HookSpec is created with an event name, a handler function, optional tool filters, and a best_effort flag. This method checks the flag and event. If best_effort is true for anything except user_prompt_submit, construction fails with a ValueError; otherwise the hook declaration is accepted unchanged.
-
-**Call relations**: This validation happens when an extension declares a hook. It protects the later hook runner from ambiguous policy, so it can assume best-effort behavior only applies to user-prompt context injection.
-
-
-##### `AgentProvision.__post_init__`  (lines 646–672)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This validates an agent that an extension wants to create for a workspace. It catches bad names, invalid icons, missing instructions, missing purpose text, and unsafe tool allowlists before the agent is installed.
-
-**Data flow**: An AgentProvision comes in with a name, agent spec, optional tool allowlist, setup requirements, icon, and a flag saying whether it replaces the main agent. The method checks that the name looks like an object name, that the allowlist does not contain the generic object-action dispatcher, that the icon is one the portal can draw, and that the agent has both a prompt and a purpose. If the provision asks the agent to perform its own setup while using a restricted tool list, it also checks that the needed setup tools are included. On success, nothing is returned; on failure, construction raises a ValueError.
-
-**Call relations**: This runs when extension manifests are built. It prevents invalid shipped agents from reaching the activation flow, where they would otherwise create broken workspace agent rows.
-
-
-##### `SubagentProfile.__post_init__`  (lines 723–745)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This validates a subagent profile, especially its tool allowlist and its promise about concise handoff back to the parent agent. It prevents a profile from advertising one result style while using a different output schema.
-
-**Data flow**: A SubagentProfile is created with a name, prompt, allowed tools, input and output data models, model settings, and behavior flags. The method first rejects the generic object-action dispatcher in the tool list, because subagents must be granted specific action IDs instead. It then inspects the output model fields to see whether it exactly matches the shared concise result contract. If the concise flag and the schema disagree, it raises a ValueError; otherwise the profile is accepted.
-
-**Call relations**: This runs as each profile declaration is constructed. The subagent registry and spawn flow can then trust that concise parent handoff profiles really return the expected simple result shape.
-
-
-##### `SubagentToolGrant.__post_init__`  (lines 764–769)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This validates a declaration that gives extra tools to someone else’s subagent profile. It blocks granting the generic object-action dispatcher, because grants must name exact actions or tools.
-
-**Data flow**: A SubagentToolGrant is created with a target profile name and a tuple of tool names. The method checks whether the forbidden object-action dispatcher name appears in that tuple. If it does, construction fails with a ValueError; otherwise the grant remains unchanged.
-
-**Call relations**: This runs when an extension declares cross-profile tool grants. It keeps later grant merging simple and safe, because the loader only has to union already-valid tool names into matching subagent profiles.
-
-
-##### `conversation_slot_declarations`  (lines 867–896)
-
-```
-def conversation_slot_declarations(manifests: tuple[Manifest, ...]) -> tuple[tuple[Manifest, ConversationSlotProvider], ...]
-```
-
-**Purpose**: This collects all conversation slot providers from active manifests and checks that they form one clean global namespace. A conversation slot is a typed piece of conversation-side data that extensions can display or summarize, so duplicate or malformed slot IDs would confuse the portal and runtime.
-
-**Data flow**: The function receives a tuple of manifests. It walks through each manifest’s conversation slot providers, checking each provider’s ID format, label length and non-blank text, icon choice, required callback functions, and supported payload type. It also records which extension owns each ID, so it can reject duplicates. If every provider is valid, it returns a tuple pairing each manifest with each provider; if not, it raises RuntimeError with a clear startup failure.
-
-**Call relations**: This is used during extension loading, when the runtime has all active manifests together. It turns scattered extension declarations into one validated list that downstream conversation-slot code can rely on.
-
-
-##### `open_connector_namespace`  (lines 899–911)
-
-```
-def open_connector_namespace(manifests: tuple[Manifest, ...]) -> OpenConnectorNamespace | None
-```
-
-**Purpose**: This finds the single catch-all connector namespace declared by active extensions, if there is one. It fails if more than one extension claims that role, because the system would not know who owns an unknown connector slug.
-
-**Data flow**: The function receives all active manifests and scans their connector_resolver field. If none has one, it returns None. If exactly one has one, it returns that resolver. If a second resolver appears, it raises RuntimeError instead of letting later connector lookup behave unpredictably.
-
-**Call relations**: This runs when the runtime is assembling connector support from manifests. The connect flow and connector registry can then ask one agreed resolver about unregistered connector names, or know that no open namespace exists.
-
-
-##### `declared_slots`  (lines 934–948)
-
-```
-def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]
-```
-
-**Purpose**: This turns extension credential declarations into the simpler slot records used by shared credential views and object projections. In plain terms, it makes one combined list of all secrets the active extensions say they may need.
-
-**Data flow**: The function receives all active manifests. For every credential slot in every manifest, it creates a DeclaredSlot with the slot name, description, owning extension name, whether a member may fill it, any injection host, and any merge function. It returns all of those DeclaredSlot objects as a tuple, without changing the manifests.
-
-**Call relations**: This is a shared assembly point for credential-related features. It calls DeclaredSlot.__init__ to produce the normalized records that other parts of the system, such as credential object handling and the credentials panel, can read without understanding the full Manifest structure.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `extensions/gbrain/ufo_ext_gbrain/__init__.py`
+### `core/src/ufo/onboard/__init__.py`
 
 `other` · `import time`
 
-In Python, a folder usually needs an `__init__.py` file to be treated as an importable package. This file is that marker for the `ufo_ext_gbrain` extension package. It is empty, so it does not run setup code, expose helper functions, or define package-level shortcuts. Its value is structural: without it, some Python tooling or import styles might not recognize this directory as a package, especially in older or stricter environments. Think of it like a label on a drawer: the label does not contain the contents, but it tells the system that the drawer is meant to be opened as part of the project.
+This is an empty Python package marker file. In Python projects, a file named `__init__.py` tells Python that the folder should be treated as an importable package. You can think of it like a label on a drawer: the drawer may contain useful tools, but this label is what lets the rest of the program refer to the drawer by name.
+
+Because this file is empty, it does not create objects, run setup code, or change program behavior directly. Its value is structural. Without it, depending on the Python version and packaging setup, imports that expect `ufo.onboard` to be a normal package could fail or behave differently. Keeping the file also makes the project layout clearer to readers and tools: anything inside this directory belongs to the onboarding part of the `ufo` codebase.
 
 
-### `extensions/repl/ufo_ext_repl/__init__.py`
+### Workspace onboarding services
+Trusted onboarding helpers create or find workspaces and members, expose sign-in state, and seed realistic demo project data.
 
-`other` · `package import and extension discovery`
+### `core/src/ufo/onboard/onboard_control.py`
 
-This file contains no code, but it still has a useful job. In Python projects, an `__init__.py` file tells Python that a folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may hold other useful files, and the label lets the system find them by name. Without this file, some Python environments or packaging tools might not recognize `extensions/repl/ufo_ext_repl` as a proper package, which could stop the REPL extension from being discovered or imported correctly. Because it is empty, it does not run setup code, define shortcuts, or change behavior at import time. Its purpose is simply to make the package structure explicit and reliable.
+`domain_logic` · `request handling`
+
+This file is the locked staff entrance for onboarding. The public sign-in gateway does not directly edit the main workspace tables. Instead, it calls these internal routes with a special bearer token, which is a secret string in the HTTP Authorization header. Without this file, the edge service would need to know how to create members, fund new workspaces, choose the default agent prompt, and read across workspaces, making those rules easier to drift or misuse.
+
+The main class, OnboardControl, builds five routes under /internal/onboard. One route seats a verified email address in a workspace. If the workspace is new, it creates the first member as an admin, creates the default agent, and gives the workspace a starting balance. If an intake form supplied company goals, that text is placed behind a safety “wall” so it is treated as outside information, not as an instruction the agent must obey. Another route checks whether an existing member is still an admin. The choices route lists workspaces a verified address may enter. The fleet route counts all workspaces. The invitations route pages through teammate invitations.
+
+Some reads must look across all workspaces, so they use a special owner database path rather than the normal workspace-limited path. That is powerful, so the visible cross-workspace reads are logged as warnings.
+
+#### Function details
+
+##### `MemberModelKey._served`  (lines 120–123)
+
+```
+def _served(cls, provider: str) -> str
+```
+
+**Purpose**: This validator checks that a requested model provider is one the system knows how to route for individual members. It stops callers from storing a credential under an unknown provider name.
+
+**Data flow**: It receives the provider string from a request body, compares it with the allowed provider names from the member-routed slot map, and either returns the same provider string or raises a validation error before the request can proceed.
+
+**Call relations**: It runs automatically when FastAPI and Pydantic, the request-shape checking library, build a MemberModelKey from incoming JSON. Later, if validation passed, OnboardControl._seat can safely use the model key without guessing what provider it belongs to.
+
+*Call graph*: 1 external calls (values).
 
 
-### `extensions/sources/ufo_ext_sources/__init__.py`
+##### `MemberModelKey.slot`  (lines 125–126)
 
-`other` · `import/package discovery`
+```
+def slot(self) -> str
+```
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. Without this file, depending on the Python version and packaging setup, other code might not reliably import modules from `extensions/sources/ufo_ext_sources` using normal package-style paths. Because it contains no code, it does not run setup logic, expose shortcuts, or change any state. Its main value is structural: it helps the project organize source-extension code under a clear namespace.
+**Purpose**: This converts a public provider name into the internal credential slot where that provider's key should be stored. It is used when onboarding needs to save a member's own model-provider key.
+
+**Data flow**: It reads the validated provider name on the MemberModelKey object, searches the configured slot-to-provider map, and returns the matching slot name.
+
+**Call relations**: OnboardControl._seat uses this after a member has been created. The returned slot is passed into member_slot so the credential is stored in the same place the normal browser-based connect flow would use.
+
+*Call graph*: 1 external calls (items).
+
+
+##### `_inert`  (lines 193–207)
+
+```
+def _inert(answer: str) -> str
+```
+
+**Purpose**: This makes intake-form text safe to place inside an agent prompt by defusing doubled braces like {{name}}. Those braces have special meaning to the prompt renderer, so leaving them untouched could break every turn in that workspace.
+
+**Data flow**: It receives one free-text answer from the public form, repeatedly shrinks any doubled opening or closing braces until none remain, and returns text that still resembles what the person typed but no longer contains live prompt-variable syntax.
+
+**Call relations**: agent_prompt calls this for the business and goals fields before wrapping them in the untrusted-text wall. It is a small safety step inside the larger process of turning public intake data into background context for the default agent.
+
+*Call graph*: called by 1 (agent_prompt).
+
+
+##### `agent_prompt`  (lines 210–229)
+
+```
+def agent_prompt(profile: SignupProfile | None) -> str
+```
+
+**Purpose**: This builds the starting prompt for the default agent in a newly onboarded workspace. It either returns the standard prompt unchanged or adds intake-form context in a clearly marked, untrusted section.
+
+**Data flow**: It receives an optional SignupProfile. If there is no profile, it returns DEFAULT_AGENT_PROMPT. If there is one, it cleans the business and goals answers with _inert, wraps them with wall so they are treated as quoted outside information, and inserts that section below the default prompt.
+
+**Call relations**: OnboardControl._seat calls this while creating the default agent row. It hands off to _inert for brace safety and to wall for the stronger boundary that tells the agent this text came from a public form, not from a trusted workspace member.
+
+*Call graph*: calls 1 internal fn (_inert); called by 1 (_seat); 1 external calls (wall).
+
+
+##### `_labelled`  (lines 232–268)
+
+```
+def _labelled(rows: Sequence[sa.RowMapping], subject: str) -> list[WorkspaceChoice]
+```
+
+**Purpose**: This turns raw database rows into the list of workspace choices a signing-in person can understand. It also refuses an ambiguous case where one verified subject appears to point to more than one workspace.
+
+**Data flow**: It receives rows from the choices query and the verified signup subject. It computes each workspace's human label from its first member, separates direct memberships from subject-based matches, rejects multiple subject matches, adds short UUID prefixes when labels collide, and returns WorkspaceChoice objects.
+
+**Call relations**: OnboardControl._choices calls this after doing the cross-workspace lookup. It relies on workspace_subject to make labels match the rest of onboarding, and it raises an HTTP error rather than letting the caller guess if the subject mapping is unsafe.
+
+*Call graph*: called by 1 (_choices); 3 external calls (__init__, HTTPException, workspace_subject).
+
+
+##### `_verified_signup`  (lines 271–290)
+
+```
+def _verified_signup(email: str, domain: str | None, signup_subject: str | None) -> tuple[str, str, str]
+```
+
+**Purpose**: This checks that the email, domain, and signup subject claimed by the gateway all agree with the verified email address. It protects onboarding from seating someone into a workspace for a domain or address they did not prove.
+
+**Data flow**: It receives an email plus optional domain and signup_subject values. It lowercases and trims them, derives the domain from the email, rejects mismatches with clear HTTP 422 errors, chooses a default subject when needed, and returns the normalized member email, verified domain, and signup subject.
+
+**Call relations**: OnboardControl._seat uses this before creating or joining a workspace, and OnboardControl._choices uses it before listing possible workspaces. It is the shared front door for the rollout-compatible email/domain/subject rules.
+
+*Call graph*: called by 2 (_choices, _seat); 2 external calls (HTTPException, email_domain).
+
+
+##### `OnboardControl.router`  (lines 300–307)
+
+```
+def router(self) -> APIRouter
+```
+
+**Purpose**: This builds the FastAPI router for the private onboarding API. A router is the object that tells the web server which URL paths exist and which Python methods should answer them.
+
+**Data flow**: It starts with the control token stored on the OnboardControl object, creates a router with the /internal/onboard prefix, attaches the token guard as a dependency, registers the five route methods, and returns the ready-to-mount router.
+
+**Call relations**: Application startup code can call this to add onboarding routes to the service. Every route it registers passes through OnboardControl._guard first, then reaches the matching method such as _seat, _choices, or _invitations.
+
+*Call graph*: 2 external calls (APIRouter, Depends).
+
+
+##### `OnboardControl._guard`  (lines 309–311)
+
+```
+async def _guard(self, authorization: Annotated[str, Header()]='') -> None
+```
+
+**Purpose**: This is the lock on every internal onboarding route. It rejects any request that does not carry the exact configured bearer token.
+
+**Data flow**: It receives the Authorization header from the HTTP request, compares it with Bearer plus the control token, and either returns quietly or raises a 401 HTTP error.
+
+**Call relations**: The router installs this as a dependency, meaning FastAPI runs it before any route method. If it fails, none of the database-reading or database-writing onboarding code is reached.
+
+*Call graph*: 1 external calls (HTTPException).
+
+
+##### `OnboardControl._seat`  (lines 313–406)
+
+```
+async def _seat(self, request: SeatRequest) -> EnsuredWorkspace
+```
+
+**Purpose**: This creates or joins the workspace named by a verified signup subject and seats the signing-in member there. For a new workspace, it also creates the default agent and grants the initial balance needed to start using it.
+
+**Data flow**: It receives a SeatRequest containing workspace_id, email identity information, optional intake profile, and optional model key. It verifies the email claim, opens the workspace context and database transaction, creates the workspace if absent, locks the workspace row, checks that the workspace belongs to the subject, creates or finds the member, creates the default agent, credits a signup grant only for a newly founded workspace, reads whether the member is admin, optionally stores the member's model key after the transaction, and returns workspace id, admin status, and whether this was the founding sign-in.
+
+**Call relations**: FastAPI calls this for POST /internal/onboard/seat after _guard succeeds. It calls _verified_signup for identity safety, agent_prompt for the default agent's prompt, create_member for seat rules, credit and set_reserve for the signup balance, and credential helpers if a model key was supplied.
+
+*Call graph*: calls 2 internal fn (_verified_signup, agent_prompt); 14 external calls (__init__, HTTPException, insert, select, workspace_tx, member_slot, credit, set_reserve, create_member, signup_workspace_id (+4 more)).
+
+
+##### `OnboardControl._membership`  (lines 408–428)
+
+```
+async def _membership(self, workspace_id: UUID, email: str) -> Membership
+```
+
+**Purpose**: This checks whether an email address is still a member of a chosen workspace and whether that member is an admin. It deliberately does not recreate a missing member, so a removal during sign-in still takes effect.
+
+**Data flow**: It receives a workspace_id and email, normalizes the email, opens that workspace's database context, looks up the member's admin flag, and returns it in a Membership object. If no matching member exists, it returns a 404 HTTP error.
+
+**Call relations**: FastAPI calls this for GET /internal/onboard/membership after the token guard passes. It is used after a workspace choice has been made, as a final check that the member was not revoked between listing choices and selecting one.
+
+*Call graph*: 5 external calls (__init__, HTTPException, select, workspace_tx, ws).
+
+
+##### `OnboardControl._choices`  (lines 430–455)
+
+```
+async def _choices(self, email: str, domain: str | None=None, signup_subject: str | None=None) -> WorkspaceChoices
+```
+
+**Purpose**: This lists the workspaces a verified address may enter: workspaces where the address is already a member, plus the deterministic workspace for its verified signup subject. It gives the sign-in gateway a safe menu instead of letting it inspect all tenant data itself.
+
+**Data flow**: It receives email plus optional domain and signup_subject, verifies and normalizes them, logs a warning because this is a cross-workspace read, opens the owner database path, runs the choices SQL query, converts the rows into friendly labels with _labelled, and returns a WorkspaceChoices response.
+
+**Call relations**: FastAPI calls this for GET /internal/onboard/choices after _guard. It uses _verified_signup to confirm the caller's identity facts, signup_workspace_id to look up the subject's deterministic workspace, owner_tx because the lookup crosses workspace boundaries, and _labelled to make the result safe and readable.
+
+*Call graph*: calls 2 internal fn (_labelled, _verified_signup); 5 external calls (__init__, text, owner_tx, warn, signup_workspace_id).
+
+
+##### `OnboardControl._fleet`  (lines 457–464)
+
+```
+async def _fleet(self) -> Fleet
+```
+
+**Purpose**: This counts how many workspaces exist. It is mainly a simple health or deployment check that proves the internal route can reach the database.
+
+**Data flow**: It logs a warning for the cross-workspace read, opens the owner database path, counts rows in the workspace table, and returns that count as Fleet.craft.
+
+**Call relations**: FastAPI calls this for GET /internal/onboard/fleet after _guard. Unlike workspace-scoped routes, it uses owner_tx because counting every workspace is intentionally outside any one workspace's view.
+
+*Call graph*: 4 external calls (__init__, select, owner_tx, warn).
+
+
+##### `OnboardControl._invitations`  (lines 466–539)
+
+```
+async def _invitations(self, after_invited_at: datetime | None=None, after_workspace_id: UUID | None=None, after_email: str | None=None) -> Invitations
+```
+
+**Purpose**: This returns one page of pending teammate invitations, oldest first. It lets a repeated background caller send or inspect invitations without loading the entire table at once.
+
+**Data flow**: It receives an optional page cursor made of invited time, workspace id, and email. If only part of the cursor is present, it rejects the request. It builds a query for invited members, joins the inviter and the first workspace member for email and label details, applies the cursor if present, limits the page size, reads through the owner database path, and returns Invitation objects with workspace label, invited address, inviter address, and timestamp.
+
+**Call relations**: FastAPI calls this for GET /internal/onboard/invitations after _guard. It uses owner_tx because invitations are read across the whole fleet, and it uses workspace_subject so invitation emails name workspaces the same way the choices screen does.
+
+*Call graph*: 9 external calls (__init__, __init__, HTTPException, DateTime, literal, select, tuple_, owner_tx, workspace_subject).
+
+
+### `core/src/ufo/onboard/seed.py`
+
+`domain_logic` · `onboarding or demo-data seeding`
+
+This file is like a showroom setup script for the conversation UI. Instead of waiting for a real user and real agent run to produce every possible display shape, it writes a carefully built finished conversation directly into the system’s durable stores: the database, the blob store, and the extension-owned chat store.
+
+The main class, KitchenSink, creates a new conversation with three completed turns. Those turns include terminal result frames, token and cost information, a still-open user question, tool calls, tool results, and a transcript. It also creates nested subagent conversations, where one subagent spawns another, so the portal can show that hierarchy too. Finally, it uploads two shared files and records them as artifacts connected to one turn.
+
+Before writing the new demo, it looks for previous kitchen-sink runs and deletes them. This cleanup is deliberately cautious. It only removes conversations marked with this seed’s private queue prefix, and it refuses to delete a run if there is evidence that a real user spoke in it or that transcript access was disclosed. That protects real workspace history from being mistaken for throwaway demo data.
+
+Without this file, developers and operators would need to manually create complex conversations to check whether the portal still draws every conversation feature correctly.
+
+#### Function details
+
+##### `_framed`  (lines 74–75)
+
+```
+def _framed(turn_id: UUID, said: str) -> Message
+```
+
+**Purpose**: This helper builds a user message that includes a hidden-looking context header pointing back to a specific turn. It is used so the seeded transcript looks like a real conversation where each user request is tied to the turn it belongs to.
+
+**Data flow**: It receives a turn ID and the words the user supposedly said. It wraps the turn ID into a small context block, appends the user text, and returns a Message object marked as coming from the user.
+
+**Call relations**: KitchenSink._said calls this helper while assembling the transcript. It keeps the repeated message-wrapping pattern in one place so the transcript entries are consistent.
+
+*Call graph*: called by 1 (_said); 1 external calls (__init__).
+
+
+##### `KitchenSink.write`  (lines 106–116)
+
+```
+async def write(self) -> UUID
+```
+
+**Purpose**: This is the main entry for creating the kitchen-sink demo conversation. A caller uses it when they want one fresh, complete demo conversation written into the workspace.
+
+**Data flow**: It starts with the workspace, agent, member, email, and blob store already stored on the KitchenSink object. It creates new IDs, clears older safe-to-delete demo runs, opens the main conversation, adds subagent runs, uploads sample files, writes the transcript blob, and returns the new conversation ID.
+
+**Call relations**: This method drives the whole flow. It calls _clear first for cleanup, then _open for the main database rows, _runs for nested subagent conversations, _files for shared artifacts, and _said to build the transcript that is encoded and stored in the blob store.
+
+*Call graph*: calls 5 internal fn (_clear, _files, _open, _runs, _said); 4 external calls (__init__, encode, transcript_key, uuid4).
+
+
+##### `KitchenSink._clear`  (lines 118–124)
+
+```
+async def _clear(self) -> None
+```
+
+**Purpose**: This removes earlier kitchen-sink demo runs before a new one is written. It exists so the workspace shows one current demo instead of accumulating stale copies.
+
+**Data flow**: It asks _prior for previous runs that are safe to remove. For each one, it deletes database rows through _drop, removes the chat row from the web extension store, and deletes transcript and artifact blobs from blob storage.
+
+**Call relations**: KitchenSink.write calls this at the start of each seed run. It relies on _prior to decide what is safe and on _drop to remove database records before it cleans up extension-store and blob-store leftovers.
+
+*Call graph*: calls 2 internal fn (_drop, _prior); called by 1 (write); 2 external calls (__init__, transcript_key).
+
+
+##### `KitchenSink._prior`  (lines 126–204)
+
+```
+async def _prior(self) -> tuple[_PriorRun, ...]
+```
+
+**Purpose**: This finds earlier kitchen-sink runs that belong to this seeder and are safe to delete. Its main job is to avoid damaging real user history.
+
+**Data flow**: It reads the database for web conversations in the same workspace whose queue key starts with the kitchen-sink prefix. For each root conversation, it follows linked subagent conversations through their queue keys, gathers their turns, then checks whether any turn looks user-created or whether any transcript access record exists. Only runs with no such signs are returned as _PriorRun records.
+
+**Call relations**: KitchenSink._clear calls this before deleting anything. It hands back only the runs that _clear may pass to _drop, acting as the safety gate for the cleanup process.
+
+*Call graph*: called by 1 (_clear); 5 external calls (__init__, not_, or_, select, workspace_tx).
+
+
+##### `KitchenSink._drop`  (lines 206–235)
+
+```
+async def _drop(self, run: _PriorRun) -> tuple[str, ...]
+```
+
+**Purpose**: This deletes the database records for one previous seed run. It removes the rows that the seeder itself created, while returning blob keys so the caller can clean up stored files too.
+
+**Data flow**: It receives a _PriorRun containing conversation IDs and turn IDs. Inside a workspace database transaction, it finds shared artifact blob keys, deletes artifact rows, deletes conversation change rows, deletes turn rows, and finally deletes the conversation rows. It returns the artifact blob keys it found.
+
+**Call relations**: KitchenSink._clear calls this after _prior has approved a run for deletion. _drop removes database state, then _clear uses the returned blob keys to delete matching files from blob storage.
+
+*Call graph*: called by 1 (_clear); 3 external calls (delete, select, workspace_tx).
+
+
+##### `KitchenSink._open`  (lines 237–275)
+
+```
+async def _open(self, conversation_id: UUID, turns: tuple[UUID, ...]) -> None
+```
+
+**Purpose**: This creates the main web conversation and its three completed turns. It also makes the conversation visible to the web chat surface with the expected title and chat metadata.
+
+**Data flow**: It receives the new conversation ID and three turn IDs. It inserts one conversation row, then inserts one done turn per terminal frame returned by _terminals. After the database rows are written, it retitles the conversation to “Kitchen sink” and writes a chat row containing the agent ID and user email into the web extension store.
+
+**Call relations**: KitchenSink.write calls this after cleanup. It calls _terminals to get the finished-turn summaries, then hands the created conversation to the surface title helper and the extension store so the web portal can find and display it.
+
+*Call graph*: calls 1 internal fn (_terminals); called by 1 (write); 5 external calls (__init__, insert, workspace_tx, retitle_conversation, uuid4).
+
+
+##### `KitchenSink._terminals`  (lines 277–333)
+
+```
+def _terminals(self) -> tuple[TerminalFrame, ...]
+```
+
+**Purpose**: This builds the final summary frames for the three seeded turns. These frames are what make the turns look completed and show model, token, cost, and question information.
+
+**Data flow**: It takes no outside input beyond the KitchenSink object. It returns three TerminalFrame objects: two plain completed frames with model usage and cost, and one completed frame that also includes a pending multi-part question for the user.
+
+**Call relations**: KitchenSink._open calls this while inserting the main turn rows. The returned frames become the terminal data stored on those turns, which the portal later reads to draw completion status, cost lines, and the question UI.
+
+*Call graph*: called by 1 (_open); 4 external calls (__init__, __init__, __init__, __init__).
+
+
+##### `KitchenSink._runs`  (lines 335–371)
+
+```
+async def _runs(self, conversation_id: UUID, parent: UUID) -> None
+```
+
+**Purpose**: This adds nested subagent activity to the demo conversation. It makes the seeded data show not only a main chat, but also child and grandchild agent runs.
+
+**Data flow**: It receives the main conversation ID and the parent turn ID that should appear to have spawned a subagent. It creates two subagent runs through _run, then writes a transcript blob for the first spawned conversation containing a user message, an assistant tool call, and a tool result.
+
+**Call relations**: KitchenSink.write calls this after opening the main conversation. It delegates database creation to _run, then writes a transcript so the spawned subagent conversation has visible message content.
+
+*Call graph*: calls 1 internal fn (_run); called by 1 (write); 8 external calls (__init__, __init__, __init__, __init__, __init__, encode, transcript_key, uuid4).
+
+
+##### `KitchenSink._run`  (lines 373–408)
+
+```
+async def _run(self, turn_id: UUID, parent: UUID, profile: str, answered: str) -> UUID
+```
+
+**Purpose**: This creates one subagent conversation with one completed turn. It is the reusable piece used to build the nested subagent chain in the demo.
+
+**Data flow**: It receives a turn ID, the parent turn ID, the subagent profile name, and the answer text to store. It creates a new conversation ID, inserts a subagent conversation whose queue key points back to the parent, inserts a completed turn with the profile and result JSON, and returns the new conversation ID.
+
+**Call relations**: KitchenSink._runs calls this twice: once for a child subagent and once for a grandchild subagent. The returned conversation ID lets _runs attach a transcript to the spawned conversation.
+
+*Call graph*: called by 1 (_runs); 4 external calls (__init__, insert, workspace_tx, uuid4).
+
+
+##### `KitchenSink._files`  (lines 410–431)
+
+```
+async def _files(self, turn_id: UUID) -> None
+```
+
+**Purpose**: This uploads sample shared files and records them as artifacts for one turn. It lets the demo conversation show attached documents in the portal.
+
+**Data flow**: It receives the turn ID that should own the files. For each built-in sample document, it encodes the text, creates a unique blob key, writes the bytes to blob storage, and inserts a shared_artifact database row with filename, media type, size, and workspace information.
+
+**Call relations**: KitchenSink.write calls this after creating the conversation and subagent runs. The files it records are later displayed as artifacts attached to the chosen turn.
+
+*Call graph*: called by 1 (write); 3 external calls (insert, workspace_tx, uuid4).
+
+
+##### `KitchenSink._said`  (lines 433–499)
+
+```
+def _said(self, turns: tuple[UUID, ...]) -> tuple[Message, ...]
+```
+
+**Purpose**: This builds the main transcript messages for the seeded conversation. It gives the demo realistic chat content, including tool calls, tool results, Markdown, a table, and a code block.
+
+**Data flow**: It receives the three turn IDs. It creates a sequence of Message objects: framed user requests tied to those turns, assistant tool-use messages, user tool-result messages, and assistant replies. The result is a tuple of messages ready to be encoded and stored as the transcript.
+
+**Call relations**: KitchenSink.write calls this when writing the main transcript blob. It uses _framed for the user requests and constructs the other message shapes directly so the portal has many rendering cases to exercise.
+
+*Call graph*: calls 1 internal fn (_framed); called by 1 (write); 3 external calls (__init__, __init__, __init__).
+
+
+### Shipped agent provisioning
+Runtime agent setup definitions and provisioning logic install extension-declared agents without overwriting member-managed agents.
+
+### `core/src/ufo/runtime/kinds/agent_setup.py`
+
+`domain_logic` · `request handling`
+
+An agent can be installed before it has everything it needs to run well. For example, it may need the member to connect a Google account, an admin to add an API key, or the member to turn on a daily schedule. This file is the shared language for describing those needs and checking which ones are already satisfied.
+
+Most of the file is made of Pydantic models, which are structured data objects that also validate their contents. AgentSetup is the agent author's declaration: “this app can use these connectors, these credentials, and these standing orders.” SetupState is the answer shown later to a user: “this connector is granted, this credential is filled, this schedule is armed.” The schedule-related models are careful about local time. If a member chooses 9 AM, that is their 9 AM, not a server time; conversion to UTC happens elsewhere where the member’s time zone is known.
+
+The key live function is setup_state. It reads the agent’s declared setup from the workspace database, checks which account grants the current member may actually use, checks whether needed credentials exist either in the workspace or deployment environment, and asks an outside callback whether standing orders exist. The result is a complete setup report, including both finished and unfinished rows, so the screen can explain what the agent runs on rather than only what is missing.
+
+#### Function details
+
+##### `SetupCadence._hourly_spans_every_day`  (lines 45–53)
+
+```
+def _hourly_spans_every_day(self) -> 'SetupCadence'
+```
+
+**Purpose**: This validator keeps schedule choices meaningful. It prevents an “every hour” cadence from also naming weekdays, because without a specific local hour there is no safe way to translate a local weekday into server time.
+
+**Data flow**: It reads the cadence object after its fields have been filled. If the cadence has no hour but does list weekdays, it rejects it with a clear error. It also checks that every weekday number is between 0 and 6, where 0 means Sunday. If everything is consistent, it returns the same cadence unchanged.
+
+**Call relations**: Pydantic calls this automatically whenever a SetupCadence is created or validated. Other setup objects can then trust that any cadence they contain follows the scheduling rules before it is shown to users or converted elsewhere.
+
+
+##### `AgentSetup._a_clock_need_carries_its_offer`  (lines 135–152)
+
+```
+def _a_clock_need_carries_its_offer(self) -> 'AgentSetup'
+```
+
+**Purpose**: This validator makes sure schedule setup is not half-declared. If an agent says it needs a scheduled task, it must also say what schedule it offers; if it offers schedule choices, it must also declare that it needs a scheduled task.
+
+**Data flow**: It reads the completed AgentSetup declaration. If the standing-order list includes the scheduled-task kind but no schedule offer is present, it raises an error. If a schedule offer is present but the scheduled-task need is missing, it also raises an error. Otherwise it returns the declaration unchanged.
+
+**Call relations**: Pydantic runs this when an AgentSetup is validated, including inside setup_state after the declaration is read from the database. This protects the setup screen from showing a need the user cannot act on, or an offer that is not attached to any visible need.
+
+
+##### `_armed`  (lines 236–248)
+
+```
+async def _armed(kind: str, wanted: AgentSetup, armed: Armed) -> ArmedOrder
+```
+
+**Purpose**: This helper asks whether the agent already has the standing order it needs, such as a scheduled task. For scheduled tasks, it asks about the specific task name from the agent’s schedule offer so that one feature’s schedule is not mistaken for another’s.
+
+**Data flow**: It receives a standing-order kind, the agent’s declared setup, and an async callback that knows how to look up standing orders. If the kind is the scheduled-task kind and the agent declared a schedule, it passes the schedule’s name to the callback. Otherwise it asks only whether any order of that kind exists. It returns an ArmedOrder saying whether the order is held and, when relevant, what cron schedule it uses.
+
+**Call relations**: setup_state calls this once for each declared standing-order kind while building the user-facing setup report. The lookup itself is deliberately handed off to the supplied armed callback, because different standing-order kinds can live in extension-specific storage outside this core file.
+
+*Call graph*: called by 1 (setup_state).
+
+
+##### `setup_state`  (lines 251–347)
+
+```
+async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> SetupState
+```
+
+**Purpose**: This builds the current setup status for one agent as seen by one member. It answers practical questions like “is the needed account connected for this member?”, “is the required credential available?”, and “has this scheduled task been armed?”
+
+**Data flow**: It takes an agent ID, a member ID, and a callback for checking standing orders. It opens a workspace database transaction, reads the agent’s stored setup declaration, and returns an empty setup state if there is no declaration. If there is a declaration, it validates it, reads connector grants that are either shared with the workspace or owned by the member, and reads stored credentials for the declared credential slots. After leaving the database transaction, it also treats deployment-provided environment credentials as filled. It then creates connector, credential, and standing-order status rows and returns one SetupState containing the full setup picture plus the agent’s instructions and schedule offer.
+
+**Call relations**: This is the main public flow in the file. A setup surface or API endpoint can call it when it needs to draw the setup screen for an agent. During that flow it uses _armed to delegate standing-order checks, because core knows the declaration but not every extension’s storage. It also constructs the small state models that the caller can return to the user interface.
+
+*Call graph*: calls 1 internal fn (_armed); 9 external calls (__init__, __init__, __init__, __init__, or_, select, workspace_tx, deploy_env, ws_current).
+
+
+### `core/src/ufo/runtime/kinds/provisioning.py`
+
+`domain_logic` · `workspace activation / first turn provisioning`
+
+Extensions can come with ready-made agents, like a new appliance arriving with suggested settings. This file is the installer for those agents inside one workspace. Its main job is to copy each extension-declared agent into the workspace database, while respecting that the workspace belongs to the member after that point.
+
+The key class, AgentProvisioning, receives active extension manifests. A manifest is the extension’s description of what it ships. For each declared agent, it checks the workspace. If the agent was already provisioned by this same extension under the same declared name, the file mostly leaves it alone. It only refreshes the extension-owned setup information and fills in a missing purpose sentence. This avoids wiping out a member’s own edits.
+
+If the provision is marked as the main agent, it can adopt the workspace’s existing main agent instead of replacing it. If a matching ordinary agent already exists and looks exactly like what the extension would create, it is adopted too. Otherwise, a new agent row is inserted.
+
+Name conflicts are handled politely. If the requested name is already taken, the code tries a name with the extension added, then numbered variants. This means two extensions, or an extension and a member, can ask for the same name without one silently overwriting the other.
+
+#### Function details
+
+##### `AgentProvisioning.apply`  (lines 54–62)
+
+```
+async def apply(self, workspace_id: UUID) -> tuple[ProvisionOutcome, ...]
+```
+
+**Purpose**: Applies all agent provisions from all active extension manifests to one workspace. Someone uses this when a workspace needs to make sure every installed extension’s shipped agents exist there.
+
+**Data flow**: It receives a workspace ID and reads the manifests stored on the AgentProvisioning object. It enters the workspace context, walks through every manifest and every agent declared by that manifest, and asks _one to apply each provision. It returns a tuple of ProvisionOutcome records saying, for each provision, whether the agent was created, adopted, or already present.
+
+**Call relations**: This is the public starting point for the file’s work. It sets the workspace context with ws, then repeatedly hands individual provisions to _one, which performs the database checks and writes.
+
+*Call graph*: calls 1 internal fn (_one); 1 external calls (ws).
+
+
+##### `AgentProvisioning._one`  (lines 64–147)
+
+```
+async def _one(self, workspace_id: UUID, manifest: Manifest, provision: AgentProvision) -> ProvisionOutcome
+```
+
+**Purpose**: Applies one extension-declared agent to one workspace. It decides whether to reuse an existing row, adopt a matching member-owned row, update extension-owned fields, or create a new agent.
+
+**Data flow**: It takes a workspace ID, one manifest, and one agent provision. Inside a workspace database transaction, it first looks for an agent already tied to that extension and declared provision name. If found, it may refresh the fields the extension still owns and returns a “present” result. If not found, it looks for an existing main agent or an identical unprovisioned agent that can be adopted. If adoption is not safe, it finds a free name, creates a new row, and returns a “created” result.
+
+**Call relations**: apply calls this once per declared agent. During its decision tree, it calls _fill to refresh already-provisioned rows, _identical to decide whether an existing agent is safe to adopt, _free_name to avoid name collisions, and _create to insert a new row when needed. It wraps the whole operation in workspace_tx so the read-and-write steps happen as one database transaction.
+
+*Call graph*: calls 4 internal fn (_create, _fill, _free_name, _identical); called by 1 (apply); 4 external calls (__init__, select, update, workspace_tx).
+
+
+##### `AgentProvisioning._fill`  (lines 149–189)
+
+```
+async def _fill(self, connection: AsyncConnection, shipped: sa.Row, manifest: Manifest, provision: AgentProvision) -> None
+```
+
+**Purpose**: Refreshes the small part of an already-shipped agent that still belongs to the extension. It updates setup every time it changes, and only fills purpose if the workspace row has no purpose yet.
+
+**Data flow**: It receives a database connection, the existing agent row, the manifest, and the provision. It compares the stored setup with the setup currently declared by the extension. If setup changed, it prepares an update. If the stored purpose is missing, it adds the declared purpose. If there is nothing to change, it does nothing. Otherwise, it writes the changed fields, updates the recorded provision version, and touches the updated timestamp.
+
+**Call relations**: _one calls this after it finds an agent that was already provisioned by the same extension declaration. It does not create agents or choose names; it only makes sure the already-linked row carries the current extension-owned setup and any missing purpose.
+
+*Call graph*: called by 1 (_one); 2 external calls (execute, update).
+
+
+##### `AgentProvisioning._free_name`  (lines 191–216)
+
+```
+async def _free_name(self, connection: AsyncConnection, workspace_id: UUID, extension: str, declared: str) -> str
+```
+
+**Purpose**: Chooses a safe agent name when the extension’s requested name may already be taken. It protects existing member agents and agents from other extensions from being overwritten.
+
+**Data flow**: It receives a database connection, workspace ID, extension name, and declared agent name. It reads all active agent names in that workspace. It first tries the declared name. If that is taken, it tries the declared name plus the extension name, with underscores changed to hyphens. If needed, it tries numbered versions up to a fixed limit. It returns the first unused name or raises an error if none can be found.
+
+**Call relations**: _one calls this only after deciding that no existing agent should be adopted. The chosen name is then passed to _create so the new database row is inserted without clashing with existing live agents.
+
+*Call graph*: called by 1 (_one); 2 external calls (execute, select).
+
+
+##### `AgentProvisioning._create`  (lines 218–275)
+
+```
+async def _create(self, connection: AsyncConnection, workspace_id: UUID, manifest: Manifest, provision: AgentProvision, name: str) -> None
+```
+
+**Purpose**: Creates the actual workspace agent row for an extension-declared agent. The new row starts with the extension’s declared settings, but it does not inherit special permissions or hidden authority.
+
+**Data flow**: It receives a database connection, workspace ID, manifest, provision, and final agent name. It gathers the provision’s spec fields such as prompt, model, visibility, tools, and setup. If the provision did not supply an icon, it reads existing workspace icons and asks auto_agent_icon to choose one. It then inserts a new agent row with a new UUID, timestamps, provision identity, and version. If another concurrent run inserted the same provision first, the insert quietly does nothing instead of failing.
+
+**Call relations**: _one calls this after it has ruled out an existing provision, ruled out adoption, and obtained a free name from _free_name. It is the final write step in the “create a new shipped agent” path.
+
+*Call graph*: called by 1 (_one); 4 external calls (execute, select, auto_agent_icon, uuid4).
+
+
+##### `AgentProvisioning._identical`  (lines 277–290)
+
+```
+def _identical(self, row: sa.Row, provision: AgentProvision) -> bool
+```
+
+**Purpose**: Checks whether an existing unprovisioned agent already has the same core settings as the agent an extension would create. This lets the system adopt that row instead of making a duplicate.
+
+**Data flow**: It receives a database row and an agent provision. It compares the row’s stored prompt, model, reasoning setting, internet access flag, sandbox size, visibility, and tools against the provision’s desired values. It returns true only if all those compared settings match.
+
+**Call relations**: _one calls this when it finds an ordinary, unarchived workspace agent with the declared name. If _identical says the row matches, _one marks that row as provisioned by the extension; if not, _one leaves it alone and creates a separate provisioned agent under a free name.
+
+*Call graph*: called by 1 (_one).
 
 ## 📊 State Registers Touched
 
-- `reg-selected-pack-services` — The chosen product pack and the shared service objects it wires up for the rest of the app.
-- `reg-workspace-member-agent-state` — The saved list of workspaces, people, memberships, seats, and agents.
-- `reg-agent-configuration` — Each agent’s saved settings, such as model choice, reasoning mode, tools, visibility, internet access, sandbox size, and setup needs.
-- `reg-extension-registry` — The loaded set of extensions and the routes, tools, hooks, jobs, skills, agents, and backends they contribute.
-- `reg-extension-install-store` — The saved record of which extensions are installed, removed, or holding extension-specific data.
-- `reg-surface-routing` — The shared routing state that maps browser, Slack, iMessage, terminal, site, and object requests to the right workspace, agent, and conversation.
-- `reg-credential-connections` — The encrypted accounts, secrets, connection grants, and credential fulfillments that let agents use outside services safely.
-- `reg-access-permissions-audience` — The shared rules for who may read, use, share, or act on workspace content and conversations.
-- `reg-memory-index-state` — The stored knowledge, embeddings, chunks, and memory indexes that agents can search later.
-- `reg-source-config-sync-state` — The configured external sources plus their sync progress, errors, backoff, ownership, and access grants.
-- `reg-tool-catalog-allowlists` — The shared list of tools and actions an agent may see or run, including extension tools and sandbox bridge tools.
-- `reg-skill-prompt-library` — The reusable instructions, skills, prompt rules, and agent setup guidance loaded into turns.
-- `reg-presentation-slots` — The shared conversation display slots for showing artifacts, sources, tasks, sites, automations, image previews, and other side-panel content.
-- `reg-background-jobs` — The shared job schedule, due-work candidates, claims, retries, and worker state for background and autonomous work.
-- `reg-object-journal` — The shared naming and change history for workspace objects such as tasks, prompts, skills, monitors, memories, and reports.
-- `reg-redis-service-pool` — The shared Redis client/connection and stream/cache coordination state used by live turn streaming, workers, and Redis-backed extension stores.
-- `reg-workspace-object-store` — The current persisted workspace object records, such as tasks, monitors, todos, reports, prompts, and site metadata, read and mutated through object APIs, tools, jobs, and slots.
-- `reg-extension-catalog-cache` — The extension app-store/catalog metadata and update availability state used when discovering, installing, removing, or bundling extensions.
+- `reg-pack-composition` — The selected bundle of built-in extensions, prompts, skills, jobs, and setup steps for this deployment.
+- `reg-extension-registry` — The live catalog of installed extensions and the capabilities each one has registered.
+- `reg-workspace-directory` — The saved list of workspaces, members, agents, admins, and workspace-level settings.
+- `reg-auth-sessions` — The sign-in state and signed tokens that prove who a web, surface, or API request belongs to.
+- `reg-credentials-connections` — The stored secrets, connected accounts, grants, and refreshable permissions used to call outside services.
+- `reg-scheduled-jobs` — The durable background work list for timers, recurring conversations, monitors, reports, and long-running tasks.
+- `reg-object-system` — The common address book and audit trail for durable workspace objects such as agents, members, artifacts, and connectors.
+- `reg-extension-store` — The per-workspace storage area where extensions keep their own durable settings and small JSON records.
+- `reg-agent-provisioning` — The saved provenance, setup needs, policies, and ownership for agents that are shipped by extensions or created in workspaces.
+- `reg-credential-fulfillment` — Durable one-time markers that a requested credential/setup slot has been fulfilled for a workspace.
