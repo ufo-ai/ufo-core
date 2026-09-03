@@ -208,7 +208,7 @@ const POOL_READ = "/connections";
  *  and the run gives it a step of its own — offering it twice would ask one member to install it
  *  twice. */
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
-  Founder: ["gmail", "googlecalendar", "notion", "stripe", "hubspot"],
+  Founder: ["gmail", "googlecalendar", "notion", "github", "stripe", "hubspot"],
   Designer: ["figma", "notion", "googledrive", "linear"],
   Marketing: ["google_search_console", "hubspot", "notion", "googledrive"],
   Operations: ["googlecalendar", "gmail", "notion", "quickbooks"],

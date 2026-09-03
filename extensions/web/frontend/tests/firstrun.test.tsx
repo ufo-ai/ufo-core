@@ -168,13 +168,30 @@ const ACTIONS: Pick<FirstRunPayload, "actions"> = {
   actions: { member: [], memory: [RECORD_VIEW], enrichment_profile: [] },
 };
 
+/** The catalog most cases run on. Linear is the engineer's own tool and no other role's, so a run
+ *  answered as the founder stands no tools step here and the steps stay the three questions. */
 const FIRST_RUN = {
   providers: [
     { name: "slack", label: "Slack", summary: "Send and read messages.", group: "Messaging" },
-    { name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" },
+    { name: "linear", label: "Linear", summary: "Read issues and update projects.", group: "Code" },
   ],
   connectors: [{ name: "slack", label: "Slack", installed: false }],
   ...ACTIONS,
+};
+
+/** A catalog carrying the code tool every founder who writes code works in: the founder's own
+ *  suggestions name GitHub, so this deploy stands the tools step for that role too. */
+const WITH_GITHUB = {
+  ...FIRST_RUN,
+  providers: [
+    ...FIRST_RUN.providers,
+    {
+      name: "github",
+      label: "GitHub",
+      summary: "Read repositories, open issues, and push changes.",
+      group: "Code",
+    },
+  ],
 };
 
 /** A deploy running the enrichment extension: the run gains the website step. */
@@ -508,7 +525,7 @@ test("a reload on a step keeps the step and the answers under it", async () => {
   await describeBusiness("A two-person design studio");
   await pickRole("Engineer");
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
+  await userEvent.click(screen.getByRole("button", { name: "Linear" }));
   await userEvent.click(next());
   await screen.findByRole("heading", { name: "Connect the tools you picked" });
   await userEvent.click(next());
@@ -525,7 +542,7 @@ test("a reload on a step keeps the step and the answers under it", async () => {
   expect(counted()).toEqual(["4", "5"]);
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(
-    (await screen.findByRole("button", { name: "GitHub" })).getAttribute("data-state"),
+    (await screen.findByRole("button", { name: "Linear" })).getAttribute("data-state"),
   ).toBe("on");
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -693,7 +710,7 @@ test("the tools step offers the connectors the picked role works in", async () =
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
   expect(counted()).toEqual(["3", "5"]);
   const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
-  expect(tools.map((tool) => tool.textContent)).toEqual(["GitHub"]);
+  expect(tools.map((tool) => tool.textContent)).toEqual(["Linear"]);
   expect(tools.map((tool) => tool.getAttribute("aria-pressed"))).toEqual(["false"]);
   expect(next().disabled).toBe(false);
 });
@@ -735,6 +752,53 @@ test("a picked tool is stood to connect, and the press asks for that account", a
   await describeBusiness();
   await pickRole("Engineer");
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "Linear" }));
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "Connect the tools you picked" });
+  await userEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
+
+  await waitFor(() =>
+    expect(intents(posted.calls)).toEqual([
+      {
+        lane: "intents",
+        body: { verb: "connect", kind: "connection", name: "linear", spec: { shared: false } },
+      },
+    ]),
+  );
+});
+
+/** Next off the connect list carries on with whatever is left unconnected: the run asks for the
+ *  accounts once and never holds the member on them. */
+test("Next off the connect list carries on to the goals", async () => {
+  await open(lanes(recorder()));
+  await describeBusiness();
+  await pickRole("Engineer");
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "Linear" }));
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "Connect the tools you picked" });
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+});
+
+/** A founder writes code too, and GitHub is a member's own account to connect: the founder's step
+ *  offers it beside the rest, and the press asks for that account. */
+test("the founder's tools step offers GitHub, and the press asks for that account", async () => {
+  const posted = recorder();
+  await open(lanes(posted), ADMIN, WITH_GITHUB);
+  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
+  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+  onTestFinished(() => opened.mockRestore());
+
+  await describeBusiness();
+  await pickRole("Founder");
+
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
+  expect(tools.map((tool) => tool.textContent)).toEqual(["GitHub"]);
   await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
   await userEvent.click(next());
 
@@ -749,22 +813,6 @@ test("a picked tool is stood to connect, and the press asks for that account", a
       },
     ]),
   );
-});
-
-/** Next off the connect list carries on with whatever is left unconnected: the run asks for the
- *  accounts once and never holds the member on them. */
-test("Next off the connect list carries on to the goals", async () => {
-  await open(lanes(recorder()));
-  await describeBusiness();
-  await pickRole("Engineer");
-  await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
-  await userEvent.click(next());
-
-  await screen.findByRole("heading", { name: "Connect the tools you picked" });
-  await userEvent.click(next());
-
-  await screen.findByRole("heading", { name: "What is top of mind right now?" });
 });
 
 test("the top-of-mind step offers the nine goals with none pressed, and Other asks for words", async () => {

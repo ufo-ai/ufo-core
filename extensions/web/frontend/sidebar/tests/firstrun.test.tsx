@@ -27,10 +27,11 @@ const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
   label: "Continue",
 };
 
-/** A deploy with no Slack install and no enrichment: the run is the three questions, which is the
- *  shortest path to the handoff this file is about. */
+/** A deploy with no Slack install and no enrichment, whose one connector no founder's suggestions
+ *  name: the run is the three questions, which is the shortest path to the handoff this file is
+ *  about. */
 const FIRST_RUN = {
-  providers: [{ name: "github", label: "GitHub" }],
+  providers: [{ name: "linear", label: "Linear" }],
   connectors: [],
   imessage: false,
   model_key_held: true,
