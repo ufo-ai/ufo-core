@@ -183,6 +183,56 @@ test("the connectors section lists the connection pool", async () => {
   expect(screen.getByText(/Only you/)).toBeTruthy();
 });
 
+/** A tab the connector callback page forwarded here arrives naming the account it landed, because
+ *  the grant landed in a document this one replaced. The screen states it as a toast and the
+ *  address keeps nothing: a reload is not a second connect, and the pool the screen reads is the
+ *  standing answer either way. */
+test("a forwarded connect arrival is stated, and leaves the address", async () => {
+  history.replaceState(
+    null,
+    "",
+    location.pathname + "?connected=GitHub+%C2%B7+octo" + sectionHash("connectors"),
+  );
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("GitHub · octo connected.")).toBeTruthy();
+  expect(location.search).toBe("");
+  expect(location.hash).toBe(sectionHash("connectors"));
+});
+
+test("the connectors screen states nothing where no arrival named an account", async () => {
+  location.hash = sectionHash("connectors");
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("github")).toBeTruthy();
+  expect(screen.queryByText(/connected\./)).toBeNull();
+});
+
+/** The arrival is spent on being said. A member who walks off the screen and back is not arriving
+ *  from a provider, so the second standing draws no toast — which is the same reason the callback
+ *  page's own button carries no account: they read the outcome where they pressed it. */
+test("coming back to the connectors screen does not state the arrival again", async () => {
+  history.replaceState(
+    null,
+    "",
+    location.pathname + "?connected=GitHub+%C2%B7+octo" + sectionHash("connectors"),
+  );
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+  expect(await screen.findByText("GitHub · octo connected.")).toBeTruthy();
+
+  location.hash = homeHash({ opens: [AGENT_ID] });
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  await waitFor(() => expect(screen.queryByText("GitHub · octo connected.")).toBeNull());
+  location.hash = sectionHash("connectors");
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  expect(await screen.findByText("github")).toBeTruthy();
+  expect(screen.queryByText("GitHub · octo connected.")).toBeNull();
+});
+
 /** The connectors screen stands as an app entry on home: the picker lists it under the workspace's
  *  apps, and the press stands the pool in a lane of its own, which the address carries. */
 test("the picker stands the connectors screen in a lane", async () => {
@@ -787,6 +837,10 @@ test("a connector's consent opens in a window this page owns, so its return page
   expect(name).toBe("ufo-connect");
   expect(features).toContain("popup");
   expect(consent.focus).toHaveBeenCalled();
+  // The window starts with a copy of this tab's session storage, and the mark left in it before
+  // the open is how the provider's return page knows it may take that window away rather than
+  // carry it to a screen the member never left.
+  expect(sessionStorage.getItem("ufo-consent-window")).toBe("1");
 
   StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
 

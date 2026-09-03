@@ -32,6 +32,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
+import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import type { Placement } from "@/kernel/pager";
 import { PageToolbar, usePageSearch } from "@/kernel/pane";
 import {
@@ -57,6 +58,7 @@ import { agentName } from "@/lib/agentName";
 import { BASE, getJson, postIntent, postObjectAction, type Fetched } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
+import { connectArrival } from "@/lib/router";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
@@ -415,6 +417,19 @@ function joined(
   };
 }
 
+/** The connect a forwarded tab arrived carrying, said the way an outcome whose own surface has gone
+ *  is said. The callback page took itself away to bring the member here, so the sentence they read
+ *  there is the sentence that stands here — one wording for one outcome, wherever it is read.
+ *
+ *  Read while the screen first draws, before the router has taken the arrival off the address, and
+ *  held in state from there: a member who walks back onto this screen is not arriving from a
+ *  provider. A member who pressed that page's own button reads nothing either — the button carries
+ *  no account, because they were looking at the outcome when they chose to come. */
+function arrivedToast(): ToastState {
+  const named = connectArrival();
+  return named ? { title: named + " connected." } : SILENT;
+}
+
 /** The workspace's available and connected accounts. */
 export function WorkspaceConnectors({
   place,
@@ -433,6 +448,7 @@ export function WorkspaceConnectors({
   const [handoff, setHandoff] = useState<Handoff | null>(null);
   const [removing, setRemoving] = useState<Standing | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const [toast, setToast] = useState<ToastState>(arrivedToast);
   const consent = useRef<Window | null>(null);
   const viewer = useViewer();
   const agent = useMainAgent();
@@ -751,6 +767,7 @@ export function WorkspaceConnectors({
           />
         ) : null}
       </Dialog>
+      <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>
   );
 }

@@ -1,12 +1,20 @@
 """The provider-facing OAuth callback the shared fleet mounts.
 
 The connector handoff's own return leg, drawn by the page every return leg shares
-(`ufo.sdk.callback_page`). It states what landed and then that the member may close the page. It
-never sends them off to prod an agent: consent is finished in a browser that carries only the sealed
-state, and there is not always a conversation or an agent waiting behind it. Where the message did
-reach the conversation the page adds that the conversation carries on, since that is the one case
-this code knows a conversation is there to carry on. Either way the page asks the member for
-nothing, so it takes the window away where the browser permits it.
+(`ufo.sdk.callback_page`). It states what landed and then takes the member to their connectors,
+where the account they just granted now stands. It never sends them off to prod an agent: consent
+is finished in a browser that carries only the sealed state, and there is not always a conversation
+or an agent waiting behind it.
+
+The consent window the portal opened closes itself, as it always did: the member never navigated off
+the screen behind it, and that screen has already moved on underneath them. Every other tab walked
+here from a chat link, and a browser refuses to close one of those, so that tab is carried to the
+connectors screen instead of being asked to shut itself. It arrives naming the account that landed,
+because a screen reached by a fresh page load has nothing else to say what just happened.
+
+A deploy with no public base URL or no browser surface has no connectors screen to reach, so the
+page there states what landed and the one thing left to do: close the tab, and carry on in the
+conversation where the message reached one.
 
 The mark is the portal's own file, byte for byte, and core serves it here because this page is
 reached with no session and no frontend build behind it. It was hand-minified once and drew
@@ -15,6 +23,7 @@ carries, and rounding the coordinates moved the shapes against each other. A log
 so it is copied rather than rewritten, and a test holds the two copies identical."""
 
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, Response
@@ -25,11 +34,33 @@ from ufo.runtime.access.grants import (
     UnknownProvider,
     installed_connect_flow,
 )
-from ufo.sdk.callback_page import CLOSE_THIS_PAGE, CONVERSATION_CONTINUES, callback_page
+from ufo.sdk.callback_page import (
+    CLOSE_THIS_PAGE,
+    CONVERSATION_CONTINUES,
+    PageLink,
+    callback_page,
+)
 
 CONNECT_CALLBACK_PATH = "/v1/connect/callback"
 CONNECT_LOGO_FILE = Path(__file__).parent / "assets" / "ufo-logo.svg"
 CONNECT_LOGO_CACHE = "public, max-age=31536000, immutable"
+CONNECTORS_SCREEN_FRAGMENT = "#/connectors"
+CONNECTORS_SCREEN_LABEL = "Go to your connectors"
+CONNECTED_PARAM = "connected"
+
+
+def portal_url(public_base_url: str | None, home_surface: str | None) -> str | None:
+    """The deploy's browser portal, or None where it has no public base or installs no browser
+    surface — a self-host or dev node, which has no screen to send anyone to.
+
+    Core owns both halves of the path: `/surface/<name>` is its own mount and `home_surface` is the
+    manifest flag naming the one surface a browser belongs on. Composed once at boot and carried on
+    the connect flow, because the callback answers a browser that holds no session to read it
+    from."""
+    if not public_base_url or home_surface is None:
+        return None
+    return f"{public_base_url.rstrip('/')}/surface/{home_surface}"
+
 
 callback_router = APIRouter(prefix="/v1")
 
@@ -57,6 +88,16 @@ async def connect_callback(state: str = "", code: str = "") -> HTMLResponse:
         if recorded.account_label
         else (recorded.label)
     )
+    if flow.portal_url:
+        arrival = urlencode({CONNECTED_PARAM: named})
+        return callback_page(
+            headline=f"{named} connected.",
+            link=PageLink(
+                label=CONNECTORS_SCREEN_LABEL,
+                url=f"{flow.portal_url}{CONNECTORS_SCREEN_FRAGMENT}",
+            ),
+            forward=f"{flow.portal_url}?{arrival}{CONNECTORS_SCREEN_FRAGMENT}",
+        )
     return callback_page(
         headline=f"{named} connected.",
         detail=CONVERSATION_CONTINUES if recorded.resumed else CLOSE_THIS_PAGE,

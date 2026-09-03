@@ -22,6 +22,14 @@ const CONSENT_WINDOW = "ufo-connect";
 const CONSENT_WIDTH = 520;
 const CONSENT_HEIGHT = 720;
 
+/** What the provider's return page reads to know it is standing in a window this page opened, and
+ *  may therefore take away. A window `window.open` makes starts with a copy of this tab's session
+ *  storage and keeps it across the whole consent walk; a tab opened from a link — in a chat
+ *  surface, or from the link this file falls back to — carries none, and is carried to a screen
+ *  instead. `core/src/ufo/sdk/callback_page.py` spells the same key, and a gate holds the two
+ *  equal. */
+const CONSENT_WINDOW_MARK = "ufo-consent-window";
+
 function consentFeatures(): string {
   const left = window.screenX + Math.max(0, (window.outerWidth - CONSENT_WIDTH) / 2);
   const top = window.screenY + Math.max(0, (window.outerHeight - CONSENT_HEIGHT) / 3);
@@ -35,6 +43,14 @@ function consentFeatures(): string {
 }
 
 export function openConsentWindow(url = ""): Window | null {
+  /* Marked before the open, because the copy the new window starts with is taken then. A browser
+     that refuses storage leaves the mark unwritten, and the return page carries that window to the
+     connectors screen rather than closing it — the outcome is read either way. */
+  try {
+    sessionStorage.setItem(CONSENT_WINDOW_MARK, "1");
+  } catch {
+    /* storage refused */
+  }
   const consent = window.open(url, CONSENT_WINDOW, consentFeatures());
   consent?.focus();
   return consent;

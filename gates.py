@@ -142,6 +142,12 @@ DEBUGGER_SURFACE_MODULE = Path("extensions/debugger/ufo_ext_debugger/surface.py"
 SLACK_SURFACE_MODULE = Path("extensions/slack/ufo_ext_slack/surface.py")
 REDIS_HUB_MODULE = Path("extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py")
 TURNSTREAM_MODULE = Path("extensions/web/frontend/src/lib/turnStream.ts")
+CALLBACK_PAGE_MODULE = Path("core/src/ufo/sdk/callback_page.py")
+CONSENT_MODULES = (
+    Path("extensions/web/frontend/src/lib/consent.tsx"),
+    Path("extensions/web/frontend/sidebar/src/lib/consent.tsx"),
+)
+CONSENT_MARK_NAME = "CONSENT_WINDOW_MARK"
 DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
 FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
     "web _sse": frozenset({"ArtifactsChanged"}),
@@ -971,6 +977,42 @@ def _sse_listener_failures(web: ast.Module, debugger: ast.Module) -> list[str]:
             f"sse: debugger Tail.tsx listens for event {name!r} that its surface never sends"
             for name in sorted(tail_kinds - debugger_kinds)
         )
+    return failures
+
+
+def _consent_mark_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """The consent window's mark is one string in two languages: the portal writes it into session
+    storage before it opens a consent window, and the return page core serves reads it back to know
+    it may close that window. A key spelled differently on either side reads as no mark at all —
+    every consent window would then be carried to a connectors screen inside a 520-pixel popup —
+    and nothing else in the tree would notice, since neither language ever sees the other's copy."""
+    failures: list[str] = []
+    page = trees.get(CALLBACK_PAGE_MODULE)
+    if page is None:
+        return [f"consent: {CALLBACK_PAGE_MODULE} not found"]
+    spelled = {
+        node.value.value
+        for node in ast.walk(page)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == CONSENT_MARK_NAME for t in node.targets)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    if len(spelled) != 1:
+        return [f"consent: {CALLBACK_PAGE_MODULE} does not assign {CONSENT_MARK_NAME} a string"]
+    mark = spelled.pop()
+    for rel in CONSENT_MODULES:
+        source = _required_text(rel, failures)
+        if source is None:
+            continue
+        written = re.findall(rf'{CONSENT_MARK_NAME} = "([^"]*)"', source)
+        if written != [mark]:
+            failures.append(
+                f"consent: {rel} spells {CONSENT_MARK_NAME} {written!r}, "
+                f"and the return page reads {mark!r}"
+            )
+        if f"sessionStorage.setItem({CONSENT_MARK_NAME}" not in source:
+            failures.append(f"consent: {rel} never writes {CONSENT_MARK_NAME} to session storage")
     return failures
 
 
@@ -2177,6 +2219,7 @@ def main() -> int:
     failures.extend(_live_frame_failures(trees))
     failures.extend(_live_frame_consumer_failures(trees))
     failures.extend(_directive_wire_failures(trees))
+    failures.extend(_consent_mark_failures(trees))
     failures.extend(_drawn_mark_failures())
     failures.extend(_to_thread_failures(trees))
     failures.extend(_ingress_containment_failures(trees))

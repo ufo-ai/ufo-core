@@ -159,6 +159,20 @@ export function navigate(hash: string, step: PlaceStep = "push"): void {
 
 const readAddress = () => publish(arrive(parseHash(location.hash), heldRoute()));
 
+const CONNECTED_PARAM = "connected";
+
+/** The account a connector's callback page forwarded this tab here naming, or "" where the address
+ *  names none. The grant landed in a document this one replaced — a tab walked to the provider from
+ *  a chat link and came back — so the address is all the screen it lands on has to say what just
+ *  happened.
+ *
+ *  A moment, not a place: `startRouter` takes it off the address as the page opens, which is what
+ *  spends it. A screen reads it while it first draws and states it once; every later standing of
+ *  that screen, and every reload and sent link, reads an address naming nothing. */
+export function connectArrival(): string {
+  return new URLSearchParams(location.search).get(CONNECTED_PARAM) ?? "";
+}
+
 /** Start the router: state the boot address in the bar, land the arrival, and follow the browser
  *  from there. Returns the detach for the shell's own unmount. */
 export function startRouter(): () => void {
@@ -167,6 +181,12 @@ export function startRouter(): () => void {
   const target = artifactTarget(location.search);
   if (target) location.replace(target);
   const booted = heldRoute();
+  if (connectArrival()) {
+    const params = new URLSearchParams(location.search);
+    params.delete(CONNECTED_PARAM);
+    const query = params.toString();
+    history.replaceState(null, "", location.pathname + (query ? "?" + query : "") + location.hash);
+  }
   /* A conversation and the first run are reached by query too, since a fragment never reaches the
      server. The address states either of them from here on, so what the member sees is somewhere
      they can return to and send on. */

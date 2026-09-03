@@ -859,12 +859,16 @@ class ConnectFlow:
     grant. Deps: the providers the deploy installs (empty until a connectors extension declares
     any), an optional `resolver` for an open connector namespace whose broker serves any other slug,
     the Fernet that seals the state, the grant store, and the deploy's callback `redirect_uri` — one
-    value both legs use, so the token exchange presents the same redirect the link did."""
+    value both legs use, so the token exchange presents the same redirect the link did.
+    `portal_url` is the browser portal the callback page carries the member to once the grant
+    lands, and is None on a deploy that installs no browser surface — one with no screen to send
+    them to."""
 
     providers: Mapping[str, OAuthProvider]
     fernet: Fernet
     store: GrantStore
     redirect_uri: str
+    portal_url: str | None = None
     resolver: OAuthProviderResolver | None = None
     connections: ConnectionHooks | None = None
     resumption: ConnectResumption | None = None

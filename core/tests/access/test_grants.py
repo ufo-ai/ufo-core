@@ -47,7 +47,7 @@ from ufo.runtime.agent_scope import AgentUnbound, agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.runtime.surfaces.admission import Admission, ConnectResume
-from ufo.runtime.surfaces.cli import callback_router
+from ufo.runtime.surfaces.cli import CONNECTED_PARAM, callback_router, portal_url
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
@@ -55,13 +55,16 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.callback_page import (
     CLOSE_THIS_PAGE,
+    CONSENT_WINDOW_MARK,
     CONVERSATION_CONTINUES,
+    forward_script,
 )
 
 GRANTED_HOST = "api.granted.test"
 HOST_A = "api.aaa.test"
 HOST_B = "api.bbb.test"
 REDIRECT_URI = "http://surface/v1/connect/callback"
+PORTAL_URL = "https://ufo.example.com/surface/web"
 LOCK_WAIT_TIMEOUT_SECONDS = 5
 
 
@@ -1039,6 +1042,84 @@ async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: No
     assert CLOSE_THIS_PAGE in page and CONVERSATION_CONTINUES not in page
     assert "conversation" not in page and "agent" not in page
     assert "window.close()" in page
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_callback_carries_a_link_arrived_tab_to_the_connectors_screen(db: None) -> None:
+    """A deploy with a browser surface takes the member to the screen the account now stands on,
+    rather than telling them to close a tab the browser will not close.
+
+    The page decides by the mark the portal leaves in a consent window it opens: marked, the window
+    closes as it always did; unmarked — every tab reached from a chat surface — it is carried. Only
+    that carry names the account, because the screen is reached by a page load holding nothing else,
+    while a member who presses the button read the outcome on the page they pressed it from."""
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+        portal_url=PORTAL_URL,
+    )
+    state = parse_qs(
+        urlparse(
+            flow.authorize(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                provider="stub",
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ).query
+    )["state"][0]
+
+    install_connect_flow(flow)
+    app = FastAPI()
+    app.include_router(callback_router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        done = await client.get(
+            "/v1/connect/callback",
+            params={"state": state, "code": "the-code"},
+        )
+
+    assert done.status_code == 200
+    assert "Stub · Work account connected." in done.text
+    assert f'<a href="{PORTAL_URL}#/connectors">Go to your connectors</a>' in done.text
+    assert f'sessionStorage.getItem("{CONSENT_WINDOW_MARK}")' in done.text
+    assert "window.close()" in done.text
+    assert (
+        f'location.replace("{PORTAL_URL}?connected=Stub+%C2%B7+Work+account#/connectors")'
+        in done.text
+    )
+    # One statement of the outcome in the address, on the leg the member reads nothing on.
+    assert done.text.count(f"{CONNECTED_PARAM}=") == 1
+    assert CLOSE_THIS_PAGE not in done.text and CONVERSATION_CONTINUES not in done.text
+
+
+def test_a_deploy_with_no_browser_surface_has_no_screen_to_forward_to() -> None:
+    assert portal_url("https://ufo.example.com/", "web") == PORTAL_URL
+    assert portal_url(None, "web") is None
+    assert portal_url("", "web") is None
+    assert portal_url("https://ufo.example.com", None) is None
+
+
+def test_the_forwarding_script_reads_the_mark_before_it_takes_a_window_away() -> None:
+    """Which window this is decides which half runs, and a browser that refuses storage answers no
+    mark — which carries the member, the one direction that is never a dead end."""
+    script = forward_script("https://ufo.example.com/surface/web#/connectors")
+    marked = script.index(f'sessionStorage.getItem("{CONSENT_WINDOW_MARK}")')
+    assert marked < script.index("window.close()") < script.index("location.replace")
+    assert "catch" in script[:marked] or "catch" in script[marked:]
+
+
+def test_the_forwarding_script_cannot_be_left_by_the_url_it_carries() -> None:
+    """The URL is deploy-configured, so this is the seal on the page rather than a live threat."""
+    script = forward_script('https://ufo.example.com/#/"</script><script>alert(1)')
+    assert script.count("</script>") == 1
+    assert script.endswith("</script>")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

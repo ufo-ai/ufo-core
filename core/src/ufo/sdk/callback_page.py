@@ -22,10 +22,13 @@ Getting the member out of the tab takes both halves. `close` closes the tab from
 a browser honours that only for a tab a script opened — the install walks the member from a chat
 link through the provider to here, so that tab is usually theirs and the close is refused. `link`
 is the half that always works, because a link needs no permission: it carries them back to the
-conversation and leaves the tab behind them. A page that still asks the member for something takes
-neither, so the detail line stays in front of them.
+conversation and leaves the tab behind them. `forward` decides between the two by asking which
+window it is standing in, so the small window the portal opened over a screen takes itself away
+while the tab a member walked here in is carried on to a screen. A page that still asks the member
+for something takes none of the three, so the detail line stays in front of them.
 """
 
+import json
 from dataclasses import dataclass
 from html import escape
 from string import Template
@@ -38,6 +41,7 @@ CONVERSATION_CONTINUES = "Close this tab and return to the conversation."
 CALLBACK_PAGE_MAX_BYTES = 1_024
 CLOSE_AFTER_MS = 2_000
 CLOSE_SCRIPT = f"<script>setTimeout(()=>window.close(),{CLOSE_AFTER_MS})</script>"
+CONSENT_WINDOW_MARK = "ufo-consent-window"
 LINK_STYLE = (
     "a{display:inline-block;margin-top:1.4rem;padding:.55rem 1.1rem;border:1px solid;"
     "border-radius:.35rem;color:inherit;text-decoration:none;font-weight:600}"
@@ -67,6 +71,39 @@ class PageLink:
     url: str
 
 
+def forward_script(url: str) -> str:
+    """The script that takes the member off the page: the consent window the portal opened closes
+    itself, and every other window goes to `url`.
+
+    `CONSENT_WINDOW_MARK` is what tells the two apart. The portal writes it into its own session
+    storage before it opens a consent window, and a window opened by `window.open` starts with a
+    copy of that storage — measured in Chrome 151 to survive the whole consent walk, out to the
+    provider's origin and back, and measured absent in a tab opened by a link, with or without an
+    opener. Every window a member reaches from a chat surface is that second kind, so the mark is
+    exactly the deploy's own consent window and nothing else.
+
+    Neither of the two obvious readings would do. `window.opener` is gone by the time this page is
+    read — a provider serving consent under `Cross-Origin-Opener-Policy` severs it, and a plain
+    link-opened tab measured `false` as well. Asking for the close and forwarding whatever survives
+    reads the browser's own policy instead of the fact wanted: Blink refuses `window.close` only for
+    a window it did not open, and it counts a `target=_blank` tab as one it opened, so a member
+    following a connect link from a chat surface in a browser tab would have that tab shut in their
+    face rather than be carried anywhere.
+
+    Storage a browser refuses to answer reads as no mark, which forwards: a member who cannot be
+    carried anywhere is the one case worth getting wrong in the direction of a screen.
+
+    The URL is written as a JavaScript string literal, with `<` escaped as well, so a URL holding a
+    quote or a closing tag cannot leave the script."""
+    literal = json.dumps(url).replace("<", "\\u003c")
+    mark = json.dumps(CONSENT_WINDOW_MARK)
+    return (
+        "<script>setTimeout(()=>{let mine;"
+        f"try{{mine=sessionStorage.getItem({mark})}}catch(e){{}}"
+        f"if(mine)window.close();else location.replace({literal})}},{CLOSE_AFTER_MS})</script>"
+    )
+
+
 def callback_page(
     *,
     headline: str,
@@ -74,17 +111,20 @@ def callback_page(
     link: PageLink | None = None,
     status: int = 200,
     close: bool = False,
+    forward: str = "",
 ) -> HTMLResponse:
     """The page for one return leg: what happened, then the one thing left to do — a `detail` line
     the member acts on themselves, or a `link` that acts for them. `close` takes the tab away where
-    the browser permits it, and goes only on a page that asks the member for nothing."""
+    the browser permits it, and goes only on a page that asks the member for nothing. `forward`
+    closes the deploy's own consent window and carries every other window to that URL, and
+    supersedes `close`."""
     return HTMLResponse(
         CALLBACK_PAGE.substitute(
             headline=escape(headline),
             detail=f"<p>{escape(detail)}</p>" if detail else "",
             link_style=LINK_STYLE if link else "",
             link=f'<a href="{escape(link.url)}">{escape(link.label)}</a>' if link else "",
-            close=CLOSE_SCRIPT if close else "",
+            close=forward_script(forward) if forward else (CLOSE_SCRIPT if close else ""),
         ),
         status_code=status,
     )

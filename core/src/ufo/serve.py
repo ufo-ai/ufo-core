@@ -194,7 +194,7 @@ from ufo.runtime.surfaces.admission import (
     MemberAdmission,
 )
 from ufo.runtime.surfaces.artifacts import router as artifacts_router
-from ufo.runtime.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
+from ufo.runtime.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router, portal_url
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.surfaces.stop import MemberStop
 from ufo.runtime.tool_bridge import ToolBridge
@@ -1497,6 +1497,7 @@ def _connect_flow(
         fernet=credentials.fernet,
         store=GrantStore(),
         redirect_uri=_connect_redirect_uri(config, providers),
+        portal_url=portal_url(config.connect.public_base_url, home_surface(manifests)),
         resolver=open_connector_namespace(manifests),
         connections=connection_hooks(manifests, credentials, index, embed),
         resumption=resumption,
