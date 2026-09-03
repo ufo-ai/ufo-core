@@ -4482,6 +4482,34 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
         )
 
 
+async def test_a_probe_the_sandbox_stopped_says_whose_deadline_fired(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(
+        scripted={
+            "deadline = time.time()": ExecResult(
+                stdout="", stderr="timed out", exit_code=124, timed_out_after_s=35
+            )
+        }
+    )
+    ctx = _context(sandbox, tmp_path)
+    with pytest.raises(RuntimeError, match="stopped the readiness check after 35s") as raised:
+        await start_server(
+            ctx,
+            StartServerInput(command="python3 app.py", project_path="/workspace"),
+        )
+    assert str(raised.value) != "timed out"
+
+
+async def test_a_start_that_fails_silently_names_the_command_and_its_log(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(scripted={"exec env PORT": ExecResult(stdout="", stderr="", exit_code=1)})
+    ctx = _context(sandbox, tmp_path)
+    with pytest.raises(RuntimeError, match=r"'python3 app\.py' failed with no output") as raised:
+        await start_server(
+            ctx,
+            StartServerInput(command="python3 app.py", project_path="/workspace"),
+        )
+    assert "server-5000.log" in str(raised.value)
+
+
 async def test_start_server_stops_its_task_when_readiness_fails(tmp_path: Path) -> None:
     sandbox = FakeSandbox(
         scripted={"deadline = time.time()": ExecResult(stdout="", stderr="not ready", exit_code=1)}

@@ -266,8 +266,12 @@ LOG_TAIL_TIMEOUT_SECONDS = 15
 """Reading the tail of one log inside the sandbox, on the failure path of a start that already ended
 — so the wait is short and stated rather than the 120s default."""
 SERVER_NEVER_LISTENED = (
-    "nothing listened on port {port} within {seconds}s and {log} holds nothing: the hosted link "
-    "serves that port alone, so the command must bind $PORT, which the sandbox sets to {port}"
+    "nothing listened on port {port} within {seconds}s and {log} holds nothing: this call serves "
+    "that port alone, so the command must bind $PORT, which the sandbox sets to {port}"
+)
+PROBE_OUTLIVED_ITS_DEADLINE = (
+    "the server never answered on port {port}: the sandbox stopped the readiness check after "
+    "{seconds}s and {log} holds nothing"
 )
 SERVER_START_SAID_NOTHING = "the start of {command!r} failed with no output and {log} holds nothing"
 TOOL_OUTPUT_DIR = "tool-output"
@@ -655,6 +659,12 @@ async def _serve(
     logged = await _log_tail(ctx, log_path)
     if logged:
         raise RuntimeError(logged)
+    if probe.timed_out_after_s is not None:
+        raise RuntimeError(
+            PROBE_OUTLIVED_ITS_DEADLINE.format(
+                port=port, seconds=probe.timed_out_after_s, log=log_path
+            )
+        )
     if probe.stderr:
         raise RuntimeError(probe.stderr)
     raise RuntimeError(

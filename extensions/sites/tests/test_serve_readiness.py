@@ -18,6 +18,16 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 
 PROBE_DEADLINE_SECONDS = 3
+SILENT_SERVER = """import socket
+import sys
+import time
+
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", int(sys.argv[1])))
+sock.listen(8)
+time.sleep(300)
+"""
 
 
 async def _no_spawn(profile: str, payload: dict, background: bool = False) -> SpawnResult:
@@ -89,23 +99,26 @@ async def test_a_command_that_binds_another_port_names_the_port_it_had_to_bind(
     monkeypatch.setattr(tools, "READINESS_TIMEOUT_SECONDS", PROBE_DEADLINE_SECONDS)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / "silent_server.py").write_text(SILENT_SERVER)
     ctx = await _context(workspace, tmp_path)
     port = _free_port()
     elsewhere = _free_port()
     log = await ctx.sandbox.runtime_path(PUBLISH_LOG.format(port=port))
-    with pytest.raises(RuntimeError) as raised:
-        await _serve(
-            ctx,
-            f"python3 -m http.server {elsewhere} --bind 127.0.0.1",
-            str(workspace),
-            port,
-            log,
-        )
-    message = str(raised.value)
-    assert str(port) in message
-    assert "$PORT" in message
-    assert log in message
-    await _stop_server(ctx, elsewhere)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            await _serve(
+                ctx,
+                f"python3 silent_server.py {elsewhere}",
+                str(workspace),
+                port,
+                log,
+            )
+        message = str(raised.value)
+        assert str(port) in message
+        assert "$PORT" in message
+        assert log in message
+    finally:
+        await _stop_server(ctx, elsewhere)
 
 
 async def test_what_the_command_printed_before_dying_is_what_is_raised(
