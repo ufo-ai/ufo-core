@@ -1,3 +1,4 @@
+import { IconLoader2 } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
@@ -100,8 +101,16 @@ const SKELETON_FIELDS = 3;
  *  written. It reserves its line from the first frame and appears on the theme's threshold, so a
  *  read that answers before then leaves no trace on the way past — the timing is the theme's, and
  *  the same threshold governs every placeholder on the surface. */
-export function Waiting() {
-  return <span className="animate-waiting">Loading…</span>;
+export function Loading() {
+  return (
+    <div
+      role="status"
+      className="animate-waiting flex min-h-full w-full flex-1 items-center justify-center gap-2xs self-stretch text-ink-soft"
+    >
+      <IconLoader2 aria-hidden className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />
+      <span>Loading…</span>
+    </div>
+  );
 }
 
 /** What is coming, drawn at its own size. A centred sentence sits where no record ever will, then

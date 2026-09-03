@@ -10,6 +10,7 @@ import {
   TurnStep,
   when,
 } from "./api";
+import { Loading } from "./Loading";
 import { Bubble } from "./Transcript";
 import { Compactions } from "./Compactions";
 import { Files } from "./Files";
@@ -73,7 +74,7 @@ export function Session(props: {
     };
   }, [props.conversationId]);
 
-  if (turns === null) return <div className="empty">loading…</div>;
+  if (turns === null) return <Loading />;
   if (turns.length === 0) return <div className="empty">no turns in this conversation</div>;
   return (
     <>

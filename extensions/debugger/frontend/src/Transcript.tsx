@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ContentBlock, get, Transcript as TranscriptRecord, TranscriptMessage } from "./api";
+import { Loading } from "./Loading";
 
 export function Transcript(props: { conversationId: string }) {
   const [transcript, setTranscript] = useState<TranscriptRecord | null | "missing">(null);
@@ -11,7 +12,7 @@ export function Transcript(props: { conversationId: string }) {
       .catch(() => setTranscript("missing"));
   }, [props.conversationId]);
 
-  if (transcript === null) return <div className="empty">loading…</div>;
+  if (transcript === null) return <Loading />;
   if (transcript === "missing") return <div className="empty">no transcript persisted yet</div>;
   return (
     <section className="panel">

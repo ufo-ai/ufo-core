@@ -199,7 +199,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 - **`PanelBlank`** — A section that holds no records yet takes a card on the section's own left edge.
 - **`PanelEmpty`** — The empty sentence at a section's own height:
 - **`Section`** — A band of records inside a page, stacked at the page's own rhythm:
-- **`Waiting`** — The one line a screen states while it has nothing else, and the only place the words are written.
+- **`Loading`** — The one line a screen states while it has nothing else, and the only place the words are written.
 - **`usePanelRead`** — A read holds its answer until the next one lands.
 
 ## pressrow

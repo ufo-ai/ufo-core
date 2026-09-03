@@ -9,7 +9,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { buttonVariants } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
-import { Waiting } from "@/kernel/panel";
+import { Loading } from "@/kernel/panel";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
@@ -291,7 +291,7 @@ export function ArtifactText({
   if (body === null)
     return (
       <div>
-        <Waiting />
+        <Loading />
       </div>
     );
   if (mediaType === HTML_MEDIA_TYPE && bounded)

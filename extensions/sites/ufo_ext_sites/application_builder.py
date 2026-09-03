@@ -586,6 +586,7 @@ APPLICATION_KIT_COMPONENTS = frozenset(
         "Lede",
         "Legend",
         "LegendItem",
+        "Loading",
         "Markdown",
         "MediaIcon",
         "Meter",
@@ -620,7 +621,6 @@ APPLICATION_KIT_COMPONENTS = frozenset(
         "TdFact",
         "ToolbarRule",
         "ViewSwitch",
-        "Waiting",
     }
 )
 ROOT_MOUNT = re.compile(

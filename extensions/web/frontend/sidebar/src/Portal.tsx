@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { App } from "@/App";
-import { Empty, Waiting } from "@/kernel/panel";
+import { Empty, Loading } from "@/kernel/panel";
 import { Frame } from "@/views/Frame";
 import { FAULTS, SignIn } from "@/views/SignIn";
 import { BASE, SIGN_IN_PATH, sessionFault, type SessionFault } from "@/lib/api";
@@ -77,7 +77,7 @@ export function Portal() {
   if (boot.phase === "loading")
     return (
       <Empty>
-        <Waiting />
+        <Loading />
       </Empty>
     );
   if (boot.phase === "signed-out" && boot.fault !== "expired")
@@ -89,7 +89,7 @@ export function Portal() {
   if (boot.phase === "signed-out")
     return (
       <Empty>
-        <Waiting />
+        <Loading />
       </Empty>
     );
   if (boot.phase === "failed") return <Empty>{boot.message}</Empty>;

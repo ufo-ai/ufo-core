@@ -952,8 +952,8 @@ export function decodeFrame(
 }
 
 /** A wait, spelled. The label arrives as the braille that spells it, churns, and resolves left to
- *  right — the portal's one indeterminate loading state, in place of a spinner or a skeleton rather
- *  than beside one.
+ *  right — the wait a message states, in place of the `Loading` mark or a skeleton rather than
+ *  beside one.
  *
  *  `delay` staggers a line against the ones above it. `loop` runs the cycle until the wait ends; a
  *  wait with a known end takes `loop={false}` and decodes once. `color` drops the two channels for a

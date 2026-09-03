@@ -26,7 +26,7 @@ import {
   SLACK_SURFACE,
   SurfaceGlyph,
   UFO_SURFACE,
-  Waiting,
+  Loading,
   agentHash,
   agentName,
   cn,
@@ -437,7 +437,7 @@ function ChatApp({
   if (shown.kind === "loading")
     return (
       <PaneNote>
-        <Waiting />
+        <Loading />
       </PaneNote>
     );
   if (shown.kind === "missing") {

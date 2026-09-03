@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { FleetListing, get, when } from "./api";
+import { Loading } from "./Loading";
 import { Params } from "./nav";
 
 export function Fleet(props: { navigate: (next: Partial<Params>) => void }) {
@@ -13,7 +14,7 @@ export function Fleet(props: { navigate: (next: Partial<Params>) => void }) {
   }, []);
 
   if (error) return <div className="empty">{error}</div>;
-  if (listing === null) return <div className="empty">loading…</div>;
+  if (listing === null) return <Loading />;
 
   const open = (workspaceId: string, domain: string | null, conversation: string | null) =>
     props.navigate({ ws: domain ?? workspaceId, c: conversation, t: null });

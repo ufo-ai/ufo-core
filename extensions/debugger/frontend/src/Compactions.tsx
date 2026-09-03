@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { CompactionRecord, get } from "./api";
+import { Loading } from "./Loading";
 
 export function Compactions(props: { conversationId: string }) {
   const [indices, setIndices] = useState<number[] | null>(null);
@@ -23,7 +24,7 @@ export function Compactions(props: { conversationId: string }) {
     );
   }, [props.conversationId, open]);
 
-  if (indices === null) return <div className="empty">loading…</div>;
+  if (indices === null) return <Loading />;
   if (indices.length === 0) return <div className="empty">no compactions</div>;
   return (
     <section className="panel">

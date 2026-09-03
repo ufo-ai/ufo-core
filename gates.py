@@ -124,7 +124,7 @@ RAW_CSS_VALUE = re.compile(
     r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
 )
 WAITING_MODULE = PORTAL_SOURCE / "kernel" / "panel.tsx"
-WAITING_COMPONENT = "export function Waiting("
+WAITING_COMPONENT = "export function Loading("
 WAITING_LINE = re.compile(r"Loading(?:…|\.\.\.)")
 WAITING_CLOSE = re.compile(r"^}$", re.M)
 UFO_SURFACE_MODULE = Path("extensions/ufo/ufo_ext_ufo/surface.py")
@@ -2014,7 +2014,7 @@ def _composition_rhythm_failures() -> list[str]:
 
 
 def _waiting_line_failures() -> list[str]:
-    """The waiting mark's words are written once. `Waiting` states the line a screen shows while it
+    """The waiting mark's words are written once. `Loading` states the line a screen shows while it
     has nothing else, and it appears on the theme's threshold, so the same literal spelled anywhere
     else draws a second mark at a different moment — the one that lands above rows already drawn
     while a re-read is in flight. What is read is that literal, not the idea of waiting: a screen
@@ -2039,7 +2039,7 @@ def _waiting_line_failures() -> list[str]:
     written = range(start, closing.end())
     failures = []
     if not any(found.start() in written for found in WAITING_LINE.finditer(text)):
-        failures.append(f"{WAITING_MODULE}: Waiting states no line — the gate lost its mark")
+        failures.append(f"{WAITING_MODULE}: Loading states no line — the gate lost its mark")
     pages = sorted(ROOT.glob(APP_PAGE_GLOB))
     if not pages:
         failures.append(f"{APP_PAGE_GLOB}: no app pages found — the gate lost its subjects")
@@ -2047,7 +2047,7 @@ def _waiting_line_failures() -> list[str]:
     for path in [*walked, *pages]:
         rel = path.relative_to(ROOT)
         failures.extend(
-            f"{rel}: {found.group(0)!r} outside Waiting — the surface has one waiting mark"
+            f"{rel}: {found.group(0)!r} outside Loading — the surface has one waiting mark"
             for found in WAITING_LINE.finditer(path.read_text())
             if rel != WAITING_MODULE or found.start() not in written
         )

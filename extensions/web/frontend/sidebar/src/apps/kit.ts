@@ -90,7 +90,7 @@ import {
   PanelBlank,
   PanelEmpty,
   Section,
-  Waiting,
+  Loading,
   usePanelRead,
 } from "@/kernel/panel";
 import { RebuildDialog } from "@/kernel/rebuild";
@@ -243,9 +243,9 @@ export {
   PanelBlank,
   PanelEmpty,
   Section,
-  /* The waiting line as page API: one mark, drawn on the theme's delay, so a page states what a
+  /* The loading line as page API: one mark, drawn on the theme's delay, so a page states what a
      portal screen states and a read that answers first leaves no trace on the way past. */
-  Waiting,
+  Loading,
   usePanelRead,
   RebuildDialog,
   RowLines,

@@ -21,7 +21,7 @@ import {
 import { PressRow } from "@/components/ui/pressrow";
 import type { Placement } from "@/kernel/pager";
 import { COLUMN } from "@/kernel/pane";
-import { Empty, Waiting } from "@/kernel/panel";
+import { Empty, Loading } from "@/kernel/panel";
 import { SlotTrack, opened, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, origin } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -476,7 +476,7 @@ function History({
           />
         </div>
       ) : rail.phase === "loading" ? (
-        <Waiting />
+        <Loading />
       ) : (
         <Empty>{NO_HISTORY}</Empty>
       )}
@@ -790,7 +790,7 @@ function ConversationLane({
         onOpens={onOpens}
         node={
           <div className="flex min-h-0 flex-1 flex-col bg-surface">
-            {resolving ? <Waiting /> : <Empty>{NO_CONVERSATION}</Empty>}
+            {resolving ? <Loading /> : <Empty>{NO_CONVERSATION}</Empty>}
           </div>
         }
       />
@@ -945,7 +945,7 @@ function PickerLane({
               </div>
             ) : (
               <div className={PICK_EMPTY}>
-                <Empty>{rail.phase === "loading" ? <Waiting /> : NO_CHATS}</Empty>
+                <Empty>{rail.phase === "loading" ? <Loading /> : NO_CHATS}</Empty>
               </div>
             )}
           </section>

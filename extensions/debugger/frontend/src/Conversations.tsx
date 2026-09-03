@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ConversationSummary, get, slackLink, when } from "./api";
+import { Loading } from "./Loading";
 import { Params } from "./nav";
 
 export function Conversations(props: {
@@ -12,7 +13,7 @@ export function Conversations(props: {
     get<ConversationSummary[]>("conversations").then(setConversations).catch(() => setConversations([]));
   }, []);
 
-  if (conversations === null) return <div className="empty">loading…</div>;
+  if (conversations === null) return <Loading />;
   if (conversations.length === 0) return <div className="empty">no conversations</div>;
   return (
     <table>

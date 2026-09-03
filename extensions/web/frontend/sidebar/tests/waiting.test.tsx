@@ -11,5 +11,9 @@ test("a text artifact still reading draws the one waiting mark", () => {
 
   render(<ArtifactText url="/artifacts/notes.md" name="notes.md" mediaType="text/markdown" />);
 
-  expect(screen.getByText("Loading…").className).toBe("animate-waiting");
+  const mark = screen.getByRole("status");
+  expect(mark.className).toContain("animate-waiting");
+  expect(mark.className).toContain("items-center justify-center");
+  expect(mark.querySelector("svg")?.classList.contains("animate-spin")).toBe(true);
+  expect(mark.textContent).toBe("Loading…");
 });

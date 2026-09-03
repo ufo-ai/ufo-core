@@ -17,7 +17,7 @@ import {
   Section,
   SectionApp,
   Sheet,
-  Waiting,
+  Loading,
   agentHash,
   agentName,
   appended,
@@ -626,7 +626,7 @@ function Report({
   if (body === null)
     return (
       <div>
-        <Waiting />
+        <Loading />
       </div>
     );
   return (

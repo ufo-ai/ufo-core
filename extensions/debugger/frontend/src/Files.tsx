@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiUrl, get, when, WorkspaceFile } from "./api";
+import { Loading } from "./Loading";
 
 const IMAGE_MIME: Record<string, string> = {
   png: "image/png",
@@ -32,7 +33,7 @@ export function Files(props: { conversationId: string }) {
       .catch(() => setFiles([]));
   }, [props.conversationId]);
 
-  if (files === null) return <div className="empty">loading…</div>;
+  if (files === null) return <Loading />;
   if (files.length === 0) return <div className="empty">no workspace files</div>;
   return (
     <section className="panel">
@@ -124,7 +125,7 @@ function Viewer(props: { conversationId: string; path: string }) {
       <div className="meta">
         <code>{props.path}</code>
       </div>
-      {view.kind === "loading" && <div className="empty">loading…</div>}
+      {view.kind === "loading" && <Loading />}
       {view.kind === "error" && <div className="empty error-text">{view.message}</div>}
       {view.kind === "binary" && (
         <div className="empty">binary file — use the download link</div>

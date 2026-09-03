@@ -62,7 +62,7 @@ import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
-import { Waiting } from "@/kernel/panel";
+import { Loading } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
@@ -1023,7 +1023,7 @@ function RoutedPane({
         if (rail.phase === "loading")
           return (
             <PaneNote>
-              <Waiting />
+              <Loading />
             </PaneNote>
           );
         if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
@@ -1031,7 +1031,7 @@ function RoutedPane({
         if (!outcome)
           return (
             <PaneNote>
-              <Waiting />
+              <Loading />
             </PaneNote>
           );
         if (outcome.kind === "signed-out") {
@@ -1330,7 +1330,7 @@ function RailList({
     <>
       {rail.phase === "loading" ? (
         <div className="p-sm text-ink-soft">
-          <Waiting />
+          <Loading />
         </div>
       ) : null}
       {rail.phase === "failed" ? (
