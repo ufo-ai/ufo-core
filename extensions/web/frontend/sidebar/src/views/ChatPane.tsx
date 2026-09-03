@@ -1,10 +1,10 @@
 import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Sheet } from "@/components/ui/sheet";
 import { Chat, type ChatProps } from "@/views/Chat";
 import { Header, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
+import { useSlot } from "@/kernel/slots";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import type { Crumb } from "@/lib/title";
@@ -29,8 +29,10 @@ export type ChatPaneProps = ChatProps & {
   crumb?: Crumb;
 };
 
-/** A conversation's own named sheet — its files, diffs or sources — over the transcript it belongs
- *  to. A caller already holding the inventory hands its summary over rather than reading it twice. */
+/** A conversation's own named lane — its files, diffs or sources — beside the transcript it belongs
+ *  to. It stands in the screen's track, where every other panel opened from a screen stands, rather
+ *  than fixed to the window's edge over whatever the member left standing there. A caller already
+ *  holding the inventory hands its summary over rather than reading it twice. */
 export function ConversationSlot({
   agent,
   conversationId,
@@ -52,16 +54,15 @@ export function ConversationSlot({
     (inventory.phase === "ready"
       ? inventory.payload.slots.find((entry) => entry.id === slot)
       : undefined);
-  return (
-    <Sheet open title={resolved?.label ?? slot} onClose={onClose}>
-      <ConversationSlotPane
-        agent={agent}
-        conversationId={conversationId}
-        slot={slot}
-        summary={resolved}
-        embedded
-      />
-    </Sheet>
+  return useSlot(
+    <ConversationSlotPane
+      agent={agent}
+      conversationId={conversationId}
+      slot={slot}
+      summary={resolved}
+      embedded
+    />,
+    { id: "slot:" + slot, kind: "panel", title: resolved?.label ?? slot, onClose },
   );
 }
 

@@ -1,21 +1,12 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconChevronDown,
   IconCirclePlus,
   IconDots,
   IconPin,
   IconPinFilled,
-  IconX,
 } from "@tabler/icons-react";
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
 import {
   SIDEBAR_FOLDED,
   SIDEBAR_PRESS,
@@ -23,12 +14,12 @@ import {
   SidebarPress,
   SidebarRow,
 } from "@/components/Sidebar";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Sheet } from "@/components/ui/sheet";
 import { Ticker } from "@/components/ui/ticker";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
@@ -288,12 +279,10 @@ function AgentRow({
  *  and a second place to write a task is a second place that has to state the same rules. */
 const TASK_KIND = "scheduled_task";
 
-/** An app's three reads, standing over the screen they were opened from rather than beside it. The
- *  scrim puts that screen out of focus so the panel is the one thing in hand, and the band names
- *  the read showing with the way to the other two under the same chevron — a member switches reads
- *  without going back to the band they came from. It stays out of the modal state radix would take:
- *  a record opened from the tasks read raises the shared sheet over this panel, and a modal layer
- *  under it would hold the pointer away from that sheet. */
+/** An app's three reads, standing in the shared drawer every record on the screen opens in: one
+ *  width, one band, one way out, so a member reads an app's settings where they read everything
+ *  else. The band names the app, and the read showing stands beside it under a chevron that reaches
+ *  the other two — a member switches reads without going back to the band they came from. */
 function AppSettings({
   agent,
   tab,
@@ -310,74 +299,32 @@ function AppSettings({
   children: ReactNode;
 }) {
   return (
-    <DialogPrimitive.Root modal={false} open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogPrimitive.Portal>
-        {/* The scrim is drawn here rather than as the primitive's own overlay, which renders
-            nothing outside the modal state this panel stays out of. */}
-        <div
-          data-slot="app-settings-scrim"
-          className="fixed inset-0 z-10 bg-scrim backdrop-blur-scrim animate-appear"
-          onClick={onClose}
-        />
-        <DialogPrimitive.Content
-          data-slot="app-settings"
-          aria-describedby={undefined}
-          onInteractOutside={(event) => event.preventDefault()}
-          className={cn(
-            "fixed inset-y-0 right-0 left-auto z-10 w-app-settings",
-            "flex min-h-0 flex-col border-l border-edge bg-surface pt-2xl",
-            "[box-shadow:var(--shadow-raised)] animate-slide-in-end",
-          )}
-        >
-          {/* The band stands the height of the acts on it and carries no rule of its own: the panel
-              is one surface, and a line under its own name would part the name from what it names. */}
-          <div className="flex h-(--size-control) shrink-0 items-center gap-md px-2xl">
-            {/* The app the read belongs to, then the read: a panel standing over the whole screen
-                covers the band that would otherwise say which app this is. The app step goes
-                nowhere — it is the screen already underneath — so it is the landmark's name and
-                text is all it is. */}
-            <Breadcrumb className="min-w-0 flex-1">
-              <BreadcrumbList className="flex-nowrap text-body tracking-ui">
-                <BreadcrumbItem className="min-w-0">
-                  <DialogPrimitive.Title asChild>
-                    <span className="truncate">{agentName(agent.name)}</span>
-                  </DialogPrimitive.Title>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator />
-                <BreadcrumbItem className="min-w-0">
-                  <DropdownMenu modal={false}>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className={cn(
-                          "flex min-w-0 cursor-pointer items-center gap-xs border-0 bg-transparent p-0",
-                          "text-inherit transition-colors duration-100 ease-control hover:text-ink",
-                        )}
-                      >
-                        <BreadcrumbPage>{SETTINGS_TAB_LABELS[tab]}</BreadcrumbPage>
-                        <IconChevronDown
-                          className="size-(--size-glyph) shrink-0 text-ink-soft"
-                          aria-hidden
-                        />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-(--container-menu)">
-                      <SettingsTabItems onPick={onTab} />
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </BreadcrumbItem>
-              </BreadcrumbList>
-            </Breadcrumb>
-            <Button variant="quiet" size="icon" aria-label="Close" onClick={onClose}>
-              <IconX aria-hidden />
-            </Button>
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-2xl overflow-y-auto p-2xl">
-            {children}
-          </div>
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+    <Sheet
+      open={open}
+      title={agentName(agent.name)}
+      onClose={onClose}
+      actions={
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className={cn(
+                "flex min-w-0 cursor-pointer items-center gap-xs border-0 bg-transparent p-0",
+                "text-label text-ink-soft transition-colors duration-100 ease-control hover:text-ink",
+              )}
+            >
+              <span className="min-w-0 truncate">{SETTINGS_TAB_LABELS[tab]}</span>
+              <IconChevronDown className="size-(--size-glyph) shrink-0" aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-(--container-menu)">
+            <SettingsTabItems onPick={onTab} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      }
+    >
+      {children}
+    </Sheet>
   );
 }
 

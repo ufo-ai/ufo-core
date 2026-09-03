@@ -1002,7 +1002,10 @@ test("scheduled task sheets close back to their settings list", async () => {
 
   const reopened = await openAgentSettings("Assistant", "Scheduled");
   expect(await within(reopened).findByText("daily-brief")).toBeTruthy();
-  expect(document.querySelectorAll("[data-slot=sheet-content]")).toHaveLength(0);
+  // The app's own panel is the one drawer standing: no record sheet is left over it.
+  const sheets = document.querySelectorAll("[data-slot=sheet-content]");
+  expect(sheets).toHaveLength(1);
+  expect(sheets[0]).toBe(reopened);
 });
 
 /** The workspace's own mark is reserved: the picker offers it to no app, and the main agent is the
@@ -1406,9 +1409,8 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
   render(<App agents={[AGENT, REVIEWER]} member={MEMBER} onAgents={() => {}} />);
   const dialog = within(await openAgentSettings("Code Reviewer"));
 
-  expect(dialog.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
-    "Code Reviewer/Settings",
-  );
+  expect(await screen.findByRole("dialog", { name: "Code Reviewer" })).toBeTruthy();
+  expect(dialog.getByRole("button", { name: "Settings" })).toBeTruthy();
 
   await userEvent.click(dialog.getByRole("button", { name: "Edit prompt" }));
   await userEvent.click(dialog.getByRole("button", { name: "Save prompt" }));
@@ -1788,12 +1790,11 @@ test("the app's panel switches reads from its own band, without going back to th
   render(<Portal />);
 
   const panel = within(await openAgentSettings("Research", "Settings"));
-  // The panel stands over the screen it was opened from, which the scrim under it is what says.
-  expect(document.querySelector("[data-slot=app-settings-scrim]")).toBeTruthy();
-  // The band names the app the read belongs to, because the panel covers the band that would.
-  expect(panel.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
-    "Research/Settings",
-  );
+  // The panel is the shared drawer every record on the screen opens in.
+  expect(document.querySelector("[data-slot=sheet-content]")).toBeTruthy();
+  // The band names the app the read belongs to, with the read showing beside it.
+  expect(await screen.findByRole("dialog", { name: "Research" })).toBeTruthy();
+  expect(panel.getByRole("button", { name: "Settings" })).toBeTruthy();
 
   await userEvent.click(panel.getByRole("button", { name: "Settings" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Scheduled" }));

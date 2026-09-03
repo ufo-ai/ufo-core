@@ -329,10 +329,6 @@
   /* An app's whole settings form, read in one dialog rather than a page: wider than a dialog that
      asks one question, and the width the spotlight search opens at. */
   --container-settings: min(880px, calc(100vw - 32px));
-  /* An app's own reads, standing over the screen rather than set into it. Narrower than the drawer
-     a record opens in: this one is read down a column of stated facts, and a wider measure only
-     puts more space between a fact's name and its value. */
-  --container-app-settings: min(493px, 100vw);
   --container-spotlight: min(640px, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 728px;

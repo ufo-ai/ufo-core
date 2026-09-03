@@ -937,11 +937,13 @@ test("a conversation opens its file changes and returns to chat", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "Changes" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=changes");
-  const sheet = await screen.findByRole("dialog", { name: "Changes" });
+  const lane = await screen.findByRole("region", { name: "Changes" });
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
   const column = screen.getByTestId("log").closest("[data-slot=message-scroller]")!.parentElement!;
-  expect(screen.getByRole("main").contains(sheet)).toBe(false);
-  expect(column.closest("[data-slot=slot-track]")?.className).toContain("contents");
+  // The slot stands as a lane of the screen's own track, beside the transcript rather than fixed
+  // to the window's edge over it.
+  expect(screen.getByRole("main").contains(lane)).toBe(true);
+  expect(column.closest("[data-slot=slot-track]")?.className).not.toContain("contents");
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention");
   expect(screen.getByText("+new").className).toContain("bg-affirm");
@@ -951,7 +953,7 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(screen.getByText("This diff is truncated.")).toBeTruthy();
   expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();
 
-  await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
+  await userEvent.click(within(lane).getByRole("button", { name: "Close Changes" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
@@ -1050,11 +1052,11 @@ test("an artifact slot file opens the shared file sheet", async () => {
   open();
 
   await userEvent.click(await screen.findByRole("button", { name: "Artifacts 1" }));
-  const sheet = await screen.findByRole("dialog", { name: "Artifacts" });
-  const artifact = await within(sheet).findByRole("button", { name: "chart.png" });
-  expect(within(sheet).queryByRole("link", { name: "chart.png" })).toBeNull();
+  const lane = await screen.findByRole("region", { name: "Artifacts" });
+  const artifact = await within(lane).findByRole("button", { name: "chart.png" });
+  expect(within(lane).queryByRole("link", { name: "chart.png" })).toBeNull();
   expect(screen.getByText("The final chart")).toBeTruthy();
-  expect(sheet.querySelector('img[src="/artifacts/preview/chart.png?token=signed"]')).toBeTruthy();
+  expect(lane.querySelector('img[src="/artifacts/preview/chart.png?token=signed"]')).toBeTruthy();
 
   await userEvent.click(artifact);
 
