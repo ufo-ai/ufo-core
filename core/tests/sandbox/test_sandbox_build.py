@@ -11,6 +11,7 @@ import sys
 from collections.abc import Iterator
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from e2b.template.types import BuildInfo
 
@@ -478,6 +479,30 @@ def test_publish_builds_every_tier_and_prints_the_size_map(monkeypatch, capsys) 
         "small=ufo-sbx-small:build-small,medium=ufo-sbx-medium:build-medium,"
         "large=ufo-sbx-large:build-large\n"
     )
+
+
+def test_a_verification_box_that_cannot_be_reaped_leaves_the_gate_s_verdict(
+    monkeypatch, capsys
+) -> None:
+    """Handing the box back is the E2B API's to answer, and it can time out. Every sandbox here is
+    created with a `timeout`, so E2B reaps it anyway; a transport failure closing it must not turn a
+    passing gate into a failed deploy, and a failing one must still fail."""
+    ready = SimpleNamespace(exit_code=0)
+    unreachable = SimpleNamespace(
+        commands=SimpleNamespace(run=lambda *args, **kwargs: ready),
+        kill=lambda: (_ for _ in ()).throw(httpx.ReadTimeout("The read operation timed out")),
+    )
+    monkeypatch.setattr(
+        build_template, "Sandbox", SimpleNamespace(create=lambda **kwargs: unreachable)
+    )
+
+    build_template.verify_published_template("ufo-sbx-small:build-1")
+
+    assert "ufo-sbx-small:build-1: sandbox left to expire" in capsys.readouterr().err
+
+    ready.exit_code = 1
+    with pytest.raises(RuntimeError, match="missing baked runtime tools"):
+        build_template.verify_published_template("ufo-sbx-small:build-1")
 
 
 def test_check_reads_every_tier_against_its_own_digest(monkeypatch) -> None:

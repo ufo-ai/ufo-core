@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
+import httpx
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.template.main import TemplateBuilder, TemplateFinal
@@ -453,6 +454,17 @@ def build_docker_image() -> None:
     print(DOCKER_IMAGE_TAG)
 
 
+def _reap(sandbox: Sandbox, name: str) -> None:
+    """Hand the verification box back. Every sandbox here is created with a `timeout`, so E2B reaps
+    it on its own and this only returns it sooner — which is why a transport failure closing it
+    cannot be allowed to replace the verdict the gate just computed. It is said on stderr instead,
+    because a box that outlives its check is worth knowing about even though nothing waits on it."""
+    try:
+        sandbox.kill()
+    except httpx.TransportError as unreachable:
+        print(f"{name}: sandbox left to expire ({unreachable})", file=sys.stderr)
+
+
 def verify_published_template(name: str) -> None:
     """Publish gate: boot a sandbox from the freshly built template and run the baked-tool readiness
     probe. A template missing a baked tool fails here, so the build cannot report success on a
@@ -466,7 +478,7 @@ def verify_published_template(name: str) -> None:
     except CommandExitException as error:
         raise RuntimeError(f"published template {name} is missing baked runtime tools") from error
     finally:
-        sandbox.kill()
+        _reap(sandbox, name)
     if result.exit_code != 0:
         raise RuntimeError(f"published template {name} is missing baked runtime tools")
 
@@ -485,7 +497,7 @@ def check_published_template(name: str, expected: str) -> None:
             f"published template {name} predates the build digest; republish the sandbox template"
         ) from error
     finally:
-        sandbox.kill()
+        _reap(sandbox, name)
     actual = result.stdout.strip()
     if actual != expected:
         raise RuntimeError(
