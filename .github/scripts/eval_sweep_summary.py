@@ -26,10 +26,22 @@ REASON_LIMIT = 240
 NOT_RECORDED = "Not recorded"
 MEMORY_STATE_ROOT = Path("state")
 MEMORY_PRODUCER_STATE_ROOT = Path("producer-state")
+# A fully excluded case the cohort requires, on every arm of a full sweep.
 EXPECTED_FULL_EXCLUSIONS = frozenset(
     {
         ("skill_loading_member", "bias-ach-explainer-block-off"),
         ("skill_loading_member", "bias-deploy-pdf-merge-block-off"),
+    }
+)
+# A fully excluded case the cohort accepts without requiring it. A document-read page excludes
+# only when the sweep's own shape refused the render — the stack boots the egress proxy with no
+# `UFO_EGRESS_PREVIEW_DAEMON`, so the preview host is never admitted — and the target model asked
+# for that page. A model that answers the question from another tool leaves the case scored, which
+# is a finding the suite records, not a night without a trend point.
+TOLERATED_FULL_EXCLUSIONS = frozenset(
+    {
+        ("document_read", "docx-second-page"),
+        ("document_read", "xlsx-second-printed-page"),
     }
 )
 type PlannedRun = tuple[str, str, str | None]
@@ -52,6 +64,20 @@ def _planned_runs(smoke: bool, memory_ingestion: bool) -> tuple[PlannedRun, ...]
 
 def _matches(planned: PlannedRun, recorded: RecordedRun) -> bool:
     return planned[:2] == recorded[:2] and (planned[2] is None or planned[2] == recorded[2])
+
+
+def _sweep_exclusions(
+    planned_runs: tuple[PlannedRun, ...], cases: frozenset[tuple[str, str]], smoke: bool
+) -> tuple[PlannedRun, ...]:
+    """Each planned run's copy of the fixed-case exclusions, and none for the proving subset."""
+    if smoke:
+        return ()
+    return tuple(
+        (suite, case, model)
+        for _, suite, model in planned_runs
+        for listed_suite, case in cases
+        if suite == listed_suite
+    )
 
 
 def _format_run(run: PlannedRun | RecordedRun) -> str:
@@ -184,18 +210,13 @@ def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) 
         for case in report.cases
         if case.excluded
     )
-    expected_exclusions = (
-        ()
-        if smoke
-        else tuple(
-            (suite, case, model)
-            for _, suite, model in planned_runs
-            for expected_suite, case in EXPECTED_FULL_EXCLUSIONS
-            if suite == expected_suite
-        )
+    expected_exclusions = _sweep_exclusions(planned_runs, EXPECTED_FULL_EXCLUSIONS, smoke)
+    accepted_exclusions = (
+        *expected_exclusions,
+        *_sweep_exclusions(planned_runs, TOLERATED_FULL_EXCLUSIONS, smoke),
     )
     unexpected_exclusions = sorted(
-        {row for row in excluded if not any(_matches(item, row) for item in expected_exclusions)}
+        {row for row in excluded if not any(_matches(item, row) for item in accepted_exclusions)}
     )
     absent_exclusions = tuple(
         item for item in expected_exclusions if not any(_matches(item, row) for row in excluded)

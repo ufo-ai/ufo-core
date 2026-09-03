@@ -18,8 +18,13 @@ from evals.harness.scorers import (
     restraint_scorer,
     skill_scorer,
 )
+from ufo.harness.sandbox.preview import PREVIEW_HOST
 
 FIXTURES = Path(__file__).parents[2] / "servers" / "preview" / "tests" / "fixtures"
+# The sandbox proxy's own line for a CONNECT it would not open (`client/src/egress.rs`). The read
+# path prints the render URL in every failure text, including one the service answered with a
+# status, so the host alone does not say the request never arrived — this line does.
+RENDER_TUNNEL_REFUSED = f"refused the tunnel to {PREVIEW_HOST}"
 DOCX_PATH = "/workspace/fixture-layout.docx"
 XLSX_PATH = "/workspace/fixture-print-layout.xlsx"
 DOCX = WorkspaceFile(
@@ -33,6 +38,14 @@ XLSX = WorkspaceFile(
 
 
 def paginated_read_scorer(path: str, offset: int) -> Grader:
+    """Choosing the page is the model's act; answering it is the environment's. A page the agent
+    never asked for fails, and so does a read that broke for its own reasons — only a read the
+    proxy refused to tunnel to the preview service excludes the sample. Every paginated document
+    read routes through that service, and a deploy running none never admits its host, so the
+    tunnel is refused and no render is reached: an environment the case does not describe. A render
+    the service answered with an error is the fault this suite exists to catch, so it is scored;
+    excluding it would file a real regression in the paginated read where nobody reads it."""
+
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         call = next(
             (
@@ -47,7 +60,13 @@ def paginated_read_scorer(path: str, offset: int) -> Grader:
         if call is None:
             return CapabilityVerdict(False, f"did not read {path} from page {offset}")
         if not call.succeeded:
-            return CapabilityVerdict(False, f"the paginated read failed: {call.result[:120]}")
+            unreachable = RENDER_TUNNEL_REFUSED in call.result
+            reason = (
+                f"the render service never answered {path}: {call.result[:120]}"
+                if unreachable
+                else f"the paginated read of {path} failed: {call.result[:120]}"
+            )
+            return CapabilityVerdict(False, reason, excluded=unreachable)
         return CapabilityVerdict(True, f"read {path} from page {offset}")
 
     return DescribedGrader(f"read completes for {path!r} with offset={offset}", grade)
