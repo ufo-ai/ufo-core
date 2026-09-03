@@ -170,6 +170,21 @@ resource "datadog_monitor" "problem_reported" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+resource "datadog_monitor" "portal_unhandled_error" {
+  name    = "ufo prod portal threw an unhandled error"
+  type    = "rum alert"
+  query   = "rum(\"env:prod @type:error @error.handling:unhandled\").rollup(\"count\").last(\"15m\") > 0"
+  message = "A portal screen threw where nothing caught it, so what the member was reading is what they are still looking at. {{value}} in this window. The session replay is the whole story — open the error in RUM, then the session it belongs to. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 0
+  }
+
+  notify_no_data = false
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 resource "datadog_monitor" "db_storage_low" {
   name    = "ufo prod database is low on storage"
   type    = "query alert"
