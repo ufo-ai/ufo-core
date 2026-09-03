@@ -137,7 +137,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
@@ -290,7 +290,7 @@ test("a kind stands as soon as it answers, while a slower kind is still being re
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]),
+    expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]),
   );
 });
 

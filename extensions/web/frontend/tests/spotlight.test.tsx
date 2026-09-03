@@ -253,7 +253,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]);
   expect(found.queryByText(/Error 500/)).toBeNull();
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
@@ -417,8 +417,29 @@ test("a kind that answers last still stands in its own place", async () => {
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]),
+    expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]),
   );
+});
+
+/** A thread is a thread wherever it was found: the rail's own rows and the workspace read's hits
+ *  stand in one run under the one word, and a thread the rail already carries is listed once. */
+test("the rail's threads and the read's hits stand in one run", async () => {
+  wire({
+    ...chatsOnWire(RAIL),
+    ...QUIET,
+    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION, FOUND_THEIR_CONVERSATION] }),
+  });
+  await open();
+  await type("thread");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /Rotate the signing key/ })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Threads"]);
+  expect(rowsUnder("Threads")).toEqual([
+    "Pick one thread",
+    "Rotate the signing keyAssistant",
+    "See more history",
+  ]);
 });
 
 /** Files and sites are two reads standing as one group, so the group is drawn on whichever read
@@ -436,7 +457,7 @@ test("the artifacts group stands on the read that landed and takes the other's h
   sites.lands();
   expect(await found.findByRole("option", { name: /deploy-board/ })).toBeTruthy();
   expect(rowsUnder("Artifacts")).toHaveLength(2);
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]);
 });
 
 test("an empty box reads nothing at all", async () => {

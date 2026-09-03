@@ -249,7 +249,7 @@ export async function searchEverywhere(
     lands(
       "conversations",
       group<"conversations">(
-        "Conversations",
+        "Threads",
         IconMessage,
         agents.map((agent) => "/agents/" + agent.id + "/conversations" + query(wanted)),
         (payload) =>

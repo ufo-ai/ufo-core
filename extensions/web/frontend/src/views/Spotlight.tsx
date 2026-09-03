@@ -115,10 +115,11 @@ const FILTER = "Filter threads";
  *  shell already holds, so the read's own app hits would draw each of them a second time. */
 const SEARCHED_APPS = "Apps";
 
-/** The conversations group the workspace read answers with. A thread is a lane wherever it is
- *  opened from, so these rows are drawn and opened as the rail's own threads are rather than as
- *  addresses the pane is replaced by. */
-const SEARCHED_THREADS = "Conversations";
+/** The threads group the workspace read answers with. A thread is a lane wherever it is opened
+ *  from, so these rows are drawn and opened as the rail's own threads are rather than as addresses
+ *  the pane is replaced by, and they stand under the rail's own heading rather than a second word
+ *  for the same rows. */
+const SEARCHED_THREADS = THREADS;
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
@@ -643,12 +644,27 @@ export function Spotlight({
       .filter((row) => row.title.toLowerCase().includes(lowered))
       .slice(0, THREADS_SHOWN)
       .map(railRow);
+    /** The threads the workspace read found, under the rail's own rows: one run of threads rather
+     *  than the same rows standing twice under two words. A thread the rail already lists is the
+     *  rail's row, which states whose it is and which app holds it. */
+    const searched = (groups ?? []).find((group) => group.label === SEARCHED_THREADS);
+    const searchedThreads = (searched?.hits ?? [])
+      .filter((hit) => !listedThreads.some((row) => row.value === "thread " + hit.key))
+      .map((hit) =>
+        threadRow({
+          value: "thread " + hit.key,
+          conversation: hit.key,
+          primary: hit.primary,
+          fact: hit.fact,
+        }),
+      );
     const threadsRun: Run = {
       heading: THREADS,
       rows:
         named && listedThreads.length
           ? [
               ...listedThreads,
+              ...searchedThreads,
               {
                 value: "history",
                 icon: IconArrowRight,
@@ -656,31 +672,23 @@ export function Spotlight({
                 open: () => toScope({ kind: "app", agent: named }),
               },
             ]
-          : listedThreads,
+          : [...listedThreads, ...searchedThreads],
+      note: searched?.failed ?? undefined,
     };
     /** What the workspace answered, kind by kind, under the rows the shell could list on its own.
      *  The apps it names are the roster this palette already draws, so that one group is dropped
-     *  rather than standing every app a second time. */
+     *  rather than standing every app a second time, and its threads stand in the run above. */
     const readRuns: Run[] = (groups ?? [])
-      .filter((group) => group.label !== SEARCHED_APPS)
+      .filter((group) => group.label !== SEARCHED_APPS && group.label !== SEARCHED_THREADS)
       .map((group) => ({
         heading: group.label,
-        rows: group.hits.map((hit) =>
-          group.label === SEARCHED_THREADS
-            ? threadRow({
-                value: group.label + " " + hit.key,
-                conversation: hit.key,
-                primary: hit.primary,
-                fact: hit.fact,
-              })
-            : {
-                value: group.label + " " + hit.key,
-                icon: group.icon,
-                primary: hit.primary,
-                fact: hit.fact,
-                open: () => take(hit.hash),
-              },
-        ),
+        rows: group.hits.map((hit) => ({
+          value: group.label + " " + hit.key,
+          icon: group.icon,
+          primary: hit.primary,
+          fact: hit.fact,
+          open: () => take(hit.hash),
+        })),
         note: group.failed ?? undefined,
       }));
     /** A term is answered acts first — the member typed words to do something with them — and an
