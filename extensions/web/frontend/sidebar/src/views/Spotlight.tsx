@@ -96,6 +96,9 @@ export function Spotlight({
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [groups, setGroups] = useState<Group[] | null>(null);
+  /** Whether the workspace read has finished. The kinds land one at a time and the panel draws each
+   *  as it arrives, so what has already landed does not say the search is over. */
+  const [settled, setSettled] = useState(false);
   const wanted = typed.trim();
   /** The agent a workspace-owned act is expressed to — the main one, as the artifacts screen does. */
   const named = agents.find((agent) => agent.main) ?? agents[0];
@@ -119,19 +122,28 @@ export function Spotlight({
   useEffect(() => {
     if (!open || !wanted) {
       setGroups(null);
+      setSettled(false);
       return;
     }
+    setSettled(false);
     const held = new AbortController();
     const timer = window.setTimeout(() => {
-      searchEverywhere(wanted, agents, held.signal)
+      /* Each kind is drawn as it lands rather than at the end of the fan-out: the reads are one per
+         kind and the slowest of them would otherwise hold back every row the others answered. */
+      searchEverywhere(wanted, agents, held.signal, (answering) => {
+        if (!held.signal.aborted) setGroups(answering);
+      })
         .then((found) => {
-          if (!held.signal.aborted) setGroups(found);
+          if (held.signal.aborted) return;
+          setGroups(found);
+          setSettled(true);
         })
         /** A search that broke states it. Swallowing the fault leaves the box looking like a
          *  workspace holding nothing, which is the one answer it must never give by accident. */
         .catch((error: unknown) => {
           if (held.signal.aborted) return;
           setGroups([{ label: "Search", icon: IconSearch, hits: [], failed: String(error) }]);
+          setSettled(true);
         });
     }, REST_MS);
     return () => {
@@ -176,8 +188,9 @@ export function Spotlight({
     place.label.toLowerCase().includes(lowered),
   );
 
-  const answered = groups !== null;
-  const status = !wanted ? null : !answered ? WORKING : groups.length ? null : BLANK;
+  /** What the panel says instead of rows: that the read is still running, or that the term found
+   *  nothing. The kinds land one at a time, so the read is over when the last of them lands. */
+  const status = !wanted ? null : !settled ? WORKING : groups?.length ? null : BLANK;
   return (
     <Dialog open={open} onOpenChange={show}>
       <DialogTrigger asChild>

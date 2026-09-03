@@ -286,6 +286,9 @@ export function Spotlight({
   const [typed, setTyped] = useState("");
   const [page, setPage] = useState<Page>({ kind: "root" });
   const [groups, setGroups] = useState<Group[] | null>(null);
+  /** Whether the workspace read has finished. The kinds land one at a time and the panel draws each
+   *  as it arrives, so what has already landed does not say the search is over. */
+  const [settled, setSettled] = useState(false);
   const [found, setFound] = useState<Group | null>(null);
   const [audience, setAudience] = useState<Audience>("all");
   const viewer = useViewer();
@@ -436,19 +439,28 @@ export function Spotlight({
   useEffect(() => {
     if (!open || page.kind !== "root" || !wanted) {
       setGroups(null);
+      setSettled(false);
       return;
     }
+    setSettled(false);
     const held = new AbortController();
     const timer = window.setTimeout(() => {
-      searchEverywhere(wanted, agents, held.signal)
+      /* Each kind is drawn as it lands rather than at the end of the fan-out: the reads are one per
+         kind and the slowest of them would otherwise hold back every row the others answered. */
+      searchEverywhere(wanted, agents, held.signal, (answering) => {
+        if (!held.signal.aborted) setGroups(answering);
+      })
         .then((answered) => {
-          if (!held.signal.aborted) setGroups(answered);
+          if (held.signal.aborted) return;
+          setGroups(answered);
+          setSettled(true);
         })
         /** A search that broke states it. Swallowing the fault leaves the box looking like a
          *  workspace holding nothing, which is the one answer it must never give by accident. */
         .catch((error: unknown) => {
           if (held.signal.aborted) return;
           setGroups([{ label: "Search", icon: IconSearch, hits: [], failed: String(error) }]);
+          setSettled(true);
         });
     }, REST_MS);
     return () => {
@@ -680,9 +692,13 @@ export function Spotlight({
     runs.push(...ordered.filter((run) => run.rows.length > 0 || run.note !== undefined));
   }
 
-  /** How many kinds the read answered with, and nothing while it is still running. The scopes page
-   *  narrows rows that are already drawn and reads nothing, so it says nothing either. */
+  /** How many kinds the read has answered with, and nothing before the first of them lands. The
+   *  scopes page narrows rows that are already drawn and reads nothing, so it says nothing
+   *  either. */
   const answered = page.kind === "threads" ? found?.hits.length : groups?.length;
+  /** Whether the read is still running. A root read is over when its last kind lands, not when the
+   *  first one does, so the line stands under the groups already drawn. */
+  const working = page.kind === "root" ? !settled : found === null;
   /** The row the cursor stands on, and the row it falls to. cmdk holds the cursor by value, and a
    *  value from the page before this one names no row here: the cursor would then stand on nothing,
    *  Enter would answer nothing, and an arrow press would be what put it back. */
@@ -692,13 +708,7 @@ export function Spotlight({
     setSelected(first);
   }, [page, first]);
   const status =
-    !wanted || page.kind === "scopes"
-      ? null
-      : answered === undefined
-        ? WORKING
-        : answered
-          ? null
-          : BLANK;
+    !wanted || page.kind === "scopes" ? null : working ? WORKING : answered ? null : BLANK;
   /** What the foot calls the page the member is standing on. */
   const standing =
     page.kind === "root"

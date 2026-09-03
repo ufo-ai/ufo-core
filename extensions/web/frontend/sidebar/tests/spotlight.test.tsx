@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "";
@@ -76,7 +76,7 @@ const FOUND_TASK_DETAIL = {
 };
 
 /** Every read the spotlight fans out to, each answering the one term. */
-function everything() {
+function everything(extra: Record<string, Route> = {}) {
   return wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
     "/slots": () => json({ slots: [] }),
@@ -87,6 +87,7 @@ function everything() {
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
     ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
     "/transcript": () => json({ messages: [] }),
+    ...extra,
   });
 }
 
@@ -269,7 +270,8 @@ test("a term nothing answers says so once, not once per kind", async () => {
 });
 
 /** The fan-out rests before it fires, so a term states that it is being read rather than standing
- *  under an empty list that reads as a workspace holding nothing. */
+ *  under an empty list that reads as a workspace holding nothing. The line stands until the last
+ *  kind lands, because a kind that has not answered yet may still hold rows. */
 test("a term states that it is being read until the reads answer", async () => {
   everything();
   await open();
@@ -278,7 +280,37 @@ test("a term states that it is being read until the reads answer", async () => {
   const found = within(await screen.findByRole("dialog"));
   expect(found.getByText("Searching…")).toBeTruthy();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
-  expect(found.queryByText("Searching…")).toBeNull();
+  await waitFor(() => expect(found.queryByText("Searching…")).toBeNull());
+});
+
+/** A read the suite holds open, so the panel can be read while one kind is still being answered.
+ *  Every call waits, and `lands` answers all of them. */
+function slow(answer: () => Response): { route: Route; lands: () => void } {
+  const waiting: (() => void)[] = [];
+  return {
+    route: () => new Promise<Response>((resolve) => waiting.push(() => resolve(answer()))),
+    lands: () => waiting.splice(0).forEach((go) => go()),
+  };
+}
+
+/** The reads are one per kind and they answer at their own speeds, so each kind is drawn as it
+ *  lands, and the slow one takes its own place in the list when it arrives. */
+test("a kind stands as soon as it answers, while a slower kind is still being read", async () => {
+  const conversations = slow(() => json({ conversations: [FOUND_CONVERSATION] }));
+  everything({ "/conversations$": conversations.route });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  expect(found.queryByRole("option", { name: /Rename the deploy job/ })).toBeNull();
+  expect(found.getByText("Searching…")).toBeTruthy();
+
+  conversations.lands();
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  await waitFor(() =>
+    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]),
+  );
 });
 
 test("an empty box reads nothing at all", async () => {

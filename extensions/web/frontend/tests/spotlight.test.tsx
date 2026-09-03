@@ -374,7 +374,8 @@ test("a term nothing answers says so once, not once per kind", async () => {
 });
 
 /** The fan-out rests before it fires, so a term states that it is being read rather than standing
- *  under an empty list that reads as a workspace holding nothing. */
+ *  under an empty list that reads as a workspace holding nothing. The line stands until the last
+ *  kind lands, because a kind that has not answered yet may still hold rows. */
 test("a term states that it is being read until the reads answer", async () => {
   everything();
   await open();
@@ -383,7 +384,73 @@ test("a term states that it is being read until the reads answer", async () => {
   const found = within(await screen.findByRole("dialog"));
   expect(found.getByText("Searching…")).toBeTruthy();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
-  expect(found.queryByText("Searching…")).toBeNull();
+  await waitFor(() => expect(found.queryByText("Searching…")).toBeNull());
+});
+
+/** A read the suite holds open, so the panel can be read while one kind is still being answered.
+ *  Every call waits, and `lands` answers all of them. */
+function slow(answer: () => Response): { route: Route; lands: () => void } {
+  const waiting: (() => void)[] = [];
+  return {
+    route: () => new Promise<Response>((resolve) => waiting.push(() => resolve(answer()))),
+    lands: () => waiting.splice(0).forEach((go) => go()),
+  };
+}
+
+/** The reads are one per kind and they answer at their own speeds, so each kind is drawn as it
+ *  lands. A slow kind holds back its own rows and nothing else. */
+test("a kind stands as soon as it answers, while a slower kind is still being read", async () => {
+  const memory = slow(() => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }));
+  everything({ "/workspace/memory": memory.route });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
+  expect(found.queryByRole("option", { name: /the deploy runbook lives in ops\// })).toBeNull();
+  expect(found.getByText("Searching…")).toBeTruthy();
+
+  memory.lands();
+  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  await waitFor(() => expect(found.queryByText("Searching…")).toBeNull());
+});
+
+/** A kind stands where it always stands, whenever it lands: the slowest kind takes its own place in
+ *  the list rather than the last one, so rows do not move as the member reads them. */
+test("a kind that answers last still stands in its own place", async () => {
+  const conversations = slow(() => json({ conversations: [FOUND_CONVERSATION] }));
+  everything({ "/conversations$": conversations.route });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Artifacts", "Memory", "Tasks"]);
+
+  conversations.lands();
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  await waitFor(() =>
+    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]),
+  );
+});
+
+/** Files and sites are two reads standing as one group, so the group is drawn on whichever read
+ *  has landed and takes the other's hits when they arrive. */
+test("the artifacts group stands on the read that landed and takes the other's hits", async () => {
+  const sites = slow(() => objectIndex(SITE_KIND, [owned({ name: "deploy-board" })]));
+  everything({ ["/objects/" + SITE_KIND.kind]: sites.route });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
+  expect(rowsUnder("Artifacts")).toHaveLength(1);
+
+  sites.lands();
+  expect(await found.findByRole("option", { name: /deploy-board/ })).toBeTruthy();
+  expect(rowsUnder("Artifacts")).toHaveLength(2);
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]);
 });
 
 test("an empty box reads nothing at all", async () => {
