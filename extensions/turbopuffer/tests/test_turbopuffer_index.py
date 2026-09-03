@@ -11,6 +11,9 @@ import asyncio
 import hashlib
 import json
 import threading
+from collections.abc import Callable, Coroutine
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -247,3 +250,62 @@ async def test_the_client_registry_does_not_decide_index_equality(db: None) -> N
     assert one.clients and not two.clients
     assert one == two
     assert hash(one) == hash(two)
+
+
+class _KeepAlive(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self) -> None:
+        body = b'{"rows": []}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _LiveLoop:
+    """An event loop on its own thread that stays open, as each loop `serve` runs does."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+
+    def ask(self, question: Callable[[], Coroutine[Any, Any, bool]]) -> bool:
+        return asyncio.run_coroutine_threadsafe(question(), self.loop).result(timeout=30)
+
+    def close(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=5)
+
+
+async def test_a_second_live_loop_reuses_no_connection_bound_to_the_first(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keying test pins the mechanism; this reproduces the fault it prevents. A stub transport
+    holds no socket, so the `RuntimeError` needs a real keep-alive connection: the index dials on
+    one loop, and a second loop takes that connection warm from the pool and awaits an `Event`
+    bound to the first. Both loops staying open is what makes it fire — `asyncio.run` closes its
+    loop and drops the socket, so a sequential probe redials and the fault hides."""
+    workspace_id = await _workspace()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _KeepAlive)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(tpuf, "BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    index = tpuf.TurbopufferIndex(credentials=await _access(workspace_id))
+    first, second = _LiveLoop(), _LiveLoop()
+
+    async def has_chunks() -> bool:
+        with ws(workspace_id):
+            return await index.has_chunks(IndexScope(OWNER_KIND, "m1"))
+
+    try:
+        assert first.ask(has_chunks) is False
+        assert second.ask(has_chunks) is False
+    finally:
+        first.close()
+        second.close()
+        server.shutdown()
