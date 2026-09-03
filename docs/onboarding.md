@@ -622,18 +622,41 @@ setup API.
 
 The lanes shell's run (`enable-lanes-shell`; the sidebar shell keeps its own) asks for the website,
 the business, the role, and free-text detail, and offers three goals as chips — more revenue, faster
-product development, finding product-market fit. Pressing Next on the last step does three things,
-in this order, and holds the step on a refusal rather than handing over half of it.
+product development, finding product-market fit. The business is the one answer the first task
+needs, so Next on the business step founds that thread and every step after it runs beside a turn
+already working. Next on the last step does two more things, in this order, and holds the step on a
+refusal rather than handing over half of it.
 
 | Order | Act | Why it is where it is |
 |---|---|---|
-| 1 | One `record_first_run` write on the memory collection, holding the business, the role, and every picked goal | Every thread below recalls it, so none of them asks what the business does. A thread that started first would race the write. |
-| 2 | One `POST /agents/{id}/chat?conversation=new` per picked goal, each carrying that goal's opening line | The chat POST is the chat transport, so a thread is opened by admitting its first message: the member is the speaker, the rail gains the row, and the turn runs while they are still on the build screen. The line carries its own instructions: the run already knows which goal was picked, so nothing routes and no skill loads. |
-| 3 | The first task's opening line, left for the composer home stands | The member lands on this one and reads it live, so it is founded by the composer on the screen they are looking at rather than by the panel. `competitive-intel` routes on it. |
+| 1 | One `POST /agents/{id}/chat?conversation=new` carrying the first task's opening line, on Next from the business step | The brief is the slowest thing the workspace does, so it starts before the role, the goals and the Slack install rather than after them. The line names the business and the task alone, which is all that is known that early. `competitive-intel` routes on it. |
+| 2 | One `record_first_run` write on the memory collection, holding the business, the role, and every picked goal | Every goal thread below recalls it, so none of them asks what the business does. A goal thread that started first would race the write. |
+| 3 | One `POST /agents/{id}/chat?conversation=new` per picked goal, each carrying that goal's opening line | The chat POST is the chat transport, so a thread is opened by admitting its first message: the member is the speaker, the rail gains the row, and the turn runs while they are still on the build screen. The line carries its own instructions: the run already knows which goal was picked, so nothing routes and no skill loads. |
+
+The run ends on home standing two lanes: the first task's own thread, where the turn founded on the
+business step is answering, and the connectors screen beside it, so the accounts that task reads are
+connected without leaving the page. A run whose founding send never landed stands the chat app's own
+lane in the thread's place.
 
 A goal thread is a conversation like any other: the member opens it from the rail, replies in it,
 and its turn is in the audit record the same way. Nothing about it is a background job — the only
 thing the run does that a member could not do by typing is type it for them.
+
+### The tools step
+
+The role step leads into one more question: the connectors somebody in that seat works in every
+day, offered as a multiple choice. The suggestions are held per role in the run itself and drawn
+against the catalog the `/workspace/first-run` read carries, so a deploy that cannot grant a
+suggested provider never offers it, and a role whose tools this catalog carries none of stands no
+step at all. Slack is on no role's list: it installs for the whole workspace and already has a step
+of its own.
+
+The picks are then connected on the step itself, by the acts the connectors screen uses — the
+workspace install action where the provider takes one, and the broker's `connect` verb for an
+account that is the member's, whose link arrives on the request turn's own `connect` frame. Each
+row reads connected off the `/connections` pool, which the step polls while it stands, since the
+grant lands on the provider's pages and nothing else here can say when. Next carries on with
+whatever is left unconnected: the run asks once and never holds the member on it.
 
 ## Enrichment
 

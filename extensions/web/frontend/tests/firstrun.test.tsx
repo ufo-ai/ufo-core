@@ -5,7 +5,7 @@ import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 import { App } from "@/App";
 import { BUILD_STEP_MS, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
 import { resetChatStore } from "@/lib/chatStore";
-import { HOME_HASH, homeHash } from "@/lib/route";
+import { HOME_CONNECTORS_LANE, homeConversationLane, homeHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -95,9 +95,13 @@ const OTHER_THREAD =
   "have granted, and the first step you would take. Do not guess what you could not read — say " +
   "so. Ask me at most one thing.";
 
-/** The three answers as the defaults below write them, said into the chat the run opens. */
+/** The business as the default below writes it, said into the chat the run founds off the business
+ *  step: the first task is the whole of it, and the run says it before every step that follows. */
 const OPENING =
-  "I just set up this workspace. My business: Design studio. My role: Founder. Set up my first task: a daily competitive analysis.";
+  "I just set up this workspace. My business: Design studio. Set up my first task: a daily competitive analysis.";
+
+/** Where the run leaves the member: the thread it founded, with the connectors screen beside it. */
+const HANDED = homeHash({ opens: [homeConversationLane(CONVO_ID), HOME_CONNECTORS_LANE] });
 
 /** The install as the surface object projects it, read by the Slack step on the press. */
 const INSTALL_READS: Record<string, Route> = {
@@ -141,8 +145,8 @@ const ACTIONS: Pick<FirstRunPayload, "actions"> = {
 
 const FIRST_RUN = {
   providers: [
-    { name: "slack", label: "Slack" },
-    { name: "github", label: "GitHub" },
+    { name: "slack", label: "Slack", summary: "Send and read messages.", group: "Messaging" },
+    { name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" },
   ],
   connectors: [{ name: "slack", label: "Slack", installed: false }],
   ...ACTIONS,
@@ -314,25 +318,19 @@ let chat = chatSink();
  *  wires its own lane where it is about a refusal. */
 let acts = recorder();
 
-/** The box home's chat lane stands, which is the one composer the opening line is for. */
-function laneBox(): HTMLTextAreaElement {
-  return screen.getByLabelText("Ask UFO") as HTMLTextAreaElement;
-}
-
-/** The run's end: the workspace building itself, then Open your workspace onto home. The lane it
- *  lands in says the opening line with no keystroke, and holds the cursor for the reply.
+/** The run's end: the workspace building itself, then Open your workspace onto home, standing the
+ *  thread the run founded with the connectors screen beside it.
  *
- *  The opening line is the last thing said, not the only one: a run that picked goals founded a
- *  thread per goal before it reached this screen, and those were said first. */
+ *  The opening line is the first thing said, not the only one: it left on the business step, and a
+ *  run that picked goals founded a thread per goal after it. */
 async function built(expected = OPENING) {
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await userEvent.click(
     await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 5 }),
   );
-  expect(location.hash.startsWith(HOME_HASH)).toBe(true);
-  await waitFor(() => expect(chat.sent.at(-1)).toEqual(expected));
-  expect(chat.posted.at(-1)).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
-  expect(document.activeElement).toBe(laneBox());
+  expect(location.hash).toBe(HANDED);
+  expect(chat.sent[0]).toEqual(expected);
+  expect(chat.posted[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
 }
 
 function next(): HTMLButtonElement {
@@ -413,7 +411,9 @@ test("closing the welcome opens the chat", async () => {
   expect(location.hash).not.toBe("#/first-run");
 });
 
-test("closing a step opens the chat with nothing asked", async () => {
+/** Closing walks out of the run rather than finishing it: nothing more is said, and the first
+ *  task's own thread — founded back on the business step — is left running. */
+test("closing a step opens the chat with nothing more asked", async () => {
   await open(lanes(recorder()));
 
   await answer();
@@ -422,7 +422,7 @@ test("closing a step opens the chat with nothing asked", async () => {
 
   await screen.findByPlaceholderText("Start new chat…");
   expect(location.hash).not.toBe("#/first-run");
-  expect(chat.sent).toEqual([]);
+  expect(chat.sent).toEqual([OPENING]);
 });
 
 test("the card's query lands on the first run's own address", async () => {
@@ -551,6 +551,91 @@ test("the role step offers the twelve roles, checks Founder until told otherwise
   expect(next().disabled).toBe(false);
 });
 
+/** The role's own tools, offered as a multiple choice: the engineer is asked about the code and
+ *  issue tools, and the picks are what the step then connects. A tool this deploy's catalog does
+ *  not carry is not offered, so the grid names only what a press can grant. */
+test("the tools step offers the connectors the picked role works in", async () => {
+  await open(lanes(recorder()));
+  await describeBusiness();
+  await pickRole("Engineer");
+
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  expect(counted()).toEqual(["3", "5"]);
+  const tools = within(screen.getByRole("group", { name: "Tools" })).getAllByRole("button");
+  expect(tools.map((tool) => tool.textContent)).toEqual(["GitHub"]);
+  expect(tools.map((tool) => tool.getAttribute("aria-pressed"))).toEqual(["false"]);
+  expect(next().disabled).toBe(false);
+});
+
+/** A role whose tools this deploy does not carry has no step: the run counts four and goes from the
+ *  role straight to the goals. */
+test("a role whose tools the catalog does not carry stands no tools step", async () => {
+  await open(lanes(recorder()));
+  await describeBusiness();
+  await pickRole("Sales");
+
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  expect(counted()).toEqual(["3", "4"]);
+});
+
+/** Picking nothing is skipping: Next carries straight on to the goals, and nothing is connected. */
+test("the tools step skips to the goals where nothing is picked", async () => {
+  const posted = recorder();
+  await open(lanes(posted));
+  await describeBusiness();
+  await pickRole("Engineer");
+
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+  expect(intents(posted.calls)).toEqual([]);
+});
+
+/** The picks are connected on the step itself: each one presses the act its own provider takes —
+ *  the broker's connect verb for an account that is the member's. */
+test("a picked tool is stood to connect, and the press asks for that account", async () => {
+  const posted = recorder();
+  await open(lanes(posted));
+  const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
+  const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
+  onTestFinished(() => opened.mockRestore());
+
+  await describeBusiness();
+  await pickRole("Engineer");
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "Connect the tools you picked" });
+  await userEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+
+  await waitFor(() =>
+    expect(intents(posted.calls)).toEqual([
+      {
+        lane: "intents",
+        body: { verb: "connect", kind: "connection", name: "github", spec: { shared: false } },
+      },
+    ]),
+  );
+});
+
+/** Next off the connect list carries on with whatever is left unconnected: the run asks for the
+ *  accounts once and never holds the member on them. */
+test("Next off the connect list carries on to the goals", async () => {
+  await open(lanes(recorder()));
+  await describeBusiness();
+  await pickRole("Engineer");
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "GitHub" }));
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "Connect the tools you picked" });
+  await userEvent.click(next());
+
+  await screen.findByRole("heading", { name: "What is top of mind right now?" });
+});
+
 test("the top-of-mind step offers the nine goals with none pressed, and Other asks for words", async () => {
   await open();
   await describeBusiness();
@@ -577,18 +662,23 @@ test("back walks the answers without losing one", async () => {
   await open();
   await describeBusiness();
   await pickRole("Engineer");
+  // The engineer's own tools stand between the role and the goals.
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(next());
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   await userEvent.click(screen.getByRole("button", { name: "Hiring" }));
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect((await screen.findByRole("radio", { checked: true })).textContent).toBe("Engineer");
-  expect(counted()).toEqual(["2", "4"]);
+  expect(counted()).toEqual(["2", "5"]);
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(((await screen.findByLabelText("About your business")) as HTMLTextAreaElement).value).toBe(
     "Design studio",
   );
-  expect(counted()).toEqual(["1", "4"]);
+  expect(counted()).toEqual(["1", "5"]);
 
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await screen.findByRole("heading", { name: "An AI operating system for your business" });
@@ -599,6 +689,8 @@ test("back walks the answers without losing one", async () => {
 
   await userEvent.click(next());
   await screen.findByRole("radiogroup", { name: "Role" });
+  await userEvent.click(next());
+  await screen.findByRole("heading", { name: "Which tools do you work in?" });
   await userEvent.click(next());
 
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
@@ -694,7 +786,7 @@ test("a connector the workspace already holds opens on the success screen, and C
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
   await returning();
   expect(screen.getByRole("heading", { name: "We were able to connect to Slack" })).toBeTruthy();
-  expect(chat.sent).toEqual([]);
+  expect(chat.sent).toEqual([OPENING]);
 
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   await built();
@@ -713,13 +805,13 @@ test("the member coming back from Slack's pages lands on the success screen, and
   await screen.findByRole("link", { name: "Open the Slack install page" });
   await returning();
   expect(screen.getByRole("heading", { name: "Connect your messaging app" })).toBeTruthy();
-  expect(chat.sent).toEqual([]);
+  expect(chat.sent).toEqual([OPENING]);
 
   landed = true;
   await returning();
 
   await screen.findByRole("heading", { name: "We were able to connect to Slack" });
-  expect(chat.sent).toEqual([]);
+  expect(chat.sent).toEqual([OPENING]);
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   await built();
 });
@@ -767,7 +859,7 @@ test("the step's own watch lands the success screen while the tab stays open", a
   }
   fireEvent.click(screen.getByRole("button", { name: "Open your workspace" }));
   await settle();
-  expect(location.hash.startsWith(HOME_HASH)).toBe(true);
+  expect(location.hash).toBe(HANDED);
   expect(chat.sent).toEqual([OPENING]);
 });
 
@@ -781,7 +873,7 @@ test("I use something different finishes the run with the answers written, as on
   await userEvent.click(await screen.findByRole("button", { name: "I use something different" }));
 
   await built(
-    "I just set up this workspace. My business: A two-person design studio. My role: Founder. Set up my first task: a daily competitive analysis.",
+    "I just set up this workspace. My business: A two-person design studio. Set up my first task: a daily competitive analysis.",
   );
   expect(intents(posted.calls)).toEqual([
     {
@@ -791,33 +883,32 @@ test("I use something different finishes the run with the answers written, as on
   ]);
 });
 
-/** The run ends on home, standing the assistant's own lane, and that lane's composer is the one the
- *  opening line was committed for: it says it on arrival, with no keystroke, and the transcript the
- *  member lands on is the conversation they asked for rather than an empty box. */
-test("the last screen lands home with the opening line already sent into the lane", async () => {
+/** The run ends on home, standing the thread it founded for the first task, and the connectors
+ *  screen stands beside it: the member reads the work already running and connects the tools it
+ *  needs without leaving the page. */
+test("the last screen lands home on the founded thread with connectors beside it", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK);
 
   await answer();
 
   await built();
-  expect(location.hash).toBe(homeHash({ opens: [AGENT_ID] }));
-  await screen.findByText(OPENING);
-  expect(laneBox().value).toBe("");
-  expect(document.activeElement).toBe(laneBox());
+  expect(location.hash).toBe(HANDED);
+  await waitFor(() =>
+    expect(
+      Array.from(document.querySelectorAll("[data-slot=slot-track] > div > section")).map((lane) =>
+        lane.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Conversation", "Connectors"]),
+  );
 });
 
-/** Home stands the chat app's lane, whichever agent the run itself was drawn for, so the opening
- *  line is committed for that app's composer and said to the agent that answers there. */
+/** The chat app home stands is the agent the first task is said to, whichever agent the run itself
+ *  was drawn for. */
 test("the opening line is said to the chat app home stands, not the agent the run was drawn for", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK, [AGENT, CHAT_APP]);
 
-  await answer();
-  await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  await userEvent.click(
-    await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 4 }),
-  );
+  await describeBusiness();
 
-  expect(location.hash).toBe(homeHash({ opens: [CHAT_APP_ID] }));
   await waitFor(() => expect(chat.sent).toEqual([OPENING]));
   expect(chat.posted[0]).toContain("/agents/" + CHAT_APP_ID + "/chat?conversation=new");
 });
@@ -984,7 +1075,7 @@ test("Other's words are written to memory as the member typed them, and open a t
   await pickGoals(["Hiring", "Other"], "Launching in Japan.");
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  expect(chat.sent).toEqual([HIRING_THREAD, OTHER_THREAD]);
+  expect(chat.sent).toEqual([OPENING, HIRING_THREAD, OTHER_THREAD]);
   await built();
   expect(intents(acts.calls)).toEqual([
     {
@@ -1011,14 +1102,10 @@ test("each picked goal opens a thread of its own, before the workspace screen", 
   await pickGoals(["Growing revenue", "Understanding competitors"]);
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  expect(chat.sent).toEqual([REVENUE_THREAD, COMPETITORS_THREAD]);
+  expect(chat.sent).toEqual([OPENING, REVENUE_THREAD, COMPETITORS_THREAD]);
   for (const url of chat.posted) {
     expect(url).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
   }
-  await userEvent.click(
-    await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 5 }),
-  );
-  await waitFor(() => expect(chat.sent.at(-1)).toBe(OPENING));
 });
 
 test("the workspace screen names the goals it opened a thread on", async () => {
@@ -1039,7 +1126,7 @@ test("a refused memory write holds the last step and states the refusal", async 
 
   await screen.findByText("Memory is full.");
   expect(screen.queryByRole("heading", { name: "Creating your business’s workspace" })).toBeNull();
-  expect(chat.sent).toEqual([]);
+  expect(chat.sent).toEqual([OPENING]);
 });
 
 test("a deploy running without memory refuses the last step rather than handing over", async () => {
@@ -1088,7 +1175,7 @@ test("the workspace builds itself one app at a time, then the assistant, then of
   expect(screen.queryByText("Creating…")).toBeNull();
   await tick();
   fireEvent.click(screen.getByRole("button", { name: "Open your workspace" }));
-  expect(location.hash.startsWith(HOME_HASH)).toBe(true);
+  expect(location.hash).toBe(HANDED);
 });
 
 /** An app this deploy withholds is not drawn at all. `hidden` says the portal withholds it from

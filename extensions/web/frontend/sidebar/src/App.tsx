@@ -251,7 +251,9 @@ export function App({
                 agent={mainAgent}
                 agents={agents}
                 member={member}
-                onOpenChat={() => openNewChat(mainAgent.id)}
+                onOpenChat={(conversationId) =>
+                  conversationId ? openChat(conversationId) : openNewChat(mainAgent.id)
+                }
               />
             ) : (
               <PaneNote>No such app.</PaneNote>

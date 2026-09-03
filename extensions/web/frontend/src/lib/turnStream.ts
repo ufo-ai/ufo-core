@@ -621,9 +621,10 @@ function timezoneHeader(): Record<string, string> {
  *  off a transcript that holds everything the turn did. `sendMessage` is the path for a
  *  conversation somebody is watching, and it is the only one that drives the store.
  *
- *  The answer is whether the conversation was founded, so a caller reports the threads that exist
- *  rather than the threads it asked for. */
-export async function openConversation(agentId: string, text: string): Promise<boolean> {
+ *  The answer is the conversation the words founded, or nothing where they founded none: a caller
+ *  reports the threads that exist rather than the threads it asked for, and one that hands the
+ *  member to a thread carries the id it stands on. */
+export async function openConversation(agentId: string, text: string): Promise<string | null> {
   try {
     const res = await fetch(chatUrl({ key: "", agentId, conversationId: null }), {
       method: "POST",
@@ -631,9 +632,11 @@ export async function openConversation(agentId: string, text: string): Promise<b
       body: text,
       headers: timezoneHeader(),
     });
-    return res.ok;
+    if (!res.ok) return null;
+    const founded: { conversation_id?: unknown } = await res.json();
+    return typeof founded.conversation_id === "string" ? founded.conversation_id : null;
   } catch {
-    return false;
+    return null;
   }
 }
 

@@ -3,13 +3,13 @@ import { useSyncExternalStore } from "react";
 import {
   BUILDER_HASH,
   FIRST_RUN_HASH,
+  HOME_CONNECTORS_LANE,
   HOME_NEW_LANE,
   agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
   homeHash,
-  mintHomeLane,
   newChatHash,
   parseHash,
   sectionHash,
@@ -222,12 +222,13 @@ export function openHome(): void {
   navigate(homeHash());
 }
 
-/** Home standing this agent's own chat lane and nothing else, which is where the first run hands the
- *  member over. The run commits its opening line for that lane's composer, so the address states the
- *  lane rather than leaving the arrival to answer with whatever track home was left holding: a
- *  remembered row stands a different composer, and the words would wait on a screen nobody opens. */
-export function openHomeChat(agentId: string): void {
-  navigate(homeHash({ opens: [mintHomeLane(agentId, [])] }));
+/** Home standing this one lane with the connectors screen beside it, which is where the first run
+ *  hands the member over: the thread the first task runs on, and next to it the page that connects
+ *  the tools that task reads. The address states both lanes rather than leaving the arrival to
+ *  answer with whatever track home was left holding, since a remembered row stands another screen
+ *  and the member would land nowhere near their first task. */
+export function openHomeWithConnectors(lane: string): void {
+  navigate(homeHash({ opens: [lane, HOME_CONNECTORS_LANE] }));
 }
 
 export function openChat(conversationId: string): void {

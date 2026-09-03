@@ -46,24 +46,17 @@ old = '''description: "Load when a member asks for recurring competitive analysi
 new = '''description: "Load when a member asks for recurring competitive analysis or intelligence: what competitors changed across pricing, launches, hiring, or press. Not for a single page or price watch, a change to an existing task, or a one-off competitor question."'''
 
 [[arm]]
-name = "no-run-now-line"
+name = "without-run-now-ban"
 
 [[arm.replacements]]
 path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
-old = """The manifest also carries `run_now: true`, so the first report runs on the spot rather than at
-tomorrow's fire: the member reads real findings in this conversation instead of a promise. The
-schedule keeps every fire after it.
+old = """The manifest carries no `run_now`: the first brief was written in this turn, so an immediate fire
+would research the same day twice and report it twice. The first scheduled fire is tomorrow's.
 """
 new = ""
 
 [[arm.replacements]]
 path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
-old = """  run_now: true
-"""
-new = ""
-
-[[arm.replacements]]
-path = "extensions/research/ufo_ext_research/skills/competitive-intel/SKILL.md"
-old = """- Applying without `run_now: true` — the member then waits a day for the first report.
+old = """- Carrying `run_now: true` — the brief already ran in this turn, so it would run twice.
 """
 new = ""

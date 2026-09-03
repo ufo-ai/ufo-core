@@ -902,7 +902,7 @@ CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "competitive-first-run-daily-task",
         "I just set up this workspace. My business: Bright Signal, a two-person brand design "
-        "studio. My role: Founder. Set up my first task: a daily competitive analysis.",
+        "studio. Set up my first task: a daily competitive analysis.",
         expected="competitive-intel",
         forbidden=("task-scheduling", "research-assistant"),
     ),

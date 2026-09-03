@@ -1,6 +1,6 @@
 /** The sidebar half of the one first run. The screens, the memory write and the thread per goal
  *  are the shared component's and are proved once in the lanes suite (`tests/firstrun.test.tsx`);
- *  what only this shell can be wrong about is where the handoff lands, so that is what this file
+ *  what only this shell can be wrong about is where the run leaves the member, so that is what this file
  *  holds. It also proves the shared module resolves against this shell's own tree — a `@/…` import
  *  that reached the other shell's kernel would draw the run with the wrong panel and API. */
 import { render, screen, waitFor } from "@testing-library/react";
@@ -10,6 +10,7 @@ import { beforeEach, expect, test } from "vitest";
 import { App } from "@/App";
 import { BUILD_STEP_MS, type FirstRunPayload } from "@/views/FirstRun";
 import { resetChatStore } from "@/lib/chatStore";
+import { chatHash } from "@/lib/route";
 
 import { AGENT, chatsOnWire, CONVO_ID, json, MEMBER, type Route, TURN_ID, useStreamFake, wire } from "./harness";
 
@@ -61,13 +62,20 @@ function mount(routes: Record<string, Route> = {}) {
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 }
 
-test("the run draws on this shell, and its handoff lands in the agent's own chat", async () => {
+test("the run draws on this shell, and its thread is the chat the member lands on", async () => {
   mount();
 
   // The shared component's own first screen, drawn through this shell's panel kernel.
   await userEvent.click(await screen.findByRole("button", { name: "Get started" }));
   await userEvent.type(await screen.findByLabelText("About your business"), "Design studio");
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  // The first task is said off the business step, before every step after it.
+  await waitFor(() =>
+    expect(sent).toEqual([
+      "I just set up this workspace. My business: Design studio. " +
+        "Set up my first task: a daily competitive analysis.",
+    ]),
+  );
   await userEvent.click(await screen.findByRole("radio", { name: "Founder" }));
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
@@ -78,17 +86,10 @@ test("the run draws on this shell, and its handoff lands in the agent's own chat
     await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 5 }),
   );
 
-  const box = await screen.findByLabelText("Ask UFO");
-  await waitFor(() =>
-    expect(sent.at(-1)).toBe(
-      "I just set up this workspace. My business: Design studio. My role: Founder. " +
-        "Set up my first task: a daily competitive analysis.",
-    ),
-  );
-  expect((box as HTMLTextAreaElement).value).toBe("");
+  await waitFor(() => expect(location.hash).toBe(chatHash(CONVO_ID)));
 });
 
-test("a picked goal opens its own thread before the handoff, on this shell too", async () => {
+test("a picked goal opens its own thread after the first task's, on this shell too", async () => {
   mount();
 
   await userEvent.click(await screen.findByRole("button", { name: "Get started" }));
@@ -101,7 +102,7 @@ test("a picked goal opens its own thread before the handoff, on this shell too",
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
 
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  await waitFor(() => expect(sent.length).toBe(1));
-  expect(sent[0]).toContain("My goal: growing revenue.");
-  expect(sent[0]).toContain("Ask me at most one thing.");
+  await waitFor(() => expect(sent.length).toBe(2));
+  expect(sent[1]).toContain("My goal: growing revenue.");
+  expect(sent[1]).toContain("Ask me at most one thing.");
 });

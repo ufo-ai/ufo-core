@@ -77,7 +77,7 @@ import {
   openBuilder,
   openChat,
   openHome,
-  openHomeChat,
+  openHomeWithConnectors,
   openNewChat,
   openSlot,
   placeAgent,
@@ -91,6 +91,7 @@ import type { Seek } from "@/kernel/slots";
 import {
   COMPOSE,
   COMPOSING,
+  homeConversationLane,
   homeLaneAgent,
   homeLaneConversation,
   mintHomeLane,
@@ -99,8 +100,6 @@ import {
   type Section,
   type WorkspacePlace,
 } from "@/lib/route";
-import { clearChat } from "@/lib/chatStore";
-import { setPendingAsk } from "@/lib/pendingAsk";
 import { heldTrack } from "@/lib/tracks";
 import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
@@ -289,18 +288,17 @@ export function App({
                   agents={agents}
                   member={member}
                   onClose={() => openNewChat(mainAgent.id)}
-                  onHandoff={(text) => {
-                    /* Home stands the chat app's own lane, so the words name that lane and the
-                       agent they address: an ask left for an agent's new chat screen is a screen
-                       home never opens, and it would stand unread beside an empty box. The lane is
-                       cleared first, so a member coming through the run again opens a conversation
-                       of their own rather than the one the last run founded. */
+                  onDone={(conversationId) => {
+                    /* The thread the run founded, where the first task is already answering. A run
+                       whose founding send never landed has no thread to stand, so the chat app's
+                       own lane stands in its place and the member says the first thing themselves. */
                     const speaks = chatSurface(agents) ?? mainAgent;
-                    const lane = mintHomeLane(speaks.id, []);
-                    clearChat(lane);
-                    setPendingAsk(speaks.id, text, true, lane);
+                    openHomeWithConnectors(
+                      conversationId
+                        ? homeConversationLane(conversationId)
+                        : mintHomeLane(speaks.id, []),
+                    );
                   }}
-                  onDone={() => openHomeChat((chatSurface(agents) ?? mainAgent).id)}
                 />
               ) : (
                 <PaneNote>No such app.</PaneNote>

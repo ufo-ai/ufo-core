@@ -17,7 +17,7 @@ import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Notice, Panel, PanelSkeleton, usePanelRead } from "@/kernel/panel";
 import { Frame, Head } from "@/views/Frame";
 import { AgentIcon } from "@/lib/agentIcon";
-import { getJson, postAction, postObjectAction, type ObjectAction } from "@/lib/api";
+import { BASE, getJson, postAction, postIntent, postObjectAction, type ObjectAction } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
@@ -65,6 +65,7 @@ const CONFIRM_WEBSITE_ACTION = "confirm_website";
 const BUSINESS_STEP = "business";
 const WEBSITE_STEP = "website";
 const POSITION_STEP = "position";
+const TOOLS_STEP = "tools";
 const GOALS_STEP = "goals";
 const SLACK_STEP = "slack";
 
@@ -165,18 +166,13 @@ function describes(profile: Profile): string {
  *  it and finishes the setup in chat, so the member never meets an empty dashboard. */
 const FIRST_TASK = "Set up my first task: a daily competitive analysis.";
 
-/** What the member wrote about their business and the role they picked, as the sentence the chat
- *  opens on: the agent hears who it works for before its first turn rather than asking. */
-function opening(business: string, role: string): string {
+/** What the member wrote about their business, as the sentence the chat opens on: the agent hears
+ *  who it works for before its first turn rather than asking. The business is the whole of it, so
+ *  the thread is founded the moment that box is answered and the turn runs while the member walks
+ *  the rest of the run. */
+function opening(business: string): string {
   const said = (text: string) => text.trim().replace(/[.!?]+$/, "");
-  return (
-    "I just set up this workspace. My business: " +
-    said(business) +
-    ". My role: " +
-    role +
-    ". " +
-    FIRST_TASK
-  );
+  return "I just set up this workspace. My business: " + said(business) + ". " + FIRST_TASK;
 }
 
 /** The connector catalog and the workspace's installs — the read behind both selectors. The first
@@ -201,6 +197,44 @@ export const WATCH_MS = 3_000;
 export const CONNECT_INSTALLS: Record<string, ObjectAction> = {
   slack: { kind: "surface", name: "slack", action: "slack_connect" },
 };
+
+/** The connections this member already holds, as the pool projects them. The tools step reads it
+ *  while it waits: an account is granted on the provider's own pages, so the grant landing here is
+ *  the only account of it this screen gets. */
+type PoolPayload = { connections: { provider: string }[] };
+
+const POOL_READ = "/connections";
+
+/** The tools a role suggests, in the order the step offers them: what somebody in that seat works
+ *  in every day, named by the catalog's own provider names. The step draws only the ones this
+ *  deploy's catalog carries, so a suggestion this deploy cannot grant is never offered.
+ *
+ *  Slack is on none of these lists. It installs for the whole workspace rather than for one member,
+ *  and the run gives it a step of its own — offering it twice would ask one member to install it
+ *  twice. */
+const TOOLS_BY_ROLE: Record<Role, string[]> = {
+  Founder: ["gmail", "googlecalendar", "notion", "stripe", "hubspot"],
+  Designer: ["figma", "notion", "googledrive", "linear"],
+  Marketing: ["google_search_console", "hubspot", "notion", "googledrive"],
+  Operations: ["googlecalendar", "gmail", "notion", "quickbooks"],
+  Engineer: ["github", "linear", "jira", "notion"],
+  Growth: ["google_search_console", "hubspot", "stripe", "googlesheets"],
+  "Human Resources": ["googlecalendar", "gmail", "asana", "notion"],
+  Copywriting: ["googledrive", "notion", "figma", "gmail"],
+  Researcher: ["googledrive", "googlesheets", "notion", "gmail"],
+  "Executive Assistant": ["googlecalendar", "gmail", "googledrive", "zoom"],
+  Sales: ["hubspot", "salesforce", "attio", "gmail"],
+  Other: ["gmail", "googlecalendar", "googledrive", "notion"],
+};
+
+/** What the tools step offers this member: the role's own tools, drawn from the catalog so each
+ *  one carries the label and the sentence the connectors screen gives it. A deploy whose catalog
+ *  carries none of them offers nothing, and the step stands down. */
+function suggested(role: Role, providers: ProviderTile[]): ProviderTile[] {
+  return TOOLS_BY_ROLE[role]
+    .map((name) => providers.find((tile) => tile.name === name))
+    .filter((tile): tile is ProviderTile => tile !== undefined);
+}
 
 /** What is top of mind for a member as they start, picked from a grid rather than typed: each pick
  *  is written to memory and opens a thread of its own, so the run hands back one conversation per
@@ -652,25 +686,23 @@ function Building({
   );
 }
 
-/** The run, drawn the same on both shells. What a shell owns is where its chat lives, so the two
- *  acts that touch a conversation are the shell's: `onHandoff` commits the first task's words to
- *  whichever composer that shell is about to stand, and `onDone` carries the member to it. Every
- *  other act here — the enrichment read, the memory write, the thread per goal, the build screen —
- *  is the same wherever the run is drawn, so it lives here once. */
+/** The run, drawn the same on both shells. What a shell owns is where its chat lives, so the one
+ *  act that touches a conversation is the shell's: `onDone` carries the member to the thread the
+ *  first task runs on, named by the conversation the run founded. Every other act here — the
+ *  enrichment read, the memory write, the thread per goal, the build screen — is the same wherever
+ *  the run is drawn, so it lives here once. */
 export function FirstRun({
   agent,
   agents,
   member,
   onClose,
-  onHandoff,
   onDone,
 }: {
   agent: Agent;
   agents: Agent[];
   member: Member;
   onClose: () => void;
-  onHandoff: (text: string) => void;
-  onDone: () => void;
+  onDone: (conversationId: string | null) => void;
 }) {
   const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ, 0);
   const [business, setBusiness] = useState("");
@@ -681,6 +713,13 @@ export function FirstRun({
   const [otherRole, setOtherRole] = useState("");
   const [goals, setGoals] = useState<string[]>([]);
   const [otherGoal, setOtherGoal] = useState("");
+  /* The tools the member picked off their role's suggestions, by provider name, and whether the
+     step is standing its picks to connect rather than offering them. */
+  const [tools, setTools] = useState<string[]>([]);
+  const [connecting, setConnecting] = useState(false);
+  /* The accounts this member holds, read only while the step stands the picks to connect: a grant
+     lands on the provider's pages, so the pool is the one place this screen learns of it. */
+  const pool = usePanelRead<PoolPayload>(connecting ? POOL_READ : null, 0, WATCH_MS);
   const [at, setAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -688,6 +727,12 @@ export function FirstRun({
   /* The goals whose threads the run actually founded, which is what the build screen reports: a
      thread the POST never opened is not named as opened. */
   const [threads, setThreads] = useState<string[]>([]);
+  /* The first task's own thread, founded as soon as the business is known and running behind every
+     step after it. The promise is held rather than the id, so the end of the run waits on the
+     founding it started rather than founding a second one. It is founded once: a member walking
+     back to edit the business is editing a box whose thread is already answering. */
+  const founding = useRef<Promise<string | null> | null>(null);
+  const [thread, setThread] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(SILENT);
   const [welcomed, setWelcomed] = useState(false);
   /* Held across renders, because the failed panel raises its sentence from an effect keyed on this
@@ -704,8 +749,8 @@ export function FirstRun({
         apps={agents.filter((row) => row.app && !row.main)}
         assistant={agent}
         threads={threads}
-        onClose={onDone}
-        onDone={onDone}
+        onClose={() => onDone(thread)}
+        onDone={() => onDone(thread)}
       />
     );
   }
@@ -730,14 +775,20 @@ export function FirstRun({
           const confirm = payload.actions.enrichment_profile.find(
             (view) => view.name === CONFIRM_WEBSITE_ACTION,
           );
+          /** What this role works in, which is what the tools step suggests. The step stands only
+           *  where the catalog carries at least one of them, so a deploy with no connectors offers
+           *  no empty grid. */
+          const suggests = suggested(role, payload.providers);
           /** The run the member is on: the website it reads the business from, then the questions
-           *  that read comes back to answer, then the Slack install wherever this deploy offers one.
-           *  The website step stands only where the deploy can act on the answer. Every step is
-           *  certain from the start, so the head counts them all from the first screen. */
+           *  that read comes back to answer, the tools the role suggests, then the Slack install
+           *  wherever this deploy offers one. The website step stands only where the deploy can act
+           *  on the answer. Every step is certain from the start, so the head counts them all from
+           *  the first screen. */
           const revealed = [
             ...(confirm ? [WEBSITE_STEP] : []),
             BUSINESS_STEP,
             POSITION_STEP,
+            ...(suggests.length ? [TOOLS_STEP] : []),
             GOALS_STEP,
             ...(slack ? [SLACK_STEP] : []),
           ];
@@ -748,11 +799,23 @@ export function FirstRun({
           const write = payload.actions.memory.find(
             (view) => view.name === RECORD_FIRST_RUN_ACTION,
           );
+          const speaks = chatSurface(agents) ?? agent;
+          /** The first task, said as soon as the business box is answered rather than at the end of
+           *  the run: the brief is the slowest thing the workspace does, and every step after this
+           *  one is time it can spend working instead of waiting. Nothing here is read — the member
+           *  is still on the run — and the thread is handed to them when they land. */
+          const kickOff = () => {
+            founding.current ??= openConversation(speaks.id, opening(business)).then((founded) => {
+              setThread(founded);
+              return founded;
+            });
+          };
           /** What the run leaves behind, in the order the rest depends on: the memory every thread
-           *  recalls, then a thread per picked goal, then the first task on the lane the member
-           *  lands on. The memory is written first because a goal thread that starts before it
-           *  would ask what the business does. A refused write holds the step — the run has nothing
-           *  to hand over without it, and the member reads why. */
+           *  recalls, then a thread per picked goal, then the first task's own thread, founded back
+           *  on the business step and waited on here for the lane the member lands in. The memory is
+           *  written first because a goal thread that starts before it would ask what the business
+           *  does. A refused write holds the step — the run has nothing to hand over without it, and
+           *  the member reads why. */
           const finish = async () => {
             if (busy) return;
             if (!write) {
@@ -777,19 +840,28 @@ export function FirstRun({
               refuse(outcome.message);
               return;
             }
-            const speaks = chatSurface(agents) ?? agent;
             const opened: string[] = [];
             for (const goal of picked) {
               const founded = await openConversation(speaks.id, goalOpening(business, said, goal));
               if (founded) opened.push(goal.label);
             }
-            onHandoff(opening(business, said));
+            kickOff();
+            await founding.current;
             setThreads(opened);
             setBusy(false);
             setBuilding(true);
           };
-          const advance = () => (at + 1 < revealed.length ? setAt(at + 1) : void finish());
-          const back = () => (at ? setAt(at - 1) : setWelcomed(false));
+          const advance = () => {
+            if (step === BUSINESS_STEP) kickOff();
+            /* The tools step answers twice: the picks, then connecting them. A step that picked
+               nothing has nothing to connect and moves straight on. */
+            if (step === TOOLS_STEP && tools.length && !connecting) return setConnecting(true);
+            return at + 1 < revealed.length ? setAt(at + 1) : void finish();
+          };
+          const back = () => {
+            if (step === TOOLS_STEP && connecting) return setConnecting(false);
+            return at ? setAt(at - 1) : setWelcomed(false);
+          };
           /** Confirms the website, reads back what the enrichment made of it, and suggests the role
            *  it found where the member has not picked one. A refusal is stated and holds the step. */
           const confirmWebsite = async () => {
@@ -954,6 +1026,70 @@ export function FirstRun({
                       onChange={(event) => setOtherRole(event.target.value)}
                     />
                   ) : null}
+                </Step>
+              ) : null}
+              {step === TOOLS_STEP && !connecting ? (
+                <Step onBack={back} onNext={advance} nextDisabled={false}>
+                  <div className="flex flex-col gap-sm">
+                    {said ? (
+                      <p className="m-0 text-subtitle font-medium text-ink-quiet">{said}</p>
+                    ) : null}
+                    <h1 className="m-0 text-subtitle font-medium text-ink">
+                      Which tools do you work in?
+                    </h1>
+                    <p className="m-0 text-label text-ink-soft">
+                      These are the ones your role usually needs. Pick what UFO should work in, or
+                      skip and connect them later.
+                    </p>
+                  </div>
+                  <ToggleGroup
+                    aria-label="Tools"
+                    className={CHOICES}
+                    value={tools}
+                    onValueChange={setTools}
+                  >
+                    {suggests.map((tile) => (
+                      <ToggleGroupItem key={tile.name} value={tile.name} className={CHOICE}>
+                        <span className="flex min-w-0 items-center gap-sm">
+                          <BrandMark provider={tile.name} className="size-(--size-glyph) shrink-0" />
+                          {tile.label}
+                        </span>
+                        <IconCheck
+                          className="size-(--size-glyph) shrink-0 opacity-0 group-data-[state=on]:opacity-100"
+                          stroke={1.5}
+                          aria-hidden
+                        />
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
+                </Step>
+              ) : null}
+              {step === TOOLS_STEP && connecting ? (
+                <Step onBack={back} onNext={advance} nextDisabled={false}>
+                  <div className="flex flex-col gap-sm">
+                    <h1 className="m-0 text-subtitle font-medium text-ink">
+                      Connect the tools you picked
+                    </h1>
+                    <p className="m-0 text-label text-ink-soft">
+                      Each one opens its own consent page. Next carries on with whatever is left.
+                    </p>
+                  </div>
+                  <ul className="m-0 flex w-full list-none flex-col gap-2xs p-0">
+                    {suggests
+                      .filter((tile) => tools.includes(tile.name))
+                      .map((tile) => (
+                        <ConnectTool
+                          key={tile.name}
+                          agent={agent}
+                          tile={tile}
+                          connected={
+                            pool.phase === "ready" &&
+                            pool.payload.connections.some((entry) => entry.provider === tile.name)
+                          }
+                          onRefused={refuse}
+                        />
+                      ))}
+                  </ul>
                 </Step>
               ) : null}
               {step === GOALS_STEP ? (
@@ -1159,5 +1295,109 @@ function Connect({
         </Notice>
       ) : null}
     </div>
+  );
+}
+
+/** The link a connect request mints. The broker verb ends its turn on the handoff rather than in
+ *  its answer, so the link is the turn's own `connect` frame and this waits for it; a turn that
+ *  ends without one granted nothing, and the row says so. */
+function mintedLink(turnId: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const stream = new EventSource(BASE + "/turns/" + turnId + "/stream");
+    const settle = (url: string | null) => {
+      stream.close();
+      resolve(url);
+    };
+    stream.addEventListener("connect", () => settle(BASE + "/turns/" + turnId + "/connect"));
+    stream.addEventListener("terminal", () => settle(null));
+    stream.onerror = () => settle(null);
+  });
+}
+
+const CONNECT_REFUSED = "No connection request was opened. Ask in chat to connect the account.";
+
+/** One picked tool, and the press that connects it. The act is the connectors screen's own: a
+ *  workspace install where the provider takes one, and the broker's connect verb for every account
+ *  that is the member's. The consent window opens on the press, before the round trip that mints
+ *  the link, because a window opened after it has lost the gesture the browser opens one for.
+ *
+ *  An account already in the pool is drawn connected and offers no press: the run asks for what is
+ *  missing and never for what the member already granted. */
+function ConnectTool({
+  agent,
+  tile,
+  connected,
+  onRefused,
+}: {
+  agent: Agent;
+  tile: ProviderTile;
+  connected: boolean;
+  onRefused: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [link, setLink] = useState<string | null>(null);
+
+  async function connect() {
+    if (busy) return;
+    setBusy(true);
+    setLink(null);
+    const consent = openConsentWindow();
+    const install = CONNECT_INSTALLS[tile.name];
+    const outcome = install
+      ? await postObjectAction(agent.id, install, {})
+      : await postIntent(agent.id, {
+          verb: "connect",
+          kind: "connection",
+          name: tile.name,
+          spec: { shared: false },
+        });
+    if (!outcome.applied) {
+      setBusy(false);
+      consent?.close();
+      onRefused(outcome.message);
+      return;
+    }
+    const url = install ? (outcome.url ?? null) : await mintedLink(outcome.turn_id ?? "");
+    setBusy(false);
+    if (!url) {
+      consent?.close();
+      onRefused(CONNECT_REFUSED);
+      return;
+    }
+    if (consent) consent.location.href = url;
+    // The row keeps the link only for a member whose browser refused the window, so pressing once
+    // is the whole act for everybody else.
+    setLink(consent ? null : url);
+  }
+
+  return (
+    <li className="flex w-full flex-col gap-sm">
+      <div className="flex h-10 w-full items-center gap-sm rounded-(--radius-answer) bg-fill px-2xl text-label text-ink">
+        <BrandMark provider={tile.name} className="size-(--size-glyph) shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{tile.label}</span>
+        {connected ? (
+          <Badge tone="affirm" className="gap-2xs">
+            <IconCheck className="size-(--size-glyph)" stroke={1.5} aria-hidden />
+            Connected
+          </Badge>
+        ) : (
+          <Button
+            variant="send"
+            size="bar"
+            className="h-8"
+            busy={busy}
+            aria-label={"Connect " + tile.label}
+            onClick={connect}
+          >
+            Connect
+          </Button>
+        )}
+      </div>
+      {link ? (
+        <Notice>
+          <ConsentLink url={link}>{"Open the " + tile.label + " consent page"}</ConsentLink>
+        </Notice>
+      ) : null}
+    </li>
   );
 }

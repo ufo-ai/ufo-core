@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -95,7 +94,7 @@ FIRST_TASK_COMPETITORS = ("Pentagram", "Koto", "DesignStudio")
 FIRST_TASK_NAMED_MINIMUM = 2
 FIRST_RUN_OPENING = (
     "I just set up this workspace. My business: Bright Signal, a two-person brand design "
-    "studio. My role: Founder. Set up my first task: a daily competitive analysis."
+    "studio. Set up my first task: a daily competitive analysis."
 )
 SATISFIED_INSTRUCTION = (
     "Accept the assistant's first reasonable confirmation; do not add new requests."
@@ -974,9 +973,9 @@ async def _graded_first_task(output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(
             False, "no successful object_apply carried a valid scheduled_task manifest"
         )
-    if not any(_manifest_spec(document).get("run_now") is True for document in manifests):
+    if any(_manifest_spec(document).get("run_now") is True for document in manifests):
         return CapabilityVerdict(
-            False, "the first task carries no `run_now`, so nothing runs today"
+            False, "the first task carries `run_now`, so the brief just written runs again"
         )
     rows = await _rows_about(FIRST_TASK_CASE)
     if not rows:
@@ -992,10 +991,9 @@ async def _graded_first_task(output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(False, f"schedule {row.schedule!r} is not one fire a day")
     if row.expires_at is None:
         return CapabilityVerdict(False, "the daily informational task has no expires_at")
-    # `run_now` holds the immediate fire in `next_run_at`, so the ten-fire bound is counted from
-    # the first cron occurrence after it.
-    scheduled = replace(row, next_run_at=next_fire(row.schedule, _first_fire(row)))
-    permitted, fire = _permitted_fires(scheduled, row.expires_at, BOUNDED_INFORMATIONAL_FIRES)
+    # The first brief is written in the turn itself, so the row carries no immediate fire and the
+    # ten-fire bound is counted from the schedule's own first occurrence.
+    permitted, fire = _permitted_fires(row, row.expires_at, BOUNDED_INFORMATIONAL_FIRES)
     if permitted != BOUNDED_INFORMATIONAL_FIRES or fire != row.expires_at:
         return CapabilityVerdict(
             False,
@@ -1031,9 +1029,9 @@ def _first_task_grader() -> ScenarioGrader:
     graded = combine(
         skill_scorer("competitive-intel", "task-scheduling"),
         DescribedGrader(
-            "the first task lands as one daily scheduled_task that runs now, bounded at ten "
-            "fires, its prompt naming the confirmed competitors, with a competitor written to "
-            "memory",
+            "the first brief is written in the conversation and the daily task the member then "
+            "asks for lands as one scheduled_task with no immediate fire, bounded at ten fires, "
+            "its prompt naming the confirmed competitors, with a competitor written to memory",
             _graded_first_task,
         ),
         _no_jargon(),
@@ -1162,8 +1160,8 @@ SCENARIOS = (
             known_info="Your competitors are Pentagram, Koto, and DesignStudio. You want the "
             "report here in this conversation. You are on UTC, and 8am is fine.",
             task_instructions="Confirm the competitor list the assistant proposes by naming "
-            "Pentagram, Koto, and DesignStudio. Accept every default it offers. "
-            + SATISFIED_INSTRUCTION,
+            "Pentagram, Koto, and DesignStudio. When it asks whether the brief should repeat, "
+            "say you want it every day. Accept every default it offers. " + SATISFIED_INSTRUCTION,
         ),
         _first_task_grader(),
         seed=_seeded(),
