@@ -3,7 +3,6 @@ import {
   IconClockPlay,
   IconFile,
   IconMessage,
-  IconNote,
   IconPlug,
   type TablerIcon,
 } from "@tabler/icons-react";
@@ -19,8 +18,8 @@ import type { Agent, Conversation } from "@/lib/types";
  *  ranking these, so a group is exactly what that screen would have listed for the same term. */
 export type Hit = {
   /** What the hit is, which is what makes two of them the same one. Never the place it opens: a
-   *  kind whose records share a screen — every memory match opens the memory screen — would
-   *  collapse to a single row if where it lands were its identity. */
+   *  kind whose records share a screen — every task match opens the tasks screen — would collapse
+   *  to a single row if where it lands were its identity. */
   key: string;
   /** Where picking the hit lands. Every kind is addressable: a record by its own place, a file by
    *  the artifacts screen carrying the term and the file to open. */
@@ -68,7 +67,6 @@ type FoundArtifact = { name: string; filename: string; media_type: string };
 type Found = {
   conversations: { conversations: Conversation[] };
   artifacts: { objects: FoundArtifact[] };
-  memory: { matches: { text: string; kind: string; ref: string | null }[] };
   objects: { objects: FoundObject[] };
 };
 
@@ -80,7 +78,7 @@ function query(term: string, extra: Record<string, string> = {}): string {
 
 /** One kind's answer, from however many reads it takes. A kind read once per agent can name the
  *  same record twice — a conversation every agent's read can see — so hits are deduped by what
- *  they are, the way the memory read unions its own per-agent searches. */
+ *  they are. */
 async function group<K extends keyof Found>(
   label: string,
   icon: TablerIcon,
@@ -172,14 +170,14 @@ export async function searchConnectors(term: string, signal: AbortSignal): Promi
 /** A kind's place in the list, which is where its group stands whenever the kind lands. The reads
  *  run side by side and land in whatever order each one is answered, so the order a member scans
  *  them in is held here rather than taken from the order they finish in. */
-type Slot = "apps" | "conversations" | "files" | "sites" | "memory" | "tasks" | "connectors";
+type Slot = "apps" | "conversations" | "files" | "sites" | "tasks" | "connectors";
 
 /** Every kind one term reaches, in the order a member scans them: what they are talking to, what
- *  they said, what came out of it, what is remembered, and what runs on its own. The agents are
- *  matched here rather than read, because the shell already holds the whole list.
+ *  they said, what came out of it, and what runs on its own. The agents are matched here rather
+ *  than read, because the shell already holds the whole list.
  *
- *  A conversation search is one read per agent the member reaches — the same fan-out the memory
- *  read runs server-side — because no projection searches conversations across agents.
+ *  A conversation search is one read per agent the member reaches, because no projection searches
+ *  conversations across agents.
  *
  *  `answering` is handed every kind that has landed so far, each time one lands: the slow kinds do
  *  not hold back the fast ones, and a group arrives under the heading it always stands under. The
@@ -222,7 +220,6 @@ export async function searchEverywhere(
       held.get("apps"),
       held.get("conversations"),
       ...(artifactsApp ? [artifacts] : []),
-      held.get("memory"),
       held.get("tasks"),
       held.get("connectors"),
     ]
@@ -297,22 +294,6 @@ export async function searchEverywhere(
               : "",
             primary: row.name,
             fact: SITE_KIND,
-          })),
-        signal,
-      ),
-    ),
-    lands(
-      "memory",
-      group<"memory">(
-        "Memory",
-        IconNote,
-        ["/workspace/memory" + query(wanted)],
-        (payload) =>
-          payload.matches.map((match) => ({
-            key: match.ref ?? match.text,
-            hash: workspaceHash("memory", { q: wanted }),
-            primary: match.text,
-            fact: match.kind,
           })),
         signal,
       ),

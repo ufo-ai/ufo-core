@@ -360,7 +360,7 @@
      a record opens in: this one is read down a column of stated facts, and a wider measure only
      puts more space between a fact's name and its value. */
   --container-app-settings: min(493px, 100vw);
-  --container-spotlight: min(600px, calc(100vw - 32px));
+  --container-spotlight: min(720px, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
@@ -475,15 +475,15 @@
   --size-tile: 160px;
   /* The command palette's list. Fixed rather than capped: the panel is centred, and a list that
      grew as reads landed would walk the rows out from under the member's cursor. */
-  --size-palette: 360px;
-  /* The three pitches the palette's rows are read at, and the box an application's mark stands in.
-     A thread is a title and a time, so it takes the tightest pitch a 13px line sits in; a place or
-     a scope adds a glyph and takes the row pitch the rest of the portal keeps; an application
-     carries a second line under its name and takes the tallest. The mark's box is what fixes where
-     every application's name starts, whatever glyph is drawn inside it. */
-  --size-palette-thread: 25px;
-  --size-palette-app: 41px;
-  --size-palette-mark: 24px;
+  --size-palette: 440px;
+  /* The two pitches the palette's rows are read at, and the box every mark stands in. A thread is a
+     title and the app holding it, so it takes the tighter pitch; a row carrying a mark takes the
+     taller one whether or not a second line is drawn under its name, so a run of them reads as one
+     ladder rather than as rows of two heights. The mark's box is what fixes where every name starts,
+     whatever glyph is drawn inside it. */
+  --size-palette-thread: 30px;
+  --size-palette-app: 44px;
+  --size-palette-mark: 28px;
   --size-reveal: 280px;
   /* What a folded part of a document shows before its heading has to be pressed: about four lines
      of the register the body is set in. `--size-reveal` folds a block to one screen, which is the

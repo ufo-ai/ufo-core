@@ -43,14 +43,6 @@ const FOUND_FILE = {
   owner_email: MEMBER.email,
 };
 
-const FOUND_MEMORY = {
-  text: "the deploy runbook lives in ops/",
-  kind: "fact",
-  ref: "memory/1",
-  created_at: "2026-08-01T09:00:00",
-  subject: "shared",
-};
-
 const FOUND_TASK = owned({
   name: "nightly-deploy",
   summary: "0 2 * * * — deploy",
@@ -82,7 +74,6 @@ function everything(extra: Record<string, Route> = {}) {
     "/slots": () => json({ slots: [] }),
     "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/objects/artifact": () => json({ objects: [FOUND_FILE] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK]),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
     ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
@@ -145,13 +136,12 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
-  expect(found.getByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
-  expect(asked.some((url) => url.includes("/workspace/memory"))).toBe(true);
+  expect(asked.some((url) => url.includes("/workspace/memory"))).toBe(false);
   expect(asked.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(true);
   expect(asked.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(true);
   expect(asked.some((url) => url.includes("/objects/" + TASK_KIND.kind))).toBe(true);
@@ -169,26 +159,17 @@ test("an agent matches from the payload the shell holds, under its own heading",
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });
 
-/** Every memory match opens the same screen, so a group deduped by where it lands would keep one
- *  match and drop the rest. What the member searched for is the matches, not the screen. */
-test("every memory match stands, though they all open the one memory screen", async () => {
-  const second = { ...FOUND_MEMORY, text: "deploys are announced in #ops", ref: "memory/2" };
-  wire({
-    "/slots": () => json({ slots: [] }),
-    "/objects/artifact": () => json({ objects: [] }),
-    "/workspace/memory": () =>
-      json({ available: true, kinds: [], matches: [FOUND_MEMORY, second] }),
-    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
-    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
-    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
+/** Memory is gone from the workspace, so the box does not read it: a kind the deploy no longer
+ *  holds would stand a group under every term that the member cannot open. */
+test("the box reads no memory and stands no memory group", async () => {
+  const { calls } = everything();
   await open();
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
-  expect(found.getByRole("option", { name: /deploys are announced in #ops/ })).toBeTruthy();
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(headings()).not.toContain("Memory");
+  expect(calls.some((url) => url.includes("/workspace/memory"))).toBe(false);
 });
 
 test("a hit opens the place that holds it", async () => {
@@ -302,14 +283,14 @@ test("a kind stands as soon as it answers, while a slower kind is still being re
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
   expect(found.queryByRole("option", { name: /Rename the deploy job/ })).toBeNull();
   expect(found.getByText("Searching…")).toBeTruthy();
 
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]),
+    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]),
   );
 });
 

@@ -84,13 +84,6 @@ const FOUND_FILE = {
   owner_email: MEMBER.email,
 };
 
-const FOUND_MEMORY = {
-  text: "the deploy runbook lives in ops/",
-  kind: "fact",
-  ref: "memory/1",
-  created_at: "2026-08-01T09:00:00",
-  subject: "shared",
-};
 
 const FOUND_TASK = owned({
   name: "nightly-deploy",
@@ -135,7 +128,6 @@ function everything(extra: Record<string, Route> = {}) {
     ...QUIET,
     "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/objects/artifact": () => json({ objects: [FOUND_FILE] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK]),
     ...extra,
   });
@@ -260,22 +252,20 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
-  expect(found.getByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]);
   expect(found.queryByText(/Error 500/)).toBeNull();
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
-  expect(asked.some((url) => url.includes("/workspace/memory"))).toBe(true);
   expect(asked.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(true);
   expect(asked.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(true);
   expect(asked.some((url) => url.includes("/objects/" + TASK_KIND.kind))).toBe(true);
 });
 
 /** An agent is named by the boot payload the shell already holds, so it needs no read of its own.
- *  The term reaches it twice over — as the app itself, and as the scope its own threads are
- *  searched in — and the scope stands first, because a term typed into a search is a search. */
+ *  The term reaches it as the app itself and as nothing else: the search one scope stands for is
+ *  reached by the chord, not by a row standing among the term's own answers. */
 test("an agent matches from the payload the shell holds, under its own heading", async () => {
   const { calls } = everything();
   await open();
@@ -283,26 +273,22 @@ test("an agent matches from the payload the shell holds, under its own heading",
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: "Second" })).toBeTruthy();
-  expect(found.getByRole("option", { name: scopeRow("Second") })).toBeTruthy();
-  expect(headings().slice(0, 3)).toEqual(["Actions", "Results", "Applications"]);
+  expect(found.queryByRole("option", { name: scopeRow("Second") })).toBeNull();
+  expect(headings().slice(0, 2)).toEqual(["Actions", "Applications"]);
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });
 
-/** Every memory match opens the same screen, so a group deduped by where it lands would keep one
- *  match and drop the rest. What the member searched for is the matches, not the screen. */
-test("every memory match stands, though they all open the one memory screen", async () => {
-  const second = { ...FOUND_MEMORY, text: "deploys are announced in #ops", ref: "memory/2" };
-  wire({
-    ...QUIET,
-    "/workspace/memory": () =>
-      json({ available: true, kinds: [], matches: [FOUND_MEMORY, second] }),
-  });
+/** Memory is gone from the workspace, so the box does not read it: a kind the deploy no longer
+ *  holds would stand a group under every term that the member cannot open. */
+test("the box reads no memory and stands no memory group", async () => {
+  const { calls } = everything();
   await open();
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
-  expect(found.getByRole("option", { name: /deploys are announced in #ops/ })).toBeTruthy();
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(headings()).not.toContain("Memory");
+  expect(calls.some((url) => url.includes("/workspace/memory"))).toBe(false);
 });
 
 test("a hit opens the place that holds it", async () => {
@@ -400,19 +386,19 @@ function slow(answer: () => Response): { route: Route; lands: () => void } {
 /** The reads are one per kind and they answer at their own speeds, so each kind is drawn as it
  *  lands. A slow kind holds back its own rows and nothing else. */
 test("a kind stands as soon as it answers, while a slower kind is still being read", async () => {
-  const memory = slow(() => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }));
-  everything({ "/workspace/memory": memory.route });
+  const tasks = slow(() => objectIndex(TASK_KIND, [FOUND_TASK]));
+  everything({ ["/objects/" + TASK_KIND.kind]: tasks.route });
   await open();
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
-  expect(found.queryByRole("option", { name: /the deploy runbook lives in ops\// })).toBeNull();
+  expect(found.queryByRole("option", { name: /nightly-deploy/ })).toBeNull();
   expect(found.getByText("Searching…")).toBeTruthy();
 
-  memory.lands();
-  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
+  tasks.lands();
+  expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
   await waitFor(() => expect(found.queryByText("Searching…")).toBeNull());
 });
 
@@ -425,13 +411,13 @@ test("a kind that answers last still stands in its own place", async () => {
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Artifacts", "Memory", "Tasks"]);
+  expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Artifacts", "Tasks"]);
 
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]),
+    expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]),
   );
 });
 
@@ -450,7 +436,7 @@ test("the artifacts group stands on the read that landed and takes the other's h
   sites.lands();
   expect(await found.findByRole("option", { name: /deploy-board/ })).toBeTruthy();
   expect(rowsUnder("Artifacts")).toHaveLength(2);
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Tasks"]);
 });
 
 test("an empty box reads nothing at all", async () => {
@@ -536,10 +522,10 @@ test("an unopened box lists the apps and the places, and reads nothing", async (
 });
 
 /** An empty box answers with the work itself: every app the member has, and the conversations they
- *  were last in, each under the kind that names it. A conversation is its title and nothing else —
- *  a column of times beside a column of titles tells the member when they last spoke, which is not
- *  what they came to the box to ask. The foot names the page and draws the keys that act on it as
- *  it stands. */
+ *  were last in, each under the kind that names it. A conversation is its title and, at the right
+ *  of the row, the app holding it — the one fact telling two threads of the same name apart. The
+ *  main app names nothing there: it is the workspace's own assistant rather than an app the member
+ *  added. The foot names the page and draws the keys that act on it as it stands. */
 test("an empty box lists what the member has and what they were saying", async () => {
   railed();
   await open();
@@ -550,7 +536,7 @@ test("an empty box lists what the member has and what they were saying", async (
   expect(rowsUnder("Threads")).toEqual([
     "Pick one thread",
     "Rollout notes",
-    "Standup in ops",
+    "Standup in opsSecond",
     "See more history",
   ]);
   expect(foot()).toBe("LauncherOpen↵Actions⌘K");

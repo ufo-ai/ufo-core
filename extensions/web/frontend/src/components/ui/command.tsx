@@ -63,7 +63,7 @@ export function CommandInput({
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "w-full min-w-0 border-0 bg-transparent p-0 text-label text-inherit outline-none placeholder:text-ink-soft",
+          "w-full min-w-0 border-0 bg-transparent p-0 text-body text-inherit outline-none placeholder:text-ink-soft",
           className,
         )}
         {...props}
@@ -230,17 +230,16 @@ export function CommandGroup({
 const ROW =
   "flex cursor-default items-center rounded-control px-lg outline-none select-none data-[selected=true]:bg-fill";
 
-const FACT = "ml-auto shrink-0 truncate text-small tabular-nums text-ink-soft";
+const FACT = "ml-auto shrink-0 truncate text-label text-ink-soft";
 
-/** A row, in the one of three shapes its own content asks for. An application carries a second line
- *  under its name, so it takes the tallest pitch and stands its mark in a box that fixes where every
- *  name in the run starts, whatever glyph is drawn inside. A place or a scope is a glyph and a name,
- *  and takes the row pitch the rest of the portal keeps. A thread is a title and the time it last
- *  moved, and takes the tightest pitch of the three: a run of them is read straight down, and a
- *  glyph repeated on every line would be a column of the same mark. `fact` is the one figure telling
- *  a row from its neighbours and sits flush right in figures of one width, so the times under it
- *  line up. The row under the cursor is marked by fill, the way a menu marks the item the keyboard
- *  is on. */
+/** A row, in the one of two shapes its own content asks for. A row carrying a mark stands it in a
+ *  box that fixes where every name in the run starts, whatever glyph is drawn inside, and it keeps
+ *  that box and that pitch whether or not a second line is drawn under the name: an application
+ *  with a description and one without read as the one ladder. A thread is a title and the app that
+ *  holds it, and takes the tighter pitch: a run of them is read straight down, and a glyph repeated
+ *  on every line would be a column of the same mark. `fact` is the one word telling a row from its
+ *  neighbours and sits flush right. The row under the cursor is marked by fill, the way a menu marks
+ *  the item the keyboard is on. */
 export function CommandItem({
   icon: Glyph,
   primary,
@@ -254,34 +253,22 @@ export function CommandItem({
   secondary?: string;
   fact?: string;
 }) {
-  if (secondary) {
-    return (
-      <CommandPrimitive.Item
-        data-slot="command-item"
-        className={cn(ROW, "h-(--size-palette-app) gap-2xl", className)}
-        {...props}
-      >
-        <span className="flex size-(--size-palette-mark) shrink-0 items-center justify-center">
-          {Glyph ? <Glyph className="size-(--size-glyph) text-ink-soft" aria-hidden /> : null}
-        </span>
-        <span className="flex min-w-0 flex-col leading-tight">
-          <span className="truncate text-label text-ink">{primary}</span>
-          <span className="truncate text-small text-ink-soft">{secondary}</span>
-        </span>
-        {fact ? <span className={FACT}>{fact}</span> : null}
-      </CommandPrimitive.Item>
-    );
-  }
-
   if (Glyph) {
     return (
       <CommandPrimitive.Item
         data-slot="command-item"
-        className={cn(ROW, "h-(--size-row) gap-sm", className)}
+        className={cn(ROW, "h-(--size-palette-app) gap-lg", className)}
         {...props}
       >
-        <Glyph className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
-        <span className="min-w-0 truncate text-label text-ink">{primary}</span>
+        <span className="flex size-(--size-palette-mark) shrink-0 items-center justify-center">
+          <Glyph className="size-(--size-glyph) text-ink-soft" aria-hidden />
+        </span>
+        <span className="flex min-w-0 flex-col leading-tight">
+          <span className="truncate text-ui text-ink">{primary}</span>
+          {secondary ? (
+            <span className="truncate text-label text-ink-soft">{secondary}</span>
+          ) : null}
+        </span>
         {fact ? <span className={FACT}>{fact}</span> : null}
       </CommandPrimitive.Item>
     );
@@ -293,7 +280,7 @@ export function CommandItem({
       className={cn(ROW, "h-(--size-palette-thread) gap-sm", className)}
       {...props}
     >
-      <span className="min-w-0 truncate text-label text-ink">{primary}</span>
+      <span className="min-w-0 truncate text-ui text-ink">{primary}</span>
       {fact ? <span className={FACT}>{fact}</span> : null}
     </CommandPrimitive.Item>
   );
@@ -306,7 +293,7 @@ export function CommandNote({ className, ...props }: ComponentProps<"p">) {
   return (
     <p
       data-slot="command-note"
-      className={cn("m-0 px-lg py-sm text-label text-ink-soft", className)}
+      className={cn("m-0 px-lg py-sm text-ui text-ink-soft", className)}
       {...props}
     />
   );

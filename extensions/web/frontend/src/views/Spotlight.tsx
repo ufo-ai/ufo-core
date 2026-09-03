@@ -93,7 +93,6 @@ const THREADS_SHOWN = 12;
 
 const APPLICATIONS = "Applications";
 const THREADS = "Threads";
-const RESULTS = "Results";
 const RESULT_THREADS = "Result threads";
 const ACTIONS = "Actions";
 const PLACES = "Places";
@@ -514,13 +513,22 @@ export function Spotlight({
     aside: () => besideLane(homeConversationLane(row.conversation)),
   });
 
-  /** A conversation the rail carries, as a row. */
+  /** A conversation the rail carries, as a row. The app it is held by stands at the right of the
+   *  row: a title says what was talked about and the app says who it was talked to, which is the
+   *  one fact telling two threads of the same name apart. The main app is the workspace's own
+   *  assistant rather than an app the member added, so its threads name no app and read unbranded.
+   *  Where the row has no title of its own the app's name is the title, and stating it twice on the
+   *  one row says nothing. */
   const railRow = (row: ChatRow): Row =>
     threadRow({
       value: "thread " + row.conversation_id,
       conversation: row.conversation_id,
       primary: row.title || agentName(row.agent_name),
       mine: row.mine,
+      fact:
+        row.title && row.agent_name && row.agent_id !== named?.id
+          ? agentName(row.agent_name)
+          : undefined,
     });
 
   /** One app or one surface as a row that narrows the box to it. It states the search it stands
@@ -679,17 +687,7 @@ export function Spotlight({
      *  empty box is answered with the work itself: what is running, what they have, where they
      *  were. */
     const ordered: Run[] = wanted
-      ? [
-          actionsRun,
-          placesRun,
-          {
-            heading: RESULTS,
-            rows: scopes.map(scopeRow).filter((row) => row.primary.toLowerCase().includes(lowered)),
-          },
-          appsRun,
-          threadsRun,
-          ...readRuns,
-        ]
+      ? [actionsRun, placesRun, appsRun, threadsRun, ...readRuns]
       : [appsRun, threadsRun, actionsRun, placesRun];
     runs.push(...ordered.filter((run) => run.rows.length > 0 || run.note !== undefined));
   }
