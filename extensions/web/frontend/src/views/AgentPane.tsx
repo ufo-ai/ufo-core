@@ -58,9 +58,8 @@ const NEW = "New";
 const FRESH = "new";
 
 /** What an app's own conversations are called wherever they are reached — the lane every app but
- *  the chat app opens beside its page, and the act the chat app wears instead, which sends its page
- *  to the same list. One word, so a member finds the same conversations under the same name on
- *  either screen. */
+ *  the chat app opens beside its page, whose own page lists them itself. One word, so a member
+ *  finds the same conversations under the same name on either screen. */
 const HISTORY = "History";
 const NO_HISTORY = "No conversations yet.";
 /** What the list says where the read stopped at its own bound. The read carries no cursor, so the
@@ -561,27 +560,9 @@ export function AgentPane({
               className="rounded-full border border-edge bg-surface"
             />
             {/* The act opens the app's editing chat in the lane beside its page. The chat app's page
-                is that conversation, so the act names nothing there; what stands in its place is the
-                way back to the conversations that page holds. */}
-            {speaks ? (
-              <Button
-                variant="quiet"
-                size="bar"
-                aria-label={HISTORY + " for " + agentName(agent.name)}
-                /* An act that carries an address, not a verb: it cannot be un-pressed, so it is
-                   spent where the page already stands on the list rather than drawn as a toggle
-                   holding it there — the way the lane's own New act is spent on a lane that holds
-                   nothing yet. */
-                disabled={target === undefined}
-                className="rounded-full border border-edge bg-surface"
-                onClick={() => {
-                  onPlace({ ...place, opens: [] }, "push");
-                }}
-              >
-                <IconHistory className="size-(--size-glyph)" aria-hidden />
-                {HISTORY}
-              </Button>
-            ) : (
+                is that conversation, so the act names nothing there and the shell draws none: the
+                page holds every way into the conversations it lists. */}
+            {speaks ? null : (
               <Button
                 variant="quiet"
                 size={held !== undefined ? "icon" : "bar"}
