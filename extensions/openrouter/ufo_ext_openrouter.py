@@ -97,6 +97,20 @@ _REQUIRED_REASONS = ReasoningSupport(
     supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
 )
 
+GLM_PROVIDERS = ("baseten", "fireworks", "modal", "morph", "together")
+PROVIDER_ALLOWLIST = {
+    "z-ai/glm-5.3": GLM_PROVIDERS,
+    "z-ai/glm-5.3-flash": GLM_PROVIDERS,
+}
+"""The upstreams a slug may be served by, as OpenRouter's `provider.only`. A GLM slug names two
+dozen routes that differ in quantization, price and context window, while the spec books one rate
+and one window for the id — so which route takes a call is a real difference, and these five serve
+both ids. `only` is a hard allowlist: a request whose permitted set serves the model nowhere
+answers 404 rather than routing outside it, which is why `allow_fallbacks` stays unset. That field
+belongs to `order`; against `only` it collapses the list to its single top route, which then
+carries every upstream 429 for the slug alone. The dead-provider re-route's `ignore` subtracts from
+this set."""
+
 IMAGES_PATH = "/images"
 IMAGE_TIMEOUT_SECONDS = 300.0
 IMAGE_DIR = "generated-images"
@@ -516,11 +530,12 @@ class OpenRouterModelClient:
     round and re-runs it once, and a second interruption fails the turn. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
-    nudge. Gemini 3.7 Flash's exact no-output abort retries once immediately. The request's
-    `reasoning` effort rides `extra_body` as the thinking budget OpenRouter derives from max_tokens
-    when the model's spec supports it; `off` rides there too, as `enabled: false`, because an
-    omitted parameter leaves the upstream model reasoning at its own default effort through a
-    reasoning-inclusive budget.
+    nudge; an id in PROVIDER_ALLOWLIST rides the same `provider` object as `only`, and the
+    exclusion subtracts from it. Gemini 3.7 Flash's exact no-output abort retries once immediately.
+    The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter derives
+    from max_tokens when the model's spec supports it; `off` rides there too, as `enabled: false`,
+    because an omitted parameter leaves the upstream model reasoning at its own default effort
+    through a reasoning-inclusive budget.
 
     `session_id` rides `extra_body` as OpenRouter's sticky routing key, and it is what makes prompt
     caching work here at all: a slug names many upstream providers, each holding a cache of its own,
@@ -670,16 +685,22 @@ class OpenRouterModelClient:
                 "session, so name the series this call belongs to — the conversation for a turn's "
                 "rounds, the job for a background call"
             )
+        slug = openrouter_slug(request.model)
         extra_body: dict[str, Any] = {"session_id": request.session_id}
         effort = self.spec.wire_reasoning(request.reasoning, request.tools)
         if effort == "off":
             extra_body["reasoning"] = {"enabled": False}
         elif effort not in (None, "auto"):
             extra_body["reasoning"] = {"effort": effort}
+        provider: dict[str, Any] = {}
+        if slug in PROVIDER_ALLOWLIST:
+            provider["only"] = list(PROVIDER_ALLOWLIST[slug])
         if ignore_providers:
-            extra_body["provider"] = {"ignore": sorted(ignore_providers)}
+            provider["ignore"] = sorted(ignore_providers)
+        if provider:
+            extra_body["provider"] = provider
         kwargs: dict[str, Any] = {
-            "model": openrouter_slug(request.model),
+            "model": slug,
             "messages": _openrouter_messages(
                 request.model,
                 request.system,

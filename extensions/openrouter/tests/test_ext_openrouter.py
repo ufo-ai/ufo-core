@@ -786,6 +786,59 @@ async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -
     assert create.calls[0]["extra_body"] == {"session_id": SESSION}
 
 
+def test_every_allowlisted_id_is_one_the_manifest_serves() -> None:
+    """A key that names no registered id pins nothing and says so nowhere, so the table is held to
+    the ids it claims to route."""
+    served = {spec.id for spec in openrouter.manifest().models}
+    assert set(openrouter.PROVIDER_ALLOWLIST) <= served
+
+
+@pytest.mark.parametrize("model", ["z-ai/glm-5.3", "z-ai/glm-5.3-flash"])
+def test_an_allowlisted_id_pins_its_providers_on_the_wire(model: str) -> None:
+    spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}[model]
+    request = REQUEST.model_copy(update={"model": model})
+
+    kwargs = _client(ScriptedCreate(), spec)._create_kwargs(request, frozenset())
+
+    assert kwargs["extra_body"]["provider"] == {
+        "only": ["baseten", "fireworks", "modal", "morph", "together"]
+    }
+    assert "allow_fallbacks" not in kwargs["extra_body"]["provider"]
+
+
+def test_an_id_off_the_allowlist_sends_no_provider_preference() -> None:
+    kwargs = _client(ScriptedCreate())._create_kwargs(REQUEST, frozenset())
+
+    assert "provider" not in kwargs["extra_body"]
+
+
+async def test_a_dead_upstream_is_excluded_inside_the_allowlist() -> None:
+    """The re-route and the allowlist ride one `provider` object: the empty completion's provider
+    joins `ignore` while `only` still holds, so the retry lands on another of the five rather than
+    anywhere OpenRouter would otherwise pick."""
+    spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3-flash"]
+    create = ScriptedCreate(
+        [_chunk(finish="stop", provider="Morph"), _chunk(usage=_usage(1, 0))],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    events = [
+        event
+        async for event in _client(create, spec).complete(
+            REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+        )
+    ]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[0]["extra_body"]["provider"] == {
+        "only": ["baseten", "fireworks", "modal", "morph", "together"]
+    }
+    assert create.calls[1]["extra_body"]["provider"] == {
+        "only": ["baseten", "fireworks", "modal", "morph", "together"],
+        "ignore": ["Morph"],
+    }
+
+
 def test_google_tool_results_survive_json_parser_value_refusal() -> None:
     result = '{"$value":' + "1" * 5_000 + "}"
     messages = (
