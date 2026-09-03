@@ -365,6 +365,20 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
             )
         )
         await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_ids["mine"],
+                blob_key="artifacts/compose.yaml",
+                id=uuid4(),
+                workspace_id=workspace_id,
+                filename="compose.yaml",
+                subject="Compose",
+                media_type="application/yaml",
+                size_bytes=12,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
@@ -532,6 +546,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
         blob = WorkspaceBlobStore(FilesystemBlobStore(tmp_path))
         await blob.put("artifacts/notes.txt", b"Private file text.")
         await blob.put("artifacts/invalid.txt", b"\x96")
+        await blob.put("artifacts/compose.yaml", b"services: {}")
         await blob.put(f"pages/{page_id}", b"Granted page text.")
         await blob.put(f"pages/{invalid_page_id}", b"\x96")
         context = context_for(
@@ -554,11 +569,15 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
         "notes.txt",
         "missing.txt",
         "invalid.txt",
+        "compose.yaml",
         "Weekly report",
     }
     assert all("Other member task" not in record.text for record in records)
     assert next(record.text for record in records if record.title == "notes.txt") == (
         "Private file text."
+    )
+    assert next(record.text for record in records if record.title == "compose.yaml") == (
+        "services: {}"
     )
     assert next(record.text for record in records if record.title == "Weekly report") == (
         "Granted page text."

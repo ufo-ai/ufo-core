@@ -4,8 +4,11 @@
 yaml, toml or typescript while a laptop's registry calls a `.ts` a video stream, so those shares
 landed as `application/octet-stream` or `video/mp2t` — an extension label on the shelf, no inline
 rendering. The derivation now answers those suffixes from its own table; this re-derives the rows
-already written. Every row with one of the suffixes moves, whatever a registry guessed for it: the
-suffix names exactly what the table would say, and a guess was wrong for `.ts` by construction.
+already written. A row with one of the suffixes moves whatever a registry guessed for it — the
+suffix names exactly what the table would say, and a guess was wrong for `.ts` by construction —
+unless it already holds a `text/*` type: those bytes are already readable and already filed as a
+document, and a retype would take a member context record from the file's characters back to a
+placeholder.
 """
 
 import sqlalchemy as sa
@@ -17,6 +20,7 @@ branch_labels: str | None = None
 depends_on: str | None = None
 
 FALLBACK_MEDIA_TYPE = "application/octet-stream"
+TEXT_MEDIA_PREFIX = "text/"
 ARTIFACT_MEDIA_TYPES = {
     ".toml": "application/toml",
     ".ts": "application/typescript",
@@ -33,6 +37,9 @@ def upgrade() -> None:
         op.execute(
             shared_artifact.update()
             .where(shared_artifact.c.media_type != media_type)
+            .where(
+                sa.not_(sa.func.lower(shared_artifact.c.media_type).like(TEXT_MEDIA_PREFIX + "%"))
+            )
             .where(sa.func.lower(shared_artifact.c.filename).like(f"%{suffix}"))
             .values(media_type=media_type)
         )

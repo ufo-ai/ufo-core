@@ -1844,17 +1844,28 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
         first_ctx, _ = await _workspace_context(first, tmp_path / "one")
         second_ctx, _ = await _workspace_context(second, tmp_path / "two")
         await first_ctx.sandbox.bash("printf 'older' > alpha.txt")
+        await first_ctx.sandbox.bash("printf 'services: {}' > compose.yaml")
+        await first_ctx.sandbox.bash("printf '\\x00\\x01' > blob.bin")
         await second_ctx.sandbox.bash("printf 'newer' > beta.txt")
         await _text(tools, "share_file", first_ctx, files=[{"file_path": "alpha.txt"}])
+        await _text(tools, "share_file", first_ctx, files=[{"file_path": "compose.yaml"}])
+        await _text(tools, "share_file", first_ctx, files=[{"file_path": "blob.bin"}])
         await _text(tools, "share_file", second_ctx, files=[{"file_path": "beta.txt"}])
         async with workspace_tx() as connection:
-            for filename, day in (("alpha.txt", 3), ("beta.txt", 4)):
+            for filename, day in (
+                ("blob.bin", 1),
+                ("compose.yaml", 2),
+                ("alpha.txt", 3),
+                ("beta.txt", 4),
+            ):
                 await connection.execute(
                     sa.update(tables.shared_artifact)
                     .where(tables.shared_artifact.c.filename == filename)
                     .values(created_at=datetime(2026, 7, day, tzinfo=UTC))
                 )
         alpha = f"{first.conversation_id.hex[:8]}-alpha-txt"
+        compose = f"{first.conversation_id.hex[:8]}-compose-yaml"
+        blob = f"{first.conversation_id.hex[:8]}-blob-bin"
         beta = f"{second.conversation_id.hex[:8]}-beta-txt"
 
         listing = json.loads(
@@ -1881,6 +1892,26 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
                 order="desc",
             )
         )
+        documents = json.loads(
+            await _agent_text(
+                agent_id,
+                tools,
+                "object_list",
+                first_ctx,
+                kind=ARTIFACT_KIND,
+                filters={"media": "document"},
+            )
+        )
+        others = json.loads(
+            await _agent_text(
+                agent_id,
+                tools,
+                "object_list",
+                first_ctx,
+                kind=ARTIFACT_KIND,
+                filters={"media": "other"},
+            )
+        )
     rows = {row["name"]: row for row in listing["objects"]}
     assert rows[alpha]["conversation"] == str(first.conversation_id)
     assert rows[alpha]["filename"] == "alpha.txt"
@@ -1893,8 +1924,14 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
     assert rows[alpha]["mine"] is False
     assert rows[alpha]["url"] is None
     assert rows[alpha]["preview_url"] is None
+    assert rows[compose]["media_type"] == "application/yaml"
+    assert rows[compose]["media"] == "document"
+    assert rows[blob]["media_type"] == "application/octet-stream"
+    assert rows[blob]["media"] == "other"
     assert [row["name"] for row in by_conversation["objects"]] == [beta]
-    assert [row["name"] for row in newest_first["objects"]] == [beta, alpha]
+    assert [row["name"] for row in newest_first["objects"]] == [beta, alpha, compose, blob]
+    assert {row["name"] for row in documents["objects"]} == {alpha, beta, compose}
+    assert [row["name"] for row in others["objects"]] == [blob]
 
 
 async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_back(

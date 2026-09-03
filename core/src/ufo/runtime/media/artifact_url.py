@@ -54,6 +54,27 @@ ARTIFACT_MEDIA_TYPES = {
     ".yaml": "application/yaml",
     ".yml": "application/yaml",
 }
+TEXT_MEDIA_PREFIX = "text/"
+TEXT_APPLICATION_MEDIA_TYPES = frozenset(
+    {
+        "application/json",
+        "application/toml",
+        "application/typescript",
+        "application/x-sh",
+        "application/xml",
+        "application/yaml",
+    }
+)
+
+
+def is_text_media(media_type: str) -> bool:
+    """Whether a stored type's bytes are characters a reader can show as text: every `text/*` type
+    and the code and data types the store serves under `application/*` — the `.json`, `.sh` and
+    `.xsl` the interpreter's own map names, and the yaml, toml and typescript
+    `ARTIFACT_MEDIA_TYPES` pins. The document family, the member context's extraction of a share's
+    characters, and the portal's inline rendering all answer from this one list."""
+    lowered = media_type.lower()
+    return lowered.startswith(TEXT_MEDIA_PREFIX) or lowered in TEXT_APPLICATION_MEDIA_TYPES
 
 
 class ArtifactUrlError(ValueError):

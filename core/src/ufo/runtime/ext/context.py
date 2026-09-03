@@ -84,7 +84,7 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.hub import LiveFrame
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.governance import Governance, prompt_digest
-from ufo.runtime.media.artifact_url import mint_image_preview_url
+from ufo.runtime.media.artifact_url import is_text_media, mint_image_preview_url
 from ufo.runtime.seats import Seats, workspace_domain
 from ufo.runtime.sources.sync import PageFeed, SourceRowConfig, source_row_id
 from ufo.runtime.turns.audience import (
@@ -1395,7 +1395,7 @@ class ExtensionContext:
             ).all()
         for row in artifact_rows:
             text = f"{row.subject or 'Shared file'} ({row.media_type})."
-            if row.media_type.startswith("text/") or row.media_type == "application/json":
+            if is_text_media(row.media_type):
                 try:
                     text = await _member_blob_text(self.member_context_blob, row.blob_key)
                 except (BlobNotFound, UnicodeDecodeError):

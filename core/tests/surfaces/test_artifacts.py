@@ -21,10 +21,12 @@ from ufo.runtime.media.artifact_url import (
     ARTIFACT_MEDIA_TYPES,
     ARTIFACT_URL_BUCKET_SECONDS,
     ARTIFACT_URL_TTL_SECONDS,
+    TEXT_APPLICATION_MEDIA_TYPES,
     ArtifactUrlError,
     ArtifactUrlExpired,
     artifact_media_type,
     artifact_url_expiry,
+    is_text_media,
     mint_artifact_url,
     verify_artifact_url,
 )
@@ -99,6 +101,28 @@ def test_artifact_media_types_answer_from_the_product_table_on_any_host() -> Non
     bare_registry = mimetypes.MimeTypes(filenames=())
     for suffix in ARTIFACT_MEDIA_TYPES:
         assert bare_registry.guess_type(f"a{suffix}")[0] is None
+
+
+def test_text_media_is_every_text_type_and_the_application_types_the_store_emits() -> None:
+    """One answer to "are these bytes characters": every `text/*` type, the `application/*` types
+    the interpreter's map hands a `.json`, `.sh` or `.xsl`, and every text type the product table
+    pins — so a pinned share is readable wherever the predicate is asked. A type the store never
+    emits, or whose bytes are not characters, is not."""
+    for media_type in ("text/plain", "text/x-python", "Text/Markdown", "text/yaml"):
+        assert is_text_media(media_type)
+    for media_type in TEXT_APPLICATION_MEDIA_TYPES:
+        assert is_text_media(media_type)
+    for filename in ("compose.yaml", "ci.yml", "pyproject.toml", "app.ts", "run.sh", "data.json"):
+        assert is_text_media(artifact_media_type(filename))
+    for media_type in (
+        "application/octet-stream",
+        "application/x-yaml",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "image/png",
+        "video/mp2t",
+    ):
+        assert not is_text_media(media_type)
 
 
 def test_mint_and_verify_agree_on_a_round_trip() -> None:

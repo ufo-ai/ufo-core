@@ -4,7 +4,7 @@ import { useState } from "react";
 import { expect, onTestFinished, test, vi } from "vitest";
 
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
-import { FileSheet } from "@/kernel/artifact";
+import { FileSheet, MediaIcon } from "@/kernel/artifact";
 import { Pager } from "@/kernel/pager";
 import { RowLines } from "@/kernel/rows";
 import { getJson } from "@/lib/api";
@@ -94,6 +94,18 @@ test("a file sheet renders a markdown document instead of its image preview", as
   expect(within(sheet).getByText("The number moved.")).toBeTruthy();
   expect(heading.closest("[data-artifact-document]")?.className).not.toContain("max-h-24");
   expect(within(sheet).queryByRole("img")).toBeNull();
+});
+
+test("a code file draws the document glyph and a file of unknown bytes the plain sheet", () => {
+  const { container } = render(
+    <>
+      <MediaIcon mediaType="application/yaml" />
+      <MediaIcon mediaType="application/typescript" />
+      <MediaIcon mediaType="application/octet-stream" />
+    </>,
+  );
+  expect(container.querySelectorAll("svg.tabler-icon-file-text")).toHaveLength(2);
+  expect(container.querySelectorAll("svg.tabler-icon-file")).toHaveLength(1);
 });
 
 type Row = { name: string };

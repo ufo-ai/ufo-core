@@ -155,8 +155,9 @@ def test_media_type_backfill_retypes_only_the_fallback_rows_by_suffix(tmp_path: 
 
 def test_text_media_type_backfill_retypes_every_row_by_suffix(tmp_path: Path) -> None:
     """A yaml, toml or typescript row moves whatever a registry guessed for it — the fallback the
-    hosted image wrote, the video type a laptop's registry gives a `.ts`, another's `x-yaml` — and
-    a row whose suffix the table does not name keeps its type, `.tsx` included."""
+    hosted image wrote, the video type a laptop's registry gives a `.ts`, another's `x-yaml` —
+    except a row already under `text/`, whose characters the member context already reads; a row
+    whose suffix the table does not name keeps its type, `.tsx` included."""
     retyped = _retyped(
         tmp_path / "artifact-text-media.db",
         "20260901111145",
@@ -168,6 +169,7 @@ def test_text_media_type_backfill_retypes_every_row_by_suffix(tmp_path: Path) ->
             ("app.ts", "video/mp2t"),
             ("types.d.ts", FALLBACK),
             ("laptop.yaml", "application/x-yaml"),
+            ("readable.yml", "text/yaml"),
             ("App.tsx", FALLBACK),
             ("unknown.bin", FALLBACK),
             ("notes.txt", "text/plain"),
@@ -180,6 +182,7 @@ def test_text_media_type_backfill_retypes_every_row_by_suffix(tmp_path: Path) ->
         "app.ts": "application/typescript",
         "types.d.ts": "application/typescript",
         "laptop.yaml": "application/yaml",
+        "readable.yml": "text/yaml",
         "App.tsx": FALLBACK,
         "unknown.bin": FALLBACK,
         "notes.txt": "text/plain",

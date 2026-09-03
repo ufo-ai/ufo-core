@@ -4,7 +4,7 @@ import { useState } from "react";
 import { expect, onTestFinished, test, vi } from "vitest";
 
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
-import { FileSheet } from "@/kernel/artifact";
+import { FileSheet, MediaIcon } from "@/kernel/artifact";
 import { Pager } from "@/kernel/pager";
 import { RowLines } from "@/kernel/rows";
 import { getJson } from "@/lib/api";
@@ -141,6 +141,18 @@ test("a file sheet renders a code file's characters instead of stating no previe
   expect(
     within(sheet).queryByText("No preview for this file type. Download it to open it."),
   ).toBeNull();
+});
+
+test("a code file draws the document glyph and a file of unknown bytes the plain sheet", () => {
+  const { container } = render(
+    <>
+      <MediaIcon mediaType="application/yaml" />
+      <MediaIcon mediaType="application/typescript" />
+      <MediaIcon mediaType="application/octet-stream" />
+    </>,
+  );
+  expect(container.querySelectorAll("svg.tabler-icon-file-text")).toHaveLength(2);
+  expect(container.querySelectorAll("svg.tabler-icon-file")).toHaveLength(1);
 });
 
 type Row = { name: string };

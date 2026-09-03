@@ -53,22 +53,24 @@ const SPREADSHEET_MEDIA_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]);
 
-const DOCUMENT_MEDIA_PREFIXES = ["text/", "application/vnd.openxmlformats-officedocument"];
-const DOCUMENT_MEDIA_TYPES = new Set(["application/json", "application/msword"]);
+const OFFICE_MEDIA_PREFIX = "application/vnd.openxmlformats-officedocument";
+const WORD_MEDIA_TYPE = "application/msword";
 
 /** What a file with no picture of its own is drawn as: one glyph for the family its media type
  *  falls in. The families are the ones the listing narrows by — image, document, everything else —
  *  so a member who filters to Documents sees the glyph they filtered on, and a spreadsheet and a
- *  page are told apart inside that family rather than sharing one mark. A file the map does not
- *  place takes the plain sheet, which claims nothing about what is in it. */
+ *  page are told apart inside that family rather than sharing one mark. A document is anything
+ *  readable as text, an office file, or a Word file, the same answer the listing files by. A file
+ *  the map does not place takes the plain sheet, which claims nothing about what is in it. */
 export function MediaIcon({ mediaType }: { mediaType: string }) {
   if (mediaType.startsWith("image/")) return <IconPhoto className="size-icon" aria-hidden />;
   if (mediaType === PDF_MEDIA_TYPE) return <IconFileTypePdf className="size-icon" aria-hidden />;
   if (SPREADSHEET_MEDIA_TYPES.has(mediaType))
     return <IconFileSpreadsheet className="size-icon" aria-hidden />;
   const document =
-    DOCUMENT_MEDIA_TYPES.has(mediaType) ||
-    DOCUMENT_MEDIA_PREFIXES.some((prefix) => mediaType.startsWith(prefix));
+    isTextMedia(mediaType) ||
+    mediaType.startsWith(OFFICE_MEDIA_PREFIX) ||
+    mediaType === WORD_MEDIA_TYPE;
   return document ? (
     <IconFileText className="size-icon" aria-hidden />
   ) : (

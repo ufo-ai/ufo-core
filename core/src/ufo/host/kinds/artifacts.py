@@ -33,7 +33,10 @@ from ufo.host.kinds.conversations import CONVERSATION_KIND
 from ufo.runtime.authority import authority_member_id
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
 from ufo.runtime.media.artifact_url import (
+    TEXT_APPLICATION_MEDIA_TYPES,
+    TEXT_MEDIA_PREFIX,
     artifact_url_expiry,
+    is_text_media,
     mint_artifact_url,
     mint_image_preview_url,
 )
@@ -72,18 +75,24 @@ CONVERSATION_PREFIX_HEX = 8
 COLLISION_DIGEST_HEX = 8
 WEB_SURFACE = "web"
 MEDIA_IMAGE_PREFIX = "image/"
-MEDIA_DOCUMENT_PREFIXES = ("text/", "application/vnd.openxmlformats-officedocument")
+MEDIA_OFFICE_PREFIX = "application/vnd.openxmlformats-officedocument"
 MEDIA_DOCUMENT_TYPES = frozenset({"application/pdf", "application/msword"})
 _SLUG_RUN = re.compile(r"[^a-z0-9]+")
 
 
 def artifact_media(media_type: str) -> str:
     """The coarse category a listing filters files by — `image`, `document`, or `other` — so
-    `media=image` is an exact match over a declared field rather than a bespoke query grammar."""
+    `media=image` is an exact match over a declared field rather than a bespoke query grammar. A
+    document is anything readable as text, an office file, a pdf, or a Word file; `_document_media`
+    is the same answer as a where clause."""
     lowered = media_type.lower()
     if lowered.startswith(MEDIA_IMAGE_PREFIX):
         return "image"
-    if lowered.startswith(MEDIA_DOCUMENT_PREFIXES) or lowered in MEDIA_DOCUMENT_TYPES:
+    if (
+        is_text_media(lowered)
+        or lowered.startswith(MEDIA_OFFICE_PREFIX)
+        or lowered in MEDIA_DOCUMENT_TYPES
+    ):
         return "document"
     return "other"
 
@@ -91,8 +100,9 @@ def artifact_media(media_type: str) -> str:
 def _document_media() -> sa.ColumnElement[bool]:
     lowered = sa.func.lower(tables.shared_artifact.c.media_type)
     return sa.or_(
-        *(lowered.like(prefix + "%") for prefix in MEDIA_DOCUMENT_PREFIXES),
-        lowered.in_(MEDIA_DOCUMENT_TYPES),
+        lowered.like(TEXT_MEDIA_PREFIX + "%"),
+        lowered.like(MEDIA_OFFICE_PREFIX + "%"),
+        lowered.in_(TEXT_APPLICATION_MEDIA_TYPES | MEDIA_DOCUMENT_TYPES),
     )
 
 
