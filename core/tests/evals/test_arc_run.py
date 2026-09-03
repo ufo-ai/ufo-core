@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
-from evals.harness.arc import ArcCase, ArcObservation, ArcRun, ArcVerdict
+from evals.harness.arc import NO_TRAJECTORY, ArcCase, ArcObservation, ArcRun, ArcVerdict
 from evals.harness.capability import CapabilityOutput, EvalTrajectory, WorkspaceFile
 from evals.harness.harness import WAIT_EXPIRED, EvalCaseResult
 from evals.harness.target import CapabilityTarget, TargetResult
@@ -42,12 +42,17 @@ class _OpeningTarget:
         return self.opening
 
 
-async def _unclean_arc(tmp_path: Path, status: TurnStatus) -> EvalCaseResult:
+async def _unclean_arc(
+    tmp_path: Path, status: TurnStatus | None, error_class: str | None = None
+) -> EvalCaseResult:
     opening = TargetResult(
         CapabilityOutput("", ()),
         clean=False,
         failure_reason=WAIT_EXPIRED,
-        trajectory=EvalTrajectory(
+        error_class=error_class,
+        trajectory=None
+        if status is None
+        else EvalTrajectory(
             conversation_id=CONVERSATION_ID,
             turn_id=TURN_ID,
             status=status,
@@ -68,6 +73,7 @@ async def test_arc_excludes_a_cancelled_opening_without_a_terminal_transcript(
     assert not result.passed
     assert result.excluded
     assert result.reason == f"opening turn did not settle cleanly: {WAIT_EXPIRED}"
+    assert result.evidence["openingStatus"] == "cancelled"
 
 
 async def test_arc_scores_a_terminal_opening_without_a_transcript_as_a_failure(
@@ -78,3 +84,20 @@ async def test_arc_scores_a_terminal_opening_without_a_transcript_as_a_failure(
     assert not result.passed
     assert not result.excluded
     assert result.reason == f"opening turn did not settle cleanly: {WAIT_EXPIRED}"
+    assert result.evidence["openingStatus"] == "done"
+
+
+async def test_arc_records_which_fault_one_reason_stood_for(tmp_path: Path) -> None:
+    """`turn produced no terminal transcript` is one reason over several faults, and the reason
+    alone cannot say which. The record carries the status the exclusion turned on, so an archived
+    red case reads as a cancelled wait, a turn that terminalized empty, or a run with no
+    trajectory at all — measured after a nightly `ab_reversal` red could not be told apart."""
+    cancelled = await _unclean_arc(tmp_path, "cancelled")
+    terminal = await _unclean_arc(tmp_path, "done")
+    absent = await _unclean_arc(tmp_path, None, error_class="RuntimeError")
+
+    assert cancelled.reason == terminal.reason == absent.reason
+    statuses = {result.evidence["openingStatus"] for result in (cancelled, terminal, absent)}
+    assert statuses == {"cancelled", "done", NO_TRAJECTORY}
+    assert absent.evidence["openingErrorClass"] == "RuntimeError"
+    assert not absent.excluded

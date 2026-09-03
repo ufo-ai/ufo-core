@@ -32,6 +32,9 @@ from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 
 ACTIVITY_POLL_SECONDS = 2.0
+NO_TRAJECTORY = "no trajectory"
+"""The `openingStatus` of a run that left no turn row to read a status from — distinct from a
+turn that reached one, which is why the record carries the word rather than an empty string."""
 
 
 @dataclass(frozen=True)
@@ -191,7 +194,17 @@ class ArcRun:
                     name=self.case.name,
                     passed=False,
                     reason=f"opening turn did not settle cleanly: {opening.failure_reason}",
-                    evidence={"grading": self.case.grading},
+                    # The status and error class the exclusion turned on. `turn produced no
+                    # terminal transcript` is one reason over several faults — a wait the harness
+                    # cancelled, a turn that terminalized empty, a run with no trajectory at all —
+                    # and which one it was decides whether the case is the model's to answer for.
+                    # Without them a red arc case reads only as the reason, and the archived record
+                    # cannot say which fault the night hit.
+                    evidence={
+                        "grading": self.case.grading,
+                        "openingStatus": status or NO_TRAJECTORY,
+                        "openingErrorClass": opening.error_class or "",
+                    },
                     excluded=infra_owned_fault(opening.error_class, opening.failure_reason, status),
                 )
             await self._quiesce(conversation_id)
