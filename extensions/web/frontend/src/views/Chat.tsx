@@ -119,6 +119,7 @@ export function Chat({
   const target: ChatTarget = {
     key: chatKey,
     agentId: agent.id,
+    agentModel: agent.model,
     conversationId,
     onCreated: (created, title) => {
       moveDraft(draftKey, member.id + "/" + created);
@@ -299,6 +300,7 @@ export function FoundingChat({
   const target: ChatTarget = {
     key: chatKey,
     agentId: agent.id,
+    agentModel: agent.model,
     conversationId: null,
     onCreated: (created, title) => {
       moveDraft(draftKey, member.id + "/" + created);

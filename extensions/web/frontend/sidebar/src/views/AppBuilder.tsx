@@ -61,7 +61,7 @@ export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProp
     const current = chatState(key);
     if (current.closed) updateChat(key, (state) => ({ ...state, closed: false }));
     if (current.founded || current.busy || (current.messages ?? []).length > 0) return;
-    void sendMessage({ key, agentId: agent.id, conversationId: null }, OPENING_MESSAGE, OPENING_MESSAGE);
+    void sendMessage({ key, agentId: agent.id, agentModel: agent.model, conversationId: null }, OPENING_MESSAGE, OPENING_MESSAGE);
   }, [key, agent.id]);
 
   return (

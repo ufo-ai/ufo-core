@@ -750,7 +750,7 @@ test("a second founding send on a busy key is refused and the key wears the faul
   wire({
     "/chat": () => new Promise<Response>(() => {}),
   });
-  const target = { key: "new:" + AGENT_ID, agentId: AGENT_ID, conversationId: null };
+  const target = { key: "new:" + AGENT_ID, agentId: AGENT_ID, agentModel: "opus", conversationId: null };
   const first = sendMessage(target, "One.", "One.");
   expect(await sendMessage(target, "Two.", "Two.")).toBe("refused");
   expect(chatState("new:" + AGENT_ID).fault?.title).toBe("The conversation is still opening.");

@@ -17,6 +17,8 @@ const MALFORMED_REPLY = "Malformed reply — try again.";
 const RESUMED_NOTE = "Resumed after a restart";
 const CANCELLED = "cancelled";
 const STOPPED = "Stopped.";
+/** The sentinel an agent wears when the deploy picks its model rather than the member. */
+const AUTO_MODEL = "auto";
 
 export const NEW_CONVERSATION = "new";
 
@@ -30,12 +32,15 @@ export type SendOutcome = "accepted" | "refused";
 export type ChatTarget = {
   key: string;
   agentId: string;
+  /** The model the agent is authored on, as its row states it — `auto` where the deploy chooses.
+   *  A reply names the model it ran on only where the member picked that model. */
+  agentModel: string;
   conversationId: string | null;
   onCreated?: (conversationId: string, title: string) => void;
   onAccepted?: (conversationId: string) => void;
 };
 
-function chatUrl(target: ChatTarget): string {
+function chatUrl(target: Pick<ChatTarget, "agentId" | "conversationId">): string {
   const base = BASE + "/agents/" + target.agentId + "/chat";
   return base + "?conversation=" + (target.conversationId ?? NEW_CONVERSATION);
 }
@@ -168,14 +173,19 @@ export function applyRunFrame(
  *  on this same turn — and holding it would glue two turns into one bubble, or stand the reply the
  *  replay rebuilds behind a copy of itself. The files it listed ride the live turn, so they go with
  *  it the same way; an earlier turn's files stand on its settled reply, which no new tail touches. */
-export function streamTurn(chatKey: string, turnId: string, answering: boolean): void {
+export function streamTurn(
+  chatKey: string,
+  turnId: string,
+  answering: boolean,
+  agentModel: string,
+): void {
   REATTACHES.delete(chatKey);
   updateChat(chatKey, (state) => ({
     ...state,
     live: liveTurn(),
     turn: { id: turnId, answering },
   }));
-  attach(chatKey, turnId, answering, false);
+  attach(chatKey, turnId, answering, false, agentModel);
 }
 
 /** Whether this page already holds the tail of one turn. Its own bookkeeping about its own
@@ -194,7 +204,13 @@ function withoutWait(messages: Bubble[] | null): Bubble[] | null {
 /** One tail per chat, newest attach the writer: whatever source the chat held is closed and a
  *  backoff reattach still pending is cleared before this one opens. Two sources on one chat double
  *  every delta between them, and a reattach firing behind a live source opens a third. */
-function attach(chatKey: string, turnId: string, answering: boolean, reattach: boolean): void {
+function attach(
+  chatKey: string,
+  turnId: string,
+  answering: boolean,
+  reattach: boolean,
+  agentModel: string,
+): void {
   const pending = TIMERS.get(chatKey);
   if (pending !== undefined) clearTimeout(pending);
   TIMERS.delete(chatKey);
@@ -476,7 +492,8 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       let meta = live.meta;
       if (frame.status === "done") {
         if (frame.text) text = frame.text;
-        meta = frame.model + " · " + tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
+        const spend = tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
+        meta = agentModel === AUTO_MODEL ? spend : frame.model + " · " + spend;
         if (frame.question) {
           handoffs.question = { turn_id: turnId, ...frame.question };
         } else if (!answering) {
@@ -527,7 +544,10 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     onLive((live) => ({ ...live, reconnecting: true }));
     TIMERS.set(
       chatKey,
-      reattachTimer(() => attach(chatKey, turnId, answering, true), REATTACH_DELAYS_MS[attempts - 1]),
+      reattachTimer(
+        () => attach(chatKey, turnId, answering, true, agentModel),
+        REATTACH_DELAYS_MS[attempts - 1],
+      ),
     );
   };
 }
@@ -538,7 +558,7 @@ export function resyncChat(target: ChatTarget): void {
   if (state.turn) {
     const source = SOURCES.get(chatKey);
     if (source && source.readyState !== EventSource.CLOSED) return;
-    attach(chatKey, state.turn.id, state.turn.answering, true);
+    attach(chatKey, state.turn.id, state.turn.answering, true, target.agentModel);
     return;
   }
   if (state.busy || state.messages === null) return;
@@ -598,7 +618,7 @@ export async function refreshTranscript(
   });
   const streaming = chatState(chatKey).turn;
   if (streaming && !SOURCES.has(chatKey) && !TIMERS.has(chatKey)) {
-    streamTurn(chatKey, streaming.id, streaming.answering);
+    streamTurn(chatKey, streaming.id, streaming.answering, target.agentModel);
   }
 }
 
@@ -626,7 +646,7 @@ function timezoneHeader(): Record<string, string> {
  *  member to a thread carries the id it stands on. */
 export async function openConversation(agentId: string, text: string): Promise<string | null> {
   try {
-    const res = await fetch(chatUrl({ key: "", agentId, conversationId: null }), {
+    const res = await fetch(chatUrl({ agentId, conversationId: null }), {
       method: "POST",
       credentials: "same-origin",
       body: text,
@@ -766,7 +786,7 @@ export async function sendMessage(
   settled(streamKey, arrivalId);
   const joined = arrivalId !== null && accepted.opened_run === false;
   if (joined && tailed(streamKey, accepted.turn_id)) return "accepted";
-  streamTurn(streamKey, accepted.turn_id, false);
+  streamTurn(streamKey, accepted.turn_id, false, target.agentModel);
   return "accepted";
 }
 
@@ -821,7 +841,7 @@ export async function answerQuestions(
       messages: markAnswered(current.messages, turnId, index, landed),
     }));
     const joined = arrivalId !== null && payload.opened_run === false;
-    if (!(joined && tailed(chatKey, turn))) streamTurn(chatKey, turn, true);
+    if (!(joined && tailed(chatKey, turn))) streamTurn(chatKey, turn, true, target.agentModel);
   }
 }
 
@@ -841,7 +861,7 @@ export async function stopTurn(target: ChatTarget, turnId: string): Promise<void
     });
     if (res.ok) {
       const outcome = (await res.json()) as { stopped: boolean; turn_id?: string };
-      if (outcome.turn_id) streamTurn(target.key, outcome.turn_id, false);
+      if (outcome.turn_id) streamTurn(target.key, outcome.turn_id, false, target.agentModel);
       return;
     }
     description = "Error " + res.status + " — try again.";

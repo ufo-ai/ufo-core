@@ -91,6 +91,33 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
+/** An agent on `auto` runs whatever model the deploy picked, so naming it on the reply states a
+ *  choice the member never made — the spend stands alone. */
+test("a reply from an agent on auto states its spend and names no model", async () => {
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  render(<App agents={[{ ...AGENT, model: "auto" }]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "one two" });
+  expect(await screen.findByText(saying("one two"))).toBeTruthy();
+
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    model: "glm-5.3-flash",
+    tokens: 12,
+    cost_micro_usd: 2_000_000,
+  });
+  expect(await screen.findByText("12 tok · $2.00")).toBeTruthy();
+  expect(screen.queryByText(/glm-5.3-flash/)).toBeNull();
+});
+
 test("the one control carries the act the member has, and stops the turn once", async () => {
   const { handler } = wire({
     ...transcript(),
