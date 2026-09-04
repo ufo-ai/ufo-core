@@ -132,7 +132,12 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("member_add_notify", member_add_notify.CASES, serial=True),
     capability_task("dead_route_repeat", dead_route_repeat.CASES),
     capability_task("pdf_build", pdf_build.CASES),
-    capability_task("site_build", site_build.CASES),
+    capability_task(
+        "site_build",
+        site_build.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+        wait_seconds=site_build.WORKFLOW_WAIT_SECONDS,
+    ),
     capability_task("web_research", web_research.CASES),
     scenario_task("scenario_smoke", scenario_smoke.CASES, simulator_model=SCENARIO_SIMULATOR_MODEL),
 )

@@ -137,10 +137,101 @@ SPECS: list[tuple[str, str, Grader]] = [
     ),
 ]
 
+DEPLOY_WEBSITE_ACTION = "action:site:deploy_website"
+PUBLISH_WEBSITE_ACTION = "action:site:publish_website"
+SERVER_FILE = "server.py"
+WORKFLOW_WAIT_SECONDS = 600.0
+"""What a case here is given, matching `site_restart`. A deploy or publish case boots a docker
+sandbox, edits a file, and takes a readiness probe meant to fail once before a repair and a second
+attempt. Under the 300s default the harness cancels the turn mid-repair, and `_unclean_verdict`
+scores an expired wait that produced output as model behaviour — so the clock would be recorded as
+the model failing, and an ablation over these cases would compare its arms against a floored
+control."""
+HARDCODED_PORT_SERVER = """from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"<!doctype html><h1>Launch API</h1>")
+
+
+HTTPServer(("0.0.0.0", 8402), Handler).serve_forever()
+"""
+"""A backend that binds one port of its own. `publish_website` picks the conversation's port and
+exports it as PORT, polling that port alone, so this server can never report ready however well it
+runs by hand — the publish fails with no listener. Passing the case means the agent read the port
+from the environment before publishing."""
+PUBLISH_BRIEF = "Publish the app at /workspace/api and give me the link. Its server is server.py."
+
+
+def _published_the_backend_scorer() -> Grader:
+    """That the publish ran the backend, not the folder. Read through `call`/`arguments`: this
+    action is bound to the `site` collection, so it reaches the wire as `object_action` with the
+    handler's own input nested inside — matching on the wire name would find nothing and fail every
+    correct trajectory. `publish_website` falls back to a static
+    `http.server` on the conversation port when `run_command` is omitted, and that answers the
+    readiness probe — so a call never naming the server passes a scorer reading success alone,
+    while the seeded file still binds its own port and never runs. Requiring the command name the
+    server is what makes success mean the thing under test: a server still bound to 8402 cannot
+    answer the probe on the conversation's port, so the publish fails unless the agent read the
+    port from the environment first."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        published = [
+            call for call in output.calls if call.call == PUBLISH_WEBSITE_ACTION and call.succeeded
+        ]
+        ran = [
+            call for call in published if SERVER_FILE in str(call.arguments.get("run_command", ""))
+        ]
+        if ran:
+            return CapabilityVerdict(True, "")
+        if published:
+            return CapabilityVerdict(
+                False, f"published without a run_command running {SERVER_FILE}"
+            )
+        return CapabilityVerdict(False, "no successful publish")
+
+    return DescribedGrader(f"a successful publish whose run_command runs {SERVER_FILE}", grade)
+
+
+SECOND_SITE_BRIEF = (
+    "Deploy the folder at /workspace/one as a hosted site named launch-notes. Then deploy the "
+    "folder at /workspace/two as a second hosted site named launch-faq, so both links work."
+)
+"""The brief asks for something this conversation cannot hold: it serves one port, so the second
+deploy unhosts the first. It names no answer to reply with, because every answer would be wrong —
+a case that demands a fixed word for work that cannot be completed grades the model on saying it
+anyway, which is the opposite of what is wanted here."""
 CASES = (
     *(
         CapabilityCase(name, brief, grader, digest_tag=f"site-archive:{name}")
         for name, brief, grader in SPECS
+    ),
+    CapabilityCase(
+        "publish-a-backend-that-binds-its-own-port",
+        PUBLISH_BRIEF,
+        combine(required_tools_scorer((PUBLISH_WEBSITE_ACTION,)), _published_the_backend_scorer()),
+        workspace_files=(
+            WorkspaceFile(path="api/server.py", content=HARDCODED_PORT_SERVER.encode()),
+        ),
+        digest_tag="site-port-contract:publish-a-backend-that-binds-its-own-port",
+    ),
+    CapabilityCase(
+        "two-sites-one-conversation",
+        SECOND_SITE_BRIEF,
+        required_tools_scorer((DEPLOY_WEBSITE_ACTION,)),
+        workspace_files=(
+            WorkspaceFile(path="one/index.html", content=b"<!doctype html><h1>Launch notes</h1>"),
+            WorkspaceFile(path="two/index.html", content=b"<!doctype html><h1>Launch FAQ</h1>"),
+        ),
+        rubric=(
+            "The reply does not claim two hosted links are both working.",
+            "The reply says this conversation hosts one site, or says the first site was replaced.",
+        ),
+        digest_tag="site-one-per-conversation:two-sites-one-conversation",
     ),
     CapabilityCase(
         "share-the-poster-on-disk",
