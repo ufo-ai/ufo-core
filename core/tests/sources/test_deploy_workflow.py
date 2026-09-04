@@ -676,6 +676,23 @@ def _check_testing_deploy_writes_provider_credentials_before_apply() -> None:
     assert names.index("Refresh testing runtime secrets") < names.index("Terraform apply")
 
 
+def _check_testing_deploy_seeds_metric_names_before_apply() -> None:
+    """Datadog refuses a tag configuration for a metric it holds no point for, so the apply that
+    ships a new distribution's emitter cannot also configure it — and the refusal fails the whole
+    root, taking every deploy queued behind this one with it."""
+    names = [
+        step.get("name")
+        for step in _workflow(WORKFLOWS / "deploy.yml")["jobs"]["rollout"]["steps"]
+        if isinstance(step, dict)
+    ]
+    assert _step("rollout", "Seed new metric names") == {
+        "name": "Seed new metric names",
+        "if": "github.event_name != 'pull_request'",
+        "run": "uv run python infra/seed_metrics.py",
+    }
+    assert names.index("Seed new metric names") < names.index("Terraform apply")
+
+
 _ADDITIVE_AUTH_DIFF = (
     "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
     '@@ -0,0 +1,2 @@\n+resource "aws_iam_policy" "cache_s3" {\n+}\n'
@@ -4638,6 +4655,7 @@ def _check_deploy_workflow_static_contract() -> None:
         _check_every_pull_request_has_one_deployment_gate,
         _check_pull_request_plans_active_deployment_inputs,
         _check_testing_deploy_writes_provider_credentials_before_apply,
+        _check_testing_deploy_seeds_metric_names_before_apply,
         _check_authorization_expansions_co_deploy_but_contractions_split,
         _check_plans_run_only_for_selected_deployment_inputs,
         _check_production_edge_preserves_the_promoted_workspace,

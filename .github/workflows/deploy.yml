@@ -482,6 +482,13 @@ jobs:
           TESTING_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: uv run python infra/testing_secrets.py
 
+      # Datadog refuses a tag configuration for a metric it has no point for, so the apply that
+      # ships a new distribution's emitter cannot also configure it — and that refusal fails every
+      # deploy queued behind this one, not only its own.
+      - name: Seed new metric names
+        if: github.event_name != 'pull_request'
+        run: uv run python infra/seed_metrics.py
+
       - name: Terraform plan
         working-directory: ${{ env.TF_DIR }}
         env:
