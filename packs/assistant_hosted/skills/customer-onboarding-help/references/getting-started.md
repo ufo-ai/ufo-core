@@ -4,9 +4,10 @@
 
 A new customer is invited by the UFO team, by email. The invitation opens the workspace's first-run
 page. The customer signs in with their work email, and sign-in continues to that page without
-another action: a short setup confirms their website, then asks about their business, their role,
-the tools that role works in, and what is top of mind, then offers connecting Slack — or, if they
-decline it, connecting other surfaces — before the workspace's main agent answers them. Only a
+another action: a short setup confirms their website, then asks about their business, the roles
+they hold — they can pick more than one — the tools those roles work in, and what is top of mind,
+then offers connecting Slack — or, if they decline it, connecting other surfaces — before the
+workspace's main agent answers them. Only a
 workspace admin can connect Slack; another member sees that step but is told an admin connects it.
 The other surfaces are the member's own: any member copies the terminal install command, and any
 member connects their own phone to iMessage once an admin has made the first iMessage connection.

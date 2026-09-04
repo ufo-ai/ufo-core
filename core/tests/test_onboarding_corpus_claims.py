@@ -672,17 +672,26 @@ CLAIMS = (
         pattern=r'if \(route\.kind === "first-run"\) \{\n(?:.*\n)*?\s+<FirstRun',
     ),
     Claim(
-        claim="the first-run setup confirms the website, then asks the business, the role, the"
-        " tools that role works in, and what is top of mind, in that order",
+        claim="the first-run setup confirms the website, then asks the business, the roles held,"
+        " the tools those roles work in, and what is top of mind, in that order",
         corpus="references/getting-started.md",
-        phrase="a short setup confirms their website, then asks about their business, their"
-        " role,\nthe tools that role works in, and what is top of mind",
+        phrase="a short setup confirms their website, then asks about their business, the roles\n"
+        "they hold — they can pick more than one — the tools those roles work in, and what is"
+        " top\nof mind",
         source=FIRST_RUN_VIEW,
         pattern=(
             r"return \[\n\s+WEBSITE_STEP,\n\s+BUSINESS_STEP,\n"
             r"\s+POSITION_STEP,\n\s+\.\.\.\(tools \? \[TOOLS_STEP\] : \[\]\),\n"
             r"\s+GOALS_STEP,"
         ),
+    ),
+    Claim(
+        claim="the role step lets a member pick more than one role, and the tools step draws from"
+        " all of them",
+        corpus="references/getting-started.md",
+        phrase="the roles\nthey hold — they can pick more than one",
+        source=FIRST_RUN_VIEW,
+        pattern=r"roles: ROLES\.filter\(\(option\) => picked\.includes\(option\)\)",
     ),
     Claim(
         claim="first run offers connecting Slack after the goals step, then other surfaces only"
