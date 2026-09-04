@@ -124,6 +124,13 @@ PORT_UNHOST_NEEDS_A_SPEAKER = (
 )
 
 
+PORT_HELD_BY_A_HOMEPAGE = (
+    "this conversation hosts one site, and that site is an application's homepage: deploying "
+    "{name} here would take the page its members open. Build {name} in its own conversation and "
+    "leave {holder} up"
+)
+
+
 class UnhostNeedsASpeaker(ValueError):
     """A deploy would have retired the site holding its port on a turn with no live speaker. Taking
     a port from a site is unhosting it, and neither a scheduled fire nor a subagent acting on
@@ -131,6 +138,22 @@ class UnhostNeedsASpeaker(ValueError):
     stops at that: telling the refused turn to re-deploy under the standing site's name would name
     an act that succeeds, since a same-name deploy displaces nothing, and repoint a live link at a
     build nobody asked to put there."""
+
+
+class HomepageHoldsThePort(ValueError):
+    """A deploy under a new name would have retired the site an agent holds as its homepage. A
+    conversation serves one port and so hosts one site, and unhosting a bound page removes what
+    every member of that agent's audience opens — a loss the deploy never names and the member
+    reads as the app disappearing. Refused rather than reported, because the bytes going up are not
+    the page coming down: nothing about a new site says the old one should stop existing.
+
+    The message stops at the safe act, the same restraint `UnhostNeedsASpeaker` keeps: naming a
+    re-deploy under the bound page's own name would name an act that succeeds and does the harm
+    this refusal exists to stop. A same-name deploy displaces nothing — `_on_port` excludes it —
+    so nothing here sees it, and `register` would write the refused build's source onto the bound
+    row, serving it at the homepage's own link to every member of that agent's audience. The
+    refusal is the only place that act can be prevented, because the store is never told which
+    build the member asked for."""
 
 
 class NotTheSiteCreator(ValueError):
@@ -594,6 +617,10 @@ class HostedSites:
             raise NotTheSiteCreator(f"{SITE_VISIBILITY_GATE} ({name!r})")
         displaced = await self._on_port(connection, conversation_id, port, name)
         if displaced is not None:
+            if displaced.homepage_agent_id is not None:
+                raise HomepageHoldsThePort(
+                    PORT_HELD_BY_A_HOMEPAGE.format(name=repr(name), holder=repr(displaced.name))
+                )
             if displaced.creator_member_id != creator_member_id:
                 raise NotTheSiteCreator(f"{PORT_HELD_BY_ANOTHER_MEMBER} ({displaced.name!r})")
             if not may_unhost:

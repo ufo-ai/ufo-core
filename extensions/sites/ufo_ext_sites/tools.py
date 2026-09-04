@@ -1268,6 +1268,17 @@ async def deploy_ufo_application(ctx: ToolContext, args: DeployUfoApplicationInp
     )
 
 
+def _unhosted(displaced: HostedSite | None, conversation_id: UUID) -> dict[str, object]:
+    """What this deploy took down, named as the object it was. A conversation serves one port, so a
+    deploy under a new name retires the site that held it — and the member reads a link that has
+    stopped answering with nothing having said it would. Reporting the loss is what lets the reply
+    state it, and what tells the agent that a second name here is a replacement rather than an
+    addition."""
+    if displaced is None:
+        return {}
+    return {"unhosted": site_object_name(conversation_id, displaced.name)}
+
+
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
     source_project = workspace_path(args.project_path)
     if (
@@ -1291,7 +1302,7 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
         and await _sites_registry(ctx).read(conversation, slug) is None
     ):
         return await _redeploy_homepage(ctx, args, bound, port)
-    name, _displaced = await _refuse_before_serving(ctx, args.site_name, port, args.visibility)
+    name, displaced = await _refuse_before_serving(ctx, args.site_name, port, args.visibility)
     project, listing = await _served_directory(ctx, source_project)
     manifest = await _promote_source(ctx, project, conversation, name, listing)
     command = f"python3 -m http.server {port} --bind 0.0.0.0"
@@ -1304,6 +1315,7 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     drawn = await _pictured(ctx, name, port, conversation)
     return _json_result(
         {**served, **hosted, "entry_point": args.entry_point}
+        | _unhosted(displaced, conversation)
         | ({} if drawn is None else {"preview_error": drawn})
     )
 
@@ -1429,7 +1441,7 @@ async def _redeploy_homepage(
 async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult:
     conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
-    name, _displaced = await _refuse_before_serving(ctx, args.app_name, port, args.visibility)
+    name, displaced = await _refuse_before_serving(ctx, args.app_name, port, args.visibility)
     if args.install_command:
         install = await ctx.sandbox.bash(
             f"cd {shlex.quote(workspace_path(args.project_path))} && {args.install_command}",
@@ -1448,7 +1460,11 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
         return failed.failure.result()
     hosted = await _host(ctx, name, port, args.visibility, None)
     drawn = await _pictured(ctx, name, port, conversation)
-    return _json_result({**served, **hosted} | ({} if drawn is None else {"preview_error": drawn}))
+    return _json_result(
+        {**served, **hosted}
+        | _unhosted(displaced, conversation)
+        | ({} if drawn is None else {"preview_error": drawn})
+    )
 
 
 async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:

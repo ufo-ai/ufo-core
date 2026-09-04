@@ -40,6 +40,7 @@ from ufo_ext_sites.source import (
     CLAIM_TREE_PROG,
 )
 from ufo_ext_sites.store import (
+    HomepageHoldsThePort,
     HostedSite,
     HostedSites,
     NotTheSiteCreator,
@@ -779,6 +780,56 @@ async def test_registering_retires_another_site_on_the_same_port(db: None) -> No
     await _deploy(workspace, conversation_id, audience, member_id, site="second")
 
     assert [row.name for row in await _stored(workspace)] == ["second"]
+
+
+async def test_a_displacing_deploy_names_the_site_it_took_down(db: None) -> None:
+    """A conversation serves one port, so a second name replaces the first rather than joining it.
+    The result says which site stopped answering — the member's old link is dead either way, and a
+    deploy that reports only what it hosted leaves the reply unable to say so."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+
+    first = await _deploy(workspace, conversation_id, audience, member_id, site="first")
+    second = await _deploy(workspace, conversation_id, audience, member_id, site="second")
+
+    assert "unhosted" not in first
+    assert second["unhosted"] == site_object_name(conversation_id, "first")
+    assert [row.name for row in await _stored(workspace)] == ["second"]
+
+
+async def test_a_deploy_under_a_new_name_leaves_a_bound_homepage_up(db: None) -> None:
+    """The page an agent holds as its homepage is what every member of its audience opens, and one
+    port means a second name would retire it. Refused: the bytes going up are not that page coming
+    down, and the member reads its loss as the application disappearing.
+
+    The refusal must not name a re-deploy under the bound page's own name. That act displaces
+    nothing, so no refusal sees it, and it writes the refused build onto the bound row — every
+    member of the agent's audience would then open the wrong application at the homepage's link.
+    The member's own directive to change that page is a different turn, and still lands: the last
+    lines hold that door open."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    await _deploy(workspace, conversation_id, audience, member_id, site="home")
+    with ws(workspace.id):
+        await HostedSites(workspace.id, workspace_tx).set_homepage(
+            workspace.agent_id, conversation_id, "home"
+        )
+
+    with pytest.raises(HomepageHoldsThePort, match="hosts one site") as refused:
+        await _deploy(workspace, conversation_id, audience, member_id, site="other")
+
+    assert [row.name for row in await _stored(workspace)] == ["home"]
+    assert "in its own conversation" in str(refused.value)
+    assert "leave 'home' up" in str(refused.value)
+    assert "deploy" not in str(refused.value).casefold().split("would take")[1]
+
+    redeployed = await _deploy(workspace, conversation_id, audience, member_id, site="home")
+    assert "unhosted" not in redeployed
+    assert [row.name for row in await _stored(workspace)] == ["home"]
 
 
 async def test_only_the_creator_may_re_gate_a_site_through_a_deploy(db: None) -> None:
