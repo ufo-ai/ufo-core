@@ -2,7 +2,8 @@
 `?created[gte]` incremental filter, the `events` stream (which ufo syncs as plain records — it
 does not route Stripe's cross-object `*.deleted` events to other streams), the two-level
 `usage_records` fan-out asserted request by request with its parameters (Stripe rejects
-`/v1/subscription_items` without `subscription`), a parent Stripe no longer resolves skipped with
+`/v1/subscription_items` without `subscription`), the per-request summary id kept out of the record
+and still walked as the wire cursor, a parent Stripe no longer resolves skipped with
 the rest of the walk intact, a refusal as `StreamSkipped`, and any other reason a client error
 names reaching the run as a `StreamFault`. Stripe's `created` cursor is a unix integer, which the
 adapter's string watermark does not advance, so an incremental stream full-refreshes each run
@@ -118,7 +119,12 @@ async def test_events_sync_as_plain_records() -> None:
             "usage_records",
             {"/v1/subscriptions": "sub_1", "/v1/subscription_items": "si_1"},
             "/v1/subscription_items/si_1/usage_record_summaries",
-            {"id": "ur_1", "timestamp": 100},
+            {
+                "id": "ur_1",
+                "subscription_item": "si_1",
+                "period": {"start": 100, "end": 200},
+                "timestamp": 100,
+            },
             "1970-01-01T00:01:40.000000+00:00",
             None,
         ),
@@ -195,14 +201,91 @@ async def test_usage_records_skips_a_subscription_stripe_no_longer_resolves() ->
                     200, json={"data": [{"id": "si_1", "created": 100}], "has_more": False}
                 )
             case "/v1/subscription_items/si_1/usage_record_summaries", _:
-                return httpx.Response(
-                    200, json={"data": [{"id": "ur_1", "timestamp": 100}], "has_more": False}
-                )
+                return httpx.Response(200, json={"data": [_summary("sis_1")], "has_more": False})
             case path, _:
                 raise AssertionError(f"unexpected request {path}")
 
     result = await _fetch("usage_records", handle)
-    assert _refs(result) == {"usage_records/ur_1"}
+    assert _refs(result) == {"usage_records/si_1:100:200"}
+
+
+def _summary(summary_id: str) -> dict:
+    return {
+        "id": summary_id,
+        "subscription_item": "si_1",
+        "period": {"start": 100, "end": 200},
+        "total_usage": 7,
+        "timestamp": 100,
+    }
+
+
+async def test_usage_summaries_key_on_item_and_period_not_the_per_request_id() -> None:
+    ids = iter(["sis_first", "sis_second"])
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        match request.url.path:
+            case "/v1/subscriptions":
+                return httpx.Response(
+                    200, json={"data": [{"id": "sub_1", "created": 100}], "has_more": False}
+                )
+            case "/v1/subscription_items":
+                return httpx.Response(
+                    200, json={"data": [{"id": "si_1", "created": 100}], "has_more": False}
+                )
+            case _:
+                return httpx.Response(200, json={"data": [_summary(next(ids))], "has_more": False})
+
+    first = await _fetch("usage_records", handle)
+    second = await _fetch("usage_records", handle)
+    assert first.pages[0].source_identity == second.pages[0].source_identity
+    assert first.pages[0].source_identity == "usage_records/si_1:100:200"
+    assert "sis_first" not in first.pages[0].body
+    assert "sis_second" not in second.pages[0].body
+    assert first.pages[0].digest == second.pages[0].digest
+
+
+async def test_usage_summary_walk_pages_on_the_id_the_record_drops() -> None:
+    seen: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        match request.url.path:
+            case "/v1/subscriptions":
+                return httpx.Response(
+                    200, json={"data": [{"id": "sub_1", "created": 100}], "has_more": False}
+                )
+            case "/v1/subscription_items":
+                return httpx.Response(
+                    200, json={"data": [{"id": "si_1", "created": 100}], "has_more": False}
+                )
+            case _:
+                after = request.url.params.get("starting_after")
+                seen.append(after)
+                if after == "sis_first":
+                    later = {**_summary("sis_second"), "period": {"start": 200, "end": 300}}
+                    return httpx.Response(200, json={"data": [later], "has_more": False})
+                return httpx.Response(200, json={"data": [_summary("sis_first")], "has_more": True})
+
+    result = await _fetch("usage_records", handle)
+    assert seen == [None, "sis_first"]
+    assert _refs(result) == {"usage_records/si_1:100:200", "usage_records/si_1:200:300"}
+
+
+async def test_rotating_signed_links_leave_the_page_body_and_digest() -> None:
+    links = iter(["https://pay.stripe.com/receipts/a", "https://pay.stripe.com/receipts/b"])
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"id": "ch_1", "created": 100, "receipt_url": next(links)}],
+                "has_more": False,
+            },
+        )
+
+    first = await _fetch("charges", handle)
+    second = await _fetch("charges", handle)
+    assert "receipt_url" not in first.pages[0].body
+    assert first.pages[0].digest == second.pages[0].digest
 
 
 async def test_stream_fault_carries_the_reason_stripe_named() -> None:

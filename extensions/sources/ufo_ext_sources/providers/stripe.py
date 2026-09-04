@@ -29,6 +29,8 @@ from ufo.sdk.sources import RestConnector, StreamFault, StreamSkipped, StreamSpe
 PAGE_SIZE = 100
 STRIPE_VERSION = "2024-10-28.acacia"
 _REFUSAL_STATUS = frozenset({401, 403})
+VOLATILE_FIELDS = frozenset({"receipt_url", "hosted_invoice_url", "invoice_pdf"})
+USAGE_PERIOD_KEY = "usage_period"
 _MISSING_RESOURCE_STATUS = frozenset({400, 404})
 _MISSING_RESOURCE_CODE = "resource_missing"
 
@@ -148,6 +150,7 @@ STRIPE_STREAMS: list[StreamSpec] = [
     _stream(
         "usage_records",
         source_object="subscription_items",
+        primary_key=USAGE_PERIOD_KEY,
         cursor_field="timestamp",
         created_at_field="timestamp",
         canonical=True,
@@ -292,19 +295,28 @@ class StripeConnector(RestConnector):
             if extra_params:
                 params.update(extra_params)
             data = await self._get(client, path, params=params)
-            records = [self._browse_record(record, stream) for record in data.get("data") or []]
+            rows = data.get("data") or []
+            records = [self._browse_record(record, stream) for record in rows]
             if records:
                 yield records
             if not data.get("has_more"):
                 return
-            last = records[-1] if records else None
+            last = rows[-1] if rows else None
             if not isinstance(last, dict) or not last.get("id"):
                 return
             starting_after = str(last["id"])
 
     @staticmethod
     def _browse_record(record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
-        normalized = dict(record)
+        normalized = {key: value for key, value in record.items() if key not in VOLATILE_FIELDS}
+        if stream.name == "usage_records":
+            period = normalized.get("period")
+            item = normalized.get("subscription_item")
+            if isinstance(period, dict) and item:
+                normalized[USAGE_PERIOD_KEY] = f"{item}:{period.get('start')}:{period.get('end')}"
+            # Stripe mints a fresh summary id per request, so it is wire addressing and never
+            # part of the record: kept, it moves the page body and digest on every run.
+            normalized.pop("id", None)
         for field in ("created_at", "updated_at"):
             value = normalized.get(field)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
