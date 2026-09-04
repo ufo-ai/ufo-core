@@ -790,7 +790,10 @@ function Composer({
       }
     >
       {starting ? (
-        <div className={cn(COLUMN, "px-2xl pt-lg")}>
+        // The line stands on the band the sidebar header stands on — the same offset down the
+        // page and the same row height — so the first words of the screen and the mark beside
+        // them read as one line across the shell.
+        <div className={cn(COLUMN, "mt-xl flex h-(--size-row) shrink-0 items-center px-2xl")}>
           <p className="m-0 text-ui text-ink-soft">{START_INTRO}</p>
         </div>
       ) : null}

@@ -451,10 +451,11 @@
   --size-apps-open: calc(var(--size-row) * 16);
   --size-textarea: 12em;
   --size-usage-chart: 10em;
-  /* The mark and its wordmark, drawn as one asset: the block sits on the same optical band as
-     the 16px glyphs beside it in the sidebar header. */
-  --size-wordmark: 12px;
-  --size-logo: 48px;
+  /* The mark and its wordmark, drawn as one asset: the block stands over the 16px glyphs beside
+     it in the sidebar header rather than on their band, so the header reads as the product's
+     name first. */
+  --size-wordmark: 18px;
+  --size-logo: 72px;
   --size-notice: 1em;
   --marker-width: 2px;
 }
