@@ -5,17 +5,18 @@ Deel's REST v2 API paginates uniformly: `?limit=100&offset=N`, response `{data: 
 looping until the page returns short of the limit. Records arrive flat under `data`, so `flatten`
 stays the identity passthrough. Streams whose `cursor_field` is set filter incrementally with
 `?updated_after=<iso>`; streams without one full-refresh each run. Auth is the OAuth bearer the
-resolved `Credential` carries. The write path is intentionally absent — the source seam only
-reads."""
+resolved `Credential` carries. A refusal (401/403) raises `StreamSkipped`. The write path is
+intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSpec
+from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
 
 PAGE_SIZE = 100
+_REFUSAL_STATUS = frozenset({401, 403})
 
 
 def _stream(
@@ -74,14 +75,22 @@ class DeelConnector(RestConnector):
         path = f"/rest/v2/{stream.source_object.lstrip('/')}"
         base_params = self._initial_params(stream, cursor)
         offset = 0
-        while True:
-            params = dict(base_params)
-            params["offset"] = offset
-            data = await self._get(client, path, params=params)
-            records = self._extract_records(data)
-            if not records:
-                return
-            yield records
-            if len(records) < PAGE_SIZE:
-                return
-            offset += PAGE_SIZE
+        try:
+            while True:
+                params = dict(base_params)
+                params["offset"] = offset
+                data = await self._get(client, path, params=params)
+                records = self._extract_records(data)
+                if not records:
+                    return
+                yield records
+                if len(records) < PAGE_SIZE:
+                    return
+                offset += PAGE_SIZE
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"deel: {stream.name!r} refused ({error.response.status_code}); the grant "
+                    "lacks the scope"
+                ) from error
+            raise

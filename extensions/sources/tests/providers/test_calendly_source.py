@@ -177,3 +177,11 @@ async def test_missing_organization_skips_the_stream() -> None:
 
     with pytest.raises(StreamSkipped):
         await _fetch("scheduled_events", handle)
+
+
+async def test_a_refused_stream_is_skipped_rather_than_failed() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "Permission Denied"})
+
+    with pytest.raises(StreamSkipped):
+        await _fetch("event_types", handle)

@@ -6,8 +6,9 @@ enumerates the grant's ad accounts (`/me/adaccounts`) and fans the account-scope
 over them; each collection pages by following the absolute `paging.next` URL the response carries.
 `campaigns`, `ad_sets`, and `ads` filter past the stored watermark on `updated_time`; `ads_insights`
 requests a per-ad daily breakdown windowed from the cursor date (or the last 90 days on a fresh run)
-and synthesises a stable id per row. Auth is the OAuth bearer the resolved `Credential` carries. The
-write path is intentionally absent — the source seam only reads."""
+and synthesises a stable id per row. Auth is the OAuth bearer the resolved `Credential` carries.
+A refusal (401/403) raises `StreamSkipped`. The write path is intentionally absent — the source seam
+only reads."""
 
 import json
 from collections.abc import AsyncIterator
@@ -20,6 +21,7 @@ from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at
 
 GRAPH_VERSION = "v25.0"
 PAGE_SIZE = 100
+_REFUSAL_STATUS = frozenset({401, 403})
 
 FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
     StreamSpec(
@@ -168,20 +170,28 @@ class FacebookAdsConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name == "ad_accounts":
-            accounts = await self._accounts(client)
-            if accounts:
-                yield accounts
-            return
-        if stream.name in {"campaigns", "ad_sets", "ads"}:
-            async for page in self._account_children(client, stream, cursor=cursor):
-                yield page
-            return
-        if stream.name == "ads_insights":
-            async for page in self._insights(client, cursor=cursor):
-                yield page
-            return
-        raise StreamSkipped(f"facebook_ads stream {stream.name!r} is not implemented")
+        try:
+            if stream.name == "ad_accounts":
+                accounts = await self._accounts(client)
+                if accounts:
+                    yield accounts
+                return
+            if stream.name in {"campaigns", "ad_sets", "ads"}:
+                async for page in self._account_children(client, stream, cursor=cursor):
+                    yield page
+                return
+            if stream.name == "ads_insights":
+                async for page in self._insights(client, cursor=cursor):
+                    yield page
+                return
+            raise StreamSkipped(f"facebook_ads stream {stream.name!r} is not implemented")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"facebook_ads: {stream.name!r} refused "
+                    f"({error.response.status_code}); the grant lacks the scope"
+                ) from error
+            raise
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name == "campaigns":

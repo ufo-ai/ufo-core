@@ -1,7 +1,7 @@
 """The Brex connector over a mock transport: the `{items, next_cursor}` envelope followed to the
-end, the `posted_at_date` watermark advancing across pages, and the default titled-JSON render (Brex
-is a structured provider, not a content one). Offline — a canned transport, no DB, no token, no
-broker."""
+end, the `posted_at_date` watermark advancing across pages, a refusal as `StreamSkipped`, and the
+default titled-JSON render (Brex is a structured provider, not a content one). Offline — a canned
+transport, no DB, no token, no broker."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
@@ -11,7 +11,7 @@ import pytest
 from ufo_ext_sources.providers.brex import BrexConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -104,12 +104,10 @@ async def test_transfers_read_the_payments_list_endpoint() -> None:
     assert {page.source_ref for page in result.pages} == {"transfers/tr1"}
 
 
-async def test_a_forbidden_response_fails_the_run_rather_than_skipping_it() -> None:
-    """Brex declares no refuse-path: a 403 is a genuine fault the driver backs off on, not a
-    `StreamSkipped`."""
-
+async def test_a_refused_stream_is_skipped_rather_than_failed() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/expenses/card"
         return httpx.Response(403, json={"message": "forbidden"})
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await _fetch("users", handle)
+    with pytest.raises(StreamSkipped):
+        await _fetch("expenses", handle)

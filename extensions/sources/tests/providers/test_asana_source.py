@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from ufo_ext_sources.providers.asana import AsanaConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -106,3 +107,11 @@ async def test_full_refresh_stream_never_sends_the_modified_since_filter() -> No
     assert result.pages[0].updated_at is None
     stream = next(stream for stream in AsanaConnector.streams_list if stream.name == "users")
     assert stream.updated_at_field is None
+
+
+async def test_a_refused_stream_is_skipped_rather_than_failed() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"errors": [{"message": "forbidden"}]})
+
+    with pytest.raises(StreamSkipped):
+        await _fetch("tasks", handle)

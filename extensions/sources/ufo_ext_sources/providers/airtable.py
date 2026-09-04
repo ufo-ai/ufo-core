@@ -6,8 +6,8 @@ Airtable exposes no flat collection: the connector walks the metadata API (`/met
 new table lands on the next sync with no manual config. Records page by an opaque `offset` token the
 response body carries (`?offset=<token>&pageSize=100`). Each record is stamped with its `base_id` /
 `table_id` context so a downstream reader can resolve its origin. Auth is the OAuth bearer the
-resolved `Credential` carries. The write path is intentionally absent — the source seam only
-reads."""
+resolved `Credential` carries. A refusal (401/403) raises `StreamSkipped`. The write path is
+intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -23,6 +23,7 @@ from ufo.sdk.sources import (
 )
 
 PAGE_SIZE = 100
+_REFUSAL_STATUS = frozenset({401, 403})
 
 AIRTABLE_STREAMS: list[StreamSpec] = [
     StreamSpec(name="bases", source_object="bases", primary_key="id", canonical=True),
@@ -72,33 +73,41 @@ class AirtableConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name == "bases":
-            bases = await self._bases(client)
-            if bases:
-                yield bases
-            return
-        if stream.name == "tables":
-            page: list[dict[str, Any]] = []
-            for base in await self._bases(client):
-                page.extend(await self._tables_for_base(client, base))
-                if len(page) >= PAGE_SIZE:
+        try:
+            if stream.name == "bases":
+                bases = await self._bases(client)
+                if bases:
+                    yield bases
+                return
+            if stream.name == "tables":
+                page: list[dict[str, Any]] = []
+                for base in await self._bases(client):
+                    page.extend(await self._tables_for_base(client, base))
+                    if len(page) >= PAGE_SIZE:
+                        yield page
+                        page = []
+                if page:
                     yield page
-                    page = []
-            if page:
-                yield page
-            return
-        if stream.name == "records":
-            for base in await self._bases(client):
-                base_id = base.get("id")
-                if not isinstance(base_id, str) or not base_id:
-                    continue
-                for table in await self._tables_for_base(client, base):
-                    async for records in self._records_for_table(
-                        client, base_id=base_id, table=table
-                    ):
-                        yield records
-            return
-        raise StreamSkipped(f"airtable stream {stream.name!r} is not implemented")
+                return
+            if stream.name == "records":
+                for base in await self._bases(client):
+                    base_id = base.get("id")
+                    if not isinstance(base_id, str) or not base_id:
+                        continue
+                    for table in await self._tables_for_base(client, base):
+                        async for records in self._records_for_table(
+                            client, base_id=base_id, table=table
+                        ):
+                            yield records
+                return
+            raise StreamSkipped(f"airtable stream {stream.name!r} is not implemented")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"airtable: {stream.name!r} refused ({error.response.status_code}); the grant "
+                    "lacks the scope"
+                ) from error
+            raise
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name == "bases":

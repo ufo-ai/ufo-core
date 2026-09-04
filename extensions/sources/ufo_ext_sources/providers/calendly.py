@@ -9,7 +9,8 @@ the `pagination.next_page_token` the response body carries (`?page_token=<token>
 watermark on `created_at`. A grant whose account exposes no `current_organization` yields
 `StreamSkipped`. Organization memberships lift the member's name and email, then drop the foreign
 user object so profile changes do not change the membership. Auth is the OAuth bearer the resolved
-`Credential` carries. The write path is intentionally absent — the source seam only reads."""
+`Credential` carries. A refusal (401/403) raises `StreamSkipped` too. The write path is
+intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -25,6 +26,7 @@ from ufo.sdk.sources import (
 )
 
 PAGE_SIZE = 100
+_REFUSAL_STATUS = frozenset({401, 403})
 
 CALENDLY_STREAMS: list[StreamSpec] = [
     StreamSpec(name="api_user", source_object="users/me", primary_key="uri"),
@@ -130,36 +132,44 @@ class CalendlyConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name == "api_user":
-            user = await self._current_user(client)
-            if user:
-                yield [user]
-            return
-        if stream.name == "event_types":
-            async for page in self._org_stream(
-                client, "/event_types", cursor=cursor, cursor_param="updated_since"
-            ):
-                yield page
-            return
-        if stream.name == "groups":
-            async for page in self._org_stream(client, "/groups"):
-                yield page
-            return
-        if stream.name == "organization_memberships":
-            async for page in self._org_stream(client, "/organization_memberships"):
-                yield page
-            return
-        if stream.name == "scheduled_events":
-            async for page in self._org_stream(
-                client, "/scheduled_events", cursor=cursor, cursor_param="min_start_time"
-            ):
-                yield page
-            return
-        if stream.name == "event_invitees":
-            async for page in self._invitees(client, cursor=cursor):
-                yield page
-            return
-        raise StreamSkipped(f"calendly stream {stream.name!r} is not implemented")
+        try:
+            if stream.name == "api_user":
+                user = await self._current_user(client)
+                if user:
+                    yield [user]
+                return
+            if stream.name == "event_types":
+                async for page in self._org_stream(
+                    client, "/event_types", cursor=cursor, cursor_param="updated_since"
+                ):
+                    yield page
+                return
+            if stream.name == "groups":
+                async for page in self._org_stream(client, "/groups"):
+                    yield page
+                return
+            if stream.name == "organization_memberships":
+                async for page in self._org_stream(client, "/organization_memberships"):
+                    yield page
+                return
+            if stream.name == "scheduled_events":
+                async for page in self._org_stream(
+                    client, "/scheduled_events", cursor=cursor, cursor_param="min_start_time"
+                ):
+                    yield page
+                return
+            if stream.name == "event_invitees":
+                async for page in self._invitees(client, cursor=cursor):
+                    yield page
+                return
+            raise StreamSkipped(f"calendly stream {stream.name!r} is not implemented")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"calendly: {stream.name!r} refused ({error.response.status_code}); the grant "
+                    "lacks the scope"
+                ) from error
+            raise
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name == "api_user":

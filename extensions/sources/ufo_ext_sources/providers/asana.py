@@ -7,18 +7,19 @@ goes null. Records arrive flat under `data`, keyed by Asana's `gid`. `tasks` and
 `?modified_since=<iso>` for incremental sync (watermarked on `modified_at`); `stories` watermarks on
 `created_at`; every other stream full-refreshes each run. The credential is resolved through the
 auth proxy the runner threads (a broker's proxying transport, or a member-added key host-side) —
-this connector holds no token. The write path is intentionally absent — the source seam only
-reads."""
+this connector holds no token. A refusal (401/403) raises `StreamSkipped`. The write path is
+intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSpec, list_or_empty
+from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
 
 PAGE_SIZE = 100
 _MODIFIED_SINCE_STREAMS = frozenset({"tasks", "projects"})
+_REFUSAL_STATUS = frozenset({401, 403})
 
 
 def _stream(
@@ -78,13 +79,21 @@ class AsanaConnector(RestConnector):
         params: dict[str, Any] = {"limit": PAGE_SIZE}
         if cursor and stream.name in _MODIFIED_SINCE_STREAMS:
             params["modified_since"] = cursor
-        while True:
-            data = await self._get(client, path, params=params)
-            records = list_or_empty(data.get("data"))
-            if records:
-                yield records
-            next_page = data.get("next_page")
-            offset = next_page.get("offset") if isinstance(next_page, dict) else None
-            if not isinstance(offset, str) or not offset:
-                return
-            params = {**params, "offset": offset}
+        try:
+            while True:
+                data = await self._get(client, path, params=params)
+                records = list_or_empty(data.get("data"))
+                if records:
+                    yield records
+                next_page = data.get("next_page")
+                offset = next_page.get("offset") if isinstance(next_page, dict) else None
+                if not isinstance(offset, str) or not offset:
+                    return
+                params = {**params, "offset": offset}
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"asana: {stream.name!r} refused ({error.response.status_code}); the grant "
+                    "lacks the scope"
+                ) from error
+            raise

@@ -7,7 +7,8 @@ fans the leaf reads (tasks, comments, custom fields) out over the discovered lis
 record with its parent-id context. `tasks` page by an integer `?page=N` and filter past the stored
 watermark on `date_updated`; per-list child streams filter on their own `cursor_field`. `users` are
 collapsed from the members embedded on each team. Auth is the OAuth bearer the resolved `Credential`
-carries. The write path is intentionally absent — the source seam only reads."""
+carries. A refusal (401/403) raises `StreamSkipped`. The write path is intentionally absent —
+the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -22,6 +23,8 @@ from ufo.sdk.sources import (
     records_at,
     with_context,
 )
+
+_REFUSAL_STATUS = frozenset({401, 403})
 
 CLICKUP_STREAMS: list[StreamSpec] = [
     StreamSpec(name="teams", source_object="team", primary_key="id"),
@@ -150,30 +153,38 @@ class ClickUpConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name in {"teams", "spaces", "folders", "lists"}:
-            records = await self._root_records(client, stream.name)
-            if records:
-                yield records
-            return
-        if stream.name == "users":
-            users = await self._users(client)
-            if users:
-                yield list(users.values())
-            return
-        if stream.name == "tasks":
-            async for page in self._tasks(client, cursor=cursor):
-                yield page
-            return
-        if stream.name in {"list_comments", "list_custom_fields"}:
-            async for page in self._list_child_stream(client, stream, cursor=cursor):
-                yield page
-            return
-        if stream.name == "goals":
-            out = await self._goals(client)
-            if out:
-                yield out
-            return
-        raise StreamSkipped(f"clickup stream {stream.name!r} is not implemented")
+        try:
+            if stream.name in {"teams", "spaces", "folders", "lists"}:
+                records = await self._root_records(client, stream.name)
+                if records:
+                    yield records
+                return
+            if stream.name == "users":
+                users = await self._users(client)
+                if users:
+                    yield list(users.values())
+                return
+            if stream.name == "tasks":
+                async for page in self._tasks(client, cursor=cursor):
+                    yield page
+                return
+            if stream.name in {"list_comments", "list_custom_fields"}:
+                async for page in self._list_child_stream(client, stream, cursor=cursor):
+                    yield page
+                return
+            if stream.name == "goals":
+                out = await self._goals(client)
+                if out:
+                    yield out
+                return
+            raise StreamSkipped(f"clickup stream {stream.name!r} is not implemented")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"clickup: {stream.name!r} refused ({error.response.status_code}); the grant "
+                    "lacks the scope"
+                ) from error
+            raise
 
     async def _root_records(self, client: httpx.AsyncClient, name: str) -> list[dict[str, Any]]:
         match name:

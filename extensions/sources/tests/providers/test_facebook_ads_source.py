@@ -12,7 +12,7 @@ import pytest
 from ufo_ext_sources.providers.facebook_ads import FacebookAdsConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -168,9 +168,9 @@ async def test_ad_children_preserve_created_and_updated_times(stream: str, path:
     assert result.pages[0].updated_at == "2026-02-05T00:00:00.000000+00:00"
 
 
-async def test_a_forbidden_account_listing_fails_the_run() -> None:
+async def test_a_refused_account_listing_is_skipped_rather_than_failed() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"message": "permission"}})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(StreamSkipped):
         await _fetch("ad_accounts", handle)

@@ -12,16 +12,18 @@ filter. Auth is the OAuth bearer the resolved `Credential` carries.
 list endpoint returns the same transfer objects the webhook's follow-up `GET /v1/transfers/{id}`
 hydrates, keyed by the same transfer id. The source seam is polled — core drives `fetch` on the sync
 interval and no surface receives provider callbacks — so the list read is what lands the transfer.
-The write path is intentionally absent — the source seam only reads."""
+A refusal (401/403) raises `StreamSkipped`. The write path is intentionally absent — the source seam
+only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSpec, list_or_empty
+from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
 
 PAGE_SIZE = 100
+_REFUSAL_STATUS = frozenset({401, 403})
 
 # Stream-name → list-endpoint path. Streams sit under `/v1/` (vendors, expenses) or `/v2/`
 # (everything else); tracking the path per-stream keeps the mapping explicit.
@@ -75,14 +77,22 @@ class BrexConnector(RestConnector):
         if path is None:
             raise NotImplementedError(f"brex: no list endpoint for stream {stream.name!r}")
         next_cursor: str | None = None
-        while True:
-            params: dict[str, Any] = {"limit": PAGE_SIZE}
-            if next_cursor:
-                params["cursor"] = next_cursor
-            data = await self._get(client, path, params=params)
-            records = list_or_empty(data.get("items"))
-            if records:
-                yield records
-            next_cursor = data.get("next_cursor")
-            if not next_cursor:
-                return
+        try:
+            while True:
+                params: dict[str, Any] = {"limit": PAGE_SIZE}
+                if next_cursor:
+                    params["cursor"] = next_cursor
+                data = await self._get(client, path, params=params)
+                records = list_or_empty(data.get("items"))
+                if records:
+                    yield records
+                next_cursor = data.get("next_cursor")
+                if not next_cursor:
+                    return
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"brex: {stream.name!r} refused ({error.response.status_code}); the grant "
+                    "lacks the scope"
+                ) from error
+            raise

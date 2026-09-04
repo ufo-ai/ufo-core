@@ -11,7 +11,7 @@ import pytest
 from ufo_ext_sources.providers.deel import PAGE_SIZE, DeelConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -78,9 +78,9 @@ async def test_cursor_streams_thread_updated_after_and_forms_never_do() -> None:
     assert result.next_cursor == "2026-02-01"
 
 
-async def test_a_forbidden_response_fails_the_run() -> None:
+async def test_a_refused_stream_is_skipped_rather_than_failed() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"message": "forbidden"})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(StreamSkipped):
         await _fetch("tasks", handle)

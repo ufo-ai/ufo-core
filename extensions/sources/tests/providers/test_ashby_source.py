@@ -14,7 +14,7 @@ import pytest
 from ufo_ext_sources.providers.ashby import ASHBY_STREAMS, AshbyConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -126,9 +126,9 @@ async def test_a_direct_key_is_encoded_as_http_basic() -> None:
         await client.aclose()
 
 
-async def test_a_forbidden_response_fails_the_run() -> None:
+async def test_a_refused_stream_is_skipped_rather_than_failed() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"errors": ["forbidden"]})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(StreamSkipped):
         await _fetch("candidates", handle)

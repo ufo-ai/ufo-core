@@ -11,7 +11,7 @@ import pytest
 from ufo_ext_sources.providers.airtable import AirtableConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -107,9 +107,9 @@ async def test_records_flatten_lifts_created_at_and_fields() -> None:
     assert record["fields"] == {"Name": "Do"}
 
 
-async def test_a_forbidden_base_listing_fails_the_run() -> None:
+async def test_a_refused_base_listing_is_skipped_rather_than_failed() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": "NOT_AUTHORIZED"})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(StreamSkipped):
         await _fetch("bases", handle)

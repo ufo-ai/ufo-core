@@ -10,8 +10,8 @@ watermark over `updatedAt`. `application_criteria_evaluations` fans out per appl
 
 Auth is HTTP Basic with the API key as the username and an empty password: when the resolved
 `Credential` carries a direct key (`bearer`), `_make_client` encodes it as a Basic header; a
-broker's proxying `transport` is honored unchanged. The write path is intentionally absent — the
-source seam only reads."""
+broker's proxying `transport` is honored unchanged. A refusal (401/403) raises `StreamSkipped`.
+The write path is intentionally absent — the source seam only reads."""
 
 import base64
 from collections.abc import AsyncIterator
@@ -20,9 +20,10 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSpec
+from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
 
 PAGE_SIZE = 100
+_REFUSAL_STATUS = frozenset({401, 403})
 
 
 def _stream(
@@ -92,12 +93,20 @@ class AshbyConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name == "application_criteria_evaluations":
-            async for page in self._paginate_application_criteria(client):
+        try:
+            if stream.name == "application_criteria_evaluations":
+                async for page in self._paginate_application_criteria(client):
+                    yield page
+                return
+            async for page in self._paginate_default(client, stream, cursor=cursor):
                 yield page
-            return
-        async for page in self._paginate_default(client, stream, cursor=cursor):
-            yield page
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REFUSAL_STATUS:
+                raise StreamSkipped(
+                    f"ashby: {stream.name!r} refused ({error.response.status_code}); the api key "
+                    "lacks the scope"
+                ) from error
+            raise
 
     async def _paginate_default(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

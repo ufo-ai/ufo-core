@@ -12,7 +12,7 @@ import pytest
 from ufo_ext_sources.providers.clickup import ClickUpConnector
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -143,9 +143,9 @@ async def test_list_comments_flatten_derive_body_author_and_parent() -> None:
     assert record["parent_external_id"] == "l1"
 
 
-async def test_a_forbidden_team_listing_fails_the_run() -> None:
+async def test_a_refused_team_listing_is_skipped_rather_than_failed() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"err": "OAUTH_017"})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(StreamSkipped):
         await _fetch("teams", handle)
