@@ -806,33 +806,33 @@ async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -
     assert create.calls[0]["extra_body"] == {"session_id": SESSION}
 
 
-def test_every_allowlisted_id_is_one_the_manifest_serves() -> None:
-    """A key that names no registered id pins nothing and says so nowhere, so the table is held to
-    the ids it claims to route."""
+def test_every_ordered_id_is_one_the_manifest_serves() -> None:
+    """A key that names no registered id orders nothing and says so nowhere, so the table is held
+    to the ids it claims to route."""
     served = {spec.id for spec in openrouter.manifest().models}
-    assert set(openrouter.PROVIDER_ALLOWLIST) <= served
+    assert set(openrouter.PROVIDER_ORDER) <= served
 
 
 @pytest.mark.parametrize("model", ["z-ai/glm-5.3", "z-ai/glm-5.3-flash"])
-def test_an_allowlisted_id_pins_its_providers_on_the_wire(model: str) -> None:
+def test_an_ordered_id_prioritizes_fast_providers_and_limits_fallbacks(model: str) -> None:
     spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}[model]
     request = REQUEST.model_copy(update={"model": model})
 
     kwargs = _client(ScriptedCreate(), spec)._create_kwargs(request, frozenset())
 
     assert kwargs["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "morph", "together"]
+        "order": ["fireworks", "together", "baseten", "morph"],
+        "allow_fallbacks": False,
     }
-    assert "allow_fallbacks" not in kwargs["extra_body"]["provider"]
 
 
-def test_an_id_off_the_allowlist_sends_no_provider_preference() -> None:
+def test_an_id_off_the_order_sends_no_provider_preference() -> None:
     kwargs = _client(ScriptedCreate())._create_kwargs(REQUEST, frozenset())
 
     assert "provider" not in kwargs["extra_body"]
 
 
-def test_an_id_off_the_allowlist_sends_its_exclusions_and_no_pin() -> None:
+def test_an_id_off_the_order_sends_its_exclusions_and_no_pin() -> None:
     """The pin belongs to the table, the exclusion to the re-route: an id with no `only` of its own
     still carries `ignore`, because a re-issue without it repeats the call the dead upstream
     answered empty."""
@@ -843,10 +843,9 @@ def test_an_id_off_the_allowlist_sends_its_exclusions_and_no_pin() -> None:
     assert kwargs["extra_body"]["provider"] == {"ignore": ["Google", "Google AI Studio"]}
 
 
-async def test_a_dead_upstream_is_excluded_inside_the_allowlist() -> None:
-    """The re-route and the allowlist ride one `provider` object: the empty completion's provider
-    joins `ignore` while `only` still holds, so the retry lands on another of the four rather than
-    anywhere OpenRouter would otherwise pick."""
+async def test_a_dead_upstream_is_excluded_inside_the_ordered_providers() -> None:
+    """The re-route and order ride one `provider` object: the empty completion's provider joins
+    `ignore` while the order still holds, so the retry lands on another of the four."""
     spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3-flash"]
     create = ScriptedCreate(
         [_chunk(finish="stop", provider="Morph"), _chunk(usage=_usage(1, 0))],
@@ -862,15 +861,17 @@ async def test_a_dead_upstream_is_excluded_inside_the_allowlist() -> None:
 
     assert TextDelta(text="ok") in events
     assert create.calls[0]["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "morph", "together"]
+        "order": ["fireworks", "together", "baseten", "morph"],
+        "allow_fallbacks": False,
     }
     assert create.calls[1]["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "morph", "together"],
+        "order": ["fireworks", "together", "baseten", "morph"],
+        "allow_fallbacks": False,
         "ignore": ["Morph"],
     }
 
 
-async def test_a_dead_upstream_off_the_allowlist_is_excluded_from_the_re_issue() -> None:
+async def test_a_dead_upstream_off_the_order_is_excluded_from_the_re_issue() -> None:
     """An unpinned id carries no `only`, so the re-route's `ignore` is its whole provider
     preference — and it has to carry one: the re-issue keeps the session_id that pins the series to
     the upstream of its first answered call, so nothing else moves it off the dead one."""
@@ -918,9 +919,8 @@ async def test_a_404_before_any_exclusion_still_fails_loud() -> None:
 
 
 async def test_a_404_on_a_narrowed_call_still_fails_loud() -> None:
-    """A pinned slug holds four routes against three exclusions at most, so `ignore` cannot exhaust
-    `only` — a 404 under narrowing is a refusal the client did not cause and keeps the same raise.
-    """
+    """An ordered slug holds four routes against three exclusions at most, so `ignore` cannot
+    exhaust the order. A 404 under narrowing is a refusal the client did not cause."""
     spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3-flash"]
     create = ScriptedCreate(_dead_attempt("Morph"), _routing_error())
     request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
@@ -930,12 +930,16 @@ async def test_a_404_on_a_narrowed_call_still_fails_loud() -> None:
             pass
 
     assert create.calls[1]["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "morph", "together"],
+        "order": ["fireworks", "together", "baseten", "morph"],
+        "allow_fallbacks": False,
         "ignore": ["Morph"],
     }
 
 
-GLM_FLASH_ONLY = ["baseten", "fireworks", "morph", "together"]
+GLM_FLASH_ROUTING = {
+    "order": ["fireworks", "together", "baseten", "morph"],
+    "allow_fallbacks": False,
+}
 
 
 def _glm_flash_spec() -> openrouter.ModelSpec:
@@ -969,9 +973,9 @@ async def test_a_stalled_upstream_leaves_the_rounds_re_run() -> None:
 
     assert raised.value.kind == "stream_error"
     assert TextDelta(text="ok") in events
-    assert create.calls[0]["extra_body"]["provider"] == {"only": GLM_FLASH_ONLY}
+    assert create.calls[0]["extra_body"]["provider"] == GLM_FLASH_ROUTING
     assert create.calls[1]["extra_body"]["provider"] == {
-        "only": GLM_FLASH_ONLY,
+        **GLM_FLASH_ROUTING,
         "ignore": ["Morph"],
     }
     assert create.calls[1]["extra_body"]["session_id"] == SESSION
@@ -998,15 +1002,15 @@ async def test_a_transport_fault_mid_stream_leaves_its_upstream_too() -> None:
     assert raised.value.kind == "stream_transport"
     assert TextDelta(text="ok") in events
     assert create.calls[1]["extra_body"]["provider"] == {
-        "only": GLM_FLASH_ONLY,
+        **GLM_FLASH_ROUTING,
         "ignore": ["Together"],
     }
 
 
 async def test_stalled_upstreams_never_leave_a_pinned_slug_served_nowhere() -> None:
-    """`ignore` subtracts from `only`, so a turn that stalled on all four routes would ask for a
-    slug served nowhere and 404 every round after it. Three exclusions ride at most — the bound the
-    dead-provider re-route already holds — so a route always stays open."""
+    """`ignore` subtracts from the ordered routes, so a turn that stalled on all four would ask for
+    a slug served nowhere and 404 every round after it. Three exclusions ride at most — the bound
+    the dead-provider re-route already holds — so a route always stays open."""
     request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
     create = ScriptedCreate(
         *(_stalled_stream(upstream) for upstream in ("Baseten", "Fireworks", "Morph", "Together")),
@@ -1022,16 +1026,16 @@ async def test_stalled_upstreams_never_leave_a_pinned_slug_served_nowhere() -> N
 
     assert TextDelta(text="ok") in events
     assert create.calls[4]["extra_body"]["provider"] == {
-        "only": GLM_FLASH_ONLY,
+        **GLM_FLASH_ROUTING,
         "ignore": ["Baseten", "Fireworks", "Morph"],
     }
 
 
-async def test_a_stall_off_the_allowlist_narrows_nothing() -> None:
+async def test_a_stall_off_the_order_narrows_nothing() -> None:
     """`ignore` is the whole provider preference for an unpinned slug, and how many routes that
     slug has is OpenRouter's to know — narrowing one away across rounds can leave it served
     nowhere, and that 404 lands on a round holding no usage to degrade on. A stall is remembered
-    only where `only` names the routes it subtracts from."""
+    only where `order` names the routes it subtracts from."""
     create = ScriptedCreate(
         _stalled_stream("Google"),
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
@@ -1084,7 +1088,7 @@ async def test_a_generation_lookup_fault_leaves_no_upstream(
 
     assert raised.value.kind == "generation_missing"
     assert TextDelta(text="ok") in events
-    assert create.calls[1]["extra_body"]["provider"] == {"only": GLM_FLASH_ONLY}
+    assert create.calls[1]["extra_body"]["provider"] == GLM_FLASH_ROUTING
 
 
 def test_google_tool_results_survive_json_parser_value_refusal() -> None:

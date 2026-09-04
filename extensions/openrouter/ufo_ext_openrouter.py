@@ -97,23 +97,22 @@ _REQUIRED_REASONS = ReasoningSupport(
     supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
 )
 
-GLM_PROVIDERS = ("baseten", "fireworks", "morph", "together")
-PROVIDER_ALLOWLIST = {
-    "z-ai/glm-5.3": GLM_PROVIDERS,
-    "z-ai/glm-5.3-flash": GLM_PROVIDERS,
+GLM_PROVIDER_ORDER = ("fireworks", "together", "baseten", "morph")
+PROVIDER_ORDER = {
+    "z-ai/glm-5.3": GLM_PROVIDER_ORDER,
+    "z-ai/glm-5.3-flash": GLM_PROVIDER_ORDER,
 }
-"""The upstreams a slug may be served by, as OpenRouter's `provider.only`. A GLM slug names two
+"""The upstreams a slug may be served by, in OpenRouter's `provider.order`. A GLM slug names two
 dozen routes that differ in quantization, price and context window, while the spec books one rate
-and one window for the id — so which route takes a call is a real difference, and these four serve
-both ids. `only` is a hard allowlist: a request whose permitted set serves the model nowhere
-answers 404 rather than routing outside it, which is why `allow_fallbacks` stays unset. That field
-belongs to `order`; against `only` it collapses the list to its single top route, which then
-carries every upstream 429 for the slug alone. This table pins routes and nothing else: the
-dead-provider re-route's `ignore` subtracts from the pinned set for a slug named here and is the
-whole `provider` object for one that is not, because an exclusion has to reach the wire for every
-id or the re-issue lands back on the upstream that answered empty. Naming a slug here is also what
-lets a stalled upstream stay excluded past the round it stalled: the count of routes bounds how
-many exclusions may ride, so a turn that stalls on route after route always leaves one open."""
+and one window for the id. Fireworks and Together serve both ids with materially higher throughput,
+so they lead; BaseTen and Morph are the bounded fallbacks. `allow_fallbacks: false` keeps routing
+inside these four while OpenRouter tries each in order, so a request whose permitted set serves the
+model nowhere answers 404 rather than routing outside it. The dead-provider re-route's `ignore`
+subtracts from the ordered set for a slug named here and is the whole `provider` object for one
+that is not, because an exclusion has to reach the wire for every id or the re-issue lands back on
+the upstream that answered empty. Naming a slug here is also what lets a stalled upstream stay
+excluded past the round it stalled: the count of routes bounds how many exclusions may ride, so a
+turn that stalls on route after route always leaves one open."""
 
 IMAGES_PATH = "/images"
 IMAGE_TIMEOUT_SECONDS = 300.0
@@ -539,8 +538,8 @@ class OpenRouterModelClient:
     MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's nudge. The
     exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying no exclusion
     is byte-identical to the call the dead upstream answered empty, and the sticky routing key
-    below pins it straight back to that upstream. An id in PROVIDER_ALLOWLIST rides the
-    exclusion in the same `provider` object as `only`, four routes against three exclusions at
+    below pins it straight back to that upstream. An id in PROVIDER_ORDER rides the
+    exclusion in the same `provider` object as `order`, four routes against three exclusions at
     most; every other id — every Gemini one — sends `ignore` as its whole provider preference, so
     the pin stays where a slug names one. An unpinned slug can run out of upstreams before those
     retries do — every Gemini id serves from two — and OpenRouter then refuses the call outright; a
@@ -634,12 +633,12 @@ class OpenRouterModelClient:
 
     def _excluded(self, slug: str, dead: set[str]) -> frozenset[str]:
         """The upstreams this call routes around: the ones that answered empty in this round, then
-        the ones that stalled earlier in the turn, trimmed so `ignore` can never cover `only`."""
-        allowed = PROVIDER_ALLOWLIST.get(slug)
-        if allowed is None:
+        the ones that stalled earlier in the turn, trimmed so `ignore` can never cover `order`."""
+        ordered_routes = PROVIDER_ORDER.get(slug)
+        if ordered_routes is None:
             return frozenset(dead)
         ordered = [*sorted(dead), *(upstream for upstream in self._stalled if upstream not in dead)]
-        return frozenset(ordered[: len(allowed) - 1])
+        return frozenset(ordered[: len(ordered_routes) - 1])
 
     def _nowhere_left(
         self, slug: str, model: str, error: openai.APIStatusError, dead: set[str]
@@ -648,7 +647,7 @@ class OpenRouterModelClient:
         run out of upstreams before the re-route's retries do, and OpenRouter then answers 404
         rather than routing outside the set. The round degrades to the empty result the turn loop
         nudges on instead of failing the turn."""
-        if not dead or error.status_code != 404 or slug in PROVIDER_ALLOWLIST:
+        if not dead or error.status_code != 404 or slug in PROVIDER_ORDER:
             return False
         log(
             "model.provider_exclusions_exhausted",
@@ -663,12 +662,13 @@ class OpenRouterModelClient:
         re-runs an interrupted round with the same messages under the same sticky session_id, so
         without this the re-run is the call that just stalled and OpenRouter pins it back to the
         upstream that stalled it — which is how one wedged route spent both attempts of a round and
-        failed the turn. Only a slug the allowlist pins remembers: `only` names the routes `ignore`
-        subtracts from, so one stays open, while for an unpinned slug the route count is
-        OpenRouter's alone and an exclusion carried into a later round can leave it served nowhere.
-        That gate is also what keeps the one mid-stream fault a call absorbs in place — Gemini 3.7
-        Flash's abort, on an unpinned slug — retrying the identical call it means to retry."""
-        if upstream is None or slug not in PROVIDER_ALLOWLIST or upstream in self._stalled:
+        failed the turn. Only a slug the order table pins remembers: `order` under
+        `allow_fallbacks: false` names the routes `ignore` subtracts from, so one stays open, while
+        for an unpinned slug the route count is OpenRouter's alone and an exclusion carried into a
+        later round can leave it served nowhere. That gate is also what keeps the one mid-stream
+        fault a call absorbs in place — Gemini 3.7 Flash's abort, on an unpinned slug — retrying
+        the identical call it means to retry."""
+        if upstream is None or slug not in PROVIDER_ORDER or upstream in self._stalled:
             return
         self._stalled.append(upstream)
         log(
@@ -763,8 +763,9 @@ class OpenRouterModelClient:
         elif effort not in (None, "auto"):
             extra_body["reasoning"] = {"effort": effort}
         provider: dict[str, Any] = {}
-        if slug in PROVIDER_ALLOWLIST:
-            provider["only"] = list(PROVIDER_ALLOWLIST[slug])
+        if slug in PROVIDER_ORDER:
+            provider["order"] = list(PROVIDER_ORDER[slug])
+            provider["allow_fallbacks"] = False
         if ignore_providers:
             provider["ignore"] = sorted(ignore_providers)
         if provider:
