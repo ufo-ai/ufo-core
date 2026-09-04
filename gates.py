@@ -163,6 +163,8 @@ SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
 CORE_SKILLS_DIR = RUNTIME_SRC / "skills"
 CORE_SKILL_NAMES = frozenset({"sandbox", "create-application", "ufo-style"})
 SKILL_MANIFEST = "SKILL.md"
+RECURSIVE_COPY = re.compile(r"\bcp\s+(?:-\w+\s+)*-\w*[rR]")
+SKILL_COPY_MODE = "--no-preserve=mode"
 HOUSE_STYLE_TOKENS = CORE_SKILLS_DIR / "ufo-style/references/tokens.css"
 DESIGN_SKILLS = Path("extensions/documents/ufo_ext_documents/skills")
 SITE_SKILL_SHARED = Path("extensions/sites/ufo_ext_sites/skills/website-building/shared")
@@ -1467,6 +1469,39 @@ def _skill_failures() -> list[str]:
     return _rogue_skill_failures(present)
 
 
+def _skill_copy_mode_failures() -> list[str]:
+    """A skill that tells the agent to copy one of its own directories must reset the mode as it
+    copies. The sandbox image publishes the skills tree read-only (`chmod -R a-w` over
+    `SYSTEM_SKILLS_ROOT` in `sandbox/build_template.py`), and `cp -r` carries a directory's mode
+    onto the copy, so a plain recursive copy hands the agent a project it cannot write into: the
+    install fails, the edits fail, and the shell reports a permission error naming files rather
+    than the directory that caused it. Copying a file needs nothing — the agent's own directory
+    holds the new one, and the tools that rewrite it replace rather than open for append.
+
+    Only fenced blocks are read. Prose naming the flag is how a skill explains the rule, and a gate
+    that failed on the explanation would push every skill into writing about the copy without
+    showing it."""
+    failures = []
+    for root in SOURCE_ROOTS:
+        for path in (ROOT / root).rglob(SKILL_MANIFEST):
+            if _vendored(path):
+                continue
+            fenced = False
+            for line in path.read_text().splitlines():
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                    continue
+                if not fenced:
+                    continue
+                if RECURSIVE_COPY.search(line) and SKILL_COPY_MODE not in line:
+                    failures.append(
+                        f"{path.relative_to(ROOT)}: {line.strip()!r} copies a directory out of the "
+                        f"read-only skills tree — add {SKILL_COPY_MODE} or the project it makes "
+                        f"cannot be written to"
+                    )
+    return failures
+
+
 def _skill_boundary_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """A bundled skill script runs inside the sandbox, where the ufo package does not exist; it
     imports only the standard library and third-party tools, never ufo — not core internals and
@@ -2227,6 +2262,7 @@ def main() -> int:
     failures.extend(_lexical_containment_failures(trees))
     failures.extend(_set_cookie_failures(trees))
     failures.extend(_skill_failures())
+    failures.extend(_skill_copy_mode_failures())
     failures.extend(_skill_palette_failures())
     skill_trees = {
         path.relative_to(ROOT): ast.parse(path.read_text(), filename=str(path))

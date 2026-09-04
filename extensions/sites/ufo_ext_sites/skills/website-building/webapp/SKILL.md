@@ -12,10 +12,12 @@ Build fullstack web applications using an opinionated pre-wired template: Expres
 
 ## Getting Started
 
-Copy the template to your project directory, then install dependencies:
+Copy the template to your project directory, then install dependencies. The skills tree is
+read-only and `cp -r` carries a directory's mode onto the copy, so the project needs
+`--no-preserve=mode` to be writable at all:
 
 ```bash
-cp -r template/ <project-name>/
+cp -r --no-preserve=mode template/ <project-name>/
 cd <project-name>
 npm install
 ```
