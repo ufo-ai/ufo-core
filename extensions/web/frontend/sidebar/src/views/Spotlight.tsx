@@ -10,6 +10,14 @@ import {
 } from "@tabler/icons-react";
 
 import {
+  SIDEBAR_FOLDED,
+  SIDEBAR_PRESS,
+  SidebarCap,
+  SidebarRow,
+  SidebarTooltip,
+  type Chord,
+} from "@/components/Sidebar";
+import {
   Command,
   CommandGroup,
   CommandInput,
@@ -47,6 +55,12 @@ const WORKING = "Searching…";
 /** The chord that opens the palette from anywhere, and closes it again. Meta holds it alone:
  *  `ctrl+k` is kill-line in every readline-shaped field, so it is not a chord to take away. */
 const CHORD = "k";
+
+const SEARCH = "Search";
+
+/** The chord as the member meets it: the cap the row prints and the same chord spelled for the
+ *  accessibility tree, both read off the key the guard above answers. */
+const SEARCH_CHORD: Chord = { key: CHORD, cap: "\u2318K", aria: "Meta+K" };
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
@@ -86,10 +100,12 @@ function places(landing: WorkspaceTab): { label: string; hash: string; icon: Tab
 export function Spotlight({
   agents,
   className,
+  collapsed,
   label,
 }: {
   agents: Agent[];
   className?: string;
+  collapsed?: boolean;
   label?: React.ReactNode;
 }) {
   const tabs = useOfferedTabs();
@@ -193,17 +209,19 @@ export function Spotlight({
   const status = !wanted ? null : !settled ? WORKING : groups?.length ? null : BLANK;
   return (
     <Dialog open={open} onOpenChange={show}>
-      <DialogTrigger asChild>
-        <button
-          type="button"
-          aria-label="Search"
-          aria-keyshortcuts="Meta+K"
-          className={cn(className, open && "bg-fill")}
-        >
-          <IconSearch className="size-(--size-glyph) shrink-0" aria-hidden />
-          {label}
-        </button>
-      </DialogTrigger>
+      <SidebarTooltip collapsed={collapsed === true} label={SEARCH} chord={SEARCH_CHORD}>
+        <DialogTrigger asChild>
+          <button
+            type="button"
+            aria-label={SEARCH}
+            aria-keyshortcuts={SEARCH_CHORD.aria}
+            className={cn(className, open && "bg-fill")}
+          >
+            <IconSearch className="size-(--size-glyph) shrink-0" aria-hidden />
+            {label}
+          </button>
+        </DialogTrigger>
+      </SidebarTooltip>
       <DialogContent
         className="w-spotlight gap-0 overflow-y-hidden p-0"
         aria-describedby={undefined}
@@ -258,5 +276,28 @@ export function Spotlight({
         </Command>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The palette drawn as the sidebar's own row: the same trigger the narrow bar carries, standing in
+ *  the column under the act it sits beside, so the chord that opens it is printed where the member
+ *  reads the rest of the sidebar. */
+export function SearchRow({ agents, collapsed }: { agents: Agent[]; collapsed: boolean }) {
+  return (
+    <SidebarRow>
+      <Spotlight
+        agents={agents}
+        collapsed={collapsed}
+        className={cn(SIDEBAR_PRESS, collapsed && SIDEBAR_FOLDED)}
+        label={
+          collapsed ? null : (
+            <>
+              <span className="min-w-0 flex-1 truncate">{SEARCH}</span>
+              <SidebarCap chord={SEARCH_CHORD} />
+            </>
+          )
+        }
+      />
+    </SidebarRow>
   );
 }

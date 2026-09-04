@@ -273,6 +273,11 @@
      corner around them reads as a box someone forgot to round. */
   --radius-menu: 16px;
 
+  /* A key cap in a row's tail and in the tooltip that stands for it. Rounder than a control and
+     squarer than the tile a mark is drawn on: the cap is a printed key rather than a thing to
+     press. */
+  --radius-key: 6px;
+
   /* The tile an app's mark is drawn on. Rounder than a control and squarer than a pill: it reads as
      a thing the app owns rather than as a button. */
   --radius-avatar: 8px;
@@ -296,6 +301,10 @@
   /* The one tracking the type carries: half a percent, so a heading and a chip open by the same
      ratio at any size rather than each carrying its own hand-set figure. */
   --tracking-ui: 0.005em;
+
+  /* A key cap holds a chord of two or three characters and is read as a key rather than as a word,
+     so it opens wider than running type. */
+  --tracking-key: 0.1em;
 
   --leading-chrome: 1.5;
   --leading-reading: 1.65;

@@ -1185,6 +1185,20 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
 });
 
+test("the chord the row prints starts the conversation the row would", async () => {
+  location.hash = "#/";
+  wire({});
+  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  const row = rail.getByRole("button", { name: "New chat" });
+  expect(row.getAttribute("aria-keyshortcuts")).toBe("Meta+Shift+O");
+
+  await userEvent.keyboard("{Meta>}{Shift>}O{/Shift}{/Meta}");
+
+  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
+});
+
 test("the ask control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

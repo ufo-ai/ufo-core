@@ -4,6 +4,7 @@ import {
   IconBrandSlack,
   IconBroadcast,
   IconChevronDown,
+  IconCirclePlusFilled,
   IconFilter2,
   IconChevronRight,
   IconDeviceDesktop,
@@ -13,7 +14,6 @@ import {
   IconMessageCircle,
   IconMoon,
   IconPlug,
-  IconPlus,
   IconSun,
   IconTerminal2,
   IconUsers,
@@ -21,7 +21,13 @@ import {
 } from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
-import { SidebarPress, SidebarRow } from "@/components/Sidebar";
+import {
+  SidebarCap,
+  SidebarPress,
+  SidebarRow,
+  SidebarTooltip,
+  type Chord,
+} from "@/components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -44,7 +50,7 @@ import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { FirstRun } from "@/views/FirstRun";
 import { SignIn } from "@/views/SignIn";
 import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
-import { Spotlight } from "@/views/Spotlight";
+import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
@@ -504,6 +510,10 @@ const CHATS = "Chats";
 const CHANNELS = "Channels";
 const NEW_CHAT = "New chat";
 
+/** Starting a conversation, on the chord ChatGPT and Claude both spend it on, so a member arrives
+ *  already holding it. Shift makes the character upper case, so the guard reads the letter. */
+const NEW_CHAT_CHORD: Chord = { key: "o", cap: "\u21e7\u2318O", aria: "Meta+Shift+O" };
+
 /** A sidebar section's heading — the muted band the whole line of which opens the section's menu.
  *  The glyph that states the menu is drawn only once the section is pointed at, reached by keyboard,
  *  or standing open: a column of headings each carrying a control the member is not using reads as
@@ -530,30 +540,15 @@ function defaultPins(agents: Agent[]): string[] {
 
 const GLYPH = "size-(--size-glyph) shrink-0";
 
-const AskGlyph = () => <IconPlus className={GLYPH} aria-hidden />;
+/** The one act the column leads with, marked the way a primary act is marked: tabler's filled
+ *  circle in the accent, so the mark is one glyph in the box every other row's glyph keeps rather
+ *  than a disc drawn around one. */
+const AskGlyph = () => <IconCirclePlusFilled className={cn(GLYPH, "text-primary")} aria-hidden />;
 const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
 };
-
-function SidebarTooltip({
-  collapsed,
-  label,
-  children,
-}: {
-  collapsed: boolean;
-  label: string;
-  children: React.ReactElement;
-}) {
-  if (!collapsed) return children;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
 
 /** The two controls the sidebar header carries beside the mark. Their glyphs stand 8px apart and
  *  12px in from the sidebar's edge, on the pitch the rows under them keep. */
@@ -574,24 +569,34 @@ function NavRow({
   current,
   collapsed,
   label,
+  chord,
   onClick,
 }: {
   icon: React.ReactNode;
   current: boolean;
   collapsed: boolean;
   label: string;
+  chord?: Chord;
   onClick: () => void;
 }) {
   return (
     <SidebarRow current={current}>
-      <SidebarTooltip collapsed={collapsed} label={label}>
+      <SidebarTooltip collapsed={collapsed} label={label} chord={chord}>
         <SidebarPress
           current={current}
           collapsed={collapsed}
           label={label}
           glyph={icon}
+          aria-keyshortcuts={chord?.aria}
           onClick={onClick}
-        />
+        >
+          {chord ? (
+            <>
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+              <SidebarCap chord={chord} />
+            </>
+          ) : undefined}
+        </SidebarPress>
       </SidebarTooltip>
     </SidebarRow>
   );
@@ -791,6 +796,26 @@ function WorkspaceSidebar({
   const chatsShut = !collapsed && rail.sectionsShut.includes(CHATS);
   const pinned = rail.pinned ?? defaultPins(agents);
   const chatApp = chatSurface(agents);
+  const startChat = useCallback(() => {
+    if (!mainAgent) return;
+    if (chatApp) openAgentPlace(chatApp.id, { opens: [COMPOSE] });
+    else openNewChat(mainAgent.id);
+  }, [chatApp, mainAgent]);
+  /* The chord reaches the act from wherever the member is standing, including the composer they are
+     already typing in — three modifiers deep it is nobody's character — and including the fold,
+     where the row it prints on is a glyph. It is bound beside the row rather than in a table of its
+     own, so the act, the cap and the keyboard cannot drift apart. */
+  useEffect(() => {
+    const chord = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !event.metaKey || !event.shiftKey) return;
+      if (event.altKey || event.ctrlKey) return;
+      if (event.key.toLowerCase() !== NEW_CHAT_CHORD.key) return;
+      event.preventDefault();
+      startChat();
+    };
+    document.addEventListener("keydown", chord);
+    return () => document.removeEventListener("keydown", chord);
+  }, [startChat]);
   return useDrawerList(
     <nav
       aria-label="Workspace"
@@ -813,15 +838,12 @@ function WorkspaceSidebar({
           className={cn("h-(--size-wordmark) w-(--size-logo) bg-current", collapsed && "hidden")}
           style={{ mask: `url(${logo}) center / contain no-repeat` }}
         />
-        <span className={cn("flex items-center", collapsed && "flex-col")}>
-          <Spotlight agents={agents} className={HEADER_CONTROL} />
-          <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
-            <SidebarToggle
-              label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              onClick={() => foldSidebar(!collapsed)}
-            />
-          </SidebarTooltip>
-        </span>
+        <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
+          <SidebarToggle
+            label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => foldSidebar(!collapsed)}
+          />
+        </SidebarTooltip>
       </div>
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
         {mainAgent ? (
@@ -830,13 +852,11 @@ function WorkspaceSidebar({
             current={standing(route, COMPOSING)}
             collapsed={collapsed}
             label={NEW_CHAT}
-            onClick={() =>
-              chatApp
-                ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
-                : openNewChat(mainAgent.id)
-            }
+            chord={NEW_CHAT_CHORD}
+            onClick={startChat}
           />
         ) : null}
+        <SearchRow agents={agents} collapsed={collapsed} />
       </ul>
       {/* The workspace's apps, drawn where the member works rather than behind a hover: the column
           states what each one is doing, which is the fact the sidebar exists to carry. Pinned rows

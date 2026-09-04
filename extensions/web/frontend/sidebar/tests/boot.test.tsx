@@ -161,9 +161,10 @@ test("the sidebar names the shell's destinations and states the member at its fo
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
-    "Search",
     "Collapse sidebar",
-    "New chat",
+    /* The two acts the column leads with, each printing the chord that reaches it. */
+    "New chat\u21e7\u2318O",
+    "Search",
     "Apps",
     /* The sidebar stands open, so the app's row states its name and the pin act every row wears. */
     agentName(AGENT.name),
@@ -326,9 +327,10 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
-    "Search",
     "Collapse sidebar",
-    "New chat",
+    /* The two acts the column leads with, each printing the chord that reaches it. */
+    "New chat\u21e7\u2318O",
+    "Search",
     "Apps",
     /* The drawer is always drawn whole, so the app's row states its name and the pin act every row
        wears. */

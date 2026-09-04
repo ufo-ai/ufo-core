@@ -1,5 +1,6 @@
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps, ReactElement, ReactNode } from "react";
 
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 
 /** The box every row in the sidebar is drawn in: one height, one radius, one ground under the
@@ -72,5 +73,71 @@ export function SidebarPress({
         ? null
         : (children ?? <span className="min-w-0 flex-1 truncate">{label}</span>)}
     </button>
+  );
+}
+
+/** A chord a row answers: the letter the keyboard sends, the cap the row prints, and the same chord
+ *  spelled for the accessibility tree. One record, so what a member reads cannot drift from what the
+ *  keyboard does. */
+export type Chord = { key: string; cap: string; aria: string };
+
+/** The cap a chord is printed on: a ground and no edge, the characters opened out so a chord reads
+ *  as one key rather than as a word. The tail padding is short by the tracking the last character
+ *  carries, so the chord sits centred in the cap rather than pushed off its left edge. */
+const CAP = cn(
+  "pointer-events-none flex h-4xl shrink-0 items-center justify-center",
+  "rounded-key pl-xs pr-2xs font-sans text-small tracking-key",
+);
+
+/** The chord a row answers, printed in the row's tail where the column has room for it. It is drawn
+ *  only once the row is pointed at or reached by keyboard: a column of rows each carrying a chord
+ *  nobody is reading is a table of keys, and the row is a place before it is a chord. It holds its
+ *  box while hidden, so the name beside it keeps its measure and nothing moves under the pointer.
+ *
+ *  The cap is drawn for the eye alone: the row states its chord to the accessibility tree in
+ *  `aria-keyshortcuts`, and a cap left in the tree would read the chord into the row's own name. */
+export function SidebarCap({ chord }: { chord: Chord }) {
+  return (
+    <kbd
+      aria-hidden
+      className={cn(
+        CAP,
+        "bg-fill text-ink-soft opacity-0 transition-opacity duration-100 ease-control",
+        "motion-reduce:transition-none",
+        "group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100",
+      )}
+    >
+      {chord.cap}
+    </kbd>
+  );
+}
+
+/** What a folded row states to the pointer: the name the fold dropped, and the chord that reaches
+ *  the row without it. The cap is drawn in the tooltip's own ink held back, because the ground it
+ *  stands on there is the inverse of the pane every other cap sits on. */
+export function SidebarTooltip({
+  collapsed,
+  label,
+  chord,
+  children,
+}: {
+  collapsed: boolean;
+  label: string;
+  chord?: Chord;
+  children: ReactElement;
+}) {
+  if (!collapsed) return children;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent className={cn(chord && "flex items-center gap-sm pr-sm")}>
+        {label}
+        {chord ? (
+          <kbd aria-hidden className={cn(CAP, "bg-surface/20")}>
+            {chord.cap}
+          </kbd>
+        ) : null}
+      </TooltipContent>
+    </Tooltip>
   );
 }
