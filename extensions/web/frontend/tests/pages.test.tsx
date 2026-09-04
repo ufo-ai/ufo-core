@@ -16,7 +16,7 @@ import {
   CONVO_ID,
   MEMBER,
   NO_ARTIFACTS,
-  NO_RUNS,
+  RADAR_TOUR,
   SECOND_ID,
   SITE_KIND,
   TURN_ID,
@@ -177,13 +177,13 @@ afterEach(async () => {
   (window as { EventSource: typeof EventSource }).EventSource = nativeEventSource;
 });
 
-test("the radar page mounts and draws its empty feed under its own band", async () => {
+test("the radar page mounts and stands its tour under its own band where no run reports", async () => {
   const { calls } = await runPage("radar", {
     "/objects/report": () => json({ objects: [] }),
     "/actions/report$": () => json({ actions: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
-  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: RADAR_TOUR })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Rebuild entries" })).toBeNull();
   expect(calls.some((url) => url.includes("/api/agents"))).toBe(false);
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);

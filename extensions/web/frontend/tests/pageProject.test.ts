@@ -8,11 +8,12 @@ import { expect, test } from "vitest";
 
 /** The app page fork loop, built with the real vite against the real kit.
  *
- *  The project's three fixed parts come from where the site kind reads them — the app extension's
- *  home skill for `app.tsx` and `index.html`, the sites extension's package for `vite.config.ts`
- *  and the kit — so this assembles exactly what `source.py` writes into a sandbox and then does
- *  what the skill tells an agent to do with it. It lives in this suite because `vite` is this
- *  package's devDependency: the Python suite has no node_modules to run a build with.
+ *  The project's parts come from where the site kind reads them — the app extension's home skill
+ *  for the page, its entry, and the document the page reads beside them, the sites extension's
+ *  package for `vite.config.ts` and the kit — so this assembles exactly what `source.py` writes
+ *  into a sandbox and then does what the skill tells an agent to do with it. It lives in this
+ *  suite because `vite` is this package's devDependency: the Python suite has no node_modules to
+ *  run a build with.
  *
  *  A staged project must be reached by its RESOLVED path. Through a symlinked `/tmp` — which is
  *  what macOS hands out — rollup refuses the html emit, because the path it derives is neither
@@ -26,18 +27,18 @@ const APPS = readdirSync(EXTENSIONS, { withFileTypes: true })
   .map((entry) => entry.name.slice("app_".length))
   .sort();
 const BUILD_CEILING_MS = 240_000;
-const PROJECT = ["app.tsx", "index.html"];
+// The radar page reads `tour.md` beside it, and radar is the app this builds.
+const PROJECT = ["app.tsx", "index.html", "tour.md"];
 
 const homeSkill = (app: string): string =>
   join(EXTENSIONS, `app_${app}`, `ufo_ext_app_${app}`, "skills", `app-${app}-home`);
 
-const materialized = (source: string, page: string): string => {
+const materialized = (source: string): string => {
   const site = resolve(mkdtempSync(join(tmpdir(), "ufo-page-")));
   const project = join(site, "src");
   mkdirSync(project, { recursive: true });
   cpSync(join(PAGE, "kit"), join(project, "sdk"), { recursive: true });
-  cpSync(source, join(project, "app.tsx"));
-  cpSync(page, join(project, "index.html"));
+  for (const name of PROJECT) cpSync(join(source, name), join(project, name));
   cpSync(join(PAGE, "vite.config.ts"), join(project, "vite.config.ts"));
   return project;
 };
@@ -96,11 +97,10 @@ test(
   () => {
     // radar of the five, because its page reads a mark through the kit: its build is the one that
     // proves a sprite reaches a member's own tree rather than naming an origin only ours answers.
-    const home = homeSkill("radar");
-    const forked = built(materialized(join(home, "app.tsx"), join(home, "index.html")));
+    const forked = built(materialized(homeSkill("radar")));
     const assets = readdirSync(join(forked, "..", "assets"));
     expect(assets.filter((file) => file.startsWith("tabler-")).length).toBeGreaterThan(0);
-    built(materialized(join(forked, "app.tsx"), join(forked, "index.html")));
+    built(materialized(forked));
   },
   BUILD_CEILING_MS,
 );

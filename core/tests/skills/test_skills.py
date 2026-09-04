@@ -85,6 +85,22 @@ def test_core_ships_exactly_the_fixed_skills() -> None:
     assert {skill.name for skill in CORE_SKILLS} == set(CORE_SKILL_NAMES)
 
 
+def test_the_house_style_ships_the_logo_sheet_and_names_it() -> None:
+    """The logo sheet is bytes the deploy carries, so every workspace holds it without anyone
+    fetching a file: the skill mounts its own files, and a member who asks for the logo is handed
+    that sheet rather than a mark the agent drew. The skill has to name it, or nothing reads it.
+
+    The share is of a workspace copy, because `share_file` stages its path through the workspace
+    guard and the skill tree is outside it: a section that shared the mounted path would fail every
+    ask for the logo."""
+    style = CORE_SKILL_REGISTRY.named("ufo-style")
+    sheet = dict(style.files)["assets/ufo-logo-ratio.pdf"]
+    assert sheet.startswith(b"%PDF")
+    assert "assets/ufo-logo-ratio.pdf" in style.instructions
+    assert "share_file" in style.instructions
+    assert "/workspace/ufo-logo-ratio.pdf" in style.instructions
+
+
 def test_skill_named_unknown_fails_loud_and_suggests_only_the_closest() -> None:
     """The message is bounded by what is close, never by how many skills exist: a member-authored
     set runs to hundreds, and every name in the error is context spent on one typo — the model

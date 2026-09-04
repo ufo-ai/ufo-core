@@ -298,8 +298,7 @@ export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
   "/api/chats": () => json({ chats: rows }),
 });
 
-export const NO_RUNS =
-  "Each scheduled run reports here: the reply it closed with and the files it shared.";
+export const RADAR_TOUR = "What this workspace can do";
 export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_TRIGGERS = "No source trigger is visible to you.";
 export const NO_ARTIFACTS = "A file or site an app makes in a conversation is listed here.";

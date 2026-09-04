@@ -67,6 +67,15 @@ Paths are relative to this skill's directory (`$UFO_HOME/skills/ufo-style/`).
   is short and functional: `--ease-control` for a control, the enter/leave pair for anything that
   arrives over the page.
 
+## The mark
+
+`assets/ufo-logo-ratio.pdf` is the logo sheet the deploy ships: the wordmark, the mark's three dots
+on their golden-ratio construction, and the spacing around both. Read it before you place the mark.
+When a member asks for the logo, copy the sheet into the workspace first —
+`cp "$UFO_HOME/skills/ufo-style/assets/ufo-logo-ratio.pdf" /workspace/ufo-logo-ratio.pdf` — and
+`share_file` that copy: `share_file` takes a path under `/workspace` alone, and this skill's tree is
+not one. The file is the answer, and a copy you draw yourself is not the mark.
+
 ## A deck, a PDF, a chart
 
 No CSS variable resolves in those, so take the hexes out of `references/tokens.css` and write them

@@ -42,6 +42,10 @@ import {
   useTextArtifact,
 } from "ufo/kit";
 import type { ObjectAddress, Placement, ReactMouseEvent } from "ufo/kit";
+// The tour's words, committed beside this file and taken into the bundle at build time. `?raw` is
+// vite's own: the same import resolves in the deploy's app build and in the build a member's
+// redeploy runs, so the document ships with the page rather than being fetched at runtime.
+import TOUR_DOCUMENT from "./tour.md?raw";
 
 const TASK_KIND = "scheduled_task";
 const RUN_PREFIX = "run/";
@@ -134,6 +138,60 @@ const STATUS_NOTES: Record<string, string> = {
   cancelled: "Stopped",
 };
 
+/** The tour: the oldest entry on the rail, in every workspace. The feed runs newest first, so the
+ *  foot of the list is where the thing that came before all the work belongs — a new team reads it
+ *  because it is the only entry there, and a team already running reports keeps every report above
+ *  it untouched.
+ *
+ *  Its words are `tour.md` beside this file and nothing else — the summary and the points its
+ *  frontmatter states, the body under it. The document is committed, so the words are edited and
+ *  reviewed as prose and read from one place by anything else that wants them, and the build takes
+ *  it into the bundle the deploy serves: no per-workspace copy to migrate, no skill to load, and no
+ *  row to rewrite.
+ *
+ *  It is drawn and never stored: a report exists by a scheduled task running, so a canned row in
+ *  that table would be a run that never ran, and every reader of the report kind would have to know
+ *  to skip it. */
+const TOUR_SLOT = "tour";
+
+/** The tour as its document states it: a digest like every other entry on the rail, plus the line
+ *  above the title and the body the drawer reads. */
+type TourWritten = DigestWritten & { lead: string; body: string };
+
+const TOUR_FRONTMATTER = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
+const TOUR_POINT = /^ *- text: "(.*)"\n *actor: "(.*)"$/gm;
+
+/** A value as the frontmatter writes it: quoted, because every scalar there is quoted, and a
+ *  sentence in this document carries a colon. */
+function tourValue(front: string, key: string): string {
+  const found = new RegExp(`^${key}: "(.*)"$`, "m").exec(front);
+  if (found === null) throw new Error(`tour.md states no ${key}`);
+  return found[1];
+}
+
+/** The document read: its frontmatter as the fields the entry draws, its body as the drawer's
+ *  prose. The frontmatter this reads is the one shape `tour.md` is written in — quoted scalars and
+ *  a `points` list of `text`/`actor` pairs — because a page resolves no import but `ufo/kit`, so a
+ *  YAML library is not one of its choices. The app's own tests read the same document with a YAML
+ *  parser, which is what holds the file to that shape. */
+function tourWritten(raw: string): TourWritten {
+  const split = TOUR_FRONTMATTER.exec(raw);
+  if (split === null) throw new Error("tour.md must open with a YAML frontmatter block");
+  const [, front, body] = split;
+  return {
+    lead: tourValue(front, "lead"),
+    title: tourValue(front, "title"),
+    summary: tourValue(front, "summary"),
+    points: [...front.matchAll(TOUR_POINT)].map((point) => ({
+      text: point[1],
+      actor: point[2],
+    })),
+    body,
+  };
+}
+
+const TOUR = tourWritten(TOUR_DOCUMENT);
+
 function Radar({
   title,
   place,
@@ -156,7 +214,9 @@ function Radar({
         <Feed place={place} onPlace={onPlace} />
       </Section>
       {opens.slice(-1).map((id) =>
-        isRun(id) ? (
+        id === TOUR_SLOT ? (
+          <TourSheet key={id} opens={opens} onPlace={onPlace} />
+        ) : isRun(id) ? (
           <StorySheet
             key={id}
             id={id}
@@ -208,9 +268,13 @@ function RecordSlot({
   );
 }
 
-/** The feed: every run the reader may read, newest first. It stands whatever the place carries —
- *  a story opened from it is read in the drawer beside it, so the list the member is walking is
- *  never taken away by the report they opened out of it. */
+/** The feed: every run the reader may read, newest first, and the tour under the oldest of them.
+ *  It stands whatever the place carries — a story opened from it is read in the drawer beside it, so
+ *  the list the member is walking is never taken away by the report they opened out of it.
+ *
+ *  The tour closes the rail rather than opening it, and closes it once: it stands on the page that
+ *  has no older reports behind it, which is the first page of a workspace that has never run and the
+ *  last page of one that walks its whole history. */
 function Feed({
   place,
   onPlace,
@@ -227,16 +291,13 @@ function Feed({
     <Panel state={state} shape="cards">
       {(payload) => {
         const runs = payload.objects.map(toRun);
-        if (!runs.length && !after)
-          return (
-            <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
-          );
         return (
           <>
             <ol className="m-0 flex list-none flex-col p-0">
               {runs.map((run) => (
                 <Entry key={run.turn_id} run={run} opens={opens} onPlace={onPlace} />
               ))}
+              {payload.next_cursor ? null : <TourEntry />}
             </ol>
             {payload.next_cursor || after ? (
               <div className="flex gap-sm">
@@ -262,6 +323,82 @@ function Feed({
         );
       }}
     </Panel>
+  );
+}
+
+/** The tour on the rail, shaped as an entry so a member reads it the way they read every report
+ *  above it: the app's own mark, a heading, and the points under it. It takes the rail's own line
+ *  and its last-entry rules from `Entry`, so the report before it joins down to the tour and the
+ *  tour closes the list. It opens the tour in the drawer beside the feed. */
+function TourEntry() {
+  return (
+    <li className="group/entry flex gap-2xl">
+      <div className="flex flex-col items-center gap-sm">
+        <Avatar>
+          <AvatarFallback>
+            <AgentIcon name="radar" />
+          </AvatarFallback>
+        </Avatar>
+        <span aria-hidden className="w-px flex-1 bg-edge group-last/entry:hidden" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-sm pb-6xl group-last/entry:pb-0">
+        <p className="m-0 truncate font-mono text-small tabular-nums text-ink-soft">{TOUR.lead}</p>
+        <a
+          href={sectionHash("radar", { opens: [TOUR_SLOT] })}
+          className="flex items-start gap-2xl text-inherit no-underline"
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-sm">
+            <h3 className="m-0 line-clamp-2 text-subtitle font-medium text-ink group-hover/entry:underline">
+              {TOUR.title}
+            </h3>
+            <p className="m-0 line-clamp-2 text-ui text-ink-soft">{TOUR.summary}</p>
+            <ul className="m-0 flex list-none flex-col gap-2xs p-0">
+              {TOUR.points.map((made) => (
+                <li key={made.actor} className="flex items-baseline gap-sm text-ui">
+                  <span aria-hidden className="text-ink-faint">
+                    —
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-ink">{made.text}</span>
+                  <span className="shrink-0 whitespace-nowrap text-small text-ink-soft">
+                    {made.actor}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </a>
+      </div>
+    </li>
+  );
+}
+
+/** The tour opened: the shipped prose, and under it the screens it names — the same dateline of
+ *  ways out a report's story stands on, so a member leaves the tour for the work rather than for
+ *  the page they came from. */
+function TourSheet({
+  opens,
+  onPlace,
+}: {
+  opens: string[];
+  onPlace: (place: Placement) => void;
+}) {
+  const out = "text-inherit no-underline hover:underline focus-visible:underline";
+  return (
+    <Sheet open title={TOUR.title} onClose={() => onPlace({ opens: closed(opens, TOUR_SLOT) })}>
+      <div className="flex flex-col gap-2xl">
+        <div className="text-body leading-reading">
+          <Markdown text={TOUR.body} />
+        </div>
+        <p className="m-0 flex flex-wrap gap-x-sm font-mono text-mono text-ink-soft">
+          <a href={sectionHash("artifacts")} className={out}>
+            Artifacts
+          </a>
+          <a href={sectionHash("connectors")} className={out}>
+            Connectors
+          </a>
+        </p>
+      </div>
+    </Sheet>
   );
 }
 

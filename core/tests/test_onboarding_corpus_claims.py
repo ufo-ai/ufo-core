@@ -452,7 +452,8 @@ CLAIMS = (
         phrase="Radar opens each scheduled run as a full report with its files and\n  conversation",
         source=RADAR_HOME,
         pattern=(
-            r"Each scheduled run reports here: the reply it closed with and the files it shared"
+            r"<a href=\{chatHash\(run\.conversation_id\)\} className=\{out\}>\n"
+            r"\s+Conversation\n(?:.*\n){0,20}\s+\{files\.length \? \("
         ),
     ),
     Claim(

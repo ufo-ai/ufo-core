@@ -11,10 +11,14 @@ The homepage is served with the deploy: `app.tsx` in this skill is its source, b
 page every workspace reads until it changes one. It renders the radar feed: each report's
 digest, and its findings with the actors behind them.
 
+The tour's words are `tour.md` beside `app.tsx`. Edit the tour there, quote every frontmatter
+value — the page reads them with a regular expression and not a YAML parser — and keep the tour as
+the last entry on the rail.
+
 To change it:
 
-1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
-   `cp "$UFO_HOME/skills/app-radar-home/app.tsx" "$UFO_HOME/skills/app-radar-home/index.html" radar-home/`.
+1. Copy this skill's `app.tsx`, `index.html`, and `tour.md` into a directory of their own —
+   `cp "$UFO_HOME/skills/app-radar-home/app.tsx" "$UFO_HOME/skills/app-radar-home/index.html" "$UFO_HOME/skills/app-radar-home/tour.md" radar-home/`.
 2. Edit `app.tsx`. `read` `$UFO_HOME/skills/ufo-style/references/kit.md` first — every
    component the kit publishes and what each is — and reach for one before composing a
    shape out of `div`s. Space the page with `gap-2xs` inside a word, `gap-sm` between the
