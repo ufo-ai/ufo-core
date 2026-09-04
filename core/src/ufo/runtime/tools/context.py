@@ -151,6 +151,43 @@ class SpawnPayloadRejected(Exception):
         self.detail = detail
 
 
+class SpawnModelRejected(Exception):
+    """A spawn asked for a model its child cannot be run on. The pin reaches the child turn's
+    runtime config, which the child's every setup reads, so it is decided where the caller can
+    still repair the call: an id the registry does not serve names the ids it does serve, a target
+    that runs on the member's own account says the pin would not take effect there, and a turn tree
+    the member already pinned says whose choice it keeps — a pin silently dropped is what makes a
+    caller believe it ran a model it never ran."""
+
+    def __init__(self, message: str, requested: str) -> None:
+        super().__init__(message)
+        self.requested = requested
+
+    @classmethod
+    def unknown(cls, requested: str, models: tuple[str, ...]) -> "SpawnModelRejected":
+        return cls(
+            f"unknown model {requested!r} for a spawn; this deploy serves: "
+            f"{', '.join(sorted(models)) or 'none'}",
+            requested,
+        )
+
+    @classmethod
+    def pinned_tree(cls, requested: str, pinned: str) -> "SpawnModelRejected":
+        return cls(
+            f"this turn tree is pinned to model {pinned!r}, which every agent and profile in it "
+            f"runs on — a spawn cannot move a child to {requested!r}; spawn it without a model",
+            requested,
+        )
+
+    @classmethod
+    def own_account(cls, requested: str, target: str) -> "SpawnModelRejected":
+        return cls(
+            f"spawn target {target!r} runs on the member's own provider account, which serves its "
+            f"own models — it cannot be pinned to {requested!r}; spawn it without a model",
+            requested,
+        )
+
+
 class UnknownSpawnTarget(Exception):
     """A spawn named a target neither namespace holds. Its message lists what is spawnable — the
     registered profiles and the workspace's agents — so the model retries against a valid name."""
@@ -356,7 +393,12 @@ class Spawn(Protocol):
     `detach_on_arrival` makes a foreground wait interruptible by a member message arriving on the
     parent's conversation: the child moves to the background and the result says so instead of
     carrying an output. A caller that assembles its own answer out of the output leaves it false —
-    it has no way to represent a child that is still running."""
+    it has no way to represent a child that is still running.
+
+    `model` pins the child turn onto one model id, over the target's own model and the deploy's
+    default. An id the registry does not serve is refused as `SpawnModelRejected`, and so is any
+    pin under a turn tree the member's own admission already pinned: that selection holds for every
+    agent and profile in the tree."""
 
     async def __call__(
         self,
@@ -367,6 +409,7 @@ class Spawn(Protocol):
         delivers_result: bool = False,
         name: str = "",
         detach_on_arrival: bool = False,
+        model: str | None = None,
     ) -> SpawnResult: ...
 
 

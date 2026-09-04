@@ -44,6 +44,7 @@ from ufo.runtime.subagents import (
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
+    SpawnModelRejected,
     SpawnNeedsOwnModelKey,
     SpawnPayloadRejected,
     UnknownSpawnTarget,
@@ -1167,6 +1168,115 @@ async def test_spawn_stamps_the_spawning_spans_traceparent_on_the_child_turn(
     assert root.traceparent is None
 
 
+async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
+    db: None, dbos_launched: Config
+) -> None:
+    """A spawn that names a model writes it as the child turn's runtime-config pin — the value the
+    child's own setup resolves its model through — while the internet and environment pins the
+    parent turn carries ride along unchanged. A spawn that names none inherits the parent's config
+    whole."""
+    workspace_id, agent_id = await _workspace_agent()
+    inherited = TurnRuntimeConfig(internet_access=False)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"runtime_config": inherited}
+    )
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        authority=parent.authority,
+        audience=conversation_audience(None),
+        models=("claude-opus-4-8", "gpt-5.6-sol"),
+    )
+
+    pinned = await subagents.spawn(
+        "research", {"task": "acme"}, background=True, model="gpt-5.6-sol"
+    )
+    inheriting = await subagents.spawn("research", {"task": "beta"}, background=True)
+
+    child, _, _ = await _load_turn(pinned.turn_id)
+    assert child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol", internet_access=False)
+    sibling, _, _ = await _load_turn(inheriting.turn_id)
+    assert sibling.runtime_config == inherited
+
+
+async def test_spawn_cannot_move_a_pinned_turn_tree_onto_another_model(
+    db: None, dbos_launched: Config
+) -> None:
+    """The pin a turn tree already carries is the member's own admitted selection, which replaces
+    every agent and profile model in the tree. A spawn asking for another model is refused with
+    both ids, and the child it would have pinned is never admitted."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"runtime_config": TurnRuntimeConfig(model="claude-opus-4-8")}
+    )
+    client = _RecordingClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        authority=parent.authority,
+        audience=conversation_audience(None),
+        models=("claude-opus-4-8", "gpt-5.6-sol"),
+    )
+
+    with pytest.raises(SpawnModelRejected) as refusal:
+        await subagents.spawn("research", {"task": "acme"}, background=True, model="gpt-5.6-sol")
+
+    assert "claude-opus-4-8" in str(refusal.value)
+    assert "gpt-5.6-sol" in str(refusal.value)
+    assert client.enqueued == []
+
+
+async def test_spawn_refuses_a_model_the_registry_does_not_serve(
+    db: None, dbos_launched: Config
+) -> None:
+    """An unregistered id is refused where the call is made, naming what the deploy serves. Written
+    to the row it would fail the child's every attempt, on a turn no member can reach to repair."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    client = _RecordingClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        authority=parent.authority,
+        audience=conversation_audience(None),
+        models=("claude-opus-4-8",),
+    )
+
+    with pytest.raises(SpawnModelRejected) as refusal:
+        await subagents.spawn("research", {"task": "acme"}, background=True, model="gpt-5.6-sol")
+
+    assert "gpt-5.6-sol" in str(refusal.value)
+    assert "claude-opus-4-8" in str(refusal.value)
+    assert client.enqueued == []
+
+
+async def test_spawn_refuses_a_model_pin_on_a_target_that_runs_on_the_members_account(
+    db: None, dbos_launched: Config
+) -> None:
+    """A profile bound to the member's own account takes the model that account serves, so a pin
+    there would be dropped. It is refused instead: a caller told nothing believes it ran a model it
+    never ran."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    client = _RecordingClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((replace(_profile("coding"), needs_own_model_key=True),)),
+        parent=parent,
+        authority=parent.authority,
+        audience=conversation_audience(None),
+        models=("claude-opus-4-8",),
+    )
+
+    with pytest.raises(SpawnModelRejected, match="own provider account"):
+        await subagents.spawn("coding", {"task": "acme"}, background=True, model="claude-opus-4-8")
+
+    assert client.enqueued == []
+
+
 async def test_wait_reports_every_already_finished_childs_status(
     db: None, dbos_launched: Config
 ) -> None:
@@ -1556,6 +1666,7 @@ async def _delivered_child(
     terminal: TerminalFrame,
     profile: str,
     registry: SubagentRegistry,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> UUID:
     child_id, conversation_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -1584,6 +1695,9 @@ async def _delivered_child(
                 parent_turn_id=parent.id,
                 result_delivery="pending",
                 subagent_profile=profile,
+                runtime_config=(
+                    None if runtime_config is None else runtime_config.model_dump(mode="json")
+                ),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1644,6 +1758,46 @@ async def test_a_finished_child_delivers_validated_output_as_the_parents_next_tu
     assert '{"finding":"acme ships"}' in body
     assert "dropped" not in body
     assert await _arrival_bodies(parent.conversation_id) == []
+
+
+async def test_a_delivery_leaves_the_parents_own_runtime_config_on_its_next_turn(
+    db: None,
+) -> None:
+    """A child pinned to its own model delivers onto a parent whose turn has ended, so the arrival
+    founds the parent's next turn. That turn runs the parent's own config: the child's pin is the
+    caller's choice for the child alone, and carrying it here would run the parent — and any member
+    message folding into it — on a model nobody selected for the parent."""
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent_turn(workspace_id, agent_id, "done")
+    parent_config = TurnRuntimeConfig(internet_access=False)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(runtime_config=parent_config.model_dump(mode="json"))
+            .where(tables.turn.c.id == parent.id)
+        )
+    await _delivered_child(
+        workspace_id,
+        agent_id,
+        parent,
+        TerminalFrame(status="done", text='{"finding": "acme ships"}'),
+        "plain",
+        SubagentRegistry((_profile("plain"),)),
+        runtime_config=TurnRuntimeConfig(model="gpt-5.6-sol", internet_access=False),
+    )
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.runtime_config)
+                .where(tables.turn.c.conversation_id == parent.conversation_id)
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+    assert [row.runtime_config for row in rows] == [
+        parent_config.model_dump(mode="json"),
+        parent_config.model_dump(mode="json"),
+    ]
 
 
 async def test_a_finished_child_folds_into_the_parents_live_turn_as_an_arrival(db: None) -> None:

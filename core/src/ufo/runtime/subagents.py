@@ -53,6 +53,7 @@ from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import CORE_SKILLS, LoadedSkill, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
+    SpawnModelRejected,
     SpawnNeedsOwnModelKey,
     SpawnPayloadRejected,
     SpawnResult,
@@ -235,6 +236,10 @@ class Subagents:
     key_slot_for: Callable[[str], str | None] | None = None
     billing_url: str | None = None
     connect_url: str | None = None
+    """The model ids this deploy's registry serves, the closed set a spawn's own model pin holds
+    to. The registry is fixed at boot, so the ids ride here as data rather than as a handle
+    `subagents` would have to import the registry to hold."""
+    models: tuple[str, ...] = ()
     """Whether this deploy can hold a member's own provider account at all. A deploy carrying no
     extension that connects one has no member to refuse: the profile runs on the deploy's own key
     there, so refusing work nobody could ever enable would take the capability away entirely."""
@@ -260,6 +265,7 @@ class Subagents:
         delivers_result: bool = False,
         name: str = "",
         detach_on_arrival: bool = False,
+        model: str | None = None,
     ) -> SpawnResult:
         """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
         turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
@@ -274,7 +280,15 @@ class Subagents:
         has: a member message arriving on the parent's conversation ends the wait, the child is
         moved to the background rather than cancelled, and the result says so instead of carrying
         an output — so the parent can answer the message while the work it already paid for runs
-        on and delivers itself."""
+        on and delivers itself.
+
+        `model` pins this child onto one model id over the target's own and the deploy's default:
+        it becomes the child turn's runtime-config pin, which is what every later setup of that
+        turn resolves through, and the model the balance gate weighs the child under. An id the
+        registry does not serve is refused here rather than at the child's first round, and so is a
+        pin asked for under a turn tree that already carries one — that pin is the member's own
+        admitted selection, which the tree keeps."""
+        runtime_config = self._child_runtime_config(model)
         conversation_id = (
             uuid5(NAMESPACE_URL, f"{self.parent.id}/{dedup_key}")
             if dedup_key is not None
@@ -285,6 +299,8 @@ class Subagents:
         resolved = replay[0] if replay is not None else await self._resolve(target)
         match resolved:
             case SubagentProfile():
+                if resolved.needs_own_model_key and model is not None:
+                    raise SpawnModelRejected.own_account(model, target)
                 if (
                     resolved.needs_own_model_key
                     and self.member_accounts_connectable
@@ -336,10 +352,10 @@ class Subagents:
             delivers_result=delivers_result,
             name=name,
             agent_target=agent_target,
+            runtime_config=runtime_config,
             model=(
-                self.parent.runtime_config.model
-                if self.parent.runtime_config is not None
-                and self.parent.runtime_config.model is not None
+                runtime_config.model
+                if runtime_config is not None and runtime_config.model is not None
                 else _target_model(resolved)
             ),
         ):
@@ -781,6 +797,30 @@ class Subagents:
         named = next((one for one in self.registry.profiles if one.name == profile), None)
         return named.model if named is not None else None
 
+    def _child_runtime_config(self, model: str | None) -> TurnRuntimeConfig | None:
+        """The runtime config the child turn is admitted with: the parent's, with a requested model
+        taking the pin an unpinned tree leaves empty. A spawn that asks for no model inherits the
+        parent's config whole, as it always has — the pin is the one choice a caller makes per
+        child, and the internet and environment pins around it stay the turn tree's.
+
+        A tree that already carries a model pin keeps it. That pin is the member's own selection
+        (`ufo --model`, `x-ufo-model`), which replaces every agent and subagent profile model in the
+        turn tree, so a spawn under it is refused rather than run on a model the member excluded —
+        and refused here, where the caller can drop its argument and retry.
+
+        The id is checked against the deploy's registry here, before any row is written: an
+        unregistered id would reach the child's setup, fail every attempt of that turn, and leave
+        the caller nothing to repair."""
+        inherited = self.parent.runtime_config
+        if model is None:
+            return inherited
+        if inherited is not None and inherited.model is not None:
+            raise SpawnModelRejected.pinned_tree(model, inherited.model)
+        if self.models and model not in self.models:
+            raise SpawnModelRejected.unknown(model, self.models)
+        base = {} if inherited is None else inherited.model_dump(mode="json")
+        return TurnRuntimeConfig.model_validate({**base, "model": model})
+
     async def _require_balance(
         self, connection: AsyncConnection, model: str | None, agent_id: UUID | None = None
     ) -> None:
@@ -815,6 +855,7 @@ class Subagents:
         delivers_result: bool = False,
         name: str = "",
         agent_target: AgentTarget | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
         model: str | None = None,
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
@@ -878,9 +919,7 @@ class Subagents:
                     subagent_name=name or None,
                     traceparent=current_traceparent(),
                     runtime_config=(
-                        None
-                        if self.parent.runtime_config is None
-                        else self.parent.runtime_config.model_dump(mode="json")
+                        None if runtime_config is None else runtime_config.model_dump(mode="json")
                     ),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -1194,7 +1233,12 @@ class SubagentResult:
     The arrival is posted first and the child stamped `delivered` after, both here and in the sweep
     that finds what this path missed: a crash between the two leaves the child `pending` and the
     next pass re-posts under the same key, which admits nothing. Stamping first would let that same
-    crash retire a delivery no parent ever received."""
+    crash retire a delivery no parent ever received.
+
+    The arrival carries the spawning turn's own runtime config, never the child's. A parent holding
+    no live turn takes this arrival as a whole new turn admitted under that config, so delivering
+    the child's would run the parent — and any member message folding into that turn — on a model
+    the caller pinned for the child alone."""
 
     invoker: TurnInvoker
     registry: SubagentRegistry
@@ -1207,7 +1251,11 @@ class SubagentResult:
         async with workspace_tx() as connection:
             parent = (
                 await connection.execute(
-                    sa.select(tables.turn.c.conversation_id, tables.turn.c.agent_id).where(
+                    sa.select(
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.agent_id,
+                        tables.turn.c.runtime_config,
+                    ).where(
                         tables.turn.c.id == child.parent_turn_id,
                         tables.turn.c.workspace_id == child.workspace_id,
                     )
@@ -1231,7 +1279,11 @@ class SubagentResult:
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
             authority=child.authority,
             holds_work_already_done=True,
-            runtime_config=child.runtime_config,
+            runtime_config=(
+                None
+                if parent.runtime_config is None
+                else TurnRuntimeConfig.model_validate(parent.runtime_config)
+            ),
         )
         async with workspace_tx() as connection:
             await connection.execute(

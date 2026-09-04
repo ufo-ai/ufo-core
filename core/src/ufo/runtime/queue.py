@@ -1008,6 +1008,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             key_slot_for=runtime.registry.key_slot_for,
             billing_url=runtime.billing_url,
             connect_url=runtime.config.connect.public_base_url,
+            models=tuple(runtime.registry.specs),
             member_accounts_connectable=_member_accounts_connectable(runtime),
         )
 

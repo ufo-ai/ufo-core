@@ -231,7 +231,9 @@ state commits on the failure path too.
   on the terminal beside its schema-shaped answer. A woken turn reads the durable record, never
   the ending turn's working memory. Two payload knobs any profile may declare: `preload_skills`
   loads the named skills with their `depends` closure and injects their instructions before the
-  child's first round; `extended_context` lifts its round budget to the main ceiling.
+  child's first round; `extended_context` lifts its round budget to the main ceiling. A third,
+  `model`, runs the child on a named registry model instead of its target's own, under the
+  precedence the client pin section states.
 - **Compaction** — full-conversation `messages.json.lz4` transcript with monotonic seq +
   `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline
   groups the over-window head into API rounds, compresses it into a validated structured
@@ -403,7 +405,13 @@ with either carrier choice.
 A client's `--model` travels with each admitted turn: that concrete model replaces every agent and
 subagent profile model in the turn tree, and `--no-internet` beside it may only narrow the deployed
 agent policy. The server validates both at admission and stores the selection on each turn; it
-never changes the deployed configuration.
+never changes the deployed configuration. A `spawn` call names its own `model` for the child it
+admits — validated against the deploy's registry at the call, refused there when the id is unknown
+or the target runs on the member's own provider account — and that pin holds for the child turn and
+the work spawned under it. It never displaces a pin the tree already carries: under an admitted
+`--model` (or `x-ufo-model`) selection the spawn's argument is refused as a recoverable tool error,
+so the model the member selected stays the model every agent and profile in the tree runs on. An
+environment document's per-target `model` outranks both.
 A packaged deploy's terminal end attests its revision, immutable image, config and sandbox digests,
 and the terminal frame's selected model and reasoning. Remote evals bind the most-covered identity
 into their runtime digest and list every identity seen with its case coverage — a deploy rolling

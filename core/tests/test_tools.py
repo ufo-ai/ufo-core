@@ -45,6 +45,7 @@ from ufo.runtime.subagents import SubagentRegistry, Subagents
 from ufo.runtime.tools.context import (
     SHARED_BYTES_LIMIT,
     Spawn,
+    SpawnModelRejected,
     SpawnResult,
     SubagentStatus,
     ToolContext,
@@ -1030,6 +1031,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         delivers_result: bool = False,
         name: str = "",
         detach_on_arrival: bool = False,
+        model: str | None = None,
     ) -> SpawnResult:
         recorded.append((dedup_key, delivers_result))
         return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
@@ -1056,6 +1058,55 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         payload={"task": "x"},
     )
     assert recorded[1] == ("turn-1/spawn/call-1", False)
+
+
+async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refusal(
+    tmp_path: Path,
+) -> None:
+    """The tool hands the caller's model straight to the spawn, and a model the deploy does not
+    serve comes back as a recoverable tool error naming what it serves — the same shape a bad
+    target or payload takes, so the model repairs its own call."""
+    asked: list[str | None] = []
+
+    async def _record(
+        target: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
+        delivers_result: bool = False,
+        name: str = "",
+        detach_on_arrival: bool = False,
+        model: str | None = None,
+    ) -> SpawnResult:
+        asked.append(model)
+        if model == "gpt-5.6-sol":
+            return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
+        raise SpawnModelRejected.unknown(model or "", ("gpt-5.6-sol",))
+
+    ctx = make_context(FakeSandbox(), tmp_path, spawn=_record)
+
+    pinned = await run(
+        "spawn",
+        ctx,
+        target="research",
+        payload={"task": "x"},
+        background=True,
+        model="gpt-5.6-sol",
+    )
+    refused = await run(
+        "spawn",
+        ctx,
+        target="research",
+        payload={"task": "x"},
+        background=True,
+        model="gpt-9",
+    )
+
+    assert asked == ["gpt-5.6-sol", "gpt-9"]
+    assert not pinned.is_error
+    assert refused.is_error
+    assert "gpt-9" in refused.content[0].text
+    assert "gpt-5.6-sol" in refused.content[0].text
 
 
 def test_spawn_without_a_payload_is_refused_by_this_tools_own_field() -> None:

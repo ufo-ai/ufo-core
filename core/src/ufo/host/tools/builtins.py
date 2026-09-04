@@ -83,6 +83,7 @@ from ufo.runtime.skills.runtime import load_skills, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     ImageContent,
+    SpawnModelRejected,
     SpawnPayloadRejected,
     SpeakerRequired,
     TextContent,
@@ -301,6 +302,13 @@ class SpawnInput(BaseModel):
     name: str = Field(
         default="",
         description="A short display name for this run, at most four words, e.g. 'UK sports news'.",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Run this child on a named model instead of the target's own, by exact model "
+        "id. Set it only when the work needs a model the target does not run by default; an id "
+        "this deploy does not serve is refused, and the refusal names the ids it serves. A run "
+        "already pinned to one model keeps that pin and refuses this field.",
     )
 
 
@@ -1021,8 +1029,14 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
             delivers_result=args.background,
             name=args.name,
             detach_on_arrival=True,
+            model=args.model,
         )
-    except (AmbiguousSpawnTarget, SpawnPayloadRejected, UnknownSpawnTarget) as error:
+    except (
+        AmbiguousSpawnTarget,
+        SpawnModelRejected,
+        SpawnPayloadRejected,
+        UnknownSpawnTarget,
+    ) as error:
         return ToolResult(content=(TextContent(text=str(error)),), is_error=True)
     if result.terminal is not None and result.terminal.question is not None:
         return ToolResult(
