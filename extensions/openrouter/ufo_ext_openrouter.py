@@ -22,7 +22,7 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, get_args
 
 import httpx
@@ -111,7 +111,9 @@ belongs to `order`; against `only` it collapses the list to its single top route
 carries every upstream 429 for the slug alone. This table pins routes and nothing else: the
 dead-provider re-route's `ignore` subtracts from the pinned set for a slug named here and is the
 whole `provider` object for one that is not, because an exclusion has to reach the wire for every
-id or the re-issue lands back on the upstream that answered empty."""
+id or the re-issue lands back on the upstream that answered empty. Naming a slug here is also what
+lets a stalled upstream stay excluded past the round it stalled: the count of routes bounds how
+many exclusions may ride, so a turn that stalls on route after route always leaves one open."""
 
 IMAGES_PATH = "/images"
 IMAGE_TIMEOUT_SECONDS = 300.0
@@ -529,12 +531,15 @@ class OpenRouterModelClient:
     raw timeout or peer disconnect mid-body, or a usage lookup the ledger never answers (a 404 past
     the indexing window, a transport fault past the same window) — raises
     ModelStreamInterrupted whether or not output already yielded: the engine discards the partial
-    round and re-runs it once, and a second interruption fails the turn. A normal completion that
-    returned no text and no tool calls is a dead upstream — the client re-issues excluding that
-    provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
-    nudge. The exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying
-    no exclusion is byte-identical to the call the dead upstream answered empty, and the sticky
-    routing key below pins it straight back to that upstream. An id in PROVIDER_ALLOWLIST rides the
+    round and re-runs it once, and a second interruption fails the turn. A stream that died on the
+    wire takes its upstream out of the turn's routing first, because that re-run is otherwise the
+    same call and lands back on the wedged route; the ledger faults leave every route in, since the
+    stream they follow completed exactly as asked. A normal completion that returned no text and no
+    tool calls is a dead upstream — the client re-issues excluding that provider up to
+    MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's nudge. The
+    exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying no exclusion
+    is byte-identical to the call the dead upstream answered empty, and the sticky routing key
+    below pins it straight back to that upstream. An id in PROVIDER_ALLOWLIST rides the
     exclusion in the same `provider` object as `only`, four routes against three exclusions at
     most; every other id — every Gemini one — sends `ignore` as its whole provider preference, so
     the pin stays where a slug names one. An unpinned slug can run out of upstreams before those
@@ -563,6 +568,7 @@ class OpenRouterModelClient:
     spec: ModelSpec
     key: str
     generation_transport: httpx.AsyncBaseTransport | None = None
+    _stalled: list[str] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         retry = _OpenRouterRetry(self.spec, request.model)
@@ -573,7 +579,7 @@ class OpenRouterModelClient:
             state = _OpenRouterStream(bool(self.spec.price.cache_write_30m))
             try:
                 stream = await self.client.chat.completions.create(
-                    **self._create_kwargs(request, frozenset(ignore_providers))
+                    **self._create_kwargs(request, self._excluded(slug, ignore_providers))
                 )
                 stream_started = False
                 async for chunk in stream:
@@ -585,20 +591,14 @@ class OpenRouterModelClient:
             except openai.APIStatusError as error:
                 if state.usage is not None:
                     yield state.usage
-                nowhere_left = error.status_code == 404 and slug not in PROVIDER_ALLOWLIST
-                if ignore_providers and nowhere_left:
-                    log(
-                        "model.provider_exclusions_exhausted",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        excluded=sorted(ignore_providers),
-                    )
+                if self._nowhere_left(slug, request.model, error, ignore_providers):
                     return
                 retry = await retry.status(error, state.yielded)
                 continue
             except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
                 if state.usage is not None:
                     yield state.usage
+                self._stalled_out(slug, state.provider, "stream_transport")
                 raise ModelStreamInterrupted(
                     "stream_transport",
                     f"OpenRouter stream died mid-round ({type(error).__name__}): {error}",
@@ -606,6 +606,7 @@ class OpenRouterModelClient:
             except openai.APIError as error:
                 if state.usage is not None:
                     yield state.usage
+                self._stalled_out(slug, state.provider, "stream_error")
                 retry = retry.stream_error(error, state.yielded)
                 continue
             if state.finish_reason == "length":
@@ -630,6 +631,53 @@ class OpenRouterModelClient:
                 continue
             yield usage
             return
+
+    def _excluded(self, slug: str, dead: set[str]) -> frozenset[str]:
+        """The upstreams this call routes around: the ones that answered empty in this round, then
+        the ones that stalled earlier in the turn, trimmed so `ignore` can never cover `only`."""
+        allowed = PROVIDER_ALLOWLIST.get(slug)
+        if allowed is None:
+            return frozenset(dead)
+        ordered = [*sorted(dead), *(upstream for upstream in self._stalled if upstream not in dead)]
+        return frozenset(ordered[: len(allowed) - 1])
+
+    def _nowhere_left(
+        self, slug: str, model: str, error: openai.APIStatusError, dead: set[str]
+    ) -> bool:
+        """Whether this refusal is one of our own exclusions asking for it: an unpinned slug can
+        run out of upstreams before the re-route's retries do, and OpenRouter then answers 404
+        rather than routing outside the set. The round degrades to the empty result the turn loop
+        nudges on instead of failing the turn."""
+        if not dead or error.status_code != 404 or slug in PROVIDER_ALLOWLIST:
+            return False
+        log(
+            "model.provider_exclusions_exhausted",
+            provider=self.spec.provider,
+            model=model,
+            excluded=sorted(dead),
+        )
+        return True
+
+    def _stalled_out(self, slug: str, upstream: str | None, kind: str) -> None:
+        """Keep the upstream a stream died on out of the rest of this turn's calls. The engine
+        re-runs an interrupted round with the same messages under the same sticky session_id, so
+        without this the re-run is the call that just stalled and OpenRouter pins it back to the
+        upstream that stalled it — which is how one wedged route spent both attempts of a round and
+        failed the turn. Only a slug the allowlist pins remembers: `only` names the routes `ignore`
+        subtracts from, so one stays open, while for an unpinned slug the route count is
+        OpenRouter's alone and an exclusion carried into a later round can leave it served nowhere.
+        That gate is also what keeps the one mid-stream fault a call absorbs in place — Gemini 3.7
+        Flash's abort, on an unpinned slug — retrying the identical call it means to retry."""
+        if upstream is None or slug not in PROVIDER_ALLOWLIST or upstream in self._stalled:
+            return
+        self._stalled.append(upstream)
+        log(
+            "model.provider_stalled",
+            provider=self.spec.provider,
+            model=self.spec.id,
+            upstream=upstream,
+            kind=kind,
+        )
 
     async def _finish_usage(self, state: _OpenRouterStream) -> Usage:
         usage = state.usage

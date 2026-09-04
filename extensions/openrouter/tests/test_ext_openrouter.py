@@ -935,6 +935,158 @@ async def test_a_404_on_a_narrowed_call_still_fails_loud() -> None:
     }
 
 
+GLM_FLASH_ONLY = ["baseten", "fireworks", "morph", "together"]
+
+
+def _glm_flash_spec() -> openrouter.ModelSpec:
+    return {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3-flash"]
+
+
+def _stalled_stream(upstream: str) -> list[BaseException | ChatCompletionChunk]:
+    return [
+        _chunk(content="partial", provider=upstream),
+        _api_error("Upstream idle timeout exceeded"),
+    ]
+
+
+async def test_a_stalled_upstream_leaves_the_rounds_re_run() -> None:
+    """The live failure this closes: a round died on an injected idle timeout, the engine re-ran it,
+    and it died the same way three minutes later. A re-run carries the same messages and the same
+    sticky session_id, so it is the call that just stalled and OpenRouter pins it back to the
+    upstream that stalled it. The upstream a stream died on joins `ignore` for the rest of the
+    turn, so the re-run is served somewhere else."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        _stalled_stream("Morph"),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    client = _client(create, _glm_flash_spec())
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for _ in client.complete(request):
+            pass
+    events = [event async for event in client.complete(request)]
+
+    assert raised.value.kind == "stream_error"
+    assert TextDelta(text="ok") in events
+    assert create.calls[0]["extra_body"]["provider"] == {"only": GLM_FLASH_ONLY}
+    assert create.calls[1]["extra_body"]["provider"] == {
+        "only": GLM_FLASH_ONLY,
+        "ignore": ["Morph"],
+    }
+    assert create.calls[1]["extra_body"]["session_id"] == SESSION
+
+
+async def test_a_transport_fault_mid_stream_leaves_its_upstream_too() -> None:
+    """A connection dropped mid-body is the same wedged route as an error frame OpenRouter injects
+    when its upstream stalls, and the re-run has to land elsewhere for the same reason."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        [
+            _chunk(content="partial", provider="Together"),
+            httpx.RemoteProtocolError("peer closed connection without sending complete body"),
+        ],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    client = _client(create, _glm_flash_spec())
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for _ in client.complete(request):
+            pass
+    events = [event async for event in client.complete(request)]
+
+    assert raised.value.kind == "stream_transport"
+    assert TextDelta(text="ok") in events
+    assert create.calls[1]["extra_body"]["provider"] == {
+        "only": GLM_FLASH_ONLY,
+        "ignore": ["Together"],
+    }
+
+
+async def test_stalled_upstreams_never_leave_a_pinned_slug_served_nowhere() -> None:
+    """`ignore` subtracts from `only`, so a turn that stalled on all four routes would ask for a
+    slug served nowhere and 404 every round after it. Three exclusions ride at most — the bound the
+    dead-provider re-route already holds — so a route always stays open."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        *(_stalled_stream(upstream) for upstream in ("Baseten", "Fireworks", "Morph", "Together")),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    client = _client(create, _glm_flash_spec())
+
+    for _ in range(4):
+        with pytest.raises(ModelStreamInterrupted):
+            async for _ in client.complete(request):
+                pass
+    events = [event async for event in client.complete(request)]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[4]["extra_body"]["provider"] == {
+        "only": GLM_FLASH_ONLY,
+        "ignore": ["Baseten", "Fireworks", "Morph"],
+    }
+
+
+async def test_a_stall_off_the_allowlist_narrows_nothing() -> None:
+    """`ignore` is the whole provider preference for an unpinned slug, and how many routes that
+    slug has is OpenRouter's to know — narrowing one away across rounds can leave it served
+    nowhere, and that 404 lands on a round holding no usage to degrade on. A stall is remembered
+    only where `only` names the routes it subtracts from."""
+    create = ScriptedCreate(
+        _stalled_stream("Google"),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    client = _client(create)
+
+    with pytest.raises(ModelStreamInterrupted):
+        async for _ in client.complete(REQUEST):
+            pass
+    events = [event async for event in client.complete(REQUEST)]
+
+    assert TextDelta(text="ok") in events
+    assert "provider" not in create.calls[1]["extra_body"]
+
+
+async def test_the_gemini_flash_abort_retry_keeps_its_identical_call() -> None:
+    """The abort is the model's own no-output fault, not a wedged route: it clears on an immediate
+    identical retry, so it is the one mid-stream fault that leaves no upstream behind."""
+    create = ScriptedCreate(
+        [_chunk(provider="Google"), _api_error()],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(2, 1))],
+    )
+
+    events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[0] == create.calls[1]
+
+
+async def test_a_generation_lookup_fault_leaves_no_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stream completed and only the usage ledger failed, so the upstream served the round
+    exactly as asked and the re-run keeps every route."""
+    monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        [_chunk(content="ok", provider="Morph"), _chunk(finish="stop")],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    client = replace(
+        _client(create, _glm_flash_spec()),
+        generation_transport=httpx.MockTransport(lambda _: httpx.Response(404)),
+    )
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for _ in client.complete(request):
+            pass
+    events = [event async for event in client.complete(request)]
+
+    assert raised.value.kind == "generation_missing"
+    assert TextDelta(text="ok") in events
+    assert create.calls[1]["extra_body"]["provider"] == {"only": GLM_FLASH_ONLY}
+
+
 def test_google_tool_results_survive_json_parser_value_refusal() -> None:
     result = '{"$value":' + "1" * 5_000 + "}"
     messages = (
