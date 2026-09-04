@@ -44,6 +44,10 @@ import {
   useViewer,
 } from "ufo/kit";
 import type { Face, FacetGroup, ObjectRow, PanelState, Placement, ReactNode } from "ufo/kit";
+// The logo sheet the deploy ships, committed beside this file. `?url` is vite's own, so the bytes
+// ride with the page in this build and in the build a member's redeploy runs.
+import LOGO_SHEET_URL from "./ufo-logo-ratio.pdf?url";
+import LOGO_SHEET_COVER from "./ufo-logo-ratio-cover.png?url";
 
 const SITE_KIND = "site";
 
@@ -129,7 +133,12 @@ type Card = {
   file: Artifact | null;
 };
 
-type Shelf = { cards: Card[]; files: FilesPayload };
+/** `bare` is the workspace's own shelf holding nothing: the shipped sheet is on the page, so the
+ *  cards are not empty, and the member still has to be told where their own files land. */
+type Shelf = { cards: Card[]; files: FilesPayload; bare: boolean };
+
+/** What the shelf states where the workspace has shared nothing yet. */
+const NOTHING_SHARED = "A file or site an app makes in a conversation is listed here.";
 
 const NO_FILES: PanelState<FilesPayload> = { phase: "ready", payload: { objects: [] } };
 const NO_SITES: PanelState<SitesPayload> = { phase: "ready", payload: { objects: [] } };
@@ -253,6 +262,27 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
   };
 }
 
+/** The logo sheet the deploy ships, listed as the file it is. No workspace holds a row for it, so
+ *  it carries no date, no owner, and no conversation: an undated file takes the floor of the order,
+ *  which stands it under every file a member came for. */
+const SHEET: Artifact = {
+  name: "logo-sheet",
+  filename: "ufo-logo-ratio.pdf",
+  subject:
+    "The wordmark, the mark's three dots on their golden-ratio construction, and the spacing " +
+    "around both.",
+  media_type: "application/pdf",
+  size_bytes: 58240,
+  shared_at: "",
+  url: LOGO_SHEET_URL,
+  preview_url: LOGO_SHEET_COVER,
+  owner_email: null,
+  origin: null,
+  conversation: "",
+  surface: "",
+  source: null,
+};
+
 /** The files listing is the shelf's own read: it fails the section. A deploy with no sites
  *  extension answers the site read with a 404, which is a family that does not exist here rather
  *  than a fault — every other refusal is stated.
@@ -261,7 +291,11 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
  *  say which page each one stands on. They stand on the newest: a site is a place that goes on
  *  being worked on rather than a file dated once, so the top of the shelf is where a member looks
  *  for it, and the family's own narrowing lists every one of them at any depth. A page a cursor
- *  continues is not the top. */
+ *  continues is not the top.
+ *
+ *  The shipped sheet closes the shelf, and closes it once: it stands on the page with no older
+ *  files behind it. It is the page's own card rather than a file the workspace holds, so it never
+ *  answers for the member's shelf: `bare` stays true under it. */
 function shelf(
   sites: PanelState<SitesPayload>,
   files: PanelState<FilesPayload>,
@@ -270,6 +304,7 @@ function shelf(
   scope: Scope,
   owner: string | null,
   top: boolean,
+  sheet: boolean,
 ): PanelState<Shelf> {
   if (files.phase !== "ready") return files;
   if (sites.phase === "loading") return sites;
@@ -280,9 +315,15 @@ function shelf(
           .filter((row) => scope === "all" || (viewer !== null && row[OWNER_FIELD] === viewer))
           .map((row) => siteCard(row, viewer, owner))
       : [];
-  const cards = [...shown, ...files.payload.objects.map((entry) => fileCard(entry, viewer))];
+  const shipped = sheet && !files.payload.next_cursor ? [fileCard(SHEET, viewer)] : [];
+  const cards = [
+    ...shown,
+    ...files.payload.objects.map((entry) => fileCard(entry, viewer)),
+    ...shipped,
+  ];
   cards.sort((left, right) => (left.time < right.time ? 1 : left.time > right.time ? -1 : 0));
-  return { phase: "ready", payload: { cards, files: files.payload } };
+  const bare = !shown.length && !files.payload.objects.length;
+  return { phase: "ready", payload: { cards, files: files.payload, bare } };
 }
 
 function nameOf(id: string, cards: Card[] | null): string | undefined {
@@ -369,6 +410,7 @@ function Artifacts({
     scope,
     siteOwner,
     !after,
+    scope === "all" && !picked && !query,
   );
 
   const selected = place.opens?.at(-1);
@@ -411,18 +453,15 @@ function Artifacts({
           {(payload) => {
             if (unknown) return <PanelBlank body="That filter is not available." />;
             if (!payload.cards.length)
-              return (
-                <PanelBlank
-                  body={
-                    query || picked
-                      ? "Nothing matches."
-                      : "A file or site an app makes in a conversation is listed here."
-                  }
-                />
-              );
+              return <PanelBlank body={query || picked ? "Nothing matches." : NOTHING_SHARED} />;
             const open = (card: Card) => () => onPlace({ opens: [card.key] });
             return (
               <>
+                {payload.bare ? (
+                  <div className="mb-lg">
+                    <PanelBlank body={NOTHING_SHARED} />
+                  </div>
+                ) : null}
                 {face === "table" ? (
                   <Shapes cards={payload.cards} opens={opens} open={open} />
                 ) : (
@@ -510,7 +549,7 @@ function Opened({
       <FileSheet
         file={card.file}
         onClose={onClose}
-        details={<ArtifactDetails entry={card.file} />}
+        details={card.file.conversation ? <ArtifactDetails entry={card.file} /> : undefined}
       />
     );
   }
@@ -573,7 +612,7 @@ function Shapes({
       stacks={false}
       rows={cards}
       rowKey={(card) => card.key}
-      empty="A file or site an app makes in a conversation is listed here."
+      empty={NOTHING_SHARED}
       open={(card) => (card.file && !card.file.url ? null : open(card))}
       current={(card) => opens.includes(card.key)}
       act={(card) => (card.file && !card.file.url ? null : "Open")}

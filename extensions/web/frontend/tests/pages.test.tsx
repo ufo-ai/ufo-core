@@ -421,7 +421,14 @@ test("a member's own page draws the summary its consolidated rows were collapsed
   expect(screen.queryByText(BREADCRUMB)).toBeNull();
 });
 
-test("the artifacts page mounts and draws the empty shelf with its search", async () => {
+/** The file name the shipped logo-sheet card is listed under, which is what a member reads on it. */
+const LOGO_SHEET = "ufo-logo-ratio.pdf";
+
+/** The page carries one card of its own — the logo sheet the deploy ships — so a shelf the
+ *  workspace has put nothing on is not an empty grid. That card is not a file anyone shared, so it
+ *  does not answer for the member's own shelf: the sentence naming where their files land stays on
+ *  the screen beside it. */
+test("the artifacts page mounts and stands the shipped logo sheet beside the empty-shelf note", async () => {
   await runPage("artifacts", {
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/objects/artifact": () => json({ objects: [] }),
@@ -429,6 +436,7 @@ test("the artifacts page mounts and draws the empty shelf with its search", asyn
   expect(await screen.findByRole("heading", { name: "Artifacts" })).toBeTruthy();
   expect(await screen.findByRole("searchbox", { name: "Search artifacts" })).toBeTruthy();
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
+  expect(await screen.findByText(LOGO_SHEET)).toBeTruthy();
 });
 
 /** The list view is one of the two shapes the bar offers, so a narrow pane must not take it away:

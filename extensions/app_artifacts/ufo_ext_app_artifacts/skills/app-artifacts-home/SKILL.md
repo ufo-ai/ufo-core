@@ -13,8 +13,9 @@ workspace's shared files as cards, with the record panel that opens one.
 
 To change it:
 
-1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
-   `cp "$UFO_HOME/skills/app-artifacts-home/app.tsx" "$UFO_HOME/skills/app-artifacts-home/index.html" artifacts-home/`.
+1. Copy this skill's `app.tsx`, `index.html`, and the two logo-sheet files the page imports into a
+   directory of their own —
+   `cp "$UFO_HOME/skills/app-artifacts-home/app.tsx" "$UFO_HOME/skills/app-artifacts-home/index.html" "$UFO_HOME/skills/app-artifacts-home/ufo-logo-ratio.pdf" "$UFO_HOME/skills/app-artifacts-home/ufo-logo-ratio-cover.png" artifacts-home/`.
 2. Edit `app.tsx`. `read` `$UFO_HOME/skills/ufo-style/references/kit.md` first — every
    component the kit publishes and what each is — and reach for one before composing a
    shape out of `div`s. Space the page with `gap-2xs` inside a word, `gap-sm` between the
