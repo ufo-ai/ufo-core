@@ -1660,6 +1660,21 @@ def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) 
     assert spec.price.cache_write_30m == 5_000_000
 
 
+def test_catalog_registers_gpt_6_astra_with_its_launch_facts(tmp_path: Path) -> None:
+    """Astra accepts 1,050,000 tokens and bills a whole request over 272,000 at 2x input and 1.5x
+    output, so the row carries the window its registered rate is true at, as the GPT-5.6 rows do."""
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("gpt-6-astra")
+    assert spec.provider == "openai"
+    assert spec.api_surface == "responses"
+    assert spec.context_window == 272_000
+    assert spec.knowledge_cutoff == "2026-04"
+    assert spec.price.input == 10_000_000
+    assert spec.price.output == 50_000_000
+    assert spec.price.cache_read == 1_000_000
+    assert spec.price.cache_write_30m == 12_500_000
+
+
 def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> None:
     """Every agent that defers its model resolves through `auto_model` on every turn, so a knob
     naming no registered spec is a boot failure — not one mid-turn failure per workspace."""
