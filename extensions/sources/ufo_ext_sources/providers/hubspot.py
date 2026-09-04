@@ -3,6 +3,7 @@ surfaces synced into recallable pages.
 
 CRM object records come from the search API (`POST /crm/v3/objects/<type>/search`), paginating with
 the `paging.next.after` opaque cursor; an incremental run filters on `hs_lastmodifieddate >= cursor`
+(`lastmodifieddate` on contacts, the one object HubSpot names it that way)
 ordered ascending (HubSpot's `GTE` is inclusive, so the connector dedupes the equal-boundary
 records by id). Each object stream follows its search with a cheap archived-id sweep against the
 list endpoint so a deleted record lands as a tombstone. Product APIs that CRM search doesn't expose
@@ -254,14 +255,20 @@ def _normalize_epoch_millis(value: Any) -> Any:
     return value
 
 
-def _stream(name: str, *, object_type: str, canonical: bool = True) -> StreamSpec:
+def _stream(
+    name: str,
+    *,
+    object_type: str,
+    canonical: bool = True,
+    modified_property: str = "hs_lastmodifieddate",
+) -> StreamSpec:
     return StreamSpec(
         name=name,
         source_object=object_type,
         primary_key="id",
-        cursor_field="hs_lastmodifieddate",
+        cursor_field=modified_property,
         created_at_field="createdAt",
-        updated_at_field="hs_lastmodifieddate",
+        updated_at_field=modified_property,
         canonical=canonical,
     )
 
@@ -317,7 +324,7 @@ def _junction(name: str, *, parent_object: str) -> StreamSpec:
 
 
 COMPANIES = _stream("companies", object_type="companies")
-CONTACTS = _stream("contacts", object_type="contacts")
+CONTACTS = _stream("contacts", object_type="contacts", modified_property="lastmodifieddate")
 DEALS = _stream("deals", object_type="deals")
 TASKS = _stream("tasks", object_type="tasks")
 

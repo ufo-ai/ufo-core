@@ -122,6 +122,47 @@ async def test_companies_incremental_filters_the_boundary_repeat() -> None:
     )
 
 
+async def test_contacts_watermark_rides_lastmodifieddate() -> None:
+    seen_bodies: list[dict] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/crm/v3/properties/contacts":
+            return httpx.Response(
+                200, json={"results": [{"name": "email"}, {"name": "lastmodifieddate"}]}
+            )
+        if request.method == "POST" and path == "/crm/v3/objects/contacts/search":
+            seen_bodies.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "id": "p1",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "properties": {
+                                "email": "ada@example.com",
+                                "lastmodifieddate": "2026-02-05T00:00:00Z",
+                            },
+                        }
+                    ],
+                    "paging": {},
+                },
+            )
+        if request.method == "GET" and path == "/crm/v3/objects/contacts":
+            return httpx.Response(200, json={"results": [], "paging": {}})
+        return httpx.Response(404, json={"path": path})
+
+    result = await _fetch("contacts", handle, cursor="2026-02-01T00:00:00Z")
+
+    assert result.next_cursor == "2026-02-05T00:00:00Z"
+    assert result.pages[0].updated_at == "2026-02-05T00:00:00.000000+00:00"
+    assert seen_bodies[0]["sorts"] == [
+        {"propertyName": "lastmodifieddate", "direction": "ASCENDING"}
+    ]
+    assert seen_bodies[0]["filterGroups"][0]["filters"][0]["propertyName"] == "lastmodifieddate"
+
+
 def _owners_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/crm/v3/owners":
