@@ -62,7 +62,7 @@ INSTANCES=$(aws ec2 describe-instances --filters Name=instance-state-name,Values
 USED=$(standard_vcpus "$INSTANCES")
 PROD_INSTANCES=$(aws ec2 describe-instances --filters Name=instance-state-name,Values=pending,running Name=tag:aws:eks:cluster-name,Values=prod-cluster --query 'Reservations[].Instances[].[InstanceType,InstanceLifecycle]' --output json)
 OWNED=$(standard_vcpus "$PROD_INSTANCES")
-REQUIRED=$(missing 28 "$OWNED")
+REQUIRED=$(missing 56 "$OWNED")
 check_headroom ec2 L-1216C47A "$REQUIRED" "$USED"
 USED=$(aws elbv2 describe-load-balancers --query 'length(LoadBalancers[?Type == `network`])' --output json)
 OWNED=$(aws resourcegroupstaggingapi get-resources --resource-type-filters elasticloadbalancing:loadbalancer --tag-filters Key=elbv2.k8s.aws/cluster,Values=prod-cluster --query 'length(ResourceTagMappingList[?contains(ResourceARN, `:loadbalancer/net/`)])' --output json)

@@ -8,9 +8,8 @@ locals {
   # it rolls. `cache_s3_bucket` stays empty — disk-only, cold on each pod roll. Prod stays off.
   cache_enabled = true
 
-  # The preview service (RFC 0037), on for testing: the image builds every deploy and the
-  # UFO_PREVIEW_TOKEN secret is provisioned, so the Deployment has both when it rolls. Prod stays off
-  # until proven here.
+  # The preview service (RFC 0037): the image builds every deploy and the UFO_PREVIEW_TOKEN secret
+  # is provisioned, so the Deployment has both when it rolls.
   preview_enabled = true
 
   # https://www.cloudflare.com/ips-v4 — the edge ranges Cloudflare connects to origins from. The NLB

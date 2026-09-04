@@ -37,7 +37,7 @@ MONITORS = {
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
-M6I_LARGE_DEFAULT_VCPUS = 2
+M6I_XLARGE_DEFAULT_VCPUS = 4
 STORAGE_QUERY = (
     "min(last_30m):avg:aws.rds.free_storage_space{dbinstanceidentifier:"
     "${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space"
@@ -1928,7 +1928,7 @@ def test_production_vcpu_quota_uses_standard_on_demand_instance_defaults(
         instances_owned='[["m6i.large", null]]',
     )
     assert run.returncode == 0
-    assert "ec2 L-1216C47A 26 8" in run.stdout.decode().splitlines()
+    assert "ec2 L-1216C47A 54 8" in run.stdout.decode().splitlines()
     assert invoked.count("describe-instance-types") == 4
     assert (
         "ec2 describe-instance-types --instance-types m6i.large "
@@ -1946,7 +1946,7 @@ def _check_production_vcpu_reservation_matches_the_node_group() -> None:
     )
     max_size = re.search(r"^  node_max_size += +(\d+)$", production, re.MULTILINE)
     az_count = re.search(r"^  az_count += +(\d+)$", production, re.MULTILINE)
-    assert instance_types and instance_types.group(1) == "m6i.large"
+    assert instance_types and instance_types.group(1) == "m6i.xlarge"
     assert max_size and az_count
     assert "use_latest_ami_release_version = true" in eks
 
@@ -1958,7 +1958,7 @@ def _check_production_vcpu_reservation_matches_the_node_group() -> None:
     assert reservation
     max_nodes = int(max_size.group(1))
     nodes = max_nodes + 2 * int(az_count.group(1))
-    assert int(reservation.group(1)) == nodes * M6I_LARGE_DEFAULT_VCPUS
+    assert int(reservation.group(1)) == nodes * M6I_XLARGE_DEFAULT_VCPUS
 
 
 def _check_production_nlb_reservation_matches_the_services() -> None:
@@ -2024,7 +2024,7 @@ def test_production_prerequisites_report_computed_headroom(tmp_path: Path) -> No
         "eks L-1194D53C 0 2",
         "rds L-7B6409FD 0 2",
         "elasticache L-DFE45DF3 1 2",
-        "ec2 L-1216C47A 28 0",
+        "ec2 L-1216C47A 56 0",
         "elasticloadbalancing L-69A177A2 2 0",
         "vpc L-FE5A380F 1 2",
         "vpc L-FE5A380F 1 2",
@@ -2050,7 +2050,7 @@ def test_production_prerequisites_combine_paginated_inventory(tmp_path: Path) ->
         "eks L-1194D53C 0 5",
         "rds L-7B6409FD 0 5",
         "elasticache L-DFE45DF3 1 5",
-        "ec2 L-1216C47A 28 0",
+        "ec2 L-1216C47A 56 0",
         "elasticloadbalancing L-69A177A2 2 0",
         "vpc L-FE5A380F 1 0",
         "vpc L-FE5A380F 1 0",
@@ -2080,7 +2080,7 @@ def test_production_prerequisites_reserve_only_missing_capacity(tmp_path: Path) 
         "eks L-1194D53C 0 4",
         "rds L-7B6409FD 0 4",
         "elasticache L-DFE45DF3 0 4",
-        "ec2 L-1216C47A 20 8",
+        "ec2 L-1216C47A 48 8",
         "elasticloadbalancing L-69A177A2 0 4",
         "vpc L-FE5A380F 0 4",
         "vpc L-FE5A380F 0 4",

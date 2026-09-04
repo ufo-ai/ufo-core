@@ -54,6 +54,9 @@ module "eks" {
     kube-proxy             = {}
     eks-pod-identity-agent = {}
     vpc-cni                = { before_compute = true }
+    # Without this nothing serves the metrics API: `kubectl top` reports no node and no pod, and a
+    # sizing decision has only a load average read out of a container.
+    metrics-server = {}
   }
 
   eks_managed_node_group_defaults = merge(

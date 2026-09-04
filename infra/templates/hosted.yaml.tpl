@@ -139,6 +139,9 @@ spec:
             - name: UFO_CONTROL_SLACK_CONNECT_BOT_TOKEN
               valueFrom:
                 secretKeyRef: {name: ufo-gateway-slack-connect, key: bot-token}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 768Mi}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
           livenessProbe:
@@ -772,8 +775,11 @@ spec:
           volumeMounts:
             # The rendered shared-fleet config replaces the image's baked dev ufo.toml.
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
+          # The request is a scheduling reservation, not a cap. Serve's peak is the widest in the
+          # fleet — a turn's model rounds and sandbox bookkeeping ride the same process — so it
+          # carries no memory limit: a limit here trades a slow pod for an OOMKilled turn.
           resources:
-            requests: {cpu: 250m}
+            requests: {cpu: 250m, memory: 512Mi}
           # No /healthz in core; a TCP probe confirms uvicorn is bound after fail-loud boot.
           readinessProbe:
             tcpSocket: {port: http}

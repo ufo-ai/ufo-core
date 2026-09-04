@@ -252,11 +252,19 @@ def _check_hosted_serve_rolls_all_replacements_before_draining() -> None:
     assert 'command: [sleep, "${prestop_seconds}"]' in SERVE_DEPLOYMENT
 
 
-def _check_hosted_serve_reserves_capacity() -> None:
-    deployment = _document(_documents(False), "Deployment", "ufo-serve")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
-    assert container["resources"] == {
-        "requests": {"cpu": "250m"},
+def _check_hosted_workloads_reserve_capacity() -> None:
+    """A container with no request is BestEffort: the first the kubelet evicts under node pressure,
+    and the smallest CPU share under contention. Serve alone carries no memory limit — a turn's
+    model rounds ride its process, so a limit there trades a slow pod for a killed turn."""
+    documents = _documents(False)
+    for name in PRODUCTION_WORKLOADS:
+        deployment = _document(documents, "Deployment", name)
+        for container in deployment["spec"]["template"]["spec"]["containers"]:
+            requests = container["resources"]["requests"]
+            assert requests["cpu"] and requests["memory"], (name, container["name"])
+    serve = _document(documents, "Deployment", "ufo-serve")
+    assert serve["spec"]["template"]["spec"]["containers"][0]["resources"] == {
+        "requests": {"cpu": "250m", "memory": "512Mi"},
     }
 
 

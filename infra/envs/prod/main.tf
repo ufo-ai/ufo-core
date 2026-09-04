@@ -33,10 +33,11 @@ module "platform" {
   # HA across AZs for prod.
   az_count                  = 3
   single_nat_gateway        = false
-  node_instance_types       = ["m6i.large"]
+  node_instance_types       = ["m6i.xlarge"]
   node_min_size             = 3
   node_max_size             = 8
   node_desired_size         = 3
+  node_disk_size            = 64
   rds_instance_class        = "db.m6g.large"
   rds_multi_az              = true
   rds_allocated_storage     = 50
