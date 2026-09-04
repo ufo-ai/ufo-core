@@ -42,7 +42,6 @@ ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
 CONNECT_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
-INSTALL_LINK = re.compile(r"https://\S+")
 STATED_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 SLACK_INSTALL_LINK_KEY = "authorize_url"
 SLACK_INSTALL_HINT_KEY = "hint"
