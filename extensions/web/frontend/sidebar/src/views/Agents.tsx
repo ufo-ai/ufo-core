@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   IconChevronDown,
   IconCirclePlus,
@@ -38,7 +38,7 @@ import {
   SettingsTabItems,
   type SettingsTab,
 } from "@/views/AgentPane";
-import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
+import { APP_CREATOR_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
@@ -65,54 +65,6 @@ export type AgentsProps = {
   buildWanted: boolean;
 };
 
-const NEW_APP = "New app";
-
-const RESPONDING = "Responding";
-
-/** The line a green row prints under its name, and how it is drawn: the engine's own word for the
- *  work in flight shimmers while that work moves, and a turn still waiting for its slot states so
- *  in the resting tone. A row holding no work prints nothing here. */
-function activeLine(status: AgentStatus | undefined): { text: string; shimmer: boolean } | null {
-  if (status === undefined) return null;
-  if (status.turn === "running") return { text: status.activity ?? RESPONDING, shimmer: true };
-  if (status.turn === "queued") return { text: "Queued", shimmer: false };
-  return null;
-}
-
-/** What an app is doing, drawn so a change to it is seen: the words that replace the line are cut
- *  up from under it a character at a time, left to right.
- *
- *  The line itself is the one element across every change, so the sweep over it never restarts and
- *  never breaks — the characters are what the browser replaces, and a character it has just
- *  inserted is what runs the cut, which is why each carries the line it belongs to in its key. The
- *  sweep is painted by the line and clipped to the text under it, its own characters' travel
- *  included.
- *
- *  A screen reader is read the line once, whole: a character per element is a spelling, not a
- *  sentence. */
-function ActivityLine({
-  asks,
-  text,
-  shimmer,
-}: {
-  asks: number;
-  text: string;
-  shimmer: boolean;
-}) {
-  return (
-    <Ticker asks={asks} className={cn("font-mono text-small text-ink-soft", shimmer && "shimmer")}>
-      <span className="sr-only">{text}</span>
-      <span aria-hidden>
-        {Array.from(text, (character, at) => (
-          <span key={text + at} data-cut style={{ "--cut": at } as CSSProperties}>
-            {character}
-          </span>
-        ))}
-      </span>
-    </Ticker>
-  );
-}
-
 /** The dot the mark wears, read before any words: the live tone while the app holds work in
  *  flight, and the blocked tone while it is waiting on the member.
  *
@@ -131,29 +83,10 @@ function statusDot(status: AgentStatus | undefined, setupDue: boolean): string |
 /** One app's row: the whole row is the one control, and it opens the app. What acts on the open app
  *  is worn by that app's own pane, beside its name.
  *
- *  The row is one shape whether or not the app is working — a name, and under it a slot the work it
- *  is doing opens. Both lines are held to one line each and cut off where the rail ends: an app
- *  names itself, and the rail is not where either is read in full. The slot is a grid track rather
- *  than a line that appears, so the row's height is a number the browser can move between; the line
- *  that closed it stays drawn behind the fold, since a track collapsing over nothing collapses
- *  instantly. A resting app's mark is held at the pointer instead, where the row costs nothing to
- *  read. */
-/** One app's row: the whole row is the one control, and it opens the app. What acts on the open app
- *  is worn by that app's own pane, beside its name.
- *
- *  The row states what it knows in the row itself. An app's work is the fact the sidebar exists to
- *  carry, and a fact held at the pointer is a fact the member has to go asking for — so the name
- *  takes the first line and what the app is doing takes the second, in the resting tone under it.
- *  The slot is a grid track rather than a line that appears, so the row's height is a number the
- *  browser can move between; the line that closed it stays drawn behind the fold, since a track
- *  collapsing over nothing collapses instantly.
- *
- *  That second line is for work in flight and nothing else. A column whose every row printed a
- *  standing line would state the app doing something and the app doing nothing in the same weight,
- *  and the row that matters would stop being the one that catches the eye. What a resting app has
- *  to say — paused, or its last run failed — is said by the dot, which costs the column no height.
- *  Both lines are held to the column and state their tails by travelling while the member is on the
- *  row, the way a conversation's title does. */
+ *  The row is its name and its dot, one line whatever the app is doing. What the app is doing is
+ *  the dot's to say, which costs the column no height; the words for it are the app's own pane's,
+ *  where there is room to read them. The name is held to the column and states its tail by
+ *  travelling while the member is on the row, the way a conversation's title does. */
 function AgentRow({
   agent,
   status,
@@ -173,17 +106,6 @@ function AgentRow({
   onOpen: () => void;
 }) {
   const [asks, setAsks] = useState(0);
-  /* The app the member is standing in states its own work, in the pane, at length. The row saying
-     it again under the name is the same fact twice on one screen — so the open row keeps the dot,
-     which is the part the pane's own words cannot carry, and drops the line. */
-  const said = open ? null : activeLine(status);
-  /** The line the fold closes over. A track collapsing over nothing collapses instantly, so the
-   *  words that were there stay drawn until the fold has shut — and are then dropped, because a
-   *  line nobody can see is a line that must not still be animating. */
-  const [held, setHeld] = useState(said);
-  if (said !== null && (held === null || held.text !== said.text || held.shimmer !== said.shimmer)) {
-    setHeld(said);
-  }
   const dot = statusDot(status, agent.setup_due === true);
   const row = (
     <SidebarRow current={open}>
@@ -214,29 +136,9 @@ function AgentRow({
           </span>
         }
       >
-        <span className="flex min-w-0 flex-1 flex-col">
-          <Ticker asks={asks} className="text-label">
-            {agentName(agent.name)}
-          </Ticker>
-          <span
-            className={cn(
-              "grid transition-[grid-template-rows] duration-200 ease-control",
-              said === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
-            )}
-            onTransitionEnd={(event) => {
-              /* The line inside this track travels on its own transition, and that one bubbles
-                 here too. Only the track's own end means the fold has shut. */
-              if (event.target !== event.currentTarget) return;
-              if (said === null) setHeld(null);
-            }}
-          >
-            <span className="min-h-0 min-w-0 overflow-hidden">
-              {held === null ? null : (
-                <ActivityLine asks={asks} text={held.text} shimmer={held.shimmer} />
-              )}
-            </span>
-          </span>
-        </span>
+        <Ticker asks={asks} className="flex-1 text-label">
+          {agentName(agent.name)}
+        </Ticker>
       </SidebarPress>
       {/* Pinning moves the app up the sidebar's order. The act rests until the pointer is on the
           row whether or not it is already done: a mark standing on every pinned row is a column of
@@ -382,74 +284,10 @@ export function AppsIndex({
   const ordered = appOrder(agents, pinned, lastActiveAt);
   const run = appRun(ordered, working);
   const shown = expanded ? run.shown.concat(run.more) : run.shown;
-  // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
-  // record after — so it survives every unmount of this list; a reload clears the store, so no
-  // phantom row survives one.
-  const key = mainAgent ? wizardKey(mainAgent.id) : null;
-  const held = useChat(key ?? "");
-  const running =
-    key !== null &&
-    !held.closed &&
-    (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
-  const runTitle = held.founded?.title ?? null;
   return (
     <nav aria-label="Apps" className="flex min-h-0 flex-col">
       <div className="flex min-h-0 max-h-(--size-apps-open) flex-col overflow-y-auto">
         <ul className="m-0 flex list-none flex-col gap-px p-0">
-          {/* Building an app is the one act this list carries, so it stands as the list's first row
-              rather than behind a mark on the heading: a member who has not built one yet has no
-              reason to go looking under a control for it. Every member is offered it — the `agent`
-              kind admits a create from any speaking member and stamps them the owner — and the
-              wizard rides the main agent's own chat, so a workspace with no main agent offers
-              nothing to ride. */}
-          {mainAgent ? (
-            <SidebarRow>
-              <SidebarPress
-                collapsed={collapsed}
-                label={NEW_APP}
-                glyph={<IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />}
-                onClick={onBuild}
-              />
-            </SidebarRow>
-          ) : null}
-          {/* The run in flight, named the way the wizard's own pane is until the conversation has
-              a title of its own. While the pane shows it states where the member already is;
-              while an app holds the pane instead, the row is the way back to the run. It is not
-              an app: nothing here opens one, and the app's real row arrives from the apps read
-              when it lands. */}
-          {(building || running) && !collapsed ? (
-            <SidebarRow current={building} className="gap-xs hover:bg-transparent">
-              {building ? (
-                <div
-                  aria-current
-                  className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
-                >
-                  <span className="min-w-0 truncate text-label">
-                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                  </span>
-                  <span className="w-full truncate font-mono text-small text-ink-soft">
-                    Building
-                  </span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={onBuild}
-                  className={cn(
-                    "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
-                    "rounded-row text-left text-inherit hover:bg-fill",
-                  )}
-                >
-                  <span className="min-w-0 max-w-full truncate text-label">
-                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                  </span>
-                  <span className="w-full truncate font-mono text-small text-ink-soft">
-                    Building
-                  </span>
-                </button>
-              )}
-            </SidebarRow>
-          ) : null}
           {shown.map((agent) => (
             <AgentRow
               key={agent.id}
@@ -462,6 +300,22 @@ export function AppsIndex({
               onOpen={() => onOpen(agent.id)}
             />
           ))}
+          {/* Building an app is the one act this list carries, and it stands under the apps rather
+              than over them: the column is read for the app a member is going to open, and the act
+              that makes a new one is what they reach when none of those is it. Every member is
+              offered it — the `agent` kind admits a create from any speaking member and stamps them
+              the owner — and the wizard rides the main agent's own chat, so a workspace with no main
+              agent offers nothing to ride. */}
+          {mainAgent ? (
+            <SidebarRow>
+              <SidebarPress
+                collapsed={collapsed}
+                label={APP_CREATOR_TITLE}
+                glyph={<IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />}
+                onClick={onBuild}
+              />
+            </SidebarRow>
+          ) : null}
         </ul>
       </div>
       {/* The rest of the workspace's apps, behind one row. It states what it does rather than how

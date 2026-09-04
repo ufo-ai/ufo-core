@@ -412,9 +412,9 @@ export async function expandApps(): Promise<void> {
   if (more) await userEvent.click(more);
 }
 
-/** The act that builds an app, which stands as the first row of the apps list. */
+/** The act that builds an app, which stands as the last row of the apps list. */
 export async function openNewApplication(): Promise<void> {
-  await userEvent.click(await screen.findByRole("button", { name: "New app" }));
+  await userEvent.click(await screen.findByRole("button", { name: "App Creator" }));
 }
 
 /** What the app pane's conversation half is headed by before a conversation names it. */

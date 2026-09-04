@@ -61,7 +61,7 @@ test("leaving a view discards the read left behind rather than painting it", asy
 
   await userEvent.keyboard("{Escape}");
   const sidebar = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(sidebar.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(sidebar.getByRole("button", { name: "New chat" }));
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
 
   releaseConnectors!(json({ connections: [STALE_CONNECTION] }));

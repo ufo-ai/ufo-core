@@ -502,6 +502,7 @@ function AccountMenu({ member }: { member: Member }) {
 const APPS = "Apps";
 const CHATS = "Chats";
 const CHANNELS = "Channels";
+const NEW_CHAT = "New chat";
 
 /** A sidebar section's heading — the muted band the whole line of which opens the section's menu.
  *  The glyph that states the menu is drawn only once the section is pointed at, reached by keyboard,
@@ -520,7 +521,7 @@ const SECTION_HEAD_GLYPH =
 
 /** The rows the sidebar pins where the member has pinned none themselves: the workspace's shipped
  *  apps, in name order, so the sidebar arrives holding its own destinations. The chat app is not one
- *  of them — the Ask assistant row above is the way to it. */
+ *  of them — the New chat row above is the way to it. */
 function defaultPins(agents: Agent[]): string[] {
   const apps = agents.filter((agent) => agent.app && agent.app !== CHAT_SURFACE);
   apps.sort((a, b) => a.name.localeCompare(b.name));
@@ -828,7 +829,7 @@ function WorkspaceSidebar({
             icon={<AskGlyph />}
             current={standing(route, COMPOSING)}
             collapsed={collapsed}
-            label="Ask assistant"
+            label={NEW_CHAT}
             onClick={() =>
               chatApp
                 ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })

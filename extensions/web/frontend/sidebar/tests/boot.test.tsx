@@ -163,12 +163,12 @@ test("the sidebar names the shell's destinations and states the member at its fo
   expect(names).toEqual([
     "Search",
     "Collapse sidebar",
-    "Ask assistant",
+    "New chat",
     "Apps",
-    "New app",
     /* The sidebar stands open, so the app's row states its name and the pin act every row wears. */
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
+    "App Creator",
     "Chats",
     "Chats options",
     "Connectors",
@@ -328,13 +328,13 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
   expect(names).toEqual([
     "Search",
     "Collapse sidebar",
-    "Ask assistant",
+    "New chat",
     "Apps",
-    "New app",
     /* The drawer is always drawn whole, so the app's row states its name and the pin act every row
        wears. */
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
+    "App Creator",
     "Chats",
     "Chats options",
     "Connectors",

@@ -1180,7 +1180,7 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(rail.getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
 });
@@ -1188,14 +1188,14 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
 test("the ask control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -1215,7 +1215,7 @@ test("the apps list opens the agent's page, and the sidebar starts the conversat
   expect(screen.getByRole("navigation", { name: "Apps" })).toBeTruthy();
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(rail.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
@@ -1255,12 +1255,12 @@ test("the conversations rail stands in the sidebar whatever the destination", as
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   expect(await rail.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(rail.getByRole("button", { name: "Ask assistant" })).toBeTruthy();
+  expect(rail.getByRole("button", { name: "New chat" })).toBeTruthy();
 
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
   expect(await screen.findByRole("heading", { name: "Team" })).toBeTruthy();
   expect(rail.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(rail.getByRole("button", { name: "Ask assistant" })).toBeTruthy();
+  expect(rail.getByRole("button", { name: "New chat" })).toBeTruthy();
 });
 
 test("the chat header names the agent holding the conversation and what it is called, never the model", async () => {
@@ -1357,11 +1357,11 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
-    ["Ask assistant", "Connectors", "Workspace"].filter(
+    ["New chat", "Connectors", "Workspace"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
-  expect(marked()).toEqual(["Ask assistant"]);
+  expect(marked()).toEqual(["New chat"]);
 
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(marked()).toEqual(["Workspace"]));

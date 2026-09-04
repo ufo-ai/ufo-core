@@ -87,7 +87,7 @@ const PHASES = [
 function board(done: number, running: number | null) {
   return json({
     type: "tasks",
-    title: "App Builder",
+    title: "App Creator",
     tasks: PHASES.map((description, index) => ({
       description,
       status: index < done ? "completed" : index === running ? "in_progress" : "pending",
@@ -126,11 +126,11 @@ async function shownIndex(): Promise<HTMLElement> {
 
 async function openWizard() {
   await openNewApplication();
-  return screen.findByRole("region", { name: "App Builder" });
+  return screen.findByRole("region", { name: "App Creator" });
 }
 
 function progress(): HTMLElement {
-  return screen.getByRole("progressbar", { name: "App Builder" });
+  return screen.getByRole("progressbar", { name: "App Creator" });
 }
 
 beforeEach(() => {
@@ -178,7 +178,7 @@ test("apps the workspace ships on its first turn reach the sidebar with no reloa
   }
 });
 
-test("New application opens the wizard speaking in the pane, and the apps list keeps its rows", async () => {
+test("App Creator opens the wizard speaking in the pane, and the apps list keeps its rows", async () => {
   const sent: { url: string; body: string }[] = [];
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
@@ -326,42 +326,9 @@ test("a conversation the composer founds after a failed opening send is still th
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(within(wizard).getByText(saying("A finances dashboard."))).toBeTruthy();
-  // The bar reads the founded conversation's own board, and the rail row takes its title — neither
-  // is reachable from a wizard that lost the conversation.
+  // The bar reads the founded conversation's own board, which a wizard that lost the conversation
+  // cannot reach.
   expect(await waitFor(progress)).toBeTruthy();
-  expect(within(await shownIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
-});
-
-test("the rail names the run in flight and takes the conversation's own title", async () => {
-  let answer = () => {};
-  const opening = new Promise<void>((resolve) => {
-    answer = resolve;
-  });
-  wire({
-    "/api/agents": () => boot([AGENT], ADMIN),
-    "/chat": async () => {
-      await opening;
-      return json(OPENED);
-    },
-    "/slots/tasks": NO_BOARD,
-    "/transcript": () => json({ messages: [] }),
-  });
-  render(<Portal />);
-
-  const index = await shownIndex();
-  expect(within(index).queryByText("App Builder")).toBeNull();
-
-  await openNewApplication();
-
-  // Until admission answers there is no conversation and nothing to call it, so the row states the
-  // run alone; the title the chat route hands back names it from then on.
-  const running = await shownIndex();
-  expect(await within(running).findByText("App Builder")).toBeTruthy();
-  expect(within(running).queryByRole("button", { name: /App Builder/ })).toBeNull();
-
-  answer();
-
-  expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 test("the progress bar reads the run's own phase board and advances with it", async () => {
@@ -432,9 +399,9 @@ test("an answer to the wizard's question rides the turn that asked it", async ()
   await openWizard();
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   // The question rides the turn's terminal, and a member can only answer in a pane that has drawn
-  // the conversation — so the emit waits for the bind the rail's title states, the way a real
-  // terminal can only follow a stream the page already tails.
-  expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
+  // the conversation — so the emit waits for the bind the bar states, the way a real terminal can
+  // only follow a stream the page already tails.
+  expect(await waitFor(progress)).toBeTruthy();
   StreamFake.last().emit("terminal", {
     ...ASKED,
     question: {
@@ -484,7 +451,7 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
 /** The rows are the section's own list, and the act that adds to it is the section head's: the
  *  index states apps, and what to do about apps is behind the name it stands under. */
-test("the act that builds an app stands as the apps list's first row", async () => {
+test("the act that builds an app stands as the apps list's last row", async () => {
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
@@ -499,7 +466,7 @@ test("the act that builds an app stands as the apps list's first row", async () 
   const rows = within(index)
     .getAllByRole("button")
     .map((row) => row.getAttribute("aria-label") ?? row.textContent);
-  expect(rows[0]).toBe("New app");
+  expect(rows.at(-1)).toBe("App Creator");
 });
 
 test("pressing a section's band folds it away, and the fold holds across a reload", async () => {
@@ -554,7 +521,7 @@ test("the drawer holds the apps index at a phone width, and a pick shuts it", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-test("closing the wizard gives the pane back to the app and clears the run's row", async () => {
+test("closing the wizard gives the pane back to the app", async () => {
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
     "/chat": () => json(OPENED),
@@ -567,8 +534,7 @@ test("closing the wizard gives the pane back to the app and clears the run's row
   await openWizard();
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  expect(within(await shownIndex()).queryByText("App Builder")).toBeNull();
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
 });
 
@@ -598,7 +564,7 @@ test("a close before the founding send answers keeps the pane closed and founds 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
 
   answer();
 
@@ -606,8 +572,7 @@ test("a close before the founding send answers keeps the pane closed and founds 
   // the member went back to.
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(sent).toEqual([OPENING]);
-  expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull();
-  expect(within(await shownIndex()).queryByText(/App Builder/)).toBeNull();
+  expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull();
 });
 
 /** The run is the key's, not the mount's: a wizard reopened while its founding send is still in
@@ -634,7 +599,7 @@ test("a wizard reopened during its founding send binds to the run the first moun
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
 
   const wizard = await openWizard();
   answer();
@@ -644,7 +609,6 @@ test("a wizard reopened during its founding send binds to the run the first moun
   );
   expect(sent).toEqual([OPENING]);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(within(await shownIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 /** The run is the key's, not the screen's: leaving for another screen unmounts every pane here,
@@ -665,20 +629,19 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
-  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
   const index = await shownIndex();
-  await userEvent.click(within(index).getByRole("button", { name: /App Builder/ }));
+  await userEvent.click(within(index).getByRole("button", { name: "App Creator" }));
 
-  const wizard = await screen.findByRole("region", { name: "App Builder" });
+  const wizard = await screen.findByRole("region", { name: "App Creator" });
   expect(await within(wizard).findByText(saying(OPENING))).toBeTruthy();
-  expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });
 
-/** An app row shows its app without ending the run: the rail keeps naming the run, and its row —
- *  now a place to go rather than the place the member is — takes them back to it. */
-test("an app row leaves the run standing, and the rail's own row returns to it", async () => {
+/** An app row shows its app without ending the run: the run stands on its own key, and App Creator
+ *  takes the member back to it rather than founding a second one. */
+test("an app row leaves the run standing, and App Creator returns to it", async () => {
   const sent: string[] = [];
   wire({
     "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
@@ -697,12 +660,10 @@ test("an app row leaves the run standing, and the rail's own row returns to it",
 
   await shownIndex();
   await openAgentRow("Research");
-  await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
   const index = await shownIndex();
-  const row = await within(index).findByRole("button", { name: /App Builder/ });
-
-  await userEvent.click(row);
-  expect(await screen.findByRole("region", { name: "App Builder" })).toBeTruthy();
+  await userEvent.click(within(index).getByRole("button", { name: "App Creator" }));
+  expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });
 
@@ -741,7 +702,6 @@ test("a founding send from the chat screen never blocks the wizard's own", async
 
   answerChat();
   await waitFor(() => expect(within(wizard).queryByText("About our numbers.")).toBeNull());
-  expect(within(await shownIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 /** A founding send the key turns away is refused to its caller and worn by the key as a fault —
@@ -1137,45 +1097,12 @@ test("a working app leads the index, and a pin orders everything under it", asyn
   await waitFor(() => expect(drawn()).toEqual(["Research", "Scribe", "Assistant"]));
 });
 
-test("a working row prints its work under the name, in plain text and with no tooltip", async () => {
+test("a row states its name and nothing else, working or not, and opens nothing at the pointer", async () => {
   wire({
     "/api/agents/status": () =>
       json({
         statuses: [
           status(SECOND_ID, { turn: "running", activity: "Running bash" }),
-          status(THIRD_ID, { turn: "running" }),
-          status(FOURTH_ID, { turn: "queued" }),
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents";
-  render(
-    <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
-  );
-
-  const index = await shownIndex();
-  const row = (name: RegExp) => within(index).getByRole("button", { name });
-  // The line is drawn a character at a time, so what a reader is given is the whole line beside
-  // those cells and the cells themselves are hidden — which is what the row is named by.
-  await waitFor(() => expect(row(/^Research Running bash$/)).toBeTruthy());
-  expect(row(/^Scribe Responding$/)).toBeTruthy();
-  expect(row(/^Watcher Queued$/)).toBeTruthy();
-  const said = row(/^Research/).querySelector(".font-mono")!;
-  expect(said.className).toContain("text-small");
-  expect(said.querySelector(".sr-only")!.textContent).toBe("Running bash");
-  expect(said.querySelector("[aria-hidden]")!.textContent).toBe("Running bash");
-  // The line is already on the row, so nothing is held at the pointer over it.
-  fireEvent.focus(row(/^Research/));
-  expect(screen.queryByRole("tooltip")).toBeNull();
-});
-
-test("an app that is not working states nothing under its name, and opens nothing at the pointer", async () => {
-  wire({
-    "/api/agents/status": () =>
-      json({
-        statuses: [
-          status(SECOND_ID, { last_failed: true }),
           status(AGENT_ID, { last_active_at: HOURS_AGO }),
         ],
       }),
@@ -1185,11 +1112,11 @@ test("an app that is not working states nothing under its name, and opens nothin
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
   const index = await shownIndex();
-  // A failed run and a run five hours ago are both read off the dot. Neither takes a line, and
-  // nothing stands in for one at the pointer.
-  const failed = within(index).getByRole("button", { name: /^Research/ });
-  await waitFor(() => expect(failed.querySelector(".bg-blocked")).toBeTruthy());
-  expect(failed.textContent).toBe("Research");
+  // Work in flight is read off the dot. It takes no line under the name — not even the activity
+  // the status names — and nothing stands in for one at the pointer.
+  const working = within(index).getByRole("button", { name: /^Research/ });
+  await waitFor(() => expect(working.querySelector(".bg-live")).toBeTruthy());
+  expect(working.textContent).toBe("Research");
 
   const quiet = within(index).getByRole("button", { name: /^Assistant/ });
   expect(quiet.textContent).toBe("Assistant");
@@ -1816,7 +1743,7 @@ test("the wizard's bare address founds nothing and forwards to the apps screen",
 
   await screen.findByRole("region", { name: agentName(AGENT.name) });
   await waitFor(() => expect(location.hash).toBe("#/agents"));
-  expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull();
   expect(StreamFake.opened.length).toBe(0);
   expect(sent).toEqual([]);
 });
