@@ -7,6 +7,11 @@ projecting distinct `workspace_id`, which core runs through the one RLS-bypass r
 workspaces the dispatcher binds. Building per tick lets dueness be time-relative: compute `now`
 inside the builder and embed the cutoff.
 
+`JobFault` is how a handler names why its work failed: a stack carries no exception message, so
+without it every failure reads as a class and a frame, and a provider outage cannot be told from a
+revoked token without a pod's stderr. Raise it with text the handler authored against the call it
+made — a status and a request, never the provider's payload.
+
 `PAGE_CHANGE_CURSOR_KEY` is the prefix core keys a `page_change` consumer's cursor by inside the
 declaring extension's own ScopedStore, `{prefix}:{handler name}`. An extension that sends its own
 consumer back over pages it already drained clears that key rather than spelling core's format
@@ -35,6 +40,9 @@ from ufo.runtime.ext.context import (
 )
 from ufo.runtime.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY as PAGE_CHANGE_CURSOR_KEY,
+)
+from ufo.runtime.ext.manifest import (
+    JobFault as JobFault,
 )
 from ufo.runtime.ext.manifest import (
     JobSpec as JobSpec,

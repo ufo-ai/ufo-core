@@ -72,7 +72,7 @@ from ufo.sdk.balance import (
 from ufo.sdk.bearer import SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.http import JSONResponse, Request, Response
-from ufo.sdk.jobs import JobSpec
+from ufo.sdk.jobs import JobFault, JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection, RouteSpec
 from ufo.sdk.o11y import log, warn
 from ufo.sdk.objects import WORKSPACE_KIND
@@ -174,10 +174,12 @@ INGEST_TRANSPORT: httpx.AsyncBaseTransport | None = None
 BILLING_TRANSPORT: httpx.AsyncBaseTransport | None = None
 
 
-class MetronomeError(RuntimeError):
-    """Metronome answered a non-2xx status — surfaced with status and body so the failed call is
-    loud; for a job the next scheduled fire is the retry, and the durable identity on every write
-    (ingest `transaction_id`, ingest alias, `uniqueness_key`) absorbs the re-send."""
+class MetronomeError(JobFault):
+    """Metronome answered a non-2xx status. Every one of these is raised on the usage shipper's
+    path, so the reason reaches `jobs.failed` as that job's `fault` and the failed call names
+    itself in the record rather than only in a pod's stderr; for a job the next scheduled fire is
+    the retry, and the durable identity on every write (ingest `transaction_id`, ingest alias,
+    `uniqueness_key`) absorbs the re-send."""
 
 
 class StripeError(RuntimeError):
@@ -625,6 +627,20 @@ def _as_str(value: object, field: str) -> str:
     raise ValueError(f"provider response carried no {field}")
 
 
+def _metronome_fault(call: str, response: httpx.Response) -> str:
+    """What to say about a call Metronome refused: which call, the status, and the `message` its
+    error body names — never that body whole. An error body echoes the request that drew it, and
+    this text is recorded as the shipper's `fault` rather than read once off a pod's stderr, where
+    a field name is all redaction matches."""
+    try:
+        body = response.json()
+    except (ValueError, httpx.ResponseNotRead):
+        body = None
+    message = body.get("message") if isinstance(body, dict) else None
+    named = f": {message}" if isinstance(message, str) and message else ""
+    return f"metronome {call} failed ({response.status_code}){named}"
+
+
 async def _ensure_metronome_customer(
     ctx: ExtensionContext, token: str, transport: httpx.AsyncBaseTransport | None
 ) -> None:
@@ -673,9 +689,7 @@ async def _ensure_metronome_customer(
                 "confirm the ingest alias, so usage under it cannot be shipped"
             )
         if not created.is_success:
-            raise MetronomeError(
-                f"metronome customer create failed ({created.status_code}): {created.text}"
-            )
+            raise MetronomeError(_metronome_fault("customer create", created))
     log("metronome.customer_created", workspace_id=alias)
 
 
@@ -697,9 +711,7 @@ async def _customer_by_alias(
     if found.status_code in _CUSTOMER_SCOPE_DENIED:
         raise _CustomerScopeDenied(f"metronome customer scope denied ({found.status_code})")
     if not found.is_success:
-        raise MetronomeError(
-            f"metronome customer lookup failed ({found.status_code}): {found.text}"
-        )
+        raise MetronomeError(_metronome_fault("customer lookup", found))
     match found.json().get("data"):
         case [{"id": str() as existing}, *_]:
             return existing
@@ -879,7 +891,7 @@ async def _ingest(
             INGEST_URL, json=events, headers={"Authorization": f"Bearer {token}"}
         )
     if not response.is_success:
-        raise MetronomeError(f"metronome ingest failed ({response.status_code}): {response.text}")
+        raise MetronomeError(_metronome_fault("ingest", response))
 
 
 def _rfc3339(moment: datetime) -> str:

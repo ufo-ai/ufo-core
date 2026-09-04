@@ -51,6 +51,7 @@ from ufo.runtime.billing.balance import (
     set_reserve,
 )
 from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.manifest import JobFault
 from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.runtime.surfaces.admission import Admission
 from ufo.runtime.tools.context import SpawnResult, ToolContext
@@ -329,6 +330,41 @@ async def test_redirect_response_is_a_failed_delivery_not_an_ack(
     with ws(workspace_id), pytest.raises(metronome.MetronomeError, match="302"):
         await _shipper(redirecting).run()
     assert await _acked() == set()
+
+
+async def test_a_refused_call_names_itself_and_carries_no_provider_body(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stack says the shipper raised at a customer read and never what the read answered, so an
+    outage, a revoked token, and a bug all reach `jobs.failed` as one record. The reason this
+    raises with is the record's `fault`, so it names the call, its status, and the `message`
+    Metronome put in its error body — and nothing else of that body, which echoes the request that
+    drew it."""
+    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
+    workspace_id, agent_id, conversation_id = await _seed()
+    turn_id = await _turn(workspace_id, conversation_id, agent_id)
+    await _settle(turn_id, age_seconds=0)
+    async with workspace_tx() as connection:
+        await record_turn_usage(connection, workspace_id, turn_id, MODEL, Usage(input_tokens=10))
+    refusing = _Recorder()
+    refusing.failing.add("/v1/customers")
+
+    with ws(workspace_id), pytest.raises(metronome.MetronomeError) as raised:
+        await _shipper(refusing).run()
+
+    assert isinstance(raised.value, JobFault)
+    assert raised.value.reason == "metronome customer lookup failed (500): provider is down"
+    assert refusing.ingests() == []
+    assert await _acked() == set()
+
+
+async def test_a_refusal_that_names_nothing_still_names_the_call(db: None) -> None:
+    """A body the provider did not shape the documented way leaves the call and its status, which
+    is what separates an outage from a refused token. The empty rendering carries no colon, so a
+    reason never trails one."""
+    assert metronome._metronome_fault(
+        "ingest", httpx.Response(503, text="<html>gateway</html>")
+    ) == ("metronome ingest failed (503)")
 
 
 async def test_unsent_rows_never_age_out_and_pre_floor_history_never_ships(

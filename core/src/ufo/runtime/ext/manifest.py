@@ -98,6 +98,28 @@ class CredentialSlot:
     merge: Callable[[str | None, str], str] | None = None
 
 
+JOB_FAULT_MAX_CHARS = 500
+
+
+class JobFault(RuntimeError):
+    """A job handler raises this when its work failed for a reason the handler itself can name.
+    `reason` reaches `jobs.failed` as the record's `fault`, bounded to `JOB_FAULT_MAX_CHARS`, and
+    no other exception puts anything there.
+
+    A stack says where a job died and never why. `formatted_stack` carries frames and classes and
+    no exception message, because a message is text this process did not write — a sandbox
+    command's stderr arrives as a `RuntimeError` carrying the run token the sandbox echoed into
+    `HTTP_PROXY`, and a field name is all redaction matches — so a provider outage, a revoked
+    token, and a bug leave one indistinguishable record and the answer lives only in a pod's
+    stderr. This is the seam that closes that, and it closes it the way `StreamFault` does for a
+    source stream: the handler authored the text against the call it made, so it names the status
+    and the request without carrying the provider's payload."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class JobSpec:
     """Recurring or one-shot background work. `schedule` is a cron string (6 fields, seconds first)

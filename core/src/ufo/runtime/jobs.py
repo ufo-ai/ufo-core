@@ -61,9 +61,11 @@ from ufo.runtime.ext.context import (
     spend_refusal_notice_key,
 )
 from ufo.runtime.ext.manifest import (
+    JOB_FAULT_MAX_CHARS,
     PAGE_CHANGE_CURSOR_KEY,
     HookContext,
     HookSpec,
+    JobFault,
     JobSpec,
     Manifest,
     PageChangeBatch,
@@ -860,10 +862,16 @@ class JobRunner:
                 await self._deferred_on_spend(key, workspace_id, refusal)
             except Exception as error:
                 error_class = type(error).__name__
+                match error:
+                    case JobFault():
+                        fault: str | None = error.reason[:JOB_FAULT_MAX_CHARS]
+                    case _:
+                        fault = None
                 log_error(
                     "jobs.failed",
                     job=key,
                     error_class=error_class,
+                    fault=fault,
                     stack=formatted_stack(error),
                     **failed_statement(error),
                 )

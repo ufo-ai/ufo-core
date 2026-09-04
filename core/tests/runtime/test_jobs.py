@@ -48,7 +48,7 @@ from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import PARK, OffTurnSpendRefused
 from ufo.runtime.candidates import owner_candidates
 from ufo.runtime.ext.context import ExtensionContext, ScopedStore
-from ufo.runtime.ext.manifest import JobSpec
+from ufo.runtime.ext.manifest import JOB_FAULT_MAX_CHARS, JobFault, JobSpec
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     JOB_FAILED_METRIC,
@@ -227,6 +227,86 @@ async def test_fire_logs_the_exact_failed_job_and_reraises(
     assert "_fail" in record.ufo["stack"]
     assert "statement" not in record.ufo
     assert "sqlstate" not in record.ufo
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_fire_records_the_reason_a_handler_named_for_its_own_failure(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stack says where a job died and never why: `formatted_stack` carries no exception message,
+    so a provider outage and a revoked token leave the same record and the answer is only in the
+    pod's stderr. `JobFault` is what closes that — the handler authored the text against the call
+    it made, so the record can hold it."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:shipper"
+
+    async def _fault(context: ExtensionContext) -> None:
+        raise JobFault("metronome customer lookup failed (500): Unexpected internal error")
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="shipper", schedule="* * * * * *", handler=_fault, candidates=_candidate)
+    with caplog.at_level(logging.ERROR, logger="ufo"), pytest.raises(JobFault):
+        await _runner((spec,)).fire(key, workspace_id)
+
+    record = next(record for record in caplog.records if record.message == "jobs.failed")
+    assert record.ufo["job"] == key
+    assert record.ufo["error_class"] == "JobFault"
+    assert record.ufo["fault"] == (
+        "metronome customer lookup failed (500): Unexpected internal error"
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_fire_records_no_fault_for_a_message_the_process_never_wrote(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only a handler's own words ride. Any other exception's message is text this process did not
+    write — a sandbox command's stderr arrives as a `RuntimeError` carrying the run token the
+    sandbox echoed into `HTTP_PROXY` — and a field name is all redaction matches, so a record that
+    formatted it would be that export. The field is absent rather than empty, so a search for it
+    returns the failures that named one."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:leaky"
+    secret = "http://token:s3cr3t@proxy.internal:8080"
+
+    async def _leak(context: ExtensionContext) -> None:
+        raise RuntimeError(f"command failed, environment was HTTP_PROXY={secret}")
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="leaky", schedule="* * * * * *", handler=_leak, candidates=_candidate)
+    with caplog.at_level(logging.ERROR, logger="ufo"), pytest.raises(RuntimeError):
+        await _runner((spec,)).fire(key, workspace_id)
+
+    record = next(record for record in caplog.records if record.message == "jobs.failed")
+    assert "fault" not in record.ufo
+    assert secret not in str(record.ufo)
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_fire_bounds_the_reason_a_handler_names(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A handler authors its reason but may build it out of a provider's answer, and no answer is
+    bounded. The record holds what an operator reads and never a payload."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:verbose"
+
+    async def _verbose(context: ExtensionContext) -> None:
+        raise JobFault("x" * (JOB_FAULT_MAX_CHARS * 2))
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="verbose", schedule="* * * * * *", handler=_verbose, candidates=_candidate)
+    with caplog.at_level(logging.ERROR, logger="ufo"), pytest.raises(JobFault):
+        await _runner((spec,)).fire(key, workspace_id)
+
+    record = next(record for record in caplog.records if record.message == "jobs.failed")
+    assert record.ufo["fault"] == "x" * JOB_FAULT_MAX_CHARS
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
