@@ -3,7 +3,7 @@ title: "What this workspace can do"
 lead: "Start here"
 summary: "What the workspace does, what to connect first, and where the work lands. Every scheduled run reports on this rail: the reply it closed with and the files it shared."
 points:
-  - text: "The whole team shares the agents and the conversations, in Slack, in the browser, and in the terminal."
+  - text: "The whole team shares the agents, in Slack, in the browser, and in the terminal. Conversations are shared or private."
     actor: "Everyone"
   - text: "Connect the CRM and the mailbox, then ask for lead research and outreach drafts."
     actor: "Sales"
@@ -12,15 +12,21 @@ points:
   - text: "Ask for the logo sheet the deploy ships, and read it in the Artifacts app with every later file."
     actor: "Artifacts"
 ---
-## The workspace is shared
+## Conversations: shared or private
 
-Every member reaches the same agents and the same conversations. A conversation shared with the workspace is shared work: a teammate opens it, adds to it, and the agent keeps what was said.
+Every member reaches the same agents. A conversation has a scope that controls who can read it and what the agent may read:
 
-Three surfaces reach this one workspace:
+- **Shared.** A conversation shared with the workspace. Any teammate can open it, add to it, and read it.
+- **Private.** A direct message. No other member can open it or see it listed.
+- **Channels.** A Slack channel has its own conversation. Members outside the channel cannot read it.
 
-- **Slack.** The agent answers a direct message. In a channel it answers a message that mentions it, and every reply in that thread.
-- **The web portal.** Chat in the browser, beside these apps.
-- **The terminal.** Install the client and work from the command line.
+Memory is scoped the same way. Memories created in a private conversation or from private data sources are not shared.
+
+Three surfaces reach the workspace:
+
+- **Slack.** Direct message the agent, or mention it in a channel and it replies in the thread.
+- **The web portal.** Chat in the browser.
+- **The terminal.** Install with `curl -fsSL https://ufo.ai/ufo | sh`, then run `ufo`.
 
 ## Set up sales work
 
@@ -35,21 +41,43 @@ Three surfaces reach this one workspace:
 2. Ask for a pull request review. The agent reads the changes and writes what it found.
 3. Schedule a code check: "every morning, read the open pull requests and report what is broken".
 
-## What the workspace holds
+## The object system
 
-The workspace keeps its parts as objects, and you change each one in chat:
+Every persistent resource in the workspace is an object with access controls, addressable from any conversation. The common kinds:
 
 - **Agents** — the apps and assistants, each with its own prompt, model, and homepage.
-- **Sites** — the pages and homepages the workspace hosts.
-- **Skills** — a written procedure an agent loads for one kind of job.
-- **Credentials** — the keys a service needs. Only an admin fills one, in a private prompt.
-- **Scheduled tasks** — the standing orders that fill this feed.
+- **Sites** — access controlled realtime websites the workspace hosts.
+- **Skills** — a procedure an agent loads for one kind of job.
+- **Scheduled tasks** — recurring jobs on a schedule.
+- **Sources** — connections that feed memory and fire triggers.
+- **Credentials** — keys a service needs. An admin fills one in a private prompt.
 
-Ask "list the scheduled tasks" or "show me the sites" to read any of them.
+Objects support list, read, update, and delete operations from chat: "list the scheduled tasks", "show me the sites". Installed apps register additional object kinds.
+
+## Connectors: memory and triggers
+
+The sync runner polls each registered source, writes the content it finds to memory, and fires triggers when content changes.
+
+```mermaid
+graph LR
+    subgraph services[Connected services]
+        gh[GitHub]
+        drive[Shared drive]
+        feed[Feeds]
+    end
+    sync[Sync runner] -->|polls| services
+    sync -->|summarizes| mem
+    sync -->|content change| trig[Trigger]
+    mem -->|recall answers| conv[Conversation]
+    trig -->|wakes| conv
+```
+
+- **Memory.** Registered sources are read on a schedule and their content is written to memory, so recall can answer from it later. A source registered by one member is readable only by that member; a source registered for the workspace is readable by every member.
+- **Triggers.** When a source changes, the trigger sends the change to its conversation. The conversation runs a standing instruction, such as reviewing the pull request, summarizing the new document, or posting the update.
 
 ## Connect other services
 
-Connectors reach the services the team already uses: mail, calendars, CRMs, project trackers, analytics, databases, and many more. Name the service and the agent starts the connection. Some services take a workspace key instead of an account, and an admin fills that key in a private prompt. Never paste a key or a token into chat.
+Connectors reach the services the team uses: mail, calendars, CRMs, project trackers, analytics, databases, and more. Name the service and the agent starts the connection.
 
 ## Choose the model
 
@@ -57,6 +85,6 @@ Each agent runs on the model you pick, or on the automatic choice. Say "run the 
 
 ## Artifacts
 
-An artifact is a file the work produced: a report, a spreadsheet, a picture, or a site the workspace hosts. The Artifacts app lists every one, with the run that made it.
+An artifact is a file the work produced: a report, a spreadsheet, an image, or a hosted site. The Artifacts app lists each one with the run that produced it.
 
 The workspace already holds one file to ask for: "ufo-logo-ratio.pdf", the logo sheet, with the mark's proportions and the spacing around it. Say "share the logo sheet" and it lands in Artifacts as the first file of your own.
