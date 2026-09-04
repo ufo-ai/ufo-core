@@ -79,6 +79,7 @@ REGENERABLE_TYPE_DELETIONS = (
     ("kubernetes_namespace_v1.ufo_system", "kubernetes_namespace_v1"),
     ("module.platform.kubernetes_secret.cloudflare_api_token", "kubernetes_secret"),
     ("kubernetes_secret_v1.ufo_serve", "kubernetes_secret_v1"),
+    ('terraform_data.metric_seed["ufo.turn_ms"]', "terraform_data"),
     ("module.platform.tls_self_signed_cert.egress_ca", "tls_self_signed_cert"),
 )
 REGENERABLE_MODULE_DELETIONS = (
@@ -453,6 +454,23 @@ def _check_rejects_a_retired_address_that_is_replaced_rather_than_destroyed() ->
     assert _guard().rejected_deletions(plan) == [f"{address} (delete/create)"]
 
 
+def _check_allows_the_metric_seed_to_be_dropped_or_replaced() -> None:
+    """The seed is declared `for_each` over the histogram names, so renaming or removing one plans
+    a delete of its instance, and a failed seed provisioner taints its instance so every later plan
+    proposes the replace. Refusing either stops the deploy at this guard before the apply, on the
+    pull request and on main, so the permission is read against the shape the root declares."""
+    seed = re.search(
+        r'resource "(\w+)" "metric_seed"',
+        (ROOT / "infra" / "envs" / "testing" / "metrics.tf").read_text(),
+    )
+    assert seed
+    resource_type = seed.group(1)
+    address = f'{resource_type}.metric_seed["ufo.turn_ms"]'
+    for actions in (["delete"], ["delete", "create"], ["create", "delete"]):
+        plan = {"resource_changes": [_change(address, resource_type, actions)]}
+        assert _guard().rejected_deletions(plan) == []
+
+
 def _check_an_unretired_address_of_a_retired_type_is_still_refused() -> None:
     """The record names addresses, never types: retiring one database does not make the next one
     deletable."""
@@ -470,6 +488,6 @@ def _check_an_unretired_address_of_a_retired_type_is_still_refused() -> None:
 
 def test_terraform_plan_guard_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 20
+    assert len(checks) == 21
     for check in checks:
         check()

@@ -413,6 +413,34 @@ def _check_every_histogram_declares_its_unit():
     assert declared == {name: ("gauge", "millisecond") for name in o11y.HISTOGRAMS}
 
 
+def _check_every_configured_metric_is_created_before_the_apply_names_it():
+    """Datadog refuses a tag configuration on a distribution metric it holds no point for, and
+    answers a metadata write for such a name with 404; a new histogram's first point comes from the
+    fleet build the same apply rolls out. So a histogram added without a seed fails the apply on its
+    own new resource, and blocks every deploy behind it until some workspace happens to emit the
+    step. Every resource that names the metric waits, not the tag configuration alone: whichever one
+    Terraform reaches first fails the same apply."""
+    text = PERCENTILE_CONFIG.read_text()
+    seeded = re.search(r"latency_metrics = \[([^\]]*)\]", text)
+    assert seeded
+    assert sorted(re.findall(r'"ufo\.(\w+)"', seeded.group(1))) == sorted(o11y.HISTOGRAMS)
+    assert re.search(
+        r'provisioner "local-exec" \{\n\s*command = "python3 \$\{path\.module\}/'
+        r'seed_distribution_metrics\.py \$\{each\.key\}"',
+        text,
+    )
+    configured = re.findall(
+        r'resource "datadog_metric_tag_configuration" "\w+" \{\n(\s*depends_on\s+=\s+\S+)?', text
+    )
+    assert configured == ["  depends_on          = [terraform_data.metric_seed]"] * len(
+        o11y.HISTOGRAMS
+    )
+    described = re.findall(
+        r'resource "datadog_metric_metadata" "\w+" \{\n(\s*depends_on\s+=\s+\S+)?', text
+    )
+    assert described == ["  depends_on = [terraform_data.metric_seed]"] * len(o11y.HISTOGRAMS)
+
+
 def _check_emit_histogram_rejects_a_dimension_the_name_does_not_declare():
     """The allowlist is deployed config: a tag it omits is dropped at Datadog, so a call site that
     invents a dimension would emit a series whose new tag is readable nowhere. It fails at the one
@@ -952,6 +980,6 @@ def test_span_nests_on_the_ambient_trace_and_redacts_attributes(monkeypatch):
 
 def test_observability_static_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 26
+    assert len(checks) == 27
     for check in checks:
         check()

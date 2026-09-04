@@ -40,6 +40,12 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
         "kubernetes_namespace_v1",
         "kubernetes_secret",
         "kubernetes_secret_v1",
+        # A `terraform_data` instance holds only its own `input` and creates nothing outside the
+        # state, so its delete destroys nothing. Its replace is also the only way a create-time
+        # provisioner runs again: a failed one taints the instance, and refusing the replacement
+        # every later plan proposes would stop the deploy at this guard until an operator ran
+        # `terraform untaint` against the remote state by hand.
+        "terraform_data",
         "tls_self_signed_cert",
     }
 )
