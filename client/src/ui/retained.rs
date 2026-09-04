@@ -36,10 +36,9 @@ pub enum Entry {
 
 impl Entry {
     /// Whether a run of blank rows inside this entry reads as one. Prose collapses; the mark is
-    /// a drawing that stands in its own air, and a member message ends on a deliberate pair that
-    /// holds the turn's work clear of the ask.
+    /// a drawing that stands in its own air.
     fn keeps_its_blanks(&self) -> bool {
-        matches!(self, Entry::Masthead | Entry::Member(_))
+        matches!(self, Entry::Masthead)
     }
 
     /// Whether the blank this entry opens on stands even under the entry above it. Only the
@@ -395,11 +394,16 @@ impl Retained {
         self.dirty = true;
     }
 
-    /// Scroll by `up` lines (positive is into history); clamped, and reaching the end resumes
-    /// following.
+    /// Scroll by `up` lines (positive is into history); clamped at the first line of the
+    /// transcript, and reaching the end resumes following.
     pub fn scroll(&mut self, up: isize) {
-        let max = self.total.saturating_sub(1) as isize;
+        let max = self.top() as isize;
         self.scroll_back = (self.scroll_back as isize + up).clamp(0, max) as usize;
+    }
+
+    /// The scroll that puts the transcript's first line at the top of the window.
+    fn top(&self) -> usize {
+        self.total.saturating_sub(self.rows)
     }
 
     pub fn scroll_to_end(&mut self) {
@@ -436,9 +440,9 @@ impl Retained {
 
     /// The visible rows at the current scroll, plus the live tail lines appended when following.
     pub fn window(&mut self, rows: usize, live: &[Line<'static>], theme: &Theme) -> Window {
-        self.layout(theme);
         let rows = rows.max(1);
         self.rows = rows;
+        self.layout(theme);
         let following = self.scroll_back == 0;
         let end = self.total.saturating_sub(self.scroll_back);
         let held = end + if following { live.len() } else { 0 };
@@ -526,7 +530,7 @@ impl Retained {
         self.total = at;
         self.grew = false;
         self.dirty = false;
-        self.scroll_back = (self.scroll_back + added).min(self.total.saturating_sub(1));
+        self.scroll_back = (self.scroll_back + added).min(self.top());
     }
 
     /// One entry's lines: prose with its adjacent blanks collapsed, the mark with its air kept.
@@ -768,7 +772,6 @@ fn member_lines(text: &str, theme: &Theme) -> Vec<Line<'static>> {
         )));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::raw(""));
     lines
 }
 
@@ -915,6 +918,19 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_past_the_top_holds_the_first_screen() {
+        let theme = theme();
+        let mut retained = notes(30);
+        let _ = retained.window(10, &[], &theme);
+        retained.scroll(100);
+        let window = retained.window(10, &[], &theme);
+        assert_eq!(window.start, 0);
+        assert_eq!(retained.scrolled(), 20);
+        let expected: Vec<String> = (0..10).map(|index| format!("line {index}")).collect();
+        assert_eq!(texts(&window.lines), expected);
+    }
+
+    #[test]
     fn a_scrolled_window_stays_anchored_across_pushes() {
         let theme = theme();
         let mut retained = notes(30);
@@ -983,10 +999,7 @@ mod tests {
         let theme = theme();
         let mut retained = Retained::new(40);
         retained.push(Entry::Member("one\ntwo".into()));
-        assert_eq!(
-            texts(&retained.document(&theme)),
-            ["› one", "  two", "", ""]
-        );
+        assert_eq!(texts(&retained.document(&theme)), ["› one", "  two", ""]);
     }
 
     #[test]
@@ -1031,8 +1044,8 @@ mod tests {
         retained.push(Entry::Markdown("body".into()));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["› hi", "", "", "› again", "", "", "body"],
-            "each message keeps its own pair; the next entry's leading blank still collapses"
+            ["› hi", "", "› again", "", "body"],
+            "one blank stands between entries, however many they wrote"
         );
     }
 
@@ -1056,8 +1069,7 @@ mod tests {
         retained.push(Entry::Note("done".into()));
         assert_eq!(retained.text_of(0, &theme), "› hi");
         assert_eq!(retained.text_of(1, &theme), "");
-        assert_eq!(retained.text_of(2, &theme), "");
-        assert_eq!(retained.text_of(3, &theme), "done");
+        assert_eq!(retained.text_of(2, &theme), "done");
     }
 
     #[test]
@@ -1223,8 +1235,8 @@ mod tests {
         retained.push_step(Step::Note("running read: the drafts".into()));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["\u{203a} draft the post", "", "", "⏺ the drafts"],
-            "two rows stand between the ask and the first thing the turn did"
+            ["\u{203a} draft the post", "", "⏺ the drafts"],
+            "one row stands between the ask and the first thing the turn did"
         );
     }
 
@@ -1294,7 +1306,6 @@ mod tests {
                 "Completed 1 step ▸",
                 "",
                 "› and again",
-                "",
                 "",
                 "Completed 2 steps ▸",
                 "",
