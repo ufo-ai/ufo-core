@@ -29,7 +29,14 @@ import shlex
 
 from pydantic import BaseModel, Field
 
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    AppliedEffect,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolFailure,
+    ToolResult,
+)
 from ufo_ext_browser.subagent import BrowserResult
 
 BROWSER_PROFILE_NAME = "browser"
@@ -98,15 +105,19 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
         background=True,
         dedup_key=ctx.idempotency_key,
     )
-    timed_out = ToolResult(
-        content=(
-            TextContent(
-                text=f"browser task {args.task_name!r} exceeded its "
-                f"{args.timeout_minutes}-minute timeout and was cancelled"
+    timed_out = ToolFailure(
+        operation="browser_task",
+        summary=(
+            f"browser task {args.task_name!r} exceeded its {args.timeout_minutes}-minute timeout "
+            "and was cancelled. It was driving a real browser until then, so whatever it had "
+            "already done on the page stands. Read its turn before re-running the task."
+        ),
+        applied=(
+            AppliedEffect(
+                kind="browser_turn", identity=str(spawned.turn_id), state="cancelled mid-task"
             ),
         ),
-        is_error=True,
-    )
+    ).result()
     try:
         async with asyncio.timeout(args.timeout_minutes * 60):
             (status,) = await ctx.subagents.wait((spawned.turn_id,))
@@ -116,7 +127,21 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
     if status.status == "cancelled":
         return timed_out
     if status.status != "done":
-        raise RuntimeError(f"subagent {BROWSER_PROFILE_NAME!r} turn ended {status.status}")
+        return ToolFailure(
+            operation="browser_task",
+            summary=(
+                f"browser task {args.task_name!r} ended {status.status} and returned no result. "
+                "It was driving a real browser, so whatever it had already done on the page "
+                "stands."
+            ),
+            applied=(
+                AppliedEffect(
+                    kind="browser_turn",
+                    identity=str(spawned.turn_id),
+                    state=f"ended {status.status}",
+                ),
+            ),
+        ).result()
     text = BrowserResult.model_validate_json(status.text).model_dump_json()
     return ToolResult(content=(TextContent(text=text),))
 
@@ -146,6 +171,8 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
     semaphore = asyncio.Semaphore(DEFAULT_SUBAGENT_FANOUT)
 
     async def visit(entity: str) -> dict[str, object]:
+        """One entity's browse. A fault here is that entity's row, never the batch's: the siblings
+        already paid a child turn each, so one hiccup must not throw their results away."""
         async with semaphore:
             task = args.prompt_template.replace("{entity}", entity)
             if output_schema.strip():
@@ -160,7 +187,20 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
                 "result": "" if result.output is None else result.output.model_dump_json(),
             }
 
-    rows = list(await asyncio.gather(*(visit(entity) for entity in entities)))
+    visited = await asyncio.gather(*(visit(entity) for entity in entities), return_exceptions=True)
+    rows: list[dict[str, object]] = []
+    for entity, outcome in zip(entities, visited, strict=True):
+        if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+            raise outcome
+        rows.append(
+            {
+                "entity": entity,
+                "result": "",
+                "error": str(outcome).strip() or type(outcome).__name__,
+            }
+            if isinstance(outcome, Exception)
+            else outcome
+        )
     await ctx.sandbox.write_file(WIDE_BROWSE_OUTPUT, json.dumps(rows, indent=2).encode())
     return ToolResult(
         content=(TextContent(text=json.dumps({"rows": rows, "output_file": WIDE_BROWSE_OUTPUT})),)

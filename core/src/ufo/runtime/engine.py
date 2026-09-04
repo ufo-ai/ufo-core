@@ -28,7 +28,7 @@ import sqlalchemy as sa
 from dbos import DBOS
 from dbos._error import DBOSWorkflowCancelledError
 from PIL import Image
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -180,6 +180,7 @@ from ufo.runtime.seats import SEAT_REVOKED_MESSAGE, Seats
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedRef, LoadedSkill, SkillRegistry
 from ufo.runtime.tools.bridge import ToolBridgeIntent
 from ufo.runtime.tools.context import (
+    RESULT_CUT_MARKER,
     ImageContent,
     Spawn,
     SpeakerRequired,
@@ -187,6 +188,7 @@ from ufo.runtime.tools.context import (
     TextContent,
     ToolContext,
     UntrustedContentError,
+    clipped,
 )
 from ufo.runtime.tools.registry import (
     OBJECT_ACTION_TOOL,
@@ -362,12 +364,18 @@ TOOL_IMAGE_BLOB_DIR = "tool-images"
 TOOL_IMAGE_EDGE_LIMIT = 2000
 TOOL_IMAGE_SAVE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
 UNREGISTERED_TOOL = "unregistered"
-RESULT_CUT_MARKER = "\n…["
 OFFLOAD_NOTICE = (
     RESULT_CUT_MARKER + "preview only — the full {total} chars are at {path} — narrow it with bash "
     "(jq, grep, sed) or read it with offset/limit; reading it whole offloads again]"
 )
-TRUNCATION_NOTICE = RESULT_CUT_MARKER + "truncated {dropped} of {total} chars]"
+BARE_RAISE_NOTICE = (
+    "{cls}: {tool} raised {cls} with no message. Nothing further was recorded about this "
+    "failure — the exception class is the whole diagnostic."
+)
+NO_DIAGNOSTIC_NOTICE = (
+    "This call failed and returned no diagnostic. Nothing about the cause reached the result, so "
+    "there is nothing here to correct against; the call may have applied part of its effect."
+)
 GUIDANCE_PREEMPTED_NOTICE = (
     "Not executed: the server restarted while this call was running, and member messages arrived "
     "in the meantime — they follow. Work the call did before the restart may have partially "
@@ -680,6 +688,17 @@ class DispatchResult(BaseModel):
     interrupted: bool = False
     resume_target: ObjectActionTarget | None = None
 
+    @model_validator(mode="after")
+    def _errors_say_something(self) -> "DispatchResult":
+        """Every failed call reaches the model with something to read. This is the one place every
+        dispatch outcome passes through — a rejected bind, a hook denial, a raising handler, a
+        handler that returned `is_error` and no text — so the guarantee is made here once rather
+        than asked of each producer, and a path added later inherits it. An empty error and a
+        recorded reason read identically to the model, and only one of them is honest."""
+        if self.is_error and not self.text.strip():
+            self.text = NO_DIAGNOSTIC_NOTICE
+        return self
+
 
 class ModelStreamError(Exception):
     """A model stream that raised mid-round, re-raised by the caller once the round's usage is
@@ -788,11 +807,19 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
 
 
 def _bounded(content: str) -> str:
-    if len(content) <= MAX_TOOL_RESULT_CHARS:
-        return content
-    return content[:MAX_TOOL_RESULT_CHARS] + TRUNCATION_NOTICE.format(
-        dropped=len(content) - MAX_TOOL_RESULT_CHARS, total=len(content)
-    )
+    return clipped(content, MAX_TOOL_RESULT_CHARS)
+
+
+def _raised_text(tool_name: str, error: Exception) -> str:
+    """What a raising handler tells the model. An exception class carries the whole diagnostic
+    only when it was given a message; raised bare, `str()` is "" and the class name alone lands as
+    a trailing colon over nothing. The model cannot tell that from a message truncated to nothing,
+    so a bare raise says it is bare — the class stays, because which exception it was is the one
+    fact still available, and the notice says there is nothing further to read."""
+    detail = str(error).strip()
+    if detail:
+        return f"{type(error).__name__}: {detail}"
+    return BARE_RAISE_NOTICE.format(cls=type(error).__name__, tool=tool_name)
 
 
 def _meter_dispatch(
@@ -3547,7 +3574,7 @@ class TurnEngine:
                 raise
             raise parked from error
         except Exception as error:
-            content = f"{type(error).__name__}: {error}"
+            content = _raised_text(bound.call.name, error)
             if isinstance(error, SpeakerRequired) and bound.member_refs:
                 content += REQUESTED_BY_HINT.format(
                     refs=", ".join(str(ref) for ref in bound.member_refs)

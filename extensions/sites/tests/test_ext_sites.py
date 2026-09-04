@@ -153,7 +153,9 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import (
     ExecResult,
     SandboxHandle,
+    SandboxProviderUnavailable,
 )
+from ufo.harness.sandbox.terminal import TerminalAbsent
 from ufo.host.ext.loader import skill_registry
 from ufo.host.tools.builtins import BUILTIN_TOOLS, LoadSkillInput
 from ufo.runtime.ext.context import ExtensionContext, context_for
@@ -260,6 +262,7 @@ class FakeSandbox:
     delegation_claim_fault: BaseException | None = None
     design_audit_barrier: asyncio.Barrier | None = None
     program_errors: dict[str, BaseException] = field(default_factory=dict)
+    shell_error: BaseException | None = None
     claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
     shell: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
     design_audit: ExecResult = field(
@@ -409,6 +412,8 @@ class FakeSandbox:
 
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         self.shells.append((script, args, timeout_s))
+        if self.shell_error is not None:
+            raise self.shell_error
         if "--design" in script:
             if self.design_audit_barrier is not None:
                 await self.design_audit_barrier.wait()
@@ -4231,6 +4236,9 @@ async def test_application_builder_edit_tool_applies_one_bounded_repair(tmp_path
 
 
 async def test_application_builder_edit_tool_rejects_structural_damage(tmp_path: Path) -> None:
+    """A failed compile keeps the candidate and leaves the served source alone. Told only that
+    the compile failed, the next call re-sends the same `old_text` against a candidate whose
+    text its own last call already replaced, and meets "must occur exactly once"."""
     task = ApplicationBuilderTask(
         objective="Repair the queue",
         scaffold_path="/workspace/application",
@@ -4258,21 +4266,86 @@ async def test_application_builder_edit_tool_rejects_structural_damage(tmp_path:
             }
         ),
     )
-    with pytest.raises(ValueError, match="does not compile: Unexpected closing tag"):
+    result = await edit_application_source(
+        ctx,
+        EditApplicationSourceInput(
+            edits=(
+                ApplicationSourceEdit(
+                    old_text="Old",
+                    new_text="Old</section>",
+                ),
+            ),
+        ),
+    )
+
+    assert result.is_error is True
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    (candidate,) = [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+    failure = json.loads(result.content[0].text)
+    assert "does not compile: Unexpected closing tag" in failure["summary"]
+    assert failure["applied"] == [
+        {
+            "kind": "candidate",
+            "identity": candidate,
+            "state": "holds the edited source, uncompiled",
+        },
+        {
+            "kind": "served_source",
+            "identity": "/workspace/application/app.tsx",
+            "state": "unchanged: still the source from before this call",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "escape",
+    (
+        SandboxProviderUnavailable("e2b control plane did not recover"),
+        TerminalAbsent("no terminal answered"),
+    ),
+    ids=("provider", "terminal"),
+)
+async def test_a_gone_sandbox_is_not_reported_as_a_source_that_does_not_compile(
+    tmp_path: Path, escape: BaseException
+) -> None:
+    """The compile reaches the carrier, so both escapes arrive here. The engine parks the turn on
+    one and ends it on the other; caught and rendered as an edit failure, neither happens and the
+    builder keeps editing against a box that is gone."""
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = (
+        'import { Card, mountApp } from "ufo/kit";\n'
+        "function App() { return <Card><main>Old</main></Card>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    sandbox = FakeSandbox(
+        scripted_paths={
+            "/workspace/application/application-design.svg": ExecResult(APPLICATION_DESIGN, "", 0)
+        },
+        claim=ExecResult(stdout=source, stderr="", exit_code=0),
+        shell_error=escape,
+    )
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(type(escape)):
         await edit_application_source(
             ctx,
             EditApplicationSourceInput(
-                edits=(
-                    ApplicationSourceEdit(
-                        old_text="Old",
-                        new_text="Old</section>",
-                    ),
-                ),
+                edits=(ApplicationSourceEdit(old_text="Old", new_text="New"),),
             ),
         )
-
-    assert "/workspace/application/app.tsx" not in sandbox.writes
-    assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
 
 
 async def test_application_builder_edit_tool_rejects_ambiguous_old_text(tmp_path: Path) -> None:
@@ -4458,13 +4531,44 @@ def test_the_qa_guidance_cleans_its_profile_without_a_forced_rm() -> None:
         assert "rm -rf" not in launch
 
 
-async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:
+async def test_website_build_failure_keeps_the_exit_code_and_both_streams(
+    tmp_path: Path,
+) -> None:
+    """A failed build hands back the code it exited on and everything it said. A toolchain writes
+    its reason to stdout as readily as to stderr, so neither stream stands in for the other."""
     sandbox = FakeSandbox(
-        scripted={"npm run build": ExecResult(stdout="", stderr="build broke", exit_code=1)}
+        scripted={
+            "npm run build": ExecResult(stdout="4 warnings", stderr="build broke", exit_code=2)
+        }
     )
     ctx = _context(sandbox, tmp_path)
-    with pytest.raises(RuntimeError, match="build broke"):
-        await website(ctx, WebsiteInput(run_command="npm run build"))
+    result = await website(ctx, WebsiteInput(run_command="npm run build"))
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert failure["operation"] == "npm run build in /workspace"
+    assert "exited 2" in failure["summary"]
+    assert failure["command"] == {
+        "exit_code": 2,
+        "stdout": "4 warnings",
+        "stderr": "build broke",
+    }
+    assert failure["applied"] == []
+
+
+async def test_a_build_the_sandbox_stopped_says_so_rather_than_naming_its_exit_code(
+    tmp_path: Path,
+) -> None:
+    """A command running `timeout` exits 124 exactly as a carrier-stopped one does, and "your
+    build is broken" and "your build needs longer" want opposite fixes."""
+    sandbox = FakeSandbox(
+        scripted={
+            "npm run build": ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=900)
+        }
+    )
+    result = await website(_context(sandbox, tmp_path), WebsiteInput(run_command="npm run build"))
+    failure = json.loads(result.content[0].text)
+    assert "stopped the build after 900s" in failure["summary"]
+    assert failure["command"]["timed_out_after_s"] == 900
 
 
 async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path) -> None:
@@ -4475,11 +4579,21 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
         }
     )
     ctx = _context(sandbox, tmp_path)
-    with pytest.raises(RuntimeError, match="port in use"):
-        await start_server(
-            ctx,
-            StartServerInput(command="python3 app.py", project_path="/workspace"),
-        )
+    result = await start_server(
+        ctx,
+        StartServerInput(command="python3 app.py", project_path="/workspace"),
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert "Traceback: port in use" in failure["summary"]
+    assert failure["command"]["exit_code"] == 1
+    assert failure["applied"] == [
+        {
+            "kind": "port",
+            "identity": str(sites_tools.START_SERVER_PORT),
+            "state": "freed: whatever was serving it was stopped before this start",
+        }
+    ]
 
 
 async def test_a_probe_the_sandbox_stopped_says_whose_deadline_fired(tmp_path: Path) -> None:
@@ -4491,23 +4605,29 @@ async def test_a_probe_the_sandbox_stopped_says_whose_deadline_fired(tmp_path: P
         }
     )
     ctx = _context(sandbox, tmp_path)
-    with pytest.raises(RuntimeError, match="stopped the readiness check after 35s") as raised:
-        await start_server(
-            ctx,
-            StartServerInput(command="python3 app.py", project_path="/workspace"),
-        )
-    assert str(raised.value) != "timed out"
+    result = await start_server(
+        ctx,
+        StartServerInput(command="python3 app.py", project_path="/workspace"),
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert "stopped the readiness check after 35s" in failure["summary"]
+    assert failure["summary"] != "timed out"
+    assert failure["command"]["timed_out_after_s"] == 35
 
 
 async def test_a_start_that_fails_silently_names_the_command_and_its_log(tmp_path: Path) -> None:
     sandbox = FakeSandbox(scripted={"exec env PORT": ExecResult(stdout="", stderr="", exit_code=1)})
     ctx = _context(sandbox, tmp_path)
-    with pytest.raises(RuntimeError, match=r"'python3 app\.py' failed with no output") as raised:
-        await start_server(
-            ctx,
-            StartServerInput(command="python3 app.py", project_path="/workspace"),
-        )
-    assert "server-5000.log" in str(raised.value)
+    result = await start_server(
+        ctx,
+        StartServerInput(command="python3 app.py", project_path="/workspace"),
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert "'python3 app.py' failed with no output" in failure["summary"]
+    assert "server-5000.log" in failure["summary"]
+    assert failure["command"]["exit_code"] == 1
 
 
 async def test_start_server_stops_its_task_when_readiness_fails(tmp_path: Path) -> None:
@@ -4516,11 +4636,12 @@ async def test_start_server_stops_its_task_when_readiness_fails(tmp_path: Path) 
     )
     ctx = _context(sandbox, tmp_path)
 
-    with pytest.raises(RuntimeError, match="not ready"):
-        await start_server(
-            ctx,
-            StartServerInput(command="python3 app.py", project_path="/workspace"),
-        )
+    result = await start_server(
+        ctx,
+        StartServerInput(command="python3 app.py", project_path="/workspace"),
+    )
+    assert result.is_error is True
+    assert json.loads(result.content[0].text)["command"]["stderr"] == "not ready"
 
     started, stopped = sandbox.tasks
     assert started[1] == stopped[1]
@@ -4606,11 +4727,11 @@ async def test_the_failure_log_tail_states_its_own_budget(tmp_path: Path) -> Non
         }
     )
     ctx = _context(sandbox, tmp_path)
-    with pytest.raises(RuntimeError, match="port in use"):
-        await start_server(
-            ctx,
-            StartServerInput(command="python3 app.py", project_path="/workspace"),
-        )
+    result = await start_server(
+        ctx,
+        StartServerInput(command="python3 app.py", project_path="/workspace"),
+    )
+    assert result.is_error is True
     tail = next(command for command in sandbox.commands if command.startswith("tail -n 20"))
     assert sandbox.budgets[tail] == LOG_TAIL_TIMEOUT_SECONDS
 
@@ -4632,11 +4753,14 @@ async def test_a_start_the_sandbox_killed_names_the_deadline_when_the_log_is_emp
         }
     )
     ctx = _context(sandbox, tmp_path)
-    with pytest.raises(RuntimeError, match=f"after {READINESS_TIMEOUT_SECONDS + 5}s"):
-        await start_server(
-            ctx,
-            StartServerInput(command="python3 app.py", project_path="/workspace"),
-        )
+    result = await start_server(
+        ctx,
+        StartServerInput(command="python3 app.py", project_path="/workspace"),
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert f"stopped the start after {READINESS_TIMEOUT_SECONDS + 5}s" in failure["summary"]
+    assert failure["command"]["timed_out_after_s"] == READINESS_TIMEOUT_SECONDS + 5
 
 
 async def test_a_model_named_path_is_scoped_to_the_workspace(tmp_path: Path) -> None:

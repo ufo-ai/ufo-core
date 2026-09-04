@@ -269,3 +269,96 @@ async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:
                 }
             ),
         )
+
+
+@dataclass
+class FailingSpawn(RecordingSpawn):
+    """Fails one named entity and answers the rest, so a row can be told from a lost batch."""
+
+    fails: str = ""
+    error: Exception = field(default_factory=lambda: RuntimeError("the browser would not start"))
+
+    async def __call__(
+        self,
+        profile: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        if payload.get("task_name") == self.fails:
+            raise self.error
+        return await super().__call__(profile, payload, background, dedup_key)
+
+
+async def test_wide_browse_keeps_the_siblings_of_an_entity_that_raised(tmp_path: Path) -> None:
+    """One child's fault is that entity's row. Its siblings each burned a real child turn, so a
+    raise out of the fan-out throws away work already paid for and reports one message about the
+    one that failed."""
+    sandbox = FilesSandbox(
+        files={"entities.txt": "acme.com\nbeta.io\ngamma.dev\n", "schema.json": ""}
+    )
+    spawn = FailingSpawn(fails="beta.io")
+    tool = _tool("wide_browse")
+    result = await tool.handler(
+        _context(sandbox, spawn, tmp_path),
+        tool.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "get pricing from {entity}",
+                "output_schema_file": "schema.json",
+            }
+        ),
+    )
+    rows = json.loads(sandbox.writes["wide_browse.json"])
+    assert [row["entity"] for row in rows] == ["acme.com", "beta.io", "gamma.dev"]
+    assert rows[1]["error"] == "the browser would not start"
+    assert "error" not in rows[0] and "error" not in rows[2]
+    assert rows[0]["result"] and rows[2]["result"]
+    assert json.loads(result.content[0].text)["output_file"] == "wide_browse.json"
+
+
+async def test_wide_browse_names_the_class_of_an_entity_that_raised_bare(tmp_path: Path) -> None:
+    """An exception raised with no message leaves `str()` empty, and an empty `error` beside an
+    empty `result` is a row that reads as though the entity was never attempted."""
+    sandbox = FilesSandbox(files={"entities.txt": "acme.com\nbeta.io\n", "schema.json": ""})
+    tool = _tool("wide_browse")
+    await tool.handler(
+        _context(sandbox, FailingSpawn(fails="beta.io", error=TimeoutError()), tmp_path),
+        tool.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "get {entity}",
+                "output_schema_file": "schema.json",
+            }
+        ),
+    )
+    rows = json.loads(sandbox.writes["wide_browse.json"])
+    assert rows[1]["error"] == "TimeoutError"
+
+
+async def test_browser_task_names_the_cancelled_child_it_leaves_behind(tmp_path: Path) -> None:
+    """A cancelled browser task was driving a real browser until the cancel, so whatever it did on
+    the page stands. Its turn is the identity the agent reads that work by; a failure that names
+    only the timeout reads as though nothing happened."""
+    spawn = RecordingSpawn()
+    control = ScriptedSubagents(finish_after_s=3600.0)
+    tool = _tool("browser_task")
+    result = await tool.handler(
+        _context(FilesSandbox(), spawn, tmp_path, subagents=control),
+        tool.input_model.model_construct(
+            url="https://shop.example",
+            task="buy it",
+            task_name="checkout",
+            timeout_minutes=0,
+        ),
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert failure["applied"] == [
+        {
+            "kind": "browser_turn",
+            "identity": str(control.cancelled[0]),
+            "state": "cancelled mid-task",
+        }
+    ]
+    assert "checkout" in failure["summary"]

@@ -12,6 +12,7 @@ from ufo_ext_browser.bua.downloads import (
     BrowserDownload,
     BrowserDownloads,
 )
+from ufo_ext_browser.bua.errors import TabLeftOpen
 from ufo_ext_browser.bua.keys import KeyboardState
 from ufo_ext_browser.bua.page import FrameNode
 from ufo_ext_browser.bua.settle import PAINT_LIFECYCLE_EVENTS, SETTLE_NAV_CAP_S, Settle
@@ -271,8 +272,12 @@ class BrowserTabs:
         )
         tab = await self.attach_tab(as_str(created.get("targetId"), "targetId"))
         self.browser.tabs.append(tab)
-        info = await self.navigate(url, self.browser.tabs.index(tab))
-        return {"tab_id": self.browser.tabs.index(tab), **info}
+        tab_id = self.browser.tabs.index(tab)
+        try:
+            info = await self.navigate(url, tab_id)
+        except Exception as error:
+            raise TabLeftOpen(tab_id, url, error) from error
+        return {"tab_id": tab_id, **info}
 
     async def close(self, args: JsonDict) -> JsonDict:
         tab = await self.page(_tab_id(args.get("tab_id")))

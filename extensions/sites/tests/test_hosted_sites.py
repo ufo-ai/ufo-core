@@ -99,7 +99,8 @@ from ufo.harness.sandbox.ingress_token import (
     verify_ingress_token,
 )
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint
+from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint, SandboxProviderUnavailable
+from ufo.harness.sandbox.terminal import TerminalAbsent
 from ufo.host.ext.loader import member_object_registry, turn_tools
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
@@ -1674,8 +1675,8 @@ async def test_a_build_that_never_comes_up_leaves_the_members_site_alone(db: Non
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     broken = replace(_bind(ctx, workspace, conversation_id, member_id), sandbox=FailingSandbox())
 
-    with ws(workspace.id), pytest.raises(RuntimeError):
-        await _dispatch(
+    with ws(workspace.id):
+        result = await _dispatch(
             tool,
             broken,
             project_path="/workspace/dist",
@@ -1683,6 +1684,7 @@ async def test_a_build_that_never_comes_up_leaves_the_members_site_alone(db: Non
             entry_point="index.html",
         )
 
+    assert "serve /workspace/dist" in result["operation"]
     (row,) = await _stored(workspace)
     assert row.name == "marketing"
 
@@ -1729,8 +1731,8 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
         await _deploy(workspace, conversation_id, audience, member_id, site="marketing")
         tool, ctx = _tool(PUBLISH_WEBSITE_TOOL, audience)
         broken = replace(_bind(ctx, workspace, conversation_id, member_id), sandbox=sandbox)
-        with ws(workspace.id), pytest.raises(RuntimeError):
-            await _dispatch(
+        with ws(workspace.id):
+            result = await _dispatch(
                 tool,
                 broken,
                 project_path="/workspace/app",
@@ -1739,14 +1741,86 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
                 install_command=install_command,
                 run_command="node server.js",
             )
+        assert result["summary"]
         (row,) = await _stored(workspace)
         assert row.name == "marketing"
 
 
 @dataclass(frozen=True)
 class StoppedSitePreviewer:
+    error: BaseException = field(
+        default_factory=lambda: RuntimeError("the turn ended while the preview service was drawing")
+    )
+
     async def render(self, *args: object) -> None:
-        raise RuntimeError("the turn ended while the preview service was drawing")
+        raise self.error
+
+
+async def test_a_deploy_whose_picture_fails_still_reports_the_live_site(db: None) -> None:
+    """The picture is drawn after `register`, so by the time it can fail the site is live, holding
+    the port, and the site it displaced is already retired. Raising there reports the render error
+    as the whole call: the agent never learns the URL its own deploy just published, and reads a
+    finished deploy as one that did nothing. The deploy is the act; the picture is decoration on a
+    row that exists."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    bound = replace(
+        _bind(ctx, workspace, conversation_id, member_id),
+        site_previewer=StoppedSitePreviewer(),  # type: ignore[arg-type]
+    )
+
+    with ws(workspace.id):
+        result = await _dispatch(
+            tool,
+            bound,
+            project_path="/workspace/dist",
+            site_name="pricing",
+            entry_point="index.html",
+        )
+
+    assert result["site_name"] == "pricing"
+    assert result["site_url"]
+    assert "the preview service was drawing" in str(result["preview_error"])
+    (row,) = await _stored(workspace)
+    assert row.name == "pricing"
+    assert row.preview_blob_key is None
+
+
+@pytest.mark.parametrize(
+    "escape",
+    (
+        SandboxProviderUnavailable("e2b control plane did not recover"),
+        TerminalAbsent("no terminal answered"),
+    ),
+    ids=("provider", "terminal"),
+)
+async def test_a_gone_sandbox_is_not_reported_as_a_picture_that_would_not_draw(
+    db: None, escape: BaseException
+) -> None:
+    """`draw_from_page` photographs the page inside the sandbox, so both carrier escapes reach the
+    picture step. The engine parks the turn on one and ends it on the other — read as a preview
+    note, neither happens and a deploy on a box that is gone reports as finished."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    bound = replace(
+        _bind(ctx, workspace, conversation_id, member_id),
+        site_previewer=StoppedSitePreviewer(escape),  # type: ignore[arg-type]
+    )
+
+    with ws(workspace.id), pytest.raises(type(escape)):
+        await _dispatch(
+            tool,
+            bound,
+            project_path="/workspace/dist",
+            site_name="pricing",
+            entry_point="index.html",
+        )
 
 
 async def test_deployed_site_reaches_its_authenticated_conversation_slot(

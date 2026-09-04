@@ -58,14 +58,26 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.sdk.authority import authority_member_id
 from ufo.sdk.objects import AGENT_KIND
-from ufo.sdk.sandbox import WORKSPACE_DIR, serve_port, shell_path, workspace_path
+from ufo.sdk.sandbox import (
+    WORKSPACE_DIR,
+    ExecResult,
+    SandboxProviderUnavailable,
+    serve_port,
+    shell_path,
+    workspace_path,
+)
+from ufo.sdk.terminal import TerminalAbsent
 from ufo.sdk.tools import (
+    AppliedEffect,
+    CommandDiagnostics,
     ObjectBinding,
     SpeakerRequired,
     TextContent,
     ToolContext,
     ToolDef,
+    ToolFailure,
     ToolResult,
+    clipped,
 )
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
@@ -273,6 +285,7 @@ PROBE_OUTLIVED_ITS_DEADLINE = (
     "the server never answered on port {port}: the sandbox stopped the readiness check after "
     "{seconds}s and {log} holds nothing"
 )
+PREVIEW_ERROR_MAX_CHARS = 500
 SERVER_START_SAID_NOTHING = "the start of {command!r} failed with no output and {log} holds nothing"
 TOOL_OUTPUT_DIR = "tool-output"
 SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
@@ -589,6 +602,42 @@ async def _log_tail(ctx: ToolContext, log_path: str) -> str:
     return tail.stdout
 
 
+class ServeFailed(Exception):
+    """A serve that could not bring the new server up, carrying what to tell the agent.
+
+    Freeing the port is the first thing a serve does, so by the time a start fails the server that
+    held it is already dead — the member's site is down, and a failure reporting only what the
+    start said reads as though nothing changed and invites a retry of the same broken command
+    while the site stays dark. The port is the identity of what was taken, so it rides the
+    failure, and so does the exit code the summary reads but does not name."""
+
+    def __init__(self, failure: ToolFailure) -> None:
+        super().__init__(failure.summary)
+        self.failure = failure
+
+
+def _serve_failed(summary: str, result: ExecResult, project: str, port: int) -> ServeFailed:
+    return ServeFailed(
+        ToolFailure(
+            operation=f"serve {project} on port {port}",
+            summary=f"{summary}. Nothing is serving that port now.",
+            applied=(
+                AppliedEffect(
+                    kind="port",
+                    identity=str(port),
+                    state="freed: whatever was serving it was stopped before this start",
+                ),
+            ),
+            command=CommandDiagnostics(
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                timed_out_after_s=result.timed_out_after_s,
+            ),
+        )
+    )
+
+
 async def _serve(
     ctx: ToolContext, command: str, project: str, port: int, log_path: str
 ) -> dict[str, object]:
@@ -636,16 +685,22 @@ async def _serve(
     if started.exit_code != 0:
         logged = await _log_tail(ctx, log_path)
         if logged:
-            raise RuntimeError(logged)
+            raise _serve_failed(logged, started, project, port)
         if started.timed_out_after_s is not None:
-            raise RuntimeError(
+            raise _serve_failed(
                 f"the server never answered on port {port}: the sandbox stopped the start after "
-                f"{started.timed_out_after_s}s and {log_path} holds nothing"
+                f"{started.timed_out_after_s}s and {log_path} holds nothing",
+                started,
+                project,
+                port,
             )
-        raise RuntimeError(
+        raise _serve_failed(
             started.stderr
             or started.stdout
-            or SERVER_START_SAID_NOTHING.format(command=command, log=log_path)
+            or SERVER_START_SAID_NOTHING.format(command=command, log=log_path),
+            started,
+            project,
+            port,
         )
     task_pid = started.stdout.strip()
     try:
@@ -658,17 +713,23 @@ async def _serve(
     await _stop_server_task(ctx, server_command, task_base, task_pid)
     logged = await _log_tail(ctx, log_path)
     if logged:
-        raise RuntimeError(logged)
+        raise _serve_failed(logged, probe, project, port)
     if probe.timed_out_after_s is not None:
-        raise RuntimeError(
+        raise _serve_failed(
             PROBE_OUTLIVED_ITS_DEADLINE.format(
                 port=port, seconds=probe.timed_out_after_s, log=log_path
-            )
+            ),
+            probe,
+            project,
+            port,
         )
     if probe.stderr:
-        raise RuntimeError(probe.stderr)
-    raise RuntimeError(
-        SERVER_NEVER_LISTENED.format(port=port, seconds=READINESS_TIMEOUT_SECONDS, log=log_path)
+        raise _serve_failed(probe.stderr, probe, project, port)
+    raise _serve_failed(
+        SERVER_NEVER_LISTENED.format(port=port, seconds=READINESS_TIMEOUT_SECONDS, log=log_path),
+        probe,
+        project,
+        port,
     )
 
 
@@ -743,6 +804,30 @@ async def _promote_source(
         total = sum(entry.size for entry in manifest.files.values())
         await transfer(ctx, UPLOAD_SCRIPT, uploads, total)
     return manifest.model_dump_json()
+
+
+async def _pictured(ctx: ToolContext, name: str, port: int, conversation_id: UUID) -> str | None:
+    """Draw the site's picture, and answer with why it could not be drawn rather than raising.
+
+    `_illustrate` runs after `register`, so by the time it can fail the site is live, reachable,
+    and holding the port — and the deploy the member asked for is done. Raising here throws that
+    away: the whole call reports the render error, and the agent is never told the URL its own
+    deploy just published, nor that the site it displaced is already retired. The picture is
+    decoration on a row that exists; the deploy is the act. So the failure is a field beside the
+    hosted result, not in place of it.
+
+    The two carrier escapes are not that. `draw_from_page` photographs the page inside the
+    sandbox, so e2b raising `SandboxProviderUnavailable` or a terminal answering nothing reaches
+    here — and the engine parks the turn on the first and ends it on the second. Reported as a
+    preview note they would read as a finished deploy on a box that is gone."""
+    try:
+        await _illustrate(ctx, name, port, conversation_id)
+    except (SandboxProviderUnavailable, TerminalAbsent):
+        raise
+    except Exception as error:
+        summary = str(error).strip() or type(error).__name__
+        return clipped(f"{type(error).__name__}: {summary}", PREVIEW_ERROR_MAX_CHARS)
+    return None
 
 
 async def _illustrate(ctx: ToolContext, name: str, port: int, conversation_id: UUID) -> None:
@@ -860,13 +945,36 @@ async def _host(
     }
 
 
+def _build_failed(command: str, project: str, result: ExecResult) -> ToolFailure:
+    """A build that failed, with what it said. Both streams are kept because a toolchain writes its
+    reason to stdout as readily as to stderr, and an expired budget is named apart from a non-zero
+    exit — a command running `timeout` exits 124 exactly as a carrier-stopped one does, and
+    "your build is broken" and "your build needs longer" want opposite fixes."""
+    expired = result.timed_out_after_s is not None
+    return ToolFailure(
+        operation=f"{command} in {project}",
+        summary=(
+            f"the sandbox stopped the build after {result.timed_out_after_s}s"
+            if expired
+            else f"the build exited {result.exit_code}"
+        )
+        + ". Nothing was served or hosted.",
+        command=CommandDiagnostics(
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            timed_out_after_s=result.timed_out_after_s,
+        ),
+    )
+
+
 async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
     project = workspace_path(args.project_path or WORKSPACE_DIR)
     result = await ctx.sandbox.bash(
         f"cd {shlex.quote(project)} && {args.run_command}", timeout_s=BUILD_TIMEOUT_SECONDS
     )
     if result.exit_code != 0:
-        raise RuntimeError(result.stderr or result.stdout)
+        return _build_failed(args.run_command, project, result).result()
     listing = await ctx.sandbox.bash(f"ls -1A {shlex.quote(project)}")
     files = [name for name in listing.stdout.splitlines() if name]
     return _json_result({"project_path": project, "files": files})
@@ -889,7 +997,10 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
         else await ctx.sandbox.runtime_path(SERVER_LOG.format(port=port))
     )
     command = args.command or f"python3 -m http.server {port} --bind 0.0.0.0"
-    served = await _serve(ctx, command, project, port, log_path)
+    try:
+        served = await _serve(ctx, command, project, port, log_path)
+    except ServeFailed as failed:
+        return failed.failure.result()
     if application_builder:
         served["url"] = f"{served['url']}/preview.html"
     return _json_result({**served, "project_path": project})
@@ -1185,10 +1296,16 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     manifest = await _promote_source(ctx, project, conversation, name, listing)
     command = f"python3 -m http.server {port} --bind 0.0.0.0"
     deploy_log = await ctx.sandbox.runtime_path(DEPLOY_LOG.format(port=port))
-    served = await _serve(ctx, command, project, port, deploy_log)
+    try:
+        served = await _serve(ctx, command, project, port, deploy_log)
+    except ServeFailed as failed:
+        return failed.failure.result()
     hosted = await _host(ctx, name, port, args.visibility, manifest)
-    await _illustrate(ctx, name, port, conversation)
-    return _json_result({**served, **hosted, "entry_point": args.entry_point})
+    drawn = await _pictured(ctx, name, port, conversation)
+    return _json_result(
+        {**served, **hosted, "entry_point": args.entry_point}
+        | ({} if drawn is None else {"preview_error": drawn})
+    )
 
 
 async def _served_directory(
@@ -1279,13 +1396,16 @@ async def _redeploy_homepage(
     manifest = await _promote_source(ctx, project, bound.conversation_id, bound.name, listing)
     command = f"python3 -m http.server {scratch_port} --bind 0.0.0.0"
     deploy_log = await ctx.sandbox.runtime_path(DEPLOY_LOG.format(port=scratch_port))
-    served = await _serve(ctx, command, project, scratch_port, deploy_log)
+    try:
+        served = await _serve(ctx, command, project, scratch_port, deploy_log)
+    except ServeFailed as failed:
+        return failed.failure.result()
     updated = await sites.redeploy(bound.conversation_id, bound.name, manifest)
     if updated is None:
         raise RuntimeError("the homepage was unhosted while it was being redeployed")
     if displaced is not None:
         await sites.unregister(displaced.conversation_id, displaced.name)
-    await _illustrate(ctx, bound.name, scratch_port, bound.conversation_id)
+    drawn = await _pictured(ctx, bound.name, scratch_port, bound.conversation_id)
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
     return _json_result(
@@ -1302,6 +1422,7 @@ async def _redeploy_homepage(
             ),
             "entry_point": args.entry_point,
         }
+        | ({} if drawn is None else {"preview_error": drawn})
     )
 
 
@@ -1315,14 +1436,19 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
             timeout_s=BUILD_TIMEOUT_SECONDS,
         )
         if install.exit_code != 0:
-            raise RuntimeError(install.stderr or install.stdout)
+            return _build_failed(
+                args.install_command, workspace_path(args.project_path), install
+            ).result()
     command = args.run_command or f"python3 -m http.server {port} --bind 0.0.0.0"
     project = workspace_path(args.project_path if args.run_command else args.dist_path)
     publish_log = await ctx.sandbox.runtime_path(PUBLISH_LOG.format(port=port))
-    served = await _serve(ctx, command, project, port, publish_log)
+    try:
+        served = await _serve(ctx, command, project, port, publish_log)
+    except ServeFailed as failed:
+        return failed.failure.result()
     hosted = await _host(ctx, name, port, args.visibility, None)
-    await _illustrate(ctx, name, port, conversation)
-    return _json_result({**served, **hosted})
+    drawn = await _pictured(ctx, name, port, conversation)
+    return _json_result({**served, **hosted} | ({} if drawn is None else {"preview_error": drawn}))
 
 
 async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:

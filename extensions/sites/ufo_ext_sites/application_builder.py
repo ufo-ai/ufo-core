@@ -31,7 +31,15 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, ExecResult, contained_relative
 from ufo.sdk.surfaces import MEMBER_ADMISSION
-from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    AppliedEffect,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolFailure,
+    ToolResult,
+)
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
@@ -1681,7 +1689,18 @@ async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceI
 
 
 async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceInput) -> ToolResult:
-    """Apply exact repairs only to the `app.tsx` path admitted in this child turn."""
+    """Apply exact repairs only to the `app.tsx` path admitted in this child turn.
+
+    The candidate is written before the source is validated or compiled, so a rejection by either
+    keeps the edited text there while the served `app.tsx` stays as it was. A rejection is a
+    `ValueError` and nothing wider: the same pair reaches the carrier, which raises
+    `SandboxProviderUnavailable` when e2b's control plane does not recover and `TerminalAbsent`
+    when no terminal answers — the engine parks the turn on the first and ends it on the second,
+    and reading either as "your source does not compile" leaves the builder editing against a dead
+    sandbox. The next call reads
+    the candidate — the edits are already in it — so an agent told only "the compile failed"
+    re-sends the same `old_text` and meets "must occur exactly once" against text its own last
+    call replaced. Naming both files and what each holds is what turns that into a repair."""
 
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
     await _require_application_source(ctx, task)
@@ -1709,8 +1728,31 @@ async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceI
     if len(source) > APPLICATION_SOURCE_MAX_CHARS:
         raise ValueError(f"app.tsx exceeds {APPLICATION_SOURCE_MAX_CHARS} characters")
     await ctx.sandbox.write_runtime_path(candidate_path, source.encode())
-    _validate_application_source(source, designed_kit_components)
-    await _compile_application_source(ctx, task, source)
+    try:
+        _validate_application_source(source, designed_kit_components)
+        await _compile_application_source(ctx, task, source)
+    except ValueError as error:
+        return ToolFailure(
+            operation=f"edit {task.source_path}",
+            summary=(
+                f"{str(error).strip() or type(error).__name__}. The edits were written to "
+                f"{candidate_path} and are not compiled; {task.source_path} is still serving the "
+                "source from before this call. Read the candidate and repair it there — its text "
+                "already holds these edits, so re-sending the same old_text will not match."
+            ),
+            applied=(
+                AppliedEffect(
+                    kind="candidate",
+                    identity=candidate_path,
+                    state="holds the edited source, uncompiled",
+                ),
+                AppliedEffect(
+                    kind="served_source",
+                    identity=task.source_path,
+                    state="unchanged: still the source from before this call",
+                ),
+            ),
+        ).result()
     await ctx.sandbox.write_file(task.source_path, source.encode())
     await _build_application_project(ctx, task.scaffold_path)
     await ctx.sandbox.write_runtime_path(

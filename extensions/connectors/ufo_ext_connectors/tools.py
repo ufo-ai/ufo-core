@@ -52,7 +52,14 @@ from ufo.sdk.connectors import (
 )
 from ufo.sdk.context import JsonValue
 from ufo.sdk.sandbox import WORKSPACE_DIR, contained_leaf, workspace_path
-from ufo.sdk.tools import ConnectorConnection, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ConnectorConnection,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolFailure,
+    ToolResult,
+)
 
 CONNECTOR_FILES_DIR = "connector_files"
 FALLBACK_FILENAME = "download"
@@ -443,7 +450,15 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
     if ctx.connector_read_only:
         described = await entry.broker.schema(ctx.turn.workspace_id, entry.provider, args.tool_name)
         if not described.read_only:
-            raise PermissionError
+            return ToolFailure(
+                operation=f"{entry.provider}.{args.tool_name}",
+                summary=(
+                    f"{args.tool_name} writes through {entry.provider}, and this agent reads "
+                    "connectors without writing to them. Nothing was sent, and re-issuing the "
+                    "call refuses again. Gather what you need with a read-only tool of this "
+                    "provider, and leave the write to the conversation that can make it."
+                ),
+            ).result()
     connection = await ctx.connector_connection(args.source_id, args.account_id)
     arguments = slack_attributed(entry.provider, args.tool_name, args.arguments)
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)

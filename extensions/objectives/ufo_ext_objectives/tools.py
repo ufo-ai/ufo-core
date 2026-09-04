@@ -11,7 +11,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import ExtensionContext, agent_current
 from ufo.sdk.o11y import emit_metric
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.sandbox import ExecResult
+from ufo.sdk.tools import (
+    AppliedEffect,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolFailure,
+    ToolResult,
+)
 from ufo_ext_objectives.store import (
     BLOCKED,
     CommandSucceeds,
@@ -27,6 +35,7 @@ from ufo_ext_objectives.store import (
 )
 
 CONDITION_TIMEOUT_SECONDS = 120
+CONDITION_OUTPUT_MAX_CHARS = 800
 PLAN_PHASE = "plan"
 RECORD_PHASE = "record"
 PRODUCED_STATE_KINDS = frozenset({"file_exists", "file_contains"})
@@ -146,8 +155,26 @@ async def _verdict(ctx: ToolContext, condition: Condition, phase: str) -> Condit
         holds=str(holds).lower(),
         phase=phase,
     )
-    detail = condition_summary(condition) if holds else f"{condition_summary(condition)} — false"
+    detail = condition_summary(condition) if holds else _unmet(condition, result)
     return ConditionVerdict(condition=condition, holds=holds, detail=detail)
+
+
+def _unmet(condition: Condition, result: ExecResult) -> str:
+    """Why the check said no. "false" alone is the whole of what a step gets told today, and a
+    `command_succeeds` gate is a whole test suite behind that word — the agent cannot tell a
+    failing assertion from a missing binary from a budget that ran out, and each wants a different
+    next move. The exit code cannot say which either, since a command running `timeout` exits 124
+    exactly as a carrier-stopped one does, so the expiry is named separately. The tail is what is
+    kept: a failing run puts its reason at the end, and every verdict here is rendered into a view
+    that lists all of them."""
+    ended = (
+        f"exit {result.exit_code}"
+        if result.timed_out_after_s is None
+        else f"stopped after {result.timed_out_after_s}s"
+    )
+    said = (result.stderr.strip() or result.stdout.strip())[-CONDITION_OUTPUT_MAX_CHARS:]
+    unmet = f"{condition_summary(condition)} — false ({ended})"
+    return f"{unmet}: {said}" if said else f"{unmet}, and the command said nothing"
 
 
 async def plan_objective(ctx: ToolContext, args: PlanObjectiveInput) -> ToolResult:
@@ -288,16 +315,19 @@ async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput
                 ),
             )
         )
-    dispatched = []
+    dispatched: list[tuple[str, str]] = []
     for step in runnable:
-        result = await ctx.spawn(
-            args.profile,
-            {"task": f"{view.directive}\n\nYour step: {step.title}"},
-            background=True,
-            dedup_key=f"{args.name}/{step.title}",
-            delivers_result=True,
-        )
-        dispatched.append((step.title, result.turn_id))
+        try:
+            result = await ctx.spawn(
+                args.profile,
+                {"task": f"{view.directive}\n\nYour step: {step.title}"},
+                background=True,
+                dedup_key=f"{args.name}/{step.title}",
+                delivers_result=True,
+            )
+        except Exception as error:
+            return _dispatch_stopped(step.title, dispatched, error).result()
+        dispatched.append((step.title, str(result.turn_id)))
         emit_metric("objective_step_dispatched_total", profile=args.profile)
     lines = [f"dispatched {len(dispatched)} independent step(s) to {args.profile!r}:"]
     lines.extend(f"  {title} -> subagent {turn_id}" for title, turn_id in dispatched)
@@ -306,6 +336,32 @@ async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput
         "be woken with their answers. Record each step when its result arrives."
     )
     return ToolResult(content=(TextContent(text="\n".join(lines)),))
+
+
+def _dispatch_stopped(
+    step: str, dispatched: list[tuple[str, str]], error: Exception
+) -> ToolFailure:
+    """A fan-out that stopped part-way names the children already running.
+
+    Each of them is a real background turn that will deliver its result into this conversation
+    whatever this call returns, so a failure reporting only the step that would not start reads as
+    though none of them exist — and the turn ends without the record it needs to match arriving
+    results to steps. Re-issuing the tool is safe and is the way to take the rest: every child is
+    keyed on its step, so the ones listed here reconnect rather than run twice."""
+    detail = str(error).strip() or type(error).__name__
+    return ToolFailure(
+        operation="run_independent_steps",
+        summary=(
+            f"step {step!r} would not start: {detail}. "
+            f"{len(dispatched)} step(s) were already dispatched and are running — their results "
+            "still arrive in this conversation, so record each one when it does. Re-issue this "
+            "tool to take the remaining steps; the dispatched ones reconnect rather than repeat."
+        ),
+        applied=tuple(
+            AppliedEffect(kind="step", identity=turn_id, state=f"running: {title}")
+            for title, turn_id in dispatched
+        ),
+    )
 
 
 async def read_objective(ctx: ToolContext, args: ReadObjectiveInput) -> ToolResult:

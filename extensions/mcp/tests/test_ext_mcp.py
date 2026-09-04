@@ -22,6 +22,7 @@ import sqlalchemy as sa
 import ufo_ext_mcp as mcp
 from cryptography.fernet import Fernet
 from fastmcp import Client, FastMCP
+from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
@@ -395,7 +396,42 @@ async def test_call_mcp_tool_surfaces_a_tool_error_as_is_error(
             mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="boom", arguments={}),
         )
     assert result.is_error is True
-    assert result.content[0].text == "no such record"
+    failure = json.loads(result.content[0].text)
+    assert failure["operation"] == f"{SERVER_NAME}.boom"
+    assert failure["summary"] == "no such record"
+    assert result.untrusted is True
+
+
+def _refusal(text: str, structured: dict[str, object] | None) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)] if text else [],
+        structured_content=structured,
+        meta=None,
+        is_error=True,
+    )
+
+
+def test_a_servers_own_structured_error_survives_its_empty_text() -> None:
+    """A server puts the machine-readable reason — a code, a field, a retry hint — in its
+    structured content, and often leaves the text blocks empty beside it. Dropping the structure
+    and falling back to a fixed sentence discards the whole diagnostic."""
+    call = mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="charge", arguments={})
+    failure = mcp._call_failed(call, _refusal("", {"code": "rate_limited", "retry_after_s": 30}))
+    assert failure.operation == f"{SERVER_NAME}.charge"
+    assert failure.provider == '{"code":"rate_limited","retry_after_s":30}'
+    assert failure.summary == f"{SERVER_NAME} refused charge and wrote no message"
+
+
+def test_an_oversized_server_error_is_clipped_rather_than_replaced() -> None:
+    """A bound that raises on an oversized payload replaces the reason with a complaint about its
+    size, which is the failure this path exists to avoid."""
+    call = mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="boom", arguments={})
+    failure = mcp._call_failed(
+        call, _refusal("x" * (mcp.MAX_MCP_RESPONSE_BYTES + 1), {"blob": "y" * 20_000})
+    )
+    assert failure.summary.endswith("chars]")
+    assert failure.provider is not None
+    assert failure.provider.endswith("chars]")
 
 
 async def test_an_unconfigured_server_name_fails_loud(db: None) -> None:

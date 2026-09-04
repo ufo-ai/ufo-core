@@ -19,9 +19,11 @@ say so to the model, and both tool defs are the untrusted-content boundary the l
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Literal
 
 from fastmcp import Client
+from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.types import TextContent as McpTextContent
 from mcp.types import Tool as McpTool
@@ -30,7 +32,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from ufo.sdk.context import JsonValue
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.manifest import CredentialSlot, Manifest
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolFailure, ToolResult
 
 NAME = "mcp"
 VERSION = "0.1.0"
@@ -269,15 +271,32 @@ async def _call_mcp_tool(ctx: ToolContext, args: CallMcpToolInput) -> ToolResult
     async with mcp_client(server) as client:
         result = await client.call_tool(args.tool_name, dict(args.arguments), raise_on_error=False)
     if result.is_error:
-        text = _joined_text(result.content) or "MCP tool call failed"
-        return ToolResult(content=(TextContent(text=_bounded(text)),), is_error=True)
+        return _call_failed(args, result).result(untrusted=True)
     structured = result.structured_content
     if isinstance(structured, dict):
         return _json_result(structured)
     return _json_result({"text": _joined_text(result.content)})
 
 
-def _joined_text(content: list[object]) -> str:
+def _call_failed(args: CallMcpToolInput, result: CallToolResult) -> ToolFailure:
+    """A refusal the MCP server itself wrote. Its own structured error is what a server puts the
+    machine-readable reason in — a code, a field name, a retry hint — and a text block is often
+    empty beside it, so dropping the structure and falling back to a fixed sentence discards the
+    whole diagnostic. It is the server's text, not ours, so it is bounded by clipping rather than
+    by the response gate: a gate that raises on an oversized payload replaces the reason with a
+    complaint about its size, which is the failure this path exists to avoid. The result is walled
+    as untrusted for the same reason a successful one is — a third party wrote it."""
+    text = _joined_text(result.content).strip()
+    return ToolFailure(
+        operation=f"{args.server}.{args.tool_name}",
+        summary=text or f"{args.server} refused {args.tool_name} and wrote no message",
+        provider=None
+        if result.structured_content is None
+        else json.dumps(result.structured_content, separators=(",", ":")),
+    )
+
+
+def _joined_text(content: Sequence[object]) -> str:
     return "\n".join(block.text for block in content if isinstance(block, McpTextContent))
 
 

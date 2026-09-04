@@ -10,8 +10,10 @@ So the test that matters is not that a step can close. It is that a step whose c
 state that is false does **not** close, however confidently it was recorded, and that a condition
 fixed at plan time survives a later revision that would have weakened it."""
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -26,6 +28,7 @@ from ufo_ext_objectives.store import (
     DONE_STATE,
     PENDING_STATE,
     UNMET_STATE,
+    CommandSucceeds,
     ConditionVerdict,
     FileExists,
     Objectives,
@@ -34,13 +37,21 @@ from ufo_ext_objectives.store import (
     StepPlan,
     StepView,
 )
-from ufo_ext_objectives.tools import PlanObjectiveInput, plan_objective
+from ufo_ext_objectives.tools import (
+    CONDITION_OUTPUT_MAX_CHARS,
+    PlanObjectiveInput,
+    RunIndependentStepsInput,
+    evaluate,
+    plan_objective,
+    run_independent_steps,
+)
 
 from ufo.db import workspace_tx
-from ufo.runtime.agent_scope import agent
+from ufo.runtime.agent_scope import agent, agent_current
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.sandbox import ExecResult
 from ufo.sdk.tools import ToolContext
 
 pytestmark = [
@@ -311,16 +322,33 @@ class _Ext:
 class _Sandbox:
     """Stands in for the sandbox only. A command exits 0 when it mentions state named in `holds`, so
     a test drives the one thing the refusal turns on — whether the condition was already true —
-    without asserting anything about the stub itself."""
+    without asserting anything about the stub itself. A failing command answers whatever `said`
+    and `expired_after_s` script, since that is what a verdict has to carry back."""
 
-    def __init__(self, *holds: str) -> None:
+    def __init__(
+        self,
+        *holds: str,
+        said: tuple[str, str] = ("", ""),
+        exit_code: int = 1,
+        expired_after_s: int | None = None,
+    ) -> None:
         self.holds = holds
+        self.said = said
+        self.exit_code = exit_code
+        self.expired_after_s = expired_after_s
         self.commands: list[str] = []
 
-    async def bash(self, command: str, timeout_s: int = 0) -> SimpleNamespace:
+    async def bash(self, command: str, timeout_s: int = 0) -> ExecResult:
         self.commands.append(command)
-        held = any(fragment in command for fragment in self.holds)
-        return SimpleNamespace(exit_code=0 if held else 1, stdout="", stderr="")
+        if any(fragment in command for fragment in self.holds):
+            return ExecResult(stdout="", stderr="", exit_code=0)
+        stdout, stderr = self.said
+        return ExecResult(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=self.exit_code,
+            timed_out_after_s=self.expired_after_s,
+        )
 
 
 def _tool_context(sandbox: _Sandbox, conversation_id: UUID, ext: object) -> ToolContext:
@@ -497,3 +525,99 @@ async def test_a_revision_that_swaps_in_a_condition_already_true_is_refused(db: 
         stored = await Objectives(connection, workspace_id).named(conversation_id, "filing")
     assert stored is not None
     assert stored.steps[0].accepts == (FileExists(path=REQUIRED_PATH),)
+
+
+async def _planned_steps(conversation_id: UUID, *titles: str) -> None:
+    async with workspace_tx() as connection:
+        await Objectives(connection, agent_current().workspace_id).plan(
+            conversation_id,
+            "launch",
+            "ship the landing page",
+            tuple(StepPlan(title=title, accepts=(), independent=True) for title in titles),
+        )
+
+
+async def test_a_failed_check_reports_the_exit_code_and_what_the_command_said(db: None) -> None:
+    """ "false" is the whole of what a step is told today, and a `command_succeeds` gate is a test
+    suite behind that word — a failing assertion, a missing binary and an expired budget all read
+    identically, and each wants a different next move."""
+    workspace_id, conversation_id = await _seeded_conversation()
+    agent_id = await _agent_of(conversation_id)
+    sandbox = _Sandbox(said=("", "E   assert 3 == 4"), exit_code=1)
+    suite = step("green suite", accepts=(CommandSucceeds(command="pytest -q"),))
+    with ws(workspace_id), agent(agent_id):
+        (verdict,) = await evaluate(_tool_context(sandbox, conversation_id, _Ext()), suite)
+    assert verdict.holds is False
+    assert "exit 1" in verdict.detail
+    assert "assert 3 == 4" in verdict.detail
+
+
+async def test_a_check_the_sandbox_stopped_says_so_rather_than_naming_its_exit_code(
+    db: None,
+) -> None:
+    """A command running `timeout` exits 124 exactly as a carrier-stopped one does, so the code
+    cannot separate broken work from a budget that ran out."""
+    workspace_id, conversation_id = await _seeded_conversation()
+    agent_id = await _agent_of(conversation_id)
+    sandbox = _Sandbox(exit_code=124, expired_after_s=120)
+    suite = step("green suite", accepts=(CommandSucceeds(command="pytest -q"),))
+    with ws(workspace_id), agent(agent_id):
+        (verdict,) = await evaluate(_tool_context(sandbox, conversation_id, _Ext()), suite)
+    assert "stopped after 120s" in verdict.detail
+    assert "exit 124" not in verdict.detail
+    assert "said nothing" in verdict.detail
+
+
+async def test_a_failed_check_clips_what_the_command_said(db: None) -> None:
+    workspace_id, conversation_id = await _seeded_conversation()
+    agent_id = await _agent_of(conversation_id)
+    sandbox = _Sandbox(said=("", "x" * (CONDITION_OUTPUT_MAX_CHARS + 500)))
+    suite = step("green suite", accepts=(CommandSucceeds(command="pytest -q"),))
+    with ws(workspace_id), agent(agent_id):
+        (verdict,) = await evaluate(_tool_context(sandbox, conversation_id, _Ext()), suite)
+    tail = "x" * CONDITION_OUTPUT_MAX_CHARS
+    assert verdict.detail.endswith(tail)
+    assert not verdict.detail.removesuffix(tail).endswith("x")
+
+
+async def test_a_fan_out_that_stops_part_way_names_the_children_already_running(
+    db: None,
+) -> None:
+    """Each dispatched child is a real background turn that delivers its result into this
+    conversation whatever this call returns. A failure naming only the step that would not start
+    reads as though none of them exist, and the turn ends without the record to match arriving
+    results to steps."""
+    workspace_id, conversation_id = await _seeded_conversation()
+    agent_id = await _agent_of(conversation_id)
+    started: list[UUID] = []
+
+    async def spawn(
+        profile: str,
+        payload: dict[str, object],
+        background: bool = False,
+        dedup_key: str | None = None,
+        delivers_result: bool = False,
+    ) -> SimpleNamespace:
+        if len(started) == 2:
+            raise RuntimeError("no capacity for another coding child")
+        turn_id = uuid4()
+        started.append(turn_id)
+        return SimpleNamespace(turn_id=turn_id)
+
+    with ws(workspace_id), agent(agent_id):
+        await _planned_steps(conversation_id, "copy", "pricing", "footer")
+        context = _tool_context(_Sandbox(), conversation_id, _Ext())
+        result = await run_independent_steps(
+            replace(context, spawn=cast("Any", spawn)),
+            RunIndependentStepsInput(name="launch", profile="coding"),
+        )
+    assert result.is_error
+    failure = json.loads(result.content[0].text)
+    assert failure["operation"] == "run_independent_steps"
+    assert [effect["identity"] for effect in failure["applied"]] == [str(id) for id in started]
+    assert [effect["state"] for effect in failure["applied"]] == [
+        "running: copy",
+        "running: pricing",
+    ]
+    assert "no capacity for another coding child" in failure["summary"]
+    assert "footer" in failure["summary"]

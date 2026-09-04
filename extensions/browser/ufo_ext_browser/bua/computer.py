@@ -12,7 +12,7 @@ from ufo_ext_browser.bua.actions import CLICK_ACTIONS, ComputerAction, ScrollPar
 from ufo_ext_browser.bua.cdp import CdpError
 from ufo_ext_browser.bua.coordinate import Coord, Size, model_to_viewport, viewport_to_model
 from ufo_ext_browser.bua.downloads import BrowserDownload
-from ufo_ext_browser.bua.errors import HallucinationError
+from ufo_ext_browser.bua.errors import BatchInterrupted, HallucinationError
 from ufo_ext_browser.bua.fixup import fixup_actions, split_at_waits
 from ufo_ext_browser.bua.keys import (
     CdpCall,
@@ -100,24 +100,27 @@ class BrowserComputer:
             ComputerAction.model_validate(as_map(item, "actions[]"))
             for item in as_list(args.get("actions"), "actions")
         ]
-        actions = fixup_actions(raw, self.viewport, self.browser.model_size)
-        scroll_only = bool(actions) and all(action.action == "scroll" for action in actions)
+        planned = fixup_actions(raw, self.viewport, self.browser.model_size)
+        scroll_only = bool(planned) and all(item.action.action == "scroll" for item in planned)
         warn_scroll = (
             SCROLL_WARNING if self.browser.last_batch_scroll_only and scroll_only else None
         )
         self.browser.last_batch_scroll_only = scroll_only
 
-        messages: list[str] = []
+        applied: list[tuple[int, str]] = []
         reminder: str | None = None
         last: tuple[int, int] | None = None
-        for batch in split_at_waits(actions):
+        for batch in split_at_waits(planned):
             self.browser.settle.reset()
-            for action in batch:
-                message, point = await self.act(tab, action)
-                messages.append(message)
+            for item in batch:
+                try:
+                    message, point = await self.act(tab, item.action)
+                except Exception as error:
+                    raise BatchInterrupted(tuple(applied), item.origin, len(raw), error) from error
+                applied.append((item.origin, message))
                 if point is not None:
                     last = point
-                    if reminder is None and action.action in CLICK_ACTIONS:
+                    if reminder is None and item.action.action in CLICK_ACTIONS:
                         reminder = await self._select_reminder(tab, point)
             await self.browser.settle.wait(
                 self.browser.connection(), tab.session_id, SETTLE_ACTION_CAP_S
@@ -150,7 +153,7 @@ class BrowserComputer:
             else None
         )
         self.browser.dialogs = []
-        output = "; ".join(messages)
+        output = "; ".join(message for _, message in applied)
         reminders = [reminder, warn_scroll, sign_in_warning(titles), warn_download, warn_dialog]
         for warning in reminders:
             if warning:

@@ -56,6 +56,8 @@ class FakeSandbox:
     link_result: ExecResult = field(
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
+    state_read_result: ExecResult | None = None
+    state_remove_result: ExecResult | None = None
     commands: list[str] = field(default_factory=list)
     runtime_root: str = ""
 
@@ -77,10 +79,14 @@ class FakeSandbox:
         if head == "set":
             return self.link_result
         if head == "cat":
+            if self.state_read_result is not None:
+                return self.state_read_result
             return ExecResult(
                 stdout=self.files.get(shlex.split(path)[0], b"").decode(), stderr="", exit_code=0
             )
         if head == "rm":
+            if self.state_remove_result is not None:
+                return self.state_remove_result
             self.files.pop(shlex.split(path)[-1], None)
             return ExecResult(stdout="", stderr="", exit_code=0)
         if head == "node":
@@ -301,6 +307,46 @@ async def test_js_repl_failed_reset_leaves_the_repl_empty(tmp_path: Path) -> Non
     sandbox.node_result = ExecResult(stdout="", stderr="", exit_code=0)
     await repl.js_repl(ctx, JsReplInput(code="const c = 3"))
     assert sandbox.files[repl.JS_REPL_PATH] == b"const c = 3\n"
+
+
+async def test_a_state_read_that_fails_runs_nothing_and_keeps_the_session(
+    tmp_path: Path,
+) -> None:
+    """The worst outcome this tool has. An unchecked `cat` returns empty stdout, so the candidate
+    becomes this call's code alone — every variable the session built gone — and the run then
+    succeeds and commits that as the whole state. Nothing may run past a failed read."""
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="const a = 1"))
+    sandbox.state_read_result = ExecResult(stdout="", stderr="I/O error", exit_code=2)
+
+    result = await repl.js_repl(ctx, JsReplInput(code="const b = 2"))
+
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert repl.JS_REPL_PATH in failure["operation"]
+    assert failure["command"] == {"exit_code": 2, "stdout": "", "stderr": "I/O error"}
+    assert sandbox.files[repl.JS_REPL_PATH] == b"const a = 1\n"
+    assert "node" not in [command.split(" ", 1)[0] for command in sandbox.commands[-1:]]
+
+
+async def test_a_reset_that_cannot_clear_the_state_says_so_rather_than_running(
+    tmp_path: Path,
+) -> None:
+    """A reset whose `rm` failed leaves the old cells on disk. Running anyway composes onto state
+    the caller asked to be rid of, and commits the result as if the reset had happened."""
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.xlsx_repl(ctx, XlsxReplInput(code="a = 1"))
+    sandbox.state_remove_result = ExecResult(stdout="", stderr="read-only file system", exit_code=1)
+
+    result = await repl.xlsx_repl(ctx, XlsxReplInput(code="b = 2", reset=True))
+
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert "clear" in failure["operation"]
+    assert failure["command"]["stderr"] == "read-only file system"
+    assert sandbox.files[repl.XLSX_REPL_PATH] == b"a = 1\n"
 
 
 async def test_xlsx_repl_discards_failed_code(tmp_path: Path) -> None:

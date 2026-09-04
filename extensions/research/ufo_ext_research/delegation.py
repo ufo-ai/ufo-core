@@ -20,7 +20,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    CommandDiagnostics,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolFailure,
+    ToolResult,
+)
 from ufo_ext_research.subagent import RESEARCH_PROFILE_NAME, ResearchOutput
 
 WIDE_RESEARCH_TOOL_NAME = "wide_research"
@@ -89,8 +96,34 @@ class _WideResearch:
     aggregate_lock: asyncio.Lock
 
     async def run(self) -> ToolResult:
+        """One entity's fault is that entity's row, never the batch's.
+
+        Every sibling has already been paid for — a spawned child burned model tokens whether or
+        not the entity beside it could start one — so a raise out of the fan-out throws away work
+        that is finished and hands back a single message about the one that failed. The failure is
+        recorded as that entity's `error` and the rest of the file stands, which is also what the
+        recovery aggregate already holds row by row. A row's `error` is never empty either: an
+        exception raised bare leaves `str()` empty, and an empty error beside an empty result
+        is a row that reads as though the entity was never attempted."""
         self.ctx.cleanup.register(self._remove_result_files)
-        rows = tuple(await asyncio.gather(*(self._visit(entity) for entity in self.entities)))
+        visited = await asyncio.gather(
+            *(self._visit(entity) for entity in self.entities), return_exceptions=True
+        )
+        collected: list[WideResearchRow] = []
+        for entity, outcome in zip(self.entities, visited, strict=True):
+            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+                raise outcome
+            collected.append(
+                WideResearchRow(
+                    entity=entity,
+                    error=(str(outcome).strip() or type(outcome).__name__)[
+                        :WIDE_RESEARCH_ERROR_MAX_CHARS
+                    ],
+                )
+                if isinstance(outcome, Exception)
+                else outcome
+            )
+        rows = tuple(collected)
         output = WideResearchFile(call_id=self.call_id, rows=rows).model_dump(mode="json")
         await self._install_recovery(rows)
         await self.ctx.sandbox.write_file(
@@ -212,7 +245,23 @@ async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResul
         if recovered is not None and recovered.call_id == call_id:
             recovered_rows = {row.entity: row for row in recovered.rows}
     schema = await ctx.sandbox.bash(f"cat {shlex.quote(args.output_schema_file)}")
-    output_schema = schema.stdout if schema.exit_code == 0 else ""
+    if schema.exit_code != 0:
+        return ToolFailure(
+            operation=f"read the output schema at {args.output_schema_file}",
+            summary=(
+                f"cannot read {args.output_schema_file}, and the schema is the contract every "
+                "child writes its result against. No child was started — read without it they "
+                "would each answer in a shape of their own, and the file they wrote would report "
+                "success. Fix the path and call again."
+            ),
+            command=CommandDiagnostics(
+                exit_code=schema.exit_code,
+                stdout=schema.stdout,
+                stderr=schema.stderr,
+                timed_out_after_s=schema.timed_out_after_s,
+            ),
+        ).result()
+    output_schema = schema.stdout
     semaphore = asyncio.Semaphore(DEFAULT_SUBAGENT_FANOUT)
     result_paths = {
         entity: (

@@ -297,6 +297,9 @@ async def test_read_only_turn_redescribes_and_executes_a_connector_read() -> Non
 
 @pytest.mark.parametrize("slug", ("create_record", "tool_without_metadata"))
 async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(slug: str) -> None:
+    """The refusal says which tool, which provider, and that re-issuing it refuses again. Raised
+    bare, `PermissionError` reached the model as its class name over an empty message — nothing
+    to correct against, so the agent retries the write it can never make."""
     broker = _ReadBoundaryBroker(read_only=False)
     registry = ConnectorRegistry(
         entries={
@@ -308,16 +311,21 @@ async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(s
         }
     )
 
-    with pytest.raises(PermissionError):
-        await call_external_tool(
-            _ctx(registry, accounts=("acct-one",), connector_read_only=True),
-            CallExternalToolInput(
-                tool_name=slug,
-                source_id=sample.CONNECTOR_PROVIDER,
-                arguments={},
-            ),
-        )
+    result = await call_external_tool(
+        _ctx(registry, accounts=("acct-one",), connector_read_only=True),
+        CallExternalToolInput(
+            tool_name=slug,
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={},
+        ),
+    )
 
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert failure["operation"] == f"{sample.CONNECTOR_PROVIDER}.{slug}"
+    assert slug in failure["summary"]
+    assert "read" in failure["summary"]
+    assert failure["applied"] == []
     assert broker.described == [slug]
     assert broker.executed == []
 

@@ -14,6 +14,12 @@ from ufo.runtime.media.previews import (
     StoredPreview as StoredPreview,
 )
 from ufo.runtime.tools.context import (
+    AppliedEffect as AppliedEffect,
+)
+from ufo.runtime.tools.context import (
+    CommandDiagnostics as CommandDiagnostics,
+)
+from ufo.runtime.tools.context import (
     ConnectorConnection as ConnectorConnection,
 )
 from ufo.runtime.tools.context import (
@@ -29,7 +35,13 @@ from ufo.runtime.tools.context import (
     ToolContext as ToolContext,
 )
 from ufo.runtime.tools.context import (
+    ToolFailure as ToolFailure,
+)
+from ufo.runtime.tools.context import (
     ToolResult as ToolResult,
+)
+from ufo.runtime.tools.context import (
+    clipped as clipped,
 )
 from ufo.runtime.tools.file_changes import (
     FILE_CHANGE_PATH_MAX_CHARS as FILE_CHANGE_PATH_MAX_CHARS,

@@ -16,8 +16,17 @@ from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, JsonValue
 
-from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    AppliedEffect,
+    ImageContent,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolFailure,
+    ToolResult,
+)
 from ufo_ext_browser.bua.backend import BuaSurface
+from ufo_ext_browser.bua.errors import BatchInterrupted, TabLeftOpen
 
 DEFAULT_SCREENSHOT_PATH = "browser-screenshot.jpg"
 DEFAULT_DOWNLOAD_DIR = "downloads"
@@ -130,7 +139,19 @@ async def _tabs_context(ctx: ToolContext, args: TabsContextInput) -> ToolResult:
 
 
 async def _tabs_create(ctx: ToolContext, args: TabsCreateInput) -> ToolResult:
-    reply = await _browser(ctx).tabs_create({"url": args.url or "about:blank"})
+    try:
+        reply = await _browser(ctx).tabs_create({"url": args.url or "about:blank"})
+    except TabLeftOpen as opened:
+        return ToolFailure(
+            operation="tabs_create",
+            summary=(
+                f"{opened}. The tab is open and blank. Navigate it by its tab_id, or close it — "
+                "calling tabs_create again opens a second one."
+            ),
+            applied=(
+                AppliedEffect(kind="tab", identity=str(opened.tab_id), state="open at about:blank"),
+            ),
+        ).result()
     return _json_result(reply)
 
 
@@ -165,7 +186,32 @@ async def _form_input(ctx: ToolContext, args: FormInputInput) -> ToolResult:
 
 
 async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
-    reply = await _browser(ctx).computer(args.model_dump(mode="json", exclude_none=True))
+    """A batch that fails part-way hands back what it already did.
+
+    The actions before the failing one are on the page — the click landed, the text is typed — and
+    a bare cause reads as though none of them happened, which invites the retry that takes every
+    one of them a second time. So the applied actions ride the failure by their place in the batch,
+    and the summary names where it stopped and what remains untaken."""
+    try:
+        reply = await _browser(ctx).computer(args.model_dump(mode="json", exclude_none=True))
+    except BatchInterrupted as interrupted:
+        untaken = (
+            ""
+            if interrupted.origin + 1 >= interrupted.total
+            else f" Actions {interrupted.origin + 2}-{interrupted.total} were not attempted."
+        )
+        return ToolFailure(
+            operation="computer",
+            summary=(
+                f"{interrupted}.{untaken} The actions listed under 'applied' already reached the "
+                "page, numbered as you sent them — re-issue only what remains, after a screenshot "
+                "to read the state they left."
+            ),
+            applied=tuple(
+                AppliedEffect(kind="action", identity=str(origin + 1), state=message)
+                for origin, message in interrupted.applied
+            ),
+        ).result()
     if args.save_to_workspace is True:
         path = args.path or DEFAULT_SCREENSHOT_PATH
         screenshot = _required_str(reply.get("screenshot_base64"), "screenshot_base64")

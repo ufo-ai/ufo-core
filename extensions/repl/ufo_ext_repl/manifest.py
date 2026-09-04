@@ -28,14 +28,16 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.o11y import emit_metric, turn_profile
-from ufo.sdk.sandbox import shell_path
+from ufo.sdk.sandbox import ExecResult, shell_path
 from ufo.sdk.tools import (
     MAX_COMMAND_TIMEOUT_MS,
+    CommandDiagnostics,
     ImageContent,
     TaskRun,
     TextContent,
     ToolContext,
     ToolDef,
+    ToolFailure,
     ToolResult,
     run_task,
     task_handles,
@@ -229,14 +231,51 @@ class XlsxReplInput(BaseModel):
     )
 
 
+class ReplStateUnreadable(Exception):
+    """The persisted cells could not be read, or a reset could not clear them.
+
+    An unchecked read is the worst outcome this tool has. Its stdout is empty on failure, so the
+    candidate becomes this call's code alone — every variable, import and loaded workbook the
+    session built silently gone — and the run then succeeds and writes that candidate back as the
+    whole state. The loss is permanent and the result says the call worked. So the read is
+    checked, nothing runs, and nothing is written."""
+
+    def __init__(self, failure: ToolFailure) -> None:
+        super().__init__(failure.summary)
+        self.failure = failure
+
+
+def _state_failed(verb: str, path: str, result: ExecResult) -> ReplStateUnreadable:
+    return ReplStateUnreadable(
+        ToolFailure(
+            operation=f"{verb} the REPL state at {path}",
+            summary=(
+                f"cannot {verb} {path}. No code ran and no state was written — running past this "
+                "would compose your code onto empty state and then commit that over the session's "
+                f"own. {STATE_UNCHANGED}"
+            ),
+            command=CommandDiagnostics(
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                timed_out_after_s=result.timed_out_after_s,
+            ),
+        )
+    )
+
+
 async def _candidate_source(
     ctx: ToolContext, relative: str, path: str, code: str, reset: bool
 ) -> str:
     if reset:
-        await ctx.sandbox.bash(f"rm -f {shell_path(path)}")
+        removed = await ctx.sandbox.bash(f"rm -f {shell_path(path)}")
+        if removed.exit_code != 0:
+            raise _state_failed("clear", path, removed)
     if reset or not await ctx.sandbox.runtime_file_exists(relative):
         return code + "\n"
     existing = await ctx.sandbox.bash(f"cat {shell_path(path)}")
+    if existing.exit_code != 0:
+        raise _state_failed("read", path, existing)
     return existing.stdout + code + "\n"
 
 
@@ -300,7 +339,12 @@ async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
     state_path = await ctx.sandbox.runtime_path(JS_REPL_PATH)
     run_path = await ctx.sandbox.runtime_path(JS_RUN_PATH)
     state_dir = await ctx.sandbox.runtime_path(REPL_STATE_DIR)
-    candidate = await _candidate_source(ctx, JS_REPL_PATH, state_path, args.code, bool(args.reset))
+    try:
+        candidate = await _candidate_source(
+            ctx, JS_REPL_PATH, state_path, args.code, bool(args.reset)
+        )
+    except ReplStateUnreadable as lost:
+        return lost.failure.result()
     emit_relative = js_emit_relative(uuid4().hex[:8])
     emit_path = await ctx.sandbox.runtime_path(emit_relative)
     await ctx.sandbox.write_runtime_file(
@@ -326,9 +370,12 @@ async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
 async def xlsx_repl(ctx: ToolContext, args: XlsxReplInput) -> ToolResult:
     state_path = await ctx.sandbox.runtime_path(XLSX_REPL_PATH)
     run_path = await ctx.sandbox.runtime_path(XLSX_RUN_PATH)
-    candidate = await _candidate_source(
-        ctx, XLSX_REPL_PATH, state_path, args.code, bool(args.reset)
-    )
+    try:
+        candidate = await _candidate_source(
+            ctx, XLSX_REPL_PATH, state_path, args.code, bool(args.reset)
+        )
+    except ReplStateUnreadable as lost:
+        return lost.failure.result()
     await ctx.sandbox.write_runtime_file(
         XLSX_RUN_PATH, candidate.encode() + XLSX_RESULT_FOOTER.encode()
     )

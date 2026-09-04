@@ -1,5 +1,10 @@
 """The capability-scoped view a tool handler receives, and the result it returns.
 
+`ToolResult` is what a handler answers with; `ToolFailure` is the one shape it answers with when
+it fails — a nonempty summary, what was being attempted, the effects that already landed, and the
+bounded diagnostics of the shell step or third party that refused. A failure that carries none of
+that reads to the model as a failure that did nothing, which is the one thing it never means.
+
 A handler reaches the outside world only through the fields here: the sandbox for filesystem and
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
 subtask to a child turn, the message requester who gates private authorization, the exact
@@ -44,7 +49,7 @@ from typing import Annotated, Any, Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -198,6 +203,96 @@ class ToolResult(BaseModel):
     content: tuple[ContentBlock, ...]
     is_error: bool = False
     untrusted: bool = False
+
+
+RESULT_CUT_MARKER = "\n…["
+TRUNCATION_NOTICE = RESULT_CUT_MARKER + "truncated {dropped} of {total} chars]"
+FAILURE_SUMMARY_MAX_CHARS = 2_000
+FAILURE_STREAM_MAX_CHARS = 4_000
+FAILURE_PROVIDER_MAX_CHARS = 4_000
+FAILURE_APPLIED_MAX = 64
+NO_REASON_NOTICE = "the tool failed and recorded no reason"
+
+
+def clipped(value: str, limit: int) -> str:
+    """One announcement of a cut, wherever the model meets one: the whole result's bound in the
+    engine and each diagnostic field's bound here, so a cut always reads the same and the count it
+    names is always the count of what was dropped."""
+    if len(value) <= limit:
+        return value
+    return value[:limit] + TRUNCATION_NOTICE.format(dropped=len(value) - limit, total=len(value))
+
+
+class CommandDiagnostics(BaseModel):
+    """What a command that failed actually said. The exit code alone cannot separate broken work
+    from an expired budget — code running `timeout` exits 124 exactly as a carrier-stopped run
+    does — so `timed_out_after_s` rides beside it. Both streams are kept because a build writes
+    its reason to stdout as readily as to stderr, and each is clipped here rather than by its
+    caller: a handler holding the bytes hands them over whole and one rule decides what the model
+    can afford to read."""
+
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    timed_out_after_s: int | None = None
+
+    @field_validator("stdout", "stderr")
+    @classmethod
+    def _bound_stream(cls, value: str) -> str:
+        return clipped(value, FAILURE_STREAM_MAX_CHARS)
+
+
+class AppliedEffect(BaseModel):
+    """One effect a failing call had already applied when it failed. `identity` is what the agent
+    addresses that effect by — a spawned child's turn id, a created tab's index, an action's place
+    in the batch it was taking — and `state` is what became of it. Without both, an agent reading a
+    mid-flight failure cannot tell a retry that resumes from one that duplicates."""
+
+    kind: str
+    identity: str
+    state: str
+
+
+class ToolFailure(BaseModel):
+    """The one shape a tool returns when it fails.
+
+    `summary` says what went wrong in the agent's terms and is never empty — an empty one becomes
+    a notice saying so, because "" and "no reason was recorded" read identically to the model and
+    only the second is true. `operation` names what was attempted, which the tool name alone stops
+    saying once a handler runs several steps. `applied` carries the effects that already landed, so
+    a failure part-way through a batch, a fan-out, or a deploy hands back what a retry must not
+    repeat. `command` preserves a shell step's exit code, both streams and its timeout state, and
+    `provider` carries a third party's own structured error, serialized by its caller and
+    clipped here — text, because a nested structure has no length to bound by, and read as
+    data, since the words are theirs and not ours."""
+
+    operation: str
+    summary: str
+    applied: tuple[AppliedEffect, ...] = ()
+    command: CommandDiagnostics | None = None
+    provider: str | None = None
+
+    @field_validator("summary")
+    @classmethod
+    def _nonempty_summary(cls, value: str) -> str:
+        return clipped(value.strip() or NO_REASON_NOTICE, FAILURE_SUMMARY_MAX_CHARS)
+
+    @field_validator("applied")
+    @classmethod
+    def _bound_applied(cls, value: tuple[AppliedEffect, ...]) -> tuple[AppliedEffect, ...]:
+        return value[:FAILURE_APPLIED_MAX]
+
+    @field_validator("provider")
+    @classmethod
+    def _bound_provider(cls, value: str | None) -> str | None:
+        return None if value is None else clipped(value, FAILURE_PROVIDER_MAX_CHARS)
+
+    def result(self, *, untrusted: bool = False) -> ToolResult:
+        return ToolResult(
+            content=(TextContent(text=self.model_dump_json(exclude_none=True)),),
+            is_error=True,
+            untrusted=untrusted,
+        )
 
 
 class SpeakerRequired(ValueError):

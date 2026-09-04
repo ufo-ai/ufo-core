@@ -27,6 +27,7 @@ import ufo_ext_browser.tools as browser_tools
 from pydantic import JsonValue
 from ufo_ext_browser.bua.backend import CDP_TOKEN_KEY, MAX_READ_BYTES, BuaSurface
 from ufo_ext_browser.bua.downloads import Download
+from ufo_ext_browser.bua.errors import BatchInterrupted, HallucinationError, TabLeftOpen
 from ufo_ext_browser.bua.session import BrowserSession
 from ufo_ext_browser.subagent import (
     BROWSER_PROFILE,
@@ -71,8 +72,12 @@ class RecordingSurface:
     calls: list[tuple[str, dict[str, JsonValue]]] = field(default_factory=list)
     attached: list[int] = field(default_factory=list)
 
+    raises: Exception | None = None
+
     def _record(self, method: str, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
         self.calls.append((method, args))
+        if self.raises is not None:
+            raise self.raises
         return dict(self.reply)
 
     async def navigate(self, args: dict[str, JsonValue]) -> dict[str, JsonValue]:
@@ -783,3 +788,55 @@ async def test_aclose_clears_the_durable_token_so_a_later_turn_never_reattaches_
         await surface.aclose()
         assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) is None
         assert provider.leases[0].released is True
+
+
+async def test_computer_hands_back_the_actions_a_failed_batch_already_applied(
+    tmp_path: Path,
+) -> None:
+    """A batch that fails part-way leaves its earlier actions on the page — the click landed, the
+    text is typed. Reported as a bare cause it reads as though none of them happened, and the
+    retry takes every one of them a second time."""
+    surface = RecordingSurface(
+        reply={},
+        raises=BatchInterrupted(
+            ((0, "Clicked (100, 200)"), (1, "Typed 'ada@example.com'")),
+            2,
+            4,
+            HallucinationError("browser ref 'e12' is not resolvable"),
+        ),
+    )
+    result = await _run(
+        "computer",
+        _recording_context(surface, WritesCarrier(), tmp_path),
+        actions=[{"action": "screenshot"}],
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert failure["operation"] == "computer"
+    assert failure["applied"] == [
+        {"kind": "action", "identity": "1", "state": "Clicked (100, 200)"},
+        {"kind": "action", "identity": "2", "state": "Typed 'ada@example.com'"},
+    ]
+    assert "action 3 of 4 failed" in failure["summary"]
+    assert "e12" in failure["summary"]
+    assert "Actions 4-4 were not attempted" in failure["summary"]
+    assert "numbered as you sent them" in failure["summary"]
+
+
+async def test_tabs_create_names_the_tab_it_left_open(tmp_path: Path) -> None:
+    """`Target.createTarget` already returned, so the tab is open and holding a place in the tab
+    list whatever the navigation did. Told only that the navigation failed, a caller opens another
+    one on the retry."""
+    surface = RecordingSurface(
+        reply={},
+        raises=TabLeftOpen(3, "https://slow.example", TimeoutError("navigation timed out")),
+    )
+    result = await _run(
+        "tabs_create",
+        _recording_context(surface, WritesCarrier(), tmp_path),
+        url="https://slow.example",
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert failure["applied"] == [{"kind": "tab", "identity": "3", "state": "open at about:blank"}]
+    assert "tab 3 opened but could not reach https://slow.example" in failure["summary"]

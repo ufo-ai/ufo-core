@@ -48,6 +48,7 @@ class RecordingSpawn:
     outputs: list[object] = field(default_factory=list)
     invalid_outputs: set[int] = field(default_factory=set)
     missing_outputs: set[int] = field(default_factory=set)
+    raising_outputs: dict[int, Exception] = field(default_factory=dict)
     sandbox: WritableSandbox | None = None
 
     async def __call__(
@@ -63,6 +64,8 @@ class RecordingSpawn:
         assert path is not None
         assert self.sandbox is not None
         index = len(self.spawned) - 1
+        if index in self.raising_outputs:
+            raise self.raising_outputs[index]
         if index not in self.missing_outputs:
             content = (
                 b"{"
@@ -476,6 +479,58 @@ async def test_one_unparsable_child_file_keeps_other_wide_research_rows(tmp_path
     assert result_payload["rows"] == rows
 
 
+async def test_one_raising_child_keeps_the_other_wide_research_rows(tmp_path: Path) -> None:
+    """The fan-out's own faults are rows too. A spawn that raises — an unresolvable profile, a
+    provider that would not answer — took the whole batch down with it, discarding siblings whose
+    children had already run and been paid for."""
+    sandbox = FilesSandbox(
+        files={"entities.txt": "acme.com\nbeta.io\ngamma.dev\n", "schema.json": "{}"}
+    )
+    spawn = RecordingSpawn(
+        outputs=[{"headcount": 1}, {}, {"headcount": 3}],
+        raising_outputs={1: RuntimeError("no capacity for a research child")},
+    )
+    result = await WIDE_RESEARCH_TOOL.handler(
+        _context(sandbox, spawn, tmp_path),
+        WIDE_RESEARCH_TOOL.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "research {entity}",
+                "output_schema_file": "schema.json",
+            }
+        ),
+    )
+    rows = json.loads(sandbox.writes["wide_research.json"])["rows"]
+    assert [row["entity"] for row in rows] == ["acme.com", "beta.io", "gamma.dev"]
+    assert rows[0]["result"] == {"headcount": 1}
+    assert rows[2]["result"] == {"headcount": 3}
+    assert rows[1] == {
+        "entity": "beta.io",
+        "result": None,
+        "error": "no capacity for a research child",
+    }
+    assert json.loads(result.content[0].text)["rows"] == rows
+
+
+async def test_a_child_raising_bare_names_its_class_in_the_row(tmp_path: Path) -> None:
+    """`str()` on a bare exception is empty, and an empty error beside an empty result is a row
+    that reads as though the entity was never attempted."""
+    sandbox = FilesSandbox(files={"entities.txt": "acme.com\n", "schema.json": "{}"})
+    spawn = RecordingSpawn(raising_outputs={0: TimeoutError()})
+    await WIDE_RESEARCH_TOOL.handler(
+        _context(sandbox, spawn, tmp_path),
+        WIDE_RESEARCH_TOOL.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "research {entity}",
+                "output_schema_file": "schema.json",
+            }
+        ),
+    )
+    rows = json.loads(sandbox.writes["wide_research.json"])["rows"]
+    assert rows[0]["error"] == "TimeoutError"
+
+
 async def test_wide_research_caps_the_entity_count(tmp_path: Path) -> None:
     too_many = "\n".join(f"site{i}.com" for i in range(MAX_WIDE_RESEARCH_ENTITIES + 1))
     sandbox = FilesSandbox(files={"entities.txt": too_many, "schema.json": ""})
@@ -490,3 +545,28 @@ async def test_wide_research_caps_the_entity_count(tmp_path: Path) -> None:
                 }
             ),
         )
+
+
+async def test_an_unreadable_output_schema_starts_no_child(tmp_path: Path) -> None:
+    """The schema is the contract every child writes its result against. Read as an empty string,
+    each answers in a shape of its own, the file is written, and the tool reports success — so a
+    failed read must stop the fan-out before a single child is paid for."""
+    sandbox = FilesSandbox(files={"entities.txt": "acme.com\nbeta.io\n"})
+    spawn = RecordingSpawn()
+    result = await WIDE_RESEARCH_TOOL.handler(
+        _context(sandbox, spawn, tmp_path),
+        WIDE_RESEARCH_TOOL.input_model.model_validate(
+            {
+                "entities_file": "entities.txt",
+                "prompt_template": "research {entity}",
+                "output_schema_file": "missing-schema.json",
+            }
+        ),
+    )
+    assert result.is_error is True
+    failure = json.loads(result.content[0].text)
+    assert "missing-schema.json" in failure["operation"]
+    assert failure["command"]["exit_code"] != 0
+    assert failure["command"]["stderr"]
+    assert spawn.spawned == []
+    assert "wide_research.json" not in sandbox.writes

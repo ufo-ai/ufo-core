@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from ufo_ext_sites import tools
-from ufo_ext_sites.tools import PUBLISH_LOG, _serve, _stop_server
+from ufo_ext_sites.tools import PUBLISH_LOG, ServeFailed, _serve, _stop_server
 
 from ufo.blob import FilesystemBlobStore
 from ufo.harness.sandbox.local import LocalCarrier
@@ -105,7 +105,7 @@ async def test_a_command_that_binds_another_port_names_the_port_it_had_to_bind(
     elsewhere = _free_port()
     log = await ctx.sandbox.runtime_path(PUBLISH_LOG.format(port=port))
     try:
-        with pytest.raises(RuntimeError) as raised:
+        with pytest.raises(ServeFailed) as raised:
             await _serve(
                 ctx,
                 f"python3 silent_server.py {elsewhere}",
@@ -113,10 +113,14 @@ async def test_a_command_that_binds_another_port_names_the_port_it_had_to_bind(
                 port,
                 log,
             )
-        message = str(raised.value)
-        assert str(port) in message
-        assert "$PORT" in message
-        assert log in message
+        failure = raised.value.failure
+        assert str(port) in failure.summary
+        assert "$PORT" in failure.summary
+        assert log in failure.summary
+        assert failure.command is not None
+        assert failure.command.exit_code != 0
+        assert failure.applied[0].kind == "port"
+        assert failure.applied[0].identity == str(port)
     finally:
         await _stop_server(ctx, elsewhere)
 
@@ -130,7 +134,7 @@ async def test_what_the_command_printed_before_dying_is_what_is_raised(
     ctx = await _context(workspace, tmp_path)
     port = _free_port()
     log = await ctx.sandbox.runtime_path(PUBLISH_LOG.format(port=port))
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(ServeFailed) as raised:
         await _serve(
             ctx,
             "echo 'ModuleNotFoundError: no module named flask' >&2; exit 1",
@@ -138,5 +142,8 @@ async def test_what_the_command_printed_before_dying_is_what_is_raised(
             port,
             log,
         )
-    assert "ModuleNotFoundError: no module named flask" in str(raised.value)
-    assert "$PORT" not in str(raised.value)
+    failure = raised.value.failure
+    assert "ModuleNotFoundError: no module named flask" in failure.summary
+    assert "$PORT" not in failure.summary
+    assert failure.command is not None
+    assert failure.command.exit_code != 0

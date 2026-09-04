@@ -114,6 +114,7 @@ from ufo.runtime.compaction import (
 )
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
+    BARE_RAISE_NOTICE,
     FINISH_DESCRIPTION,
     FINISH_TOOL,
     FORCE_FINAL_PROMPT,
@@ -124,6 +125,7 @@ from ufo.runtime.engine import (
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
+    NO_DIAGNOSTIC_NOTICE,
     OBJECT_APPLY_TOOL,
     OFFLOAD_NOTICE,
     PREEMPTED,
@@ -6466,6 +6468,73 @@ async def test_dispatch_bounds_an_oversize_error_result_and_leaves_within_cap_un
 
     small = await _dispatch(engine, context, ToolUseBlock(id="c3", name="small", input={}), {})
     assert small.content == "c" * (MAX_TOOL_RESULT_CHARS - 1)
+
+
+def _raising_tool(name: str, error: Exception) -> ToolDef:
+    async def handler(context: ToolContext, args: BaseModel) -> ToolResult:
+        raise error
+
+    return ToolDef(name=name, description="d", input_model=_NoArgs, handler=handler)
+
+
+async def test_dispatch_names_the_class_when_a_handler_raises_it_bare(
+    db: None, tmp_path: Path
+) -> None:
+    """A handler that raises with no message still says which exception it was, and says that the
+    class is all there is. Rendered as `f"{cls}: {error}"` a bare raise lands as a class name and a
+    trailing colon over nothing, which reads to the model as a message that got cut."""
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                _raising_tool("bare", PermissionError()),
+                _raising_tool("spoken", ValueError("the port is taken")),
+            )
+        ),
+    )
+    context = _dispatch_context(engine)
+
+    bare = await _dispatch(engine, context, ToolUseBlock(id="c1", name="bare", input={}), {})
+    assert bare.is_error
+    assert isinstance(bare.content, str)
+    assert bare.content == BARE_RAISE_NOTICE.format(cls="PermissionError", tool="bare")
+    assert "PermissionError" in bare.content
+    assert not bare.content.endswith(": ")
+
+    spoken = await _dispatch(engine, context, ToolUseBlock(id="c2", name="spoken", input={}), {})
+    assert spoken.content == "ValueError: the port is taken"
+
+
+async def test_dispatch_substitutes_a_notice_for_an_error_result_carrying_no_text(
+    db: None, tmp_path: Path
+) -> None:
+    """Every failed call reaches the model with something to read, including one whose handler
+    returned `is_error` and nothing else. A successful empty result is left alone — a tool that
+    found nothing says so by being empty."""
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                _fixed_result_tool("blank_error", "", is_error=True),
+                _fixed_result_tool("whitespace_error", "  \n ", is_error=True),
+                _fixed_result_tool("blank_ok", ""),
+            )
+        ),
+    )
+    context = _dispatch_context(engine)
+
+    for index, name in enumerate(("blank_error", "whitespace_error")):
+        result = await _dispatch(
+            engine, context, ToolUseBlock(id=f"c{index}", name=name, input={}), {}
+        )
+        assert result.is_error
+        assert result.content == NO_DIAGNOSTIC_NOTICE
+
+    allowed = await _dispatch(engine, context, ToolUseBlock(id="c9", name="blank_ok", input={}), {})
+    assert not allowed.is_error
+    assert allowed.content == ""
 
 
 async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview(
