@@ -14,10 +14,13 @@ import sqlalchemy as sa
 import ufo_ext_sample as sample
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from ufo import cli
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
+from ufo.harness import o11y
 from ufo.harness.models.interface import AUTO_MODEL
 from ufo.host.ext import loader
 from ufo.host.ext.loader import load_manifests
@@ -27,6 +30,7 @@ from ufo.onboard.onboarding import (
     AlreadyInitialized,
     Onboarding,
 )
+from ufo.product import INIT_SURFACE, ONBOARDING_STEP_METRIC, STEP_COMPLETED, STEP_FAILED
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.runtime.billing.balance import read_balance
 from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, ScopedStore
@@ -269,6 +273,52 @@ async def test_a_failing_onboarding_step_is_isolated_from_its_siblings(
     with ws(onboarded.workspace_id):
         scoped = ScopedStore(extension="working_ext")
         assert await scoped.get("recorded") == {"ran": True}
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_each_onboarding_step_counts_its_outcome_as_an_onboarding_step(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step that raised is isolated, which means the workspace carries on without what the step
+    was for. Nothing but this count says so: the board reads the failure beside the steps a member
+    completed, in the same funnel."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+
+    async def _boom(ctx: ExtensionContext) -> None:
+        raise RuntimeError("bad extension onboarding step")
+
+    async def _fine(ctx: ExtensionContext) -> None:
+        return None
+
+    manifest = Manifest(
+        name="stepped_ext",
+        version="0.1.0",
+        onboarding_steps=(
+            OnboardingStep(name="boom", handler=_boom),
+            OnboardingStep(name="ok", handler=_fine),
+        ),
+    )
+    await _onboarding(database_url, tmp_path, credentials=store, manifests=(manifest,)).run()
+
+    data = reader.get_metrics_data()
+    assert data is not None
+    counted = {
+        (point.attributes["step"], point.attributes["status"], point.attributes["surface"])
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == f"ufo.{ONBOARDING_STEP_METRIC}"
+        for point in metric.data.data_points
+    }
+    assert counted == {
+        ("stepped_ext/boom", STEP_FAILED, INIT_SURFACE),
+        ("stepped_ext/ok", STEP_COMPLETED, INIT_SURFACE),
+    }
 
 
 def test_cold_start_init_creates_durable_state_and_then_fails_loud(

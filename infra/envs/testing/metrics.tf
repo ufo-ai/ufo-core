@@ -73,6 +73,13 @@ resource "datadog_metric_tag_configuration" "tool_call_ms" {
   ]
 }
 
+resource "datadog_metric_tag_configuration" "onboarding_step_latency_ms" {
+  metric_name         = "ufo.onboarding_step_latency_ms"
+  metric_type         = "distribution"
+  include_percentiles = true
+  tags                = ["env", "host", "service", "status", "step", "surface"]
+}
+
 # The unit each latency distribution is in. Datadog does not read it off the OTLP payload, so without
 # this a wall clock renders as a bare number — "1150000" rather than "19min" — on every graph reading
 # them.
@@ -121,6 +128,12 @@ resource "datadog_metric_metadata" "model_provider_start_ms" {
 
 resource "datadog_metric_metadata" "tool_call_ms" {
   metric = "ufo.tool_call_ms"
+  type   = "gauge"
+  unit   = "millisecond"
+}
+
+resource "datadog_metric_metadata" "onboarding_step_latency_ms" {
+  metric = "ufo.onboarding_step_latency_ms"
   type   = "gauge"
   unit   = "millisecond"
 }

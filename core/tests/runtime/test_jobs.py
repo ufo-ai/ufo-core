@@ -22,12 +22,25 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import BACKGROUND_PROFILE
 from ufo.product import (
     ADDRESS_KIND,
+    APP_BUILT_STEP,
     APP_KIND,
+    CENSUS_SURFACE,
+    CONNECTOR_ATTACHED_STEP,
     CONNECTOR_KIND,
     CREDENTIAL_KIND,
+    INVITED_MEMBER_CHATTED_STEP,
+    MEMBER_CHATTED_STEP,
+    NO_PROVIDER,
+    ONBOARDING_LATENCY_HISTOGRAM,
+    ONBOARDING_STEP_METRIC,
     PRODUCT_ATTACH_METRIC,
     PRODUCT_STAGE_METRIC,
+    STEP_COMPLETED,
+    SURFACE_INSTALLED_STEP,
     SURFACE_KIND,
+    TEAMMATE_INVITED_STEP,
+    WORKSPACE_CREATED_STEP,
+    onboarding_census,
     product_census,
 )
 from ufo.runtime import jobs as jobs_module
@@ -909,11 +922,13 @@ async def _seeded_workspace(
     provisioned_app: str | None = None,
     own_app: bool = False,
     member_turn_days_ago: int | None = None,
+    invited_member_turn: bool = False,
     charged_micro_usd: int = 0,
     surface_installed: str | None = None,
     proved_address: str | None = None,
     claimed_address: str | None = None,
     credential_slot: str | None = None,
+    founded_days_ago: int = 0,
 ) -> UUID:
     """One workspace standing at exactly the stages the arguments name, and no others.
 
@@ -922,11 +937,14 @@ async def _seeded_workspace(
     workspace_id = uuid4()
     agent_id = uuid4()
     member_id = uuid4()
+    invited_member_id = uuid4()
     conversation_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
-                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                id=workspace_id,
+                created_at=datetime.now(UTC) - timedelta(days=founded_days_ago),
+                updated_at=sa.func.now(),
             )
         )
         await connection.execute(
@@ -942,7 +960,7 @@ async def _seeded_workspace(
         if invited:
             await connection.execute(
                 sa.insert(tables.member).values(
-                    id=uuid4(),
+                    id=invited_member_id,
                     workspace_id=workspace_id,
                     email="invitee@work.com",
                     invited_at=sa.func.now(),
@@ -1027,6 +1045,23 @@ async def _seeded_workspace(
                     terminal=TerminalFrame(status="done", text="hi").model_dump(mode="json"),
                     admission_source=MEMBER_ADMISSION,
                     created_at=datetime.now(UTC) - timedelta(days=member_turn_days_ago),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if invited_member_turn:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=2,
+                    status="done",
+                    inbound="hello from the invitee",
+                    terminal=TerminalFrame(status="done", text="hi").model_dump(mode="json"),
+                    admission_source=MEMBER_ADMISSION,
+                    speaker_member_id=invited_member_id,
+                    created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
             )
@@ -1311,3 +1346,104 @@ async def test_the_census_sees_only_the_workspace_it_is_bound_to(
         if point.value == 1
     } == {"seated"}
     assert f"ufo.{PRODUCT_ATTACH_METRIC}" not in points
+
+
+def _counted_steps(reader: InMemoryMetricReader) -> set[tuple[str, str, str, str]]:
+    return {
+        (
+            point.attributes["step"],
+            point.attributes["status"],
+            point.attributes["surface"],
+            point.attributes["provider"],
+        )
+        for point in _census_points(reader)[f"ufo.{ONBOARDING_STEP_METRIC}"]
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_onboarding_census_counts_every_step_a_workspace_just_took(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a setup screen is read against: a step per thing the team actually did, the connector's
+    provider and the installed surface named beside their steps, and nothing identifying either the
+    workspace or the member on any of them."""
+    workspace_id = await _seeded_workspace(
+        invited=True,
+        connector="gmail",
+        surface_installed="slack",
+        own_app=True,
+        member_turn_days_ago=0,
+        invited_member_turn=True,
+    )
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await onboarding_census()
+
+    assert _counted_steps(reader) == {
+        (WORKSPACE_CREATED_STEP, STEP_COMPLETED, CENSUS_SURFACE, NO_PROVIDER),
+        (MEMBER_CHATTED_STEP, STEP_COMPLETED, CENSUS_SURFACE, NO_PROVIDER),
+        (CONNECTOR_ATTACHED_STEP, STEP_COMPLETED, CENSUS_SURFACE, "gmail"),
+        (SURFACE_INSTALLED_STEP, STEP_COMPLETED, CENSUS_SURFACE, "slack"),
+        (TEAMMATE_INVITED_STEP, STEP_COMPLETED, CENSUS_SURFACE, NO_PROVIDER),
+        (APP_BUILT_STEP, STEP_COMPLETED, CENSUS_SURFACE, NO_PROVIDER),
+        (INVITED_MEMBER_CHATTED_STEP, STEP_COMPLETED, CENSUS_SURFACE, NO_PROVIDER),
+    }
+    latencies = _census_points(reader)[f"ufo.{ONBOARDING_LATENCY_HISTOGRAM}"]
+    assert {point.attributes["step"] for point in latencies} == {
+        step for step, _status, _surface, _provider in _counted_steps(reader)
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_onboarding_census_counts_a_step_only_in_the_tick_it_first_arrived_in(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step happens once, so a step whose first row predates the tick just gone is already counted
+    — counting it again would report one workspace's first chat once every ten minutes forever."""
+    workspace_id = await _seeded_workspace(member_turn_days_ago=3)
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await onboarding_census()
+
+    assert {step for step, _status, _surface, _provider in _counted_steps(reader)} == {
+        WORKSPACE_CREATED_STEP
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_onboarding_census_measures_each_step_from_the_workspaces_founding(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The latency is what says where a slow setup stalls a team: a workspace founded three days
+    before its first chat reports three days on that step, not the age of the turn."""
+    workspace_id = await _seeded_workspace(member_turn_days_ago=0, founded_days_ago=3)
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await onboarding_census()
+
+    latencies = {
+        point.attributes["step"]: point.sum
+        for point in _census_points(reader)[f"ufo.{ONBOARDING_LATENCY_HISTOGRAM}"]
+    }
+    assert set(latencies) == {MEMBER_CHATTED_STEP}
+    assert latencies[MEMBER_CHATTED_STEP] > 2 * 24 * 60 * 60 * 1000
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_onboarding_census_sees_only_the_workspace_it_is_bound_to(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One step counted under a neighbour's binding would put a step on the board no team took."""
+    quiet = await _seeded_workspace()
+    await _seeded_workspace(connector="gmail", surface_installed="slack", member_turn_days_ago=0)
+    reader = _census_reader(monkeypatch)
+
+    with ws(quiet):
+        await onboarding_census()
+
+    assert {step for step, _status, _surface, _provider in _counted_steps(reader)} == {
+        WORKSPACE_CREATED_STEP
+    }

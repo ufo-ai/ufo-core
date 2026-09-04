@@ -20,14 +20,26 @@ beside it as a `kind` and a `name` taken straight off the column — the surface
 the connector's provider, the app's name — so core counts Slack, GitHub, iMessage and every
 bring-your-own-key connector without holding one of their names. A surface that is bound and a
 surface a member can actually be reached on are different facts, so a proved address is its own kind
-rather than the installation's."""
+rather than the installation's.
+
+Beside the funnel, the same tick counts each setup step a workspace took and how long the step took
+to arrive. A stage says a workspace got there; a step says when, so the board reads where a slow
+setup stalls a team rather than only how many teams stalled. A milestone step is derived exactly
+like a stage — the earliest row that marks it — and counted on the one tick its first row lands in,
+which is what makes one workspace's step one count forever rather than one per tick since. A step
+that leaves no row cannot be derived, so `record_onboarding_step` counts the two that do not: an
+extension's onboarding step failing under `ufoctl init`, and a first-run screen a member skipped or
+walked out of. Neither a member nor a workspace is a tag anywhere here — a step, its status, the
+surface it happened on, and the provider it attached are the whole tag set, so the series stays one
+per step whatever the fleet's size."""
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.harness.o11y import emit_metric
+from ufo.harness.o11y import emit_histogram, emit_metric
 from ufo.runtime.access.credentials import MEMBER_SLOT_INFIX
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
@@ -38,6 +50,21 @@ PRODUCT_CENSUS_SECONDS = 600
 PRODUCT_CENSUS_SCHEDULE = "0 */10 * * * *"
 PRODUCT_STAGE_METRIC = "product_stage_total"
 PRODUCT_ATTACH_METRIC = "product_attach_total"
+ONBOARDING_STEP_METRIC = "onboarding_step_total"
+ONBOARDING_LATENCY_HISTOGRAM = "onboarding_step_latency_ms"
+STEP_COMPLETED = "completed"
+STEP_SKIPPED = "skipped"
+STEP_FAILED = "failed"
+CENSUS_SURFACE = "census"
+INIT_SURFACE = "init"
+NO_PROVIDER = ""
+WORKSPACE_CREATED_STEP = "workspace_created"
+MEMBER_CHATTED_STEP = "member_chatted"
+CONNECTOR_ATTACHED_STEP = "connector_attached"
+SURFACE_INSTALLED_STEP = "surface_installed"
+TEAMMATE_INVITED_STEP = "teammate_invited"
+APP_BUILT_STEP = "app_built"
+INVITED_MEMBER_CHATTED_STEP = "invited_member_chatted"
 ACTIVE_DAY_DAYS = 1
 ACTIVE_WEEK_DAYS = 7
 SURFACE_KIND = "surface"
@@ -47,6 +74,17 @@ CONNECTOR_KIND = "connector"
 APP_KIND = "app"
 
 
+def _member_turn(workspace_id: UUID) -> sa.ColumnElement[bool]:
+    """The workspace's turns a member started, which is what `stage:chatted` and the chatted steps
+    both count. One definition, so redefining a member turn moves the funnel and the steps
+    together."""
+    return sa.and_(
+        tables.turn.c.workspace_id == workspace_id,
+        tables.turn.c.admission_source == MEMBER_ADMISSION,
+        tables.turn.c.parent_turn_id.is_(None),
+    )
+
+
 async def product_census() -> None:
     """Count the bound workspace's funnel stages and everything it has attached.
 
@@ -54,11 +92,7 @@ async def product_census() -> None:
     attachments one union over the five columns that name them."""
     workspace_id = ws_current().workspace_id
     now = datetime.now(UTC)
-    member_turn = sa.and_(
-        tables.turn.c.workspace_id == workspace_id,
-        tables.turn.c.admission_source == MEMBER_ADMISSION,
-        tables.turn.c.parent_turn_id.is_(None),
-    )
+    member_turn = _member_turn(workspace_id)
     stages = sa.select(
         sa.exists(
             sa.select(tables.member.c.id).where(
@@ -150,3 +184,144 @@ async def product_census() -> None:
         emit_metric(PRODUCT_STAGE_METRIC, int(arrived), stage=stage)
     for holding in holdings:
         emit_metric(PRODUCT_ATTACH_METRIC, kind=holding.kind, name=holding.name)
+
+
+def _utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+def _elapsed_ms(created_at: datetime, at: datetime) -> int:
+    return max(0, int((_utc(at) - _utc(created_at)).total_seconds() * 1000))
+
+
+def _emit_step(step: str, status: str, surface: str, provider: str, latency_ms: int | None) -> None:
+    emit_metric(
+        ONBOARDING_STEP_METRIC, step=step, status=status, surface=surface, provider=provider
+    )
+    if latency_ms is not None:
+        emit_histogram(
+            ONBOARDING_LATENCY_HISTOGRAM, latency_ms, step=step, status=status, surface=surface
+        )
+
+
+async def record_onboarding_step(
+    workspace_id: UUID, step: str, status: str, *, surface: str, provider: str = NO_PROVIDER
+) -> None:
+    """Count one onboarding step the moment it happens, with the time since the workspace was
+    founded.
+
+    This is for a step whose outcome no row records: a skip, a member walking out of the first run,
+    an extension's onboarding step that raised. Anything the schema already marks is derived by
+    `onboarding_census` instead, which needs no call site and re-derives itself when the step is
+    redefined. The founding time is read here rather than passed in, so a caller holding a request
+    and a member cannot report a latency measured from anything else."""
+    async with workspace_tx() as connection:
+        created_at = (
+            await connection.execute(
+                sa.select(tables.workspace.c.created_at).where(
+                    tables.workspace.c.id == workspace_id
+                )
+            )
+        ).scalar_one_or_none()
+    _emit_step(
+        step,
+        status,
+        surface,
+        provider,
+        None if created_at is None else _elapsed_ms(created_at, datetime.now(UTC)),
+    )
+
+
+async def onboarding_census() -> None:
+    """Count the bound workspace's setup steps that first arrived in the tick just gone, each with
+    the time the workspace took to reach it.
+
+    The earliest row marking a step is what the step's time is, so a step is counted on the one tick
+    that row lands in and never again — the same increment-per-tick arithmetic the funnel reads,
+    except that a step happens once. A window rather than stored state is what makes it once: a tick
+    that does not run drops a step's count rather than double-counting it, which is the direction
+    that leaves the board wrong about one workspace instead of wrong about all of them.
+
+    One round trip: every step's first moment, and the provider and surface the first attachment
+    named, are scalar subqueries selected together."""
+    workspace_id = ws_current().workspace_id
+    now = datetime.now(UTC)
+    member_turn = _member_turn(workspace_id)
+    granted = tables.connector_grant.join(
+        tables.connection, tables.connector_grant.c.connection_id == tables.connection.c.id
+    )
+    moments = sa.select(
+        sa.select(tables.workspace.c.created_at)
+        .where(tables.workspace.c.id == workspace_id)
+        .scalar_subquery()
+        .label("created"),
+        sa.select(sa.func.min(tables.turn.c.created_at))
+        .where(member_turn)
+        .scalar_subquery()
+        .label("chatted"),
+        sa.select(sa.func.min(tables.connector_grant.c.created_at))
+        .where(tables.connector_grant.c.workspace_id == workspace_id)
+        .scalar_subquery()
+        .label("connector"),
+        sa.select(tables.connection.c.provider)
+        .select_from(granted)
+        .where(tables.connector_grant.c.workspace_id == workspace_id)
+        .order_by(tables.connector_grant.c.created_at)
+        .limit(1)
+        .scalar_subquery()
+        .label("connector_provider"),
+        sa.select(sa.func.min(tables.surface_installation.c.created_at))
+        .where(tables.surface_installation.c.workspace_id == workspace_id)
+        .scalar_subquery()
+        .label("surface"),
+        sa.select(tables.surface_installation.c.surface)
+        .where(tables.surface_installation.c.workspace_id == workspace_id)
+        .order_by(tables.surface_installation.c.created_at)
+        .limit(1)
+        .scalar_subquery()
+        .label("surface_name"),
+        sa.select(sa.func.min(tables.member.c.invited_at))
+        .where(
+            tables.member.c.workspace_id == workspace_id,
+            tables.member.c.invited_at.is_not(None),
+        )
+        .scalar_subquery()
+        .label("invited"),
+        sa.select(sa.func.min(tables.agent.c.created_at))
+        .where(
+            tables.agent.c.workspace_id == workspace_id,
+            tables.agent.c.owner_member_id.is_not(None),
+        )
+        .scalar_subquery()
+        .label("app"),
+        sa.select(sa.func.min(tables.turn.c.created_at))
+        .select_from(
+            tables.turn.join(tables.member, tables.member.c.id == tables.turn.c.speaker_member_id)
+        )
+        .where(
+            member_turn,
+            tables.member.c.workspace_id == workspace_id,
+            tables.member.c.invited_at.is_not(None),
+        )
+        .scalar_subquery()
+        .label("invited_chatted"),
+    )
+    async with workspace_tx() as connection:
+        first = (await connection.execute(moments)).mappings().one()
+    created_at = first["created"]
+    if created_at is None:
+        return
+    steps = (
+        (WORKSPACE_CREATED_STEP, created_at, NO_PROVIDER),
+        (MEMBER_CHATTED_STEP, first["chatted"], NO_PROVIDER),
+        (CONNECTOR_ATTACHED_STEP, first["connector"], first["connector_provider"] or NO_PROVIDER),
+        (SURFACE_INSTALLED_STEP, first["surface"], first["surface_name"] or NO_PROVIDER),
+        (TEAMMATE_INVITED_STEP, first["invited"], NO_PROVIDER),
+        (APP_BUILT_STEP, first["app"], NO_PROVIDER),
+        (INVITED_MEMBER_CHATTED_STEP, first["invited_chatted"], NO_PROVIDER),
+    )
+    since = now - timedelta(seconds=PRODUCT_CENSUS_SECONDS)
+    for step, at, provider in steps:
+        if at is None or _utc(at) <= since:
+            continue
+        _emit_step(step, STEP_COMPLETED, CENSUS_SURFACE, provider, _elapsed_ms(created_at, at))

@@ -87,6 +87,7 @@ METRICS = (
     "objective_step_dispatched_total",
     "product_stage_total",
     "product_attach_total",
+    "onboarding_step_total",
     "admitted_turn_total",
     "balance_charged_micro_usd_total",
 )
@@ -135,6 +136,7 @@ HISTOGRAMS = {
         PROFILE_DIMENSION,
     ),
     "turn_ms": ("status", PROFILE_DIMENSION),
+    "onboarding_step_latency_ms": ("step", "status", "surface"),
 }
 UP_DOWN_METRICS = {
     "model_round_active": ("model", "provider", PROFILE_DIMENSION),

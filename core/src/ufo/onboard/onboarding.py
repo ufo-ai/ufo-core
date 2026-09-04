@@ -18,6 +18,12 @@ from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
 from ufo.harness.models.registry import model_registry
 from ufo.harness.o11y import log
+from ufo.product import (
+    INIT_SURFACE,
+    STEP_COMPLETED,
+    STEP_FAILED,
+    record_onboarding_step,
+)
 from ufo.runtime.access.credentials import CredentialStore, deploy_env
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.manifest import Manifest
@@ -56,7 +62,11 @@ async def run_onboarding_steps(
     a declared slot finds the platform default live from the environment — credentials are read, not
     seeded per workspace, so rotating a deploy's value reaches every workspace. Steps run AFTER core
     access is established, and a step that raises is logged and skipped — one add-on's failure can
-    neither strand the core workspace nor block another extension's steps."""
+    neither strand the core workspace nor block another extension's steps.
+
+    Each step's outcome is counted as an onboarding step of the workspace, so a step that raises is
+    read off the board rather than off a log line: a workspace whose Slack step failed reached its
+    first run holding nothing, and that is the same funnel a skipped screen belongs to."""
     with ws(workspace_id):
         for manifest in manifests:
             if not manifest.onboarding_steps:
@@ -68,6 +78,7 @@ async def run_onboarding_steps(
                 manifest.name, frozenset(slot.name for slot in manifest.credentials)
             )
             for step in manifest.onboarding_steps:
+                named = f"{manifest.name}/{step.name}"
                 try:
                     await step.handler(context)
                 except Exception as error:
@@ -76,6 +87,13 @@ async def run_onboarding_steps(
                         extension=manifest.name,
                         step=step.name,
                         error_class=type(error).__name__,
+                    )
+                    await record_onboarding_step(
+                        workspace_id, named, STEP_FAILED, surface=INIT_SURFACE
+                    )
+                else:
+                    await record_onboarding_step(
+                        workspace_id, named, STEP_COMPLETED, surface=INIT_SURFACE
                     )
 
 

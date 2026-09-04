@@ -34,7 +34,12 @@ from ufo.db import failed_statement, owner_tx, workspace_tx
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import emit_metric, formatted_stack, log, log_error, warn
 from ufo.harness.sandbox.conversation import ConversationSandbox
-from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, product_census
+from ufo.product import (
+    PRODUCT_CENSUS_JOB,
+    PRODUCT_CENSUS_SCHEDULE,
+    onboarding_census,
+    product_census,
+)
 from ufo.runtime.authority import MemberAuthority, authority_member_id, turn_authority
 from ufo.runtime.billing.accounting import (
     ALLOW,
@@ -627,6 +632,7 @@ def core_jobs(
 
     async def _census_product(context: ExtensionContext) -> None:
         await product_census()
+        await onboarding_census()
 
     async def _render_previews(context: ExtensionContext) -> None:
         assert preview_renderer is not None
