@@ -11,7 +11,9 @@ A parent that is itself a query substream is enumerated through that same fan-ou
 `/subscription_items/{id}/usage_record_summaries`.
 The `external_account_*` streams fan over accounts with an `object=<type>` filter. The pinned API
 version rides the `Stripe-Version` header. Records arrive flat, so `flatten` is the identity
-passthrough. A refusal (401/403) raises `StreamSkipped`. The credential is resolved through the auth
+passthrough. A refusal (401/403) raises `StreamSkipped`; a fan-out child request Stripe answers
+`resource_missing` skips that one parent and the walk carries on; any other reason Stripe names
+raises `StreamFault` so the failure record carries it. The credential is resolved through the auth
 proxy the runner threads; this connector holds no token. The write path is intentionally absent —
 source seam only reads."""
 
@@ -22,11 +24,13 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import RestConnector, StreamFault, StreamSkipped, StreamSpec
 
 PAGE_SIZE = 100
 STRIPE_VERSION = "2024-10-28.acacia"
 _REFUSAL_STATUS = frozenset({401, 403})
+_MISSING_RESOURCE_STATUS = frozenset({400, 404})
+_MISSING_RESOURCE_CODE = "resource_missing"
 
 _SUBSTREAM_CHILD_PATHS: dict[str, str] = {
     "customer_balance_transactions": "/v1/customers/{id}/balance_transactions",
@@ -84,6 +88,34 @@ _EXTRA_PARAMS: dict[str, dict[str, str]] = {
     "external_account_cards": {"object": "card"},
     "subscriptions": {"status": "all"},
 }
+
+
+def _stripe_error(error: httpx.HTTPStatusError) -> dict[str, Any]:
+    try:
+        body = error.response.json()
+    except ValueError:
+        return {}
+    detail = body.get("error") if isinstance(body, dict) else None
+    return detail if isinstance(detail, dict) else {}
+
+
+def _refusal_reason(error: httpx.HTTPStatusError) -> str:
+    """The reason Stripe named for refusing a request, as `message [code]`, read from the single
+    `error` object it answers with — the shape core's `response_fault` cannot read, since that
+    reads the `errors` array a GraphQL endpoint answers with. Without this a refusal reaches the
+    failure record as a status and a URL with its query dropped, which says a request was refused
+    and never which subscription, customer or parameter it named. Only those two keys ride, never
+    the body: an error body echoes the request that drew it, and a record is not where a credential
+    lands. A 5xx names nothing about the request, so it keeps its status error and with it the
+    error class, which is the whole signal when a provider is down."""
+    if not error.response.is_client_error:
+        return ""
+    detail = _stripe_error(error)
+    message = detail.get("message")
+    if not isinstance(message, str) or not message:
+        return ""
+    code = detail.get("code")
+    return f"{message} [{code}]" if isinstance(code, str) and code else message
 
 
 def _stream(
@@ -229,7 +261,13 @@ class StripeConnector(RestConnector):
                     f"stripe: {stream.name!r} refused ({error.response.status_code}); the grant "
                     "lacks scope or the key is invalid"
                 ) from error
-            raise
+            reason = _refusal_reason(error)
+            if not reason:
+                raise
+            raise StreamFault(
+                f"stripe: {error.response.status_code} {error.request.method} "
+                f"{error.request.url.copy_with(query=None)}: {reason}"
+            ) from error
 
     async def _page_loop(
         self,
@@ -299,7 +337,7 @@ class StripeConnector(RestConnector):
                 if not pid:
                     continue
                 child_path = child_path_template.format(id=pid)
-                async for child_page in self._page_loop(client, child_path, stream, cursor=None):
+                async for child_page in self._child_pages(client, child_path, stream):
                     parent_fields = {
                         target: parent.get(source)
                         for target, source in _SUBSTREAM_PARENT_FIELDS.get(stream.name, {}).items()
@@ -329,8 +367,8 @@ class StripeConnector(RestConnector):
                 pid = parent.get("id")
                 if not pid:
                     continue
-                async for child_page in self._page_loop(
-                    client, child_path, stream, cursor=None, extra_params={query_field: str(pid)}
+                async for child_page in self._child_pages(
+                    client, child_path, stream, extra_params={query_field: str(pid)}
                 ):
                     yield [{**row, f"{query_field}_id": str(pid)} for row in child_page]
 
@@ -346,8 +384,39 @@ class StripeConnector(RestConnector):
                 if not account_id:
                     continue
                 child_path = f"/v1/accounts/{account_id}/external_accounts"
-                async for child_page in self._page_loop(client, child_path, stream, cursor=None):
+                async for child_page in self._child_pages(client, child_path, stream):
                     yield [{**row, "account_id": str(account_id)} for row in child_page]
+
+    async def _child_pages(
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        stream: StreamSpec,
+        *,
+        extra_params: dict[str, str] | None = None,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """One parent's child collection, and nothing at all where Stripe answers that the parent
+        is gone. A fan-out issues one request per parent an earlier page listed, so it spans the
+        window in which a parent can vanish, and a subscription canceled between the two is the
+        ordinary case rather than a broken request: the refusal is scoped to the one request that
+        named the parent, so skipping it leaves the rest of the walk to sync, where letting the
+        status escape ends the stream and ends it again every run, the parent staying gone. Stripe
+        spells that `resource_missing` either way — 404 where the parent is the path
+        (`/v1/customers/{id}/bank_accounts`), 400 where a parameter names it and the path is a real
+        collection (`/v1/subscription_items?subscription=`) — so the code decides, never the status
+        a request-shape fault shares with it. No Stripe stream is a `delete_missing` snapshot, so
+        the pages a skipped parent does not contribute tombstone nothing."""
+        try:
+            async for page in self._page_loop(
+                client, path, stream, cursor=None, extra_params=extra_params
+            ):
+                yield page
+        except httpx.HTTPStatusError as error:
+            if (
+                error.response.status_code not in _MISSING_RESOURCE_STATUS
+                or _stripe_error(error).get("code") != _MISSING_RESOURCE_CODE
+            ):
+                raise
 
     def _stream_spec(self, name: str) -> StreamSpec:
         return next(spec for spec in STRIPE_STREAMS if spec.name == name)

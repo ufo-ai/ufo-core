@@ -2,20 +2,25 @@
 `?created[gte]` incremental filter, the `events` stream (which ufo syncs as plain records — it
 does not route Stripe's cross-object `*.deleted` events to other streams), the two-level
 `usage_records` fan-out asserted request by request with its parameters (Stripe rejects
-`/v1/subscription_items` without `subscription`), and a refusal as `StreamSkipped`. Stripe's
-`created` cursor is a unix integer, which the adapter's string watermark does not advance, so an
-incremental stream full-refreshes each run (correct: `snapshot=False` + digest-skip). Offline — a
-canned transport, no DB, no token."""
+`/v1/subscription_items` without `subscription`), a parent Stripe no longer resolves skipped with
+the rest of the walk intact, a refusal as `StreamSkipped`, and any other reason a client error
+names reaching the run as a `StreamFault`. Stripe's `created` cursor is a unix integer, which the
+adapter's string watermark does not advance, so an incremental stream full-refreshes each run
+(correct: `snapshot=False` + digest-skip). Offline — a canned transport, no DB, no token."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.stripe import STRIPE_VERSION, StripeConnector
+from ufo_ext_sources.providers.stripe import (
+    STRIPE_VERSION,
+    StripeConnector,
+    _refusal_reason,
+)
 
 from ufo.runtime.access.connectors import Credential
-from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, StreamFault, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
@@ -23,6 +28,14 @@ MISSING_SUBSCRIPTION = {
     "error": {
         "code": "parameter_missing",
         "message": "Missing required param: subscription.",
+        "type": "invalid_request_error",
+    }
+}
+GONE_SUBSCRIPTION = {
+    "error": {
+        "code": "resource_missing",
+        "message": "No such subscription: 'sub_gone'",
+        "param": "subscription",
         "type": "invalid_request_error",
     }
 }
@@ -159,3 +172,70 @@ async def test_stream_skipped_on_refusal() -> None:
 
     with pytest.raises(StreamSkipped):
         await _fetch("charges", handle)
+
+
+async def test_usage_records_skips_a_subscription_stripe_no_longer_resolves() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        match request.url.path, request.url.params.get("subscription"):
+            case "/v1/subscriptions", _:
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"id": "sub_gone", "created": 100},
+                            {"id": "sub_1", "created": 100},
+                        ],
+                        "has_more": False,
+                    },
+                )
+            case "/v1/subscription_items", "sub_gone":
+                return httpx.Response(400, json=GONE_SUBSCRIPTION)
+            case "/v1/subscription_items", "sub_1":
+                return httpx.Response(
+                    200, json={"data": [{"id": "si_1", "created": 100}], "has_more": False}
+                )
+            case "/v1/subscription_items/si_1/usage_record_summaries", _:
+                return httpx.Response(
+                    200, json={"data": [{"id": "ur_1", "timestamp": 100}], "has_more": False}
+                )
+            case path, _:
+                raise AssertionError(f"unexpected request {path}")
+
+    result = await _fetch("usage_records", handle)
+    assert _refs(result) == {"usage_records/ur_1"}
+
+
+async def test_stream_fault_carries_the_reason_stripe_named() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/subscriptions":
+            return httpx.Response(
+                200, json={"data": [{"id": "sub_1", "created": 100}], "has_more": False}
+            )
+        return httpx.Response(400, json=MISSING_SUBSCRIPTION)
+
+    with pytest.raises(StreamFault) as raised:
+        await _fetch("usage_records", handle)
+    assert raised.value.reason == (
+        "stripe: 400 GET https://api.stripe.com/v1/subscription_items: "
+        "Missing required param: subscription. [parameter_missing]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (400, MISSING_SUBSCRIPTION, "Missing required param: subscription. [parameter_missing]"),
+        (404, {"error": {"message": "No such customer: 'cus_1'"}}, "No such customer: 'cus_1'"),
+        (500, {"error": {"message": "An unexpected error", "code": "api_error"}}, ""),
+        (400, {"error": {"type": "invalid_request_error"}}, ""),
+        (400, "<html>gateway</html>", ""),
+    ],
+)
+def test_refusal_reason_reads_only_what_a_client_error_named(
+    status: int, body: dict | str, reason: str
+) -> None:
+    request = httpx.Request("GET", "https://api.stripe.com/v1/charges")
+    response = httpx.Response(
+        status, request=request, **({"text": body} if isinstance(body, str) else {"json": body})
+    )
+    assert _refusal_reason(httpx.HTTPStatusError("", request=request, response=response)) == reason
