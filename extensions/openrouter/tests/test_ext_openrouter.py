@@ -821,7 +821,7 @@ def test_an_allowlisted_id_pins_its_providers_on_the_wire(model: str) -> None:
     kwargs = _client(ScriptedCreate(), spec)._create_kwargs(request, frozenset())
 
     assert kwargs["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "modal", "morph", "together"]
+        "only": ["baseten", "fireworks", "morph", "together"]
     }
     assert "allow_fallbacks" not in kwargs["extra_body"]["provider"]
 
@@ -845,7 +845,7 @@ def test_an_id_off_the_allowlist_sends_its_exclusions_and_no_pin() -> None:
 
 async def test_a_dead_upstream_is_excluded_inside_the_allowlist() -> None:
     """The re-route and the allowlist ride one `provider` object: the empty completion's provider
-    joins `ignore` while `only` still holds, so the retry lands on another of the five rather than
+    joins `ignore` while `only` still holds, so the retry lands on another of the four rather than
     anywhere OpenRouter would otherwise pick."""
     spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3-flash"]
     create = ScriptedCreate(
@@ -862,10 +862,10 @@ async def test_a_dead_upstream_is_excluded_inside_the_allowlist() -> None:
 
     assert TextDelta(text="ok") in events
     assert create.calls[0]["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "modal", "morph", "together"]
+        "only": ["baseten", "fireworks", "morph", "together"]
     }
     assert create.calls[1]["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "modal", "morph", "together"],
+        "only": ["baseten", "fireworks", "morph", "together"],
         "ignore": ["Morph"],
     }
 
@@ -918,7 +918,7 @@ async def test_a_404_before_any_exclusion_still_fails_loud() -> None:
 
 
 async def test_a_404_on_a_narrowed_call_still_fails_loud() -> None:
-    """A pinned slug holds five routes against three exclusions at most, so `ignore` cannot exhaust
+    """A pinned slug holds four routes against three exclusions at most, so `ignore` cannot exhaust
     `only` — a 404 under narrowing is a refusal the client did not cause and keeps the same raise.
     """
     spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3-flash"]
@@ -930,7 +930,7 @@ async def test_a_404_on_a_narrowed_call_still_fails_loud() -> None:
             pass
 
     assert create.calls[1]["extra_body"]["provider"] == {
-        "only": ["baseten", "fireworks", "modal", "morph", "together"],
+        "only": ["baseten", "fireworks", "morph", "together"],
         "ignore": ["Morph"],
     }
 

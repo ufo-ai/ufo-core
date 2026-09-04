@@ -97,14 +97,14 @@ _REQUIRED_REASONS = ReasoningSupport(
     supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
 )
 
-GLM_PROVIDERS = ("baseten", "fireworks", "modal", "morph", "together")
+GLM_PROVIDERS = ("baseten", "fireworks", "morph", "together")
 PROVIDER_ALLOWLIST = {
     "z-ai/glm-5.3": GLM_PROVIDERS,
     "z-ai/glm-5.3-flash": GLM_PROVIDERS,
 }
 """The upstreams a slug may be served by, as OpenRouter's `provider.only`. A GLM slug names two
 dozen routes that differ in quantization, price and context window, while the spec books one rate
-and one window for the id — so which route takes a call is a real difference, and these five serve
+and one window for the id — so which route takes a call is a real difference, and these four serve
 both ids. `only` is a hard allowlist: a request whose permitted set serves the model nowhere
 answers 404 rather than routing outside it, which is why `allow_fallbacks` stays unset. That field
 belongs to `order`; against `only` it collapses the list to its single top route, which then
@@ -535,7 +535,7 @@ class OpenRouterModelClient:
     nudge. The exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying
     no exclusion is byte-identical to the call the dead upstream answered empty, and the sticky
     routing key below pins it straight back to that upstream. An id in PROVIDER_ALLOWLIST rides the
-    exclusion in the same `provider` object as `only`, five routes against three exclusions at
+    exclusion in the same `provider` object as `only`, four routes against three exclusions at
     most; every other id — every Gemini one — sends `ignore` as its whole provider preference, so
     the pin stays where a slug names one. An unpinned slug can run out of upstreams before those
     retries do — every Gemini id serves from two — and OpenRouter then refuses the call outright; a
