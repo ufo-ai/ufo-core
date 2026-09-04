@@ -139,6 +139,37 @@ resource "datadog_monitor" "page_change_stalled" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+# One job execution that raised, under the key the dispatcher fired: `<extension>:<job>`. A job
+# holds nothing durable of its own — an execution that raises acknowledges nothing and the next
+# tick re-reads the same work — so its failure reaches no table and reads only here. That is how a
+# billing pipeline stops silently: `metronome:usage_shipper` confirms its ingest alias before it
+# ships anything under it, and a provider that cannot answer that read leaves the workspace's
+# settled usage unshipped every minute, with a stderr trace as the only trace.
+#
+# The threshold separates the two faults this counts: a provider blip fails a tick or two and then
+# passes, while a job that cannot run fails at its tick rate, once per workspace holding work. A
+# single workspace on a per-minute job reaches twenty inside the window, and no blip either fleet
+# recorded over a week came near it — the one burst that would have alerted was a job failing every
+# tick for half an hour, which is the condition. A job ticking more slowly than the window is read
+# from `jobs.failed`, not here.
+#
+# The grouping is the key alone: the class an extension raises is not one `ERROR_CLASSES` holds, so
+# `error_class` folds to `other` on the series, and `jobs.failed` carries the class and the stack.
+resource "datadog_monitor" "job_failed" {
+  name    = "ufo prod background job failing"
+  type    = "query alert"
+  query   = "sum(last_30m):sum:ufo.job_failed_total{env:prod} by {job}.as_count() >= 20"
+  message = "{{job.name}} raised on {{value}} executions in 30 minutes, each one completing nothing it was fired to do. Search jobs.failed for that key, its workspace, error class, and stack. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 20
+  }
+
+  require_full_window = false
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 resource "datadog_monitor" "surface_listener_parked" {
   name    = "ufo prod surface listener parked"
   type    = "query alert"

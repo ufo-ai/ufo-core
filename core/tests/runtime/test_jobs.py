@@ -51,6 +51,7 @@ from ufo.runtime.ext.context import ExtensionContext, ScopedStore
 from ufo.runtime.ext.manifest import JobSpec
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
+    JOB_FAILED_METRIC,
     JobRunner,
     bindings_from,
     spend_refusal_notice_key,
@@ -226,6 +227,78 @@ async def test_fire_logs_the_exact_failed_job_and_reraises(
     assert "_fail" in record.ufo["stack"]
     assert "statement" not in record.ufo
     assert "sqlstate" not in record.ufo
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_fire_counts_the_failed_job_so_a_stalled_pipeline_alerts(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed fire is counted under the key that fired, because the log alone cannot page anyone:
+    a job that cannot run fails at the tick rate and reads exactly like the blip that fails once,
+    and only a series carries which of the two is happening. The count rides the same handler
+    exception the log does, so no job can fail unmetered, and the key is the whole dimension an
+    operator groups on — an extension's own class name is not one of the classes `ERROR_CLASSES`
+    holds, so `error_class` folds and the log is where the class is read."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:broken"
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+
+    async def _fail(context: ExtensionContext) -> None:
+        raise TimeoutError("database connect timed out")
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="broken", schedule="* * * * * *", handler=_fail, candidates=_candidate)
+    runner = _runner((spec,))
+    for _ in range(2):
+        with pytest.raises(TimeoutError):
+            await runner.fire(key, workspace_id)
+
+    data = reader.get_metrics_data()
+    assert data is not None
+    counted = [
+        point
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == f"ufo.{JOB_FAILED_METRIC}"
+        for point in metric.data.data_points
+    ]
+    assert sum(point.value for point in counted) == 2
+    assert {point.attributes["job"] for point in counted} == {key}
+    assert {point.attributes["error_class"] for point in counted} == {"TimeoutError"}
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_job_that_returns_counts_no_failure(db: None, monkeypatch) -> None:
+    """The counter is what a monitor reads as "this job is not running", so a job that ran must
+    leave the series empty — a count on the success path would hold every alert on forever."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:quiet"
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+
+    async def _quiet(context: ExtensionContext) -> None:
+        return None
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="quiet", schedule="* * * * * *", handler=_quiet, candidates=_candidate)
+    await _runner((spec,)).fire(key, workspace_id)
+
+    data = reader.get_metrics_data()
+    assert not [
+        metric
+        for resource in (data.resource_metrics if data else ())
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == f"ufo.{JOB_FAILED_METRIC}"
+    ]
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

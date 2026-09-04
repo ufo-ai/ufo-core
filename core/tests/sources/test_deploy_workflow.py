@@ -15,6 +15,7 @@ import yaml
 
 from infra.testing_secrets import SECRET_INPUTS
 from ufo.product import PRODUCT_CENSUS_SECONDS
+from ufo.runtime.jobs import JOB_FAILED_METRIC
 from ufo.runtime.sources.sync import SOURCE_SYNC_CHECK
 
 ROOT = Path(__file__).parents[3]
@@ -4342,9 +4343,32 @@ def _check_surface_listener_park_monitor_consumes_the_reported_metric() -> None:
         ) == ("false")
 
 
+def _check_the_job_failure_monitor_consumes_the_reported_counter() -> None:
+    """The counter `fire` emits on a raised handler is the only trace a failed job leaves — it
+    acknowledges nothing and writes nothing — so a monitor over any other name reads as a fleet
+    whose jobs all run. The grouping is the dispatcher's key, which is what names the failing job;
+    the threshold is reachable by one workspace on a per-minute job inside the window and by no
+    blip either fleet recorded."""
+    for environment in DEPLOY_ENVIRONMENTS:
+        assert _monitor_attribute("job_failed", "query", environment) == (
+            f"sum(last_30m):sum:ufo.{JOB_FAILED_METRIC}"
+            f"{{env:{environment}}} by {{job}}.as_count() >= 20"
+        )
+        assert _monitor_attribute("job_failed", "critical", environment) == "20"
+        assert _monitor_attribute("job_failed", "require_full_window", environment) == "false"
+        message = _monitor_attribute("job_failed", "message", environment)
+        assert "{{job.name}}" in message
+        assert "jobs.failed" in message
+
+
 def _check_a_sparse_counters_alert_can_clear_itself() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
-        for monitor in ["db_tx_unavailable", "db_pool_exhausted", "surface_listener_parked"]:
+        for monitor in [
+            "db_tx_unavailable",
+            "db_pool_exhausted",
+            "surface_listener_parked",
+            "job_failed",
+        ]:
             assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
 
 
@@ -4715,6 +4739,7 @@ def test_deploy_workflow_sync_contract() -> None:
         _check_the_source_sync_monitor_reports_both_transitions,
         _check_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read,
         _check_surface_listener_park_monitor_consumes_the_reported_metric,
+        _check_the_job_failure_monitor_consumes_the_reported_counter,
         _check_a_sparse_counters_alert_can_clear_itself,
         _check_database_capacity_monitors,
         _check_deploy_workflow_static_contract,

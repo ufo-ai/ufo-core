@@ -109,6 +109,7 @@ InvokerFactory = Callable[[UUID], TurnInvoker]
 
 JOB_QUEUE_NAME = "jobs"
 JOB_WORKFLOW_NAME = "job"
+JOB_FAILED_METRIC = "job_failed_total"
 JOB_TICK_WORKFLOW_NAME = "job_tick"
 TURN_DISPATCH_JOB = "turn_dispatch"
 TURN_DISPATCH_SCHEDULE = "0 * * * * *"
@@ -858,13 +859,15 @@ class JobRunner:
             except OffTurnSpendRefused as refusal:
                 await self._deferred_on_spend(key, workspace_id, refusal)
             except Exception as error:
+                error_class = type(error).__name__
                 log_error(
                     "jobs.failed",
                     job=key,
-                    error_class=type(error).__name__,
+                    error_class=error_class,
                     stack=formatted_stack(error),
                     **failed_statement(error),
                 )
+                emit_metric(JOB_FAILED_METRIC, job=key, error_class=error_class)
                 raise
 
     async def _deferred_on_spend(
