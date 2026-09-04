@@ -222,6 +222,13 @@ class ConnectorBackend:
         finally:
             if isinstance(stream_pages, AsyncGenerator):
                 await stream_pages.aclose()
+        if stream.cursor_field and pages and watermark is None and page_cursor is None:
+            warn(
+                "source_sync.cursor_field_absent",
+                connector=self.connector.name,
+                stream=stream.name,
+                cursor_field=stream.cursor_field,
+            )
         next_cursor = (
             None
             if stream.delete_missing

@@ -328,6 +328,29 @@ async def test_a_record_with_no_declared_key_is_dropped_and_named_not_content_ke
     ]
 
 
+async def test_a_cursor_stream_whose_records_lack_the_field_is_named(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = StreamSpec(name="contacts", source_object="contacts", cursor_field="lastmodified")
+    feed: Feed = [[{"id": 1, "modified": "2026-01-03T00:00:00Z"}]]
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _fetch(stream, feed)
+
+    assert result.next_cursor is None
+    absent = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "source_sync.cursor_field_absent"
+    ]
+    assert absent == [{"connector": "probe", "stream": "contacts", "cursor_field": "lastmodified"}]
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        await _fetch(stream, [[{"id": 1, "lastmodified": "2026-01-03T00:00:00Z"}]])
+    assert not [r for r in caplog.records if r.getMessage() == "source_sync.cursor_field_absent"]
+
+
 async def _check_an_empty_key_is_no_key_so_the_record_is_dropped() -> None:
     stream = StreamSpec(name="items", source_object="items")
     result = await _fetch(stream, [[{"id": "", "name": "blank"}, *_records(1)]])
