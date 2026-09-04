@@ -275,15 +275,24 @@ function FilePicture({ file }: { file: SharedFile }) {
   );
 }
 
-/** What the file's own bytes are fetched by. It is drawn only where the file answers one: a link to
- *  nothing is a control the member presses once and learns nothing from. */
+/** What the file's own bytes are fetched by, held at the top right of the sheet's own body. The
+ *  drawer opens over a page that wears its acts in that same corner — the artifacts screen puts a
+ *  menu and an edit there — and the topmost of two controls at one corner is the only one a member
+ *  can press. A row below the title the act is the drawer's own and reaches nothing else.
+ *
+ *  It floats rather than taking a row, so what the file is flows up beside it instead of starting
+ *  under it: the button is one line tall and the facts are two, and a column that spent a whole row
+ *  on a control would push the words the member came to read below the fold of a narrow drawer.
+ *
+ *  It is drawn only where the file answers a url: a link to nothing is a control the member presses
+ *  once and learns nothing from. */
 function FileDownload({ file }: { file: SharedFile }) {
   if (!file.url) return null;
   return (
     <a
       href={file.url}
       download={file.filename}
-      className={cn(buttonVariants({ variant: "send" }), "shrink-0 no-underline")}
+      className={cn(buttonVariants({ variant: "send" }), "float-right ml-lg no-underline")}
     >
       Download
     </a>
@@ -307,14 +316,14 @@ export function FileSheet({
     .filter((part) => part)
     .join(" · ");
   return (
-    <Sheet
-      open
-      onClose={onClose}
-      title={file.filename}
-      actions={<FileDownload file={file} />}
-    >
-      <div className="font-mono text-small text-ink-soft">{meta}</div>
-      {details}
+    <Sheet open onClose={onClose} title={file.filename}>
+      {/* `flow-root` so the float is contained here: left to the body's own column it would reach
+          past these facts and over the preview under them. */}
+      <div className="flow-root">
+        <FileDownload file={file} />
+        <div className="font-mono text-small text-ink-soft">{meta}</div>
+        {details}
+      </div>
       <FileBody file={file} />
     </Sheet>
   );

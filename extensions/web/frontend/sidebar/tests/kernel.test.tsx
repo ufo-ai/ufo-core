@@ -67,9 +67,13 @@ test("a file sheet owns the shared title, metadata, preview, and download", () =
   expect(within(sheet).getByRole("img", { name: "Quarterly report" }).getAttribute("src")).toBe(
     "/files/report.png",
   );
-  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
-    "/files/report.png",
-  );
+  const download = within(sheet).getByRole("link", { name: "Download" });
+  expect(download.getAttribute("href")).toBe("/files/report.png");
+  // The page behind the drawer wears its own acts at that corner, so the download stands under the
+  // title line rather than in the header beside it.
+  const header = sheet.querySelector('[data-slot="sheet-header"]');
+  expect(header).toBeTruthy();
+  expect(header!.contains(download)).toBe(false);
 });
 
 /** A document opened from the transcript or the artifact shelf is read here, so the sheet draws it
