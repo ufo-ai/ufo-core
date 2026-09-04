@@ -54,6 +54,7 @@ from ufo.harness.o11y import (
     warn,
 )
 from ufo.runtime.access.connectors import AuthProxy, SourceCredentialResolver
+from ufo.runtime.sources.rest import list_or_empty
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.schema import tables
 
@@ -209,32 +210,53 @@ def validation_fault(error: ValidationError) -> str:
 
 
 def response_fault(response: httpx.Response) -> str:
-    """The reason a refused response names, read from the `errors` array a GraphQL endpoint answers
-    with: each entry's `message`, and its `extensions.code` where one rides. Without this a
-    transport-level refusal reaches the record as a status and a URL, which says a request was
-    refused and never which part of it — Linear answers a removed field with `400` and names the
-    field in the body, and nothing else knows it.
+    """The reason a refused response names, read from the two envelopes a provider answers a
+    refusal with, each rendered as the refusal beside the code that classifies it.
 
-    Only those two keys ride, never the body whole: an error body echoes the request that drew it —
+    A GraphQL endpoint carries a top-level `errors` array: each entry's `message`, and its
+    `extensions.code` where one rides — Linear answers a removed field with `400` and names the
+    field there, and nothing else knows it. A Google API nests its own array under `error` and names
+    the refusal in a closed vocabulary: the `reason` of each `errors` and `details` entry — the
+    older APIs carry the first, the newer ones the second — beside the envelope's canonical
+    `status`, or that status alone where neither array rides. Nothing else separates the unrelated
+    things a Google `403` spells: a quota throttle that clears as the window rolls, a token whose
+    scopes were never granted, and a calendar nobody shared all answer `403`, and only the reason
+    says which, so without it a sweep reads a status and a URL and cannot tell them apart.
+
+    Only those keys ride, never the body whole: an error body echoes the request that drew it —
     Slack names the token it rejected under `provided` — and a record is not where a credential
-    lands. A body carrying no `errors` array renders nothing, and the fault stays the status and the
-    URL alone."""
+    lands. That is why Google's free-text `message` stays out while its enumerated `reason` rides.
+    A body carrying neither envelope renders nothing, and the fault stays the status and the URL
+    alone."""
     try:
         body = response.json()
     except (ValueError, httpx.ResponseNotRead):
         return ""
-    errors = body.get("errors") if isinstance(body, dict) else None
-    if not isinstance(errors, list):
+    if not isinstance(body, dict):
         return ""
-    reasons = []
-    for item in errors:
-        message = item.get("message") if isinstance(item, dict) else None
+    error = body.get("error")
+    if isinstance(error, dict):
+        status = error.get("status")
+        status = status if isinstance(status, str) else ""
+        reasons = "; ".join(
+            dict.fromkeys(
+                item["reason"]
+                for item in list_or_empty(error.get("errors")) + list_or_empty(error.get("details"))
+                if isinstance(item.get("reason"), str) and item["reason"]
+            )
+        )
+        if not reasons:
+            return status
+        return f"{reasons} [{status}]" if status else reasons
+    messages = []
+    for item in list_or_empty(body.get("errors")):
+        message = item.get("message")
         if not isinstance(message, str) or not message:
             continue
         extensions = item.get("extensions")
         code = extensions.get("code") if isinstance(extensions, dict) else None
-        reasons.append(f"{message} [{code}]" if isinstance(code, str) and code else message)
-    return "; ".join(reasons)
+        messages.append(f"{message} [{code}]" if isinstance(code, str) and code else message)
+    return "; ".join(messages)
 
 
 class StreamFault(RuntimeError):

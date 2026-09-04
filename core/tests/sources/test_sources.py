@@ -3680,6 +3680,80 @@ async def test_a_graphql_fault_carries_the_reason_its_errors_array_names(
     assert "SUPERSECRET" not in str(failure.ufo)
 
 
+async def test_a_google_fault_carries_the_reason_and_status_its_nested_error_names(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A quota throttle, a token whose scopes were never granted, and a calendar nobody shared all
+    answer `403`, so the status and the URL cannot say which one a sweep is looking at. Google names
+    the refusal in a closed vocabulary nested under `error` — under `errors` on the older APIs and
+    `details` on the newer ones — and that reason rides beside the envelope's canonical status, or
+    the status alone rides where neither array does. The free-text `message` stays out of all three,
+    because an error body echoes what the request sent."""
+    workspace_id = await _workspace()
+    await _seed_connector_source(workspace_id)
+    events = httpx.Request(
+        "GET", "https://www.googleapis.com/calendar/v3/calendars/primary/events?syncToken=CJDx"
+    )
+    throttled = {
+        "error": {
+            "errors": [
+                {
+                    "domain": "usageLimits",
+                    "reason": "rateLimitExceeded",
+                    "message": "Rate Limit Exceeded",
+                }
+            ],
+            "code": 403,
+            "message": "Rate Limit Exceeded",
+            "status": "RESOURCE_EXHAUSTED",
+        },
+        "provided": "ya29.SUPERSECRET",
+    }
+    unscoped = {
+        "error": {
+            "code": 403,
+            "message": "Request had insufficient authentication scopes.",
+            "status": "PERMISSION_DENIED",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+                    "domain": "googleapis.com",
+                }
+            ],
+        }
+    }
+    unnamed = {
+        "error": {
+            "code": 403,
+            "message": "The caller does not have permission",
+            "status": "PERMISSION_DENIED",
+        }
+    }
+    bodies = (throttled, unscoped, unnamed)
+    raised = []
+    for body in bodies:
+        with pytest.raises(httpx.HTTPStatusError) as error:
+            rest._raise_for_status(httpx.Response(403, json=body, request=events))
+        raised.append(error.value)
+    driver = _connector_driver(list(raised), database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        for _ in bodies:
+            await _make_due()
+            await _sync(driver)
+
+    request = "403 GET https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    failures = _events(caplog, "source_sync.failed")
+    assert [record.ufo["provider_fault"] for record in failures] == [
+        f"{request}: rateLimitExceeded [RESOURCE_EXHAUSTED]",
+        f"{request}: ACCESS_TOKEN_SCOPE_INSUFFICIENT [PERMISSION_DENIED]",
+        f"{request}: PERMISSION_DENIED",
+    ]
+    assert not [record for record in failures if "SUPERSECRET" in str(record.ufo)]
+    assert not [record for record in failures if "Rate Limit Exceeded" in str(record.ufo)]
+
+
 async def test_a_stream_fault_reports_the_reason_the_backend_authored_for_it(
     db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
