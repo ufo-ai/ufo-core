@@ -119,6 +119,31 @@ resource "datadog_monitor" "source_sync_failed" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+# A refused stream parks, and a park pages nobody — the refusal is one member's grant, and the row
+# reads itself back every hour without an operator. That reasoning holds for one connection and
+# fails for many: a stream refused on every account that ever connects the provider is not a grant
+# anyone declined, it is a scope the connector never asks for or a stream that does not belong in
+# its catalog, and no member can widen their way out of it. This is the monitor for that second
+# case, and the count is what separates them. A parked row is re-read at
+# `SOURCE_PARK_RETRY_SECONDS` and each refused read re-parks, so one row contributes one point an
+# hour and no more; ten in six hours is only reachable by two rows or more. Below that the park
+# stays what it is — a warning to read in `source_sync.parked`, never an alert to answer.
+resource "datadog_monitor" "source_stream_refused_everywhere" {
+  name    = "ufo prod source stream refused on every account"
+  type    = "query alert"
+  query   = "sum(last_6h):sum:ufo.source_sync_parked_total{env:prod} by {provider,stream}.as_count() >= 10"
+  message = "{{provider.name}} {{stream.name}} is parked on more than one account at once, so the refusal is not a grant one member declined — the connector asks for a scope the provider does not give it, or the stream does not belong in its catalog. Search source_sync.parked for that provider stream to read the reason and the accounts. Widening the connector's scopes or dropping the stream is what clears this. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 10
+  }
+
+  require_full_window = false
+  notify_no_data      = false
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 # A page-change consumer advances its cursor only after its handler returns, so a batch the handler
 # cannot accept is replayed every tick and holds every later page in that workspace behind it. The
 # threshold is what separates the two faults this counts: a provider blip fails once or twice and
