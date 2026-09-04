@@ -547,3 +547,98 @@ async def test_js_repl_composes_prelude_and_accumulated_code_into_the_run_file(
         repl.js_emit_prelude(sandbox.emit_paths[-1]) + "let x = 1\nconsole.log(x)\n"
     )
     assert any(command == f"node {repl.JS_RUN_PATH}" for command in sandbox.commands)
+
+
+@pytest.mark.parametrize(
+    ("committed", "name"),
+    [
+        pytest.param(b"const chromium = await import('playwright');\n", "chromium", id="const"),
+        pytest.param(b"const a = 1;\nlet page;\n", "page", id="let-on-a-later-line"),
+        pytest.param(b"const ctx = 1; var page = 2;\n", "page", id="var-after-a-semicolon"),
+        pytest.param(b"const { page } = ctx;\n", "page", id="destructured"),
+        pytest.param(b"let i = 0, page = 1;\n", "page", id="a-second-declarator"),
+        pytest.param(b"async function render() {}\n", "render", id="async-function"),
+        pytest.param(b"class Page {}\n", "Page", id="class"),
+    ],
+)
+async def test_a_redeclaration_of_committed_state_names_reset(
+    tmp_path: Path, committed: bytes, name: str
+) -> None:
+    """A name the committed state already declares fails the whole composed module, so no edit to
+    this call's code can compile it. The notice names the one input that clears it, because the
+    error itself points at this call's line and reads as a mistake in the code just written.
+    Renaming is named as what it is rather than offered beside it: it compiles, and it leaves the
+    state that caused this running from the top on every call after it.
+
+    The committed halves here are the declaration forms a session accumulates, because a guard
+    tight enough to reject a name inside a string or read off an object can just as easily reject
+    the real thing and withhold the one repair that works."""
+    sandbox = FakeSandbox(
+        files={repl.JS_REPL_PATH: committed},
+        node_result=ExecResult(
+            stdout=f"SyntaxError: Identifier '{name}' has already been declared",
+            stderr="",
+            exit_code=1,
+        ),
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    result = await repl.js_repl(ctx, JsReplInput(code=f"const {name} = 1;"))
+
+    assert result.is_error is True
+    notice = json.loads(result.content[0].text)["notice"]
+    assert repl.STATE_UNCHANGED in notice
+    assert "reset: true" in notice
+    assert "keeps the earlier state" in notice
+
+
+@pytest.mark.parametrize(
+    ("committed", "name"),
+    [
+        pytest.param(b'const started = await import("node:fs");\n', "i", id="inside-import"),
+        pytest.param(b"const browserContext = await ctx.newContext();\n", "browser", id="prefix"),
+        pytest.param(b"console.log('browser ready');\n", "browser", id="inside-a-string"),
+        pytest.param(b'const notice = "reset the page";\n', "page", id="inside-a-declared-string"),
+        pytest.param(b"const t = await p.title();\n", "title", id="read-off-an-object"),
+        pytest.param(b"// declare page later\nconst a = 1;\n", "page", id="inside-a-comment"),
+        pytest.param(b"const a = 1, b = x.page;\n", "page", id="read-by-a-later-declarator"),
+        pytest.param(b"const other = 1;\n", "page", id="absent"),
+    ],
+)
+async def test_a_redeclaration_inside_one_call_is_not_told_to_reset(
+    tmp_path: Path, committed: bytes, name: str
+) -> None:
+    """The same message, the opposite repair. A name this call declares twice fails whether or not
+    any state stands, and reset would delete the session and leave the code failing exactly as
+    before — so the advice is withheld and the ordinary notice stands, which says to change the
+    code.
+
+    The committed halves here are the ones a looser test reads as a declaration: the name inside a
+    longer identifier, inside a keyword, inside a string, inside a comment, and read off an object.
+    A case whose state merely shares no letters with the name would pass under either bug."""
+    sandbox = FakeSandbox(
+        files={repl.JS_REPL_PATH: committed},
+        node_result=ExecResult(
+            stdout=f"SyntaxError: Identifier '{name}' has already been declared",
+            stderr="",
+            exit_code=1,
+        ),
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    result = await repl.js_repl(ctx, JsReplInput(code=f"const {name} = 1; const {name} = 2;"))
+
+    assert json.loads(result.content[0].text)["notice"] == repl.STATE_UNCHANGED
+
+
+async def test_an_ordinary_failure_carries_no_reset_advice(tmp_path: Path) -> None:
+    """The advice is earned by the redeclaration alone. A failure this call's own code caused is
+    fixed by changing that code, and pointing at reset there would throw away work that stands."""
+    sandbox = FakeSandbox(
+        node_result=ExecResult(stdout="", stderr="TypeError: x is not a function", exit_code=1)
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    result = await repl.js_repl(ctx, JsReplInput(code="x()"))
+
+    assert json.loads(result.content[0].text)["notice"] == repl.STATE_UNCHANGED
