@@ -39,9 +39,9 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.harness.models.spec import DEFAULT_COMPACTION_KEEP_MESSAGES
 from ufo.runtime.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
-    COMPACTION_KEEP_MESSAGES,
     COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     IMAGE_MARKER,
@@ -492,7 +492,7 @@ class SnapshotBuild:
             closer,
         )
         total = estimate_tokens(fixed)
-        guard = (COMPACTION_KEEP_MESSAGES + 1) // 2
+        guard = (DEFAULT_COMPACTION_KEEP_MESSAGES + 1) // 2
         pieces: list[Slice] = []
         while total < self.target_tokens or len(pieces) <= guard:
             piece = slices[cursor % len(slices)]
@@ -719,7 +719,7 @@ def _tail(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     rounds = _round_groups(messages)
     kept: list[Message] = []
     count = 0
-    while rounds and count < COMPACTION_KEEP_MESSAGES:
+    while rounds and count < DEFAULT_COMPACTION_KEEP_MESSAGES:
         count += len(rounds[-1])
         kept = [*rounds[-1], *kept]
         rounds = rounds[:-1]

@@ -35,6 +35,7 @@ from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo.sdk.models import (
+    DEFAULT_COMPACTION_KEEP_MESSAGES,
     OPENAI_TOOL_ERROR_PREFIX,
     Message,
     ModelEvent,
@@ -45,6 +46,7 @@ from ufo.sdk.models import (
     ModelStreamInterrupted,
     ModelStreamStart,
     ReasoningSupport,
+    RepeatedToolCompaction,
     TextDelta,
     ToolCallDelta,
     ToolCallStart,
@@ -819,6 +821,9 @@ def _openrouter(
     context_window: int = OPENROUTER_CONTEXT_WINDOW,
     reasoning: ReasoningSupport = _REASONS,
     accepts_image_input: bool = True,
+    compaction_keep_messages: int = DEFAULT_COMPACTION_KEEP_MESSAGES,
+    compaction_trigger_tokens: int | None = None,
+    repeated_tool_compaction: RepeatedToolCompaction | None = None,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -832,6 +837,9 @@ def _openrouter(
         key_slot=OPENROUTER_KEY_SLOT,
         key_env=OPENROUTER_API_KEY_ENV,
         accepts_image_input=accepts_image_input,
+        compaction_keep_messages=compaction_keep_messages,
+        compaction_trigger_tokens=compaction_trigger_tokens,
+        repeated_tool_compaction=repeated_tool_compaction,
     )
 
 
@@ -871,6 +879,11 @@ OPENROUTER_MODEL_SPECS = (
         "2026-03",
         context_window=1_048_576,
         reasoning=_REQUIRED_REASONS,
+        compaction_keep_messages=3,
+        repeated_tool_compaction=RepeatedToolCompaction(
+            consecutive_turns=4,
+            trigger_percent=50,
+        ),
     ),
     _openrouter(
         "moonshotai/kimi-k3",

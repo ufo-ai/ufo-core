@@ -38,6 +38,7 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
 )
 from ufo.harness.models.registry import ServingModel
+from ufo.harness.models.spec import RepeatedToolCompaction
 from ufo.harness.o11y import emit_metric, log, log_error, warn
 from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME, UFO_HOME_ENV
 from ufo.runtime.ext.hooks import HookChain
@@ -60,7 +61,6 @@ CHARS_PER_TOKEN = 2
 IMAGE_TOKEN_ESTIMATE = 1_600
 DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
 AUTOCOMPACT_BUFFER_TOKENS = 30_000
-COMPACTION_KEEP_MESSAGES = 8
 COMPACTION_SUMMARY_MAX_TOKENS = 20_000
 MAX_PTL_RETRIES = 3
 PTL_DROP_DENOMINATOR = 5
@@ -214,7 +214,7 @@ class Compaction:
     conversation_id: UUID
     summary_max_tokens: int = COMPACTION_SUMMARY_MAX_TOKENS
     trigger_tokens: int | None = None
-    keep_messages: int = COMPACTION_KEEP_MESSAGES
+    keep_messages: int | None = None
     max_ptl_retries: int = MAX_PTL_RETRIES
     hooks: HookChain = field(default_factory=HookChain)
     loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
@@ -234,10 +234,18 @@ class Compaction:
             context_tokens=self.serving.spec.context_window,
             summary_tokens=self.summary_max_tokens,
             buffer_tokens=AUTOCOMPACT_BUFFER_TOKENS,
-            keep_messages=self.keep_messages,
+            keep_messages=(
+                self.serving.spec.compaction_keep_messages
+                if self.keep_messages is None
+                else self.keep_messages
+            ),
             chars_per_token=CHARS_PER_TOKEN,
             image_tokens=IMAGE_TOKEN_ESTIMATE,
-            trigger_tokens=self.trigger_tokens,
+            trigger_tokens=(
+                self.serving.spec.compaction_trigger_tokens
+                if self.trigger_tokens is None
+                else self.trigger_tokens
+            ),
             head_drop_denominator=PTL_DROP_DENOMINATOR,
         )
 
@@ -256,12 +264,29 @@ class Compaction:
         nothing to summarize and is returned unchanged, so a forced call still no-ops safely. An
         unusable automatic summary suppresses further automatic attempts for this turn; a forced
         recovery still runs because the provider has proven the unchanged window cannot proceed."""
+        repeated_policy = self._repeated_tool_policy()
+        repeated_trigger = self._repeated_tool_trigger(messages)
         if not self.window.should_compact(
             messages,
             force=force,
             automatic_suppressed=self._state.automatic_suppressed,
+            automatic_trigger_tokens=repeated_trigger,
         ):
             return messages, ()
+        if (
+            not force
+            and repeated_policy is not None
+            and repeated_trigger is not None
+            and self.window.tokens(messages) <= self.window.trigger
+        ):
+            log(
+                "compaction.repeated_tool_trigger",
+                conversation_id=str(self.conversation_id),
+                tokens=self.window.tokens(messages),
+                trigger_tokens=repeated_trigger,
+                normal_trigger_tokens=self.window.trigger,
+                consecutive_turns=repeated_policy.consecutive_turns,
+            )
         compacted, usages = await self._compact(
             _CompactionRequest(
                 messages=messages,
@@ -272,6 +297,43 @@ class Compaction:
         if not force and usages and compacted == messages:
             self._state.automatic_suppressed = True
         return compacted, usages
+
+    def _repeated_tool_trigger(self, messages: tuple[Message, ...]) -> int | None:
+        policy = self._repeated_tool_policy()
+        if policy is None:
+            return None
+        repeated: set[tuple[str, str]] | None = None
+        current: set[tuple[str, str]] = set()
+        turns = 0
+        latest = True
+        for message in reversed(messages):
+            if message.role == "user" and (
+                isinstance(message.content, str)
+                or any(not isinstance(block, ToolResultBlock) for block in message.content)
+            ):
+                if latest:
+                    latest = False
+                    if not current:
+                        continue
+                turns += 1
+                repeated = current if repeated is None else repeated & current
+                if not repeated:
+                    return None
+                if turns == policy.consecutive_turns:
+                    return max(1, self.window.trigger * policy.trigger_percent // 100)
+                current = set()
+                continue
+            if message.role != "assistant" or isinstance(message.content, str):
+                continue
+            current.update(
+                (block.name, json.dumps(block.input, sort_keys=True, separators=(",", ":")))
+                for block in message.content
+                if isinstance(block, ToolUseBlock)
+            )
+        return None
+
+    def _repeated_tool_policy(self) -> RepeatedToolCompaction | None:
+        return self.serving.spec.repeated_tool_compaction
 
     @DBOS.step()
     async def _compact(
@@ -336,7 +398,22 @@ class Compaction:
             await self._persist(
                 boundary.index, request.messages, candidate.after, candidate.summary
             )
-            self._record_verification(boundary.index, request.reason, candidate.verification)
+            trigger: Literal["force", "repeated_tool", "window"] = (
+                "force"
+                if request.reason == "force"
+                else (
+                    "repeated_tool"
+                    if self._repeated_tool_trigger(request.messages) is not None
+                    and boundary.before_tokens <= self.window.trigger
+                    else "window"
+                )
+            )
+            self._record_verification(
+                boundary.index,
+                request.reason,
+                trigger,
+                candidate.verification,
+            )
             await self.hooks.fire(
                 "post_compact",
                 PostCompact(
@@ -606,16 +683,21 @@ class Compaction:
         )
 
     def _record_verification(
-        self, index: int, reason: Literal["auto", "force"], verification: CompactionVerification
+        self,
+        index: int,
+        reason: Literal["auto", "force"],
+        trigger: Literal["force", "repeated_tool", "window"],
+        verification: CompactionVerification,
     ) -> None:
         """Every compaction reports its own grade, so the fleet's loss rate is a query rather than
         an eval-suite inference: one log record naming the anchors that died and the paths that were
-        cut, and one count split by whether anything died and whether the retry was spent."""
+        cut, and one count split by trigger, model, loss, and retry."""
         log(
             "compaction.verified",
             conversation_id=str(self.conversation_id),
             index=index,
             reason=reason,
+            trigger=trigger,
             before_tokens=verification.before_tokens,
             after_tokens=verification.after_tokens,
             tail_tokens=verification.tail_tokens,
@@ -626,8 +708,11 @@ class Compaction:
         )
         emit_metric(
             "compaction_verified_total",
+            model=self.serving.model,
             outcome="lossy" if verification.missing else "clean",
+            provider=self.serving.spec.provider,
             retried="true" if verification.retried else "false",
+            trigger=trigger,
         )
 
     async def _persist(

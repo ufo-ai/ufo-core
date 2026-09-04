@@ -10,7 +10,6 @@ from evals.suites.repeated_input_coherence import (
     FAILED_CORRECTION_TURNS,
     HISTORY_CASES,
     KNOWN_BAD_COMMAND,
-    MAX_REPLY_WORDS,
     OLD_MESSAGES_PER_TURN,
     OLD_TASK_TURNS,
     OLD_TOOLS_PER_TURN,
@@ -121,13 +120,6 @@ async def test_repeated_input_grader_rejects_drift_bad_action_and_missing_result
     drift = await case.grader(
         CapabilityOutput("Project Cedar draft section 32.", (), own_calls=(read,))
     )
-    long = await case.grader(
-        CapabilityOutput(
-            HISTORY_CASES[1].current_reply + " word" * (MAX_REPLY_WORDS + 1),
-            (),
-            own_calls=(read,),
-        )
-    )
     tool = await case.grader(
         CapabilityOutput(
             HISTORY_CASES[1].current_reply,
@@ -153,8 +145,6 @@ async def test_repeated_input_grader_rejects_drift_bad_action_and_missing_result
 
     assert not drift.passed
     assert "unrelated old task" in drift.reason
-    assert not long.passed
-    assert "word limit" in long.reason
     assert not tool.passed
     assert "unexpected tool" in tool.reason
     assert not repeated.passed
@@ -185,3 +175,21 @@ async def test_repeated_input_grader_accepts_each_current_result() -> None:
         assert verdict.evidence["failedCorrectionTurns"] == FAILED_CORRECTION_TURNS
         assert verdict.evidence["knownBadFirstAction"] is False
         assert verdict.evidence["newToolCalls"] == 1
+
+
+async def test_repeated_input_grader_accepts_a_long_coherent_reply() -> None:
+    spec = HISTORY_CASES[1]
+    read = ToolInvocation(
+        "bash",
+        {"command": CURRENT_COMMAND},
+        spec.current_reply,
+        has_result=True,
+    )
+    detail = " ".join(f"detail-{index}" for index in range(60))
+
+    verdict = await CASES[1].grader(
+        CapabilityOutput(f"{spec.current_reply} {detail}", (), own_calls=(read,))
+    )
+
+    assert verdict.passed
+    assert verdict.evidence["wordCount"] > 40

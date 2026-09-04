@@ -117,6 +117,9 @@ from ufo.harness.models.pricing import (
     ModelPrice as ModelPrice,
 )
 from ufo.harness.models.spec import (
+    DEFAULT_COMPACTION_KEEP_MESSAGES as DEFAULT_COMPACTION_KEEP_MESSAGES,
+)
+from ufo.harness.models.spec import (
     ApiSurface as ApiSurface,
 )
 from ufo.harness.models.spec import (
@@ -124,6 +127,9 @@ from ufo.harness.models.spec import (
 )
 from ufo.harness.models.spec import (
     ReasoningSupport as ReasoningSupport,
+)
+from ufo.harness.models.spec import (
+    RepeatedToolCompaction as RepeatedToolCompaction,
 )
 from ufo.harness.rounds import (
     ModelStreamInterrupted as ModelStreamInterrupted,

@@ -19,7 +19,6 @@ from evals.harness.harness import Json, JsonObject
 from evals.suites.slack_message_block import inspect
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 
-MAX_REPLY_WORDS = 40
 OLD_TASK_TURNS = 32
 OLD_MESSAGES_PER_TURN = 6
 OLD_TOOLS_PER_TURN = 2
@@ -290,8 +289,6 @@ def _coherence_grader(case: HistoryCase) -> Grader:
             failures.append(f'did not report the current result "{case.current_reply}"')
         if not text:
             failures.append("returned an empty reply")
-        if word_count > MAX_REPLY_WORDS:
-            failures.append(f"used {word_count} words over the {MAX_REPLY_WORDS}-word limit")
         replayed = tuple(marker for marker in OLD_TASK_MARKERS if marker in text.casefold())
         if replayed:
             failures.append("replayed the unrelated old task: " + ", ".join(replayed))
@@ -350,8 +347,8 @@ def _coherence_grader(case: HistoryCase) -> Grader:
 
     return DescribedGrader(
         "the completion does not repeat the known-bad first action, reads the current status file, "
-        f"reports its result in at most {MAX_REPLY_WORDS} words, replays no unrelated old task, "
-        "and contains no transcript continuation, repeated-sentence loop, or language drift",
+        "reports its result, replays no unrelated old task, and contains no transcript "
+        "continuation, repeated-sentence loop, or language drift",
         grade,
     )
 

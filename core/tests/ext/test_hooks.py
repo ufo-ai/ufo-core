@@ -41,6 +41,7 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     Usage,
 )
+from ufo.harness.models.spec import DEFAULT_COMPACTION_KEEP_MESSAGES
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import load_manifests, turn_hooks, turn_tools
 from ufo.host.tools.builtins import BUILTIN_TOOLS
@@ -48,7 +49,6 @@ from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.compaction import (
     COMPACTED_CONTEXT_PREFIX,
-    COMPACTION_KEEP_MESSAGES,
     Compaction,
 )
 from ufo.runtime.engine import TurnEngine
@@ -537,7 +537,7 @@ def _engine(
     tool_ext: dict | None = None,
     carrier: RecordingCarrier | None = None,
     compaction_trigger: int | None = None,
-    compaction_keep: int = COMPACTION_KEEP_MESSAGES,
+    compaction_keep: int = DEFAULT_COMPACTION_KEEP_MESSAGES,
 ) -> TurnEngine:
     blob = FilesystemBlobStore(root=tmp_path)
     handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")

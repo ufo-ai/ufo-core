@@ -244,6 +244,16 @@ def test_manifest_registers_fable_5_1() -> None:
     assert fable.reasoning.supported
 
 
+def test_manifest_compacts_glm_flash_before_its_observed_coherence_boundary() -> None:
+    glm_flash = {spec.id: spec for spec in openrouter.manifest().models}["z-ai/glm-5.3-flash"]
+    assert glm_flash.context_window == 1_048_576
+    assert glm_flash.compaction_trigger_tokens is None
+    assert glm_flash.compaction_keep_messages == 3
+    assert glm_flash.repeated_tool_compaction is not None
+    assert glm_flash.repeated_tool_compaction.consecutive_turns == 4
+    assert glm_flash.repeated_tool_compaction.trigger_percent == 50
+
+
 async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget() -> None:
     create = ScriptedCreate(
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(3, 2))]

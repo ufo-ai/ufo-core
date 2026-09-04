@@ -64,7 +64,7 @@ from ufo.harness.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_E
 from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.registry import ServingModel, model_registry
-from ufo.harness.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.models.spec import ModelSpec, ReasoningSupport, RepeatedToolCompaction
 from ufo.harness.rounds import ModelRetryAfter, ModelStreamInterrupted
 from ufo.runtime.access.credentials import CredentialValueInvalid
 from ufo.runtime.ext.manifest import Manifest
@@ -1870,6 +1870,70 @@ def test_model_spec_rejects_tools_with_reasoning_without_support() -> None:
             context_window=1,
             reasoning=ReasoningSupport(supported=False, tools_with_reasoning=True),
             api_surface="chat",
+        )
+
+
+def test_model_spec_rejects_an_empty_compaction_tail() -> None:
+    with pytest.raises(ValueError, match="compaction_keep_messages must be positive"):
+        ModelSpec(
+            id="x",
+            provider="openai",
+            client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+            price=_PRICE,
+            knowledge_cutoff="2026-02",
+            context_window=1,
+            reasoning=_REASONS,
+            api_surface="chat",
+            compaction_keep_messages=0,
+        )
+
+
+def test_model_spec_rejects_a_nonpositive_compaction_trigger() -> None:
+    with pytest.raises(ValueError, match="compaction_trigger_tokens must be positive"):
+        ModelSpec(
+            id="x",
+            provider="openai",
+            client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+            price=_PRICE,
+            knowledge_cutoff="2026-02",
+            context_window=1,
+            reasoning=_REASONS,
+            api_surface="chat",
+            compaction_trigger_tokens=0,
+        )
+
+
+def test_model_spec_rejects_a_compaction_trigger_at_the_context_limit() -> None:
+    with pytest.raises(ValueError, match="compaction_trigger_tokens must be below"):
+        ModelSpec(
+            id="x",
+            provider="openai",
+            client=lambda spec, key: OpenAIClient(client=openai_sdk_client(key), spec=spec),
+            price=_PRICE,
+            knowledge_cutoff="2026-02",
+            context_window=100,
+            reasoning=_REASONS,
+            api_surface="chat",
+            compaction_trigger_tokens=100,
+        )
+
+
+@pytest.mark.parametrize(
+    ("consecutive_turns", "trigger_percent", "message"),
+    [
+        (1, 30, "consecutive_turns must be at least 2"),
+        (4, 0, "trigger_percent must be from 1 to 99"),
+        (4, 100, "trigger_percent must be from 1 to 99"),
+        (4, 101, "trigger_percent must be from 1 to 99"),
+    ],
+)
+def test_repeated_tool_compaction_policy_rejects_invalid_values(
+    consecutive_turns: int, trigger_percent: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        RepeatedToolCompaction(
+            consecutive_turns=consecutive_turns,
+            trigger_percent=trigger_percent,
         )
 
 

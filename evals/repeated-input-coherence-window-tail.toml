@@ -1,0 +1,105 @@
+name = "repeated-input-window-tail"
+base = "HEAD"
+suites = ["repeated_input_coherence"]
+cases = [
+  "pull_requests_failed_correction_history",
+  "emails_failed_correction_history",
+  "clean_check_failed_correction_history",
+]
+repeats = 3
+concurrency = 3
+max_stacks = 2
+remote = true
+budget_usd = 15.0
+est_usd_per_case = 0.30
+model = "z-ai/glm-5.3-flash"
+reasoning = "medium"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "500k-policy"
+
+[[arm.replacements]]
+path = "extensions/openrouter/ufo_ext_openrouter.py"
+old = '''    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+        compaction_keep_messages=3,
+        repeated_tool_compaction=RepeatedToolCompaction(
+            consecutive_turns=4,
+            trigger_percent=50,
+        ),
+    ),'''
+new = '''    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+        compaction_keep_messages=3,
+        compaction_trigger_tokens=500_000,
+    ),'''
+
+[[arm]]
+name = "tail-only-policy"
+
+[[arm.replacements]]
+path = "extensions/openrouter/ufo_ext_openrouter.py"
+old = '''    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+        compaction_keep_messages=3,
+        repeated_tool_compaction=RepeatedToolCompaction(
+            consecutive_turns=4,
+            trigger_percent=50,
+        ),
+    ),'''
+new = '''    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+        compaction_keep_messages=3,
+    ),'''
+
+[[arm]]
+name = "default-policy"
+
+[[arm.replacements]]
+path = "extensions/openrouter/ufo_ext_openrouter.py"
+old = '''    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+        compaction_keep_messages=3,
+        repeated_tool_compaction=RepeatedToolCompaction(
+            consecutive_turns=4,
+            trigger_percent=50,
+        ),
+    ),'''
+new = '''    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+    ),'''

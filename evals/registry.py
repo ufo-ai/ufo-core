@@ -66,7 +66,6 @@ from evals.suites import (
     site_restart,
     skill_routing,
     skill_tail_search,
-    slack_ladder_coherence,
     slack_message_block,
     surface_setup,
     tool_activity,
@@ -159,11 +158,6 @@ TASKS: tuple[EvalTask, ...] = (
     capability_task(
         "repeated_input_coherence",
         repeated_input_coherence.CASES,
-        nightly=False,
-    ),
-    capability_task(
-        "slack_ladder_coherence",
-        slack_ladder_coherence.CASES,
         nightly=False,
     ),
     tool_activity.tool_activity_task(),

@@ -55,13 +55,15 @@ class ContextWindow[MessageT]:
         *,
         force: bool,
         automatic_suppressed: bool,
+        automatic_trigger_tokens: int | None = None,
     ) -> bool:
         """Whether this window has a compactible head and has crossed its trigger."""
         if len(messages) <= self.keep_messages:
             return False
         if not force and automatic_suppressed:
             return False
-        return force or self.tokens(messages) > self.trigger
+        trigger = self.trigger if automatic_trigger_tokens is None else automatic_trigger_tokens
+        return force or self.tokens(messages) > trigger
 
     def select(self, messages: tuple[MessageT, ...]) -> WindowSelection[MessageT] | None:
         """Keep the smallest trailing set of whole rounds covering the retention floor."""

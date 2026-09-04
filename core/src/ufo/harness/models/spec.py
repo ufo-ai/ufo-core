@@ -18,6 +18,7 @@ from ufo.schema.records import ReasoningEffort
 KNOWLEDGE_CUTOFF_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 KEY_REJECTED_STATUS = 401
 RATE_LIMITED_STATUS = 429
+DEFAULT_COMPACTION_KEEP_MESSAGES = 8
 
 ApiSurface = Literal["chat", "responses"]
 
@@ -41,11 +42,25 @@ class ReasoningSupport:
 
 
 @dataclass(frozen=True)
+class RepeatedToolCompaction:
+    """Compact a large transcript after the same tool call recurs across consecutive turns."""
+
+    consecutive_turns: int
+    trigger_percent: int
+
+    def __post_init__(self) -> None:
+        if self.consecutive_turns < 2:
+            raise ValueError("repeated tool compaction consecutive_turns must be at least 2")
+        if not 1 <= self.trigger_percent < 100:
+            raise ValueError("repeated tool compaction trigger_percent must be from 1 to 99")
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     """Everything one model is: its provider and client builder, its price, its knowledge cutoff,
-    its context window, its reasoning and image-input capabilities, and the api surface it is
-    called on. The registry keys these by `id`; a seam reads `registry.spec(id).<fact>` instead of
-    owning a per-model dict.
+    its context window and compaction policy, its reasoning and image-input capabilities, and the
+    api surface it is called on. The registry keys these by `id`; a seam reads
+    `registry.spec(id).<fact>` instead of owning a per-model dict.
 
     `client` builds the `ModelClient` from this spec and the api key the registry resolves, once per
     turn. `knowledge_cutoff` is a machine date (`YYYY-MM`) rendered to a human month at the prompt
@@ -63,6 +78,9 @@ class ModelSpec:
     key_slot: str = ""
     key_env: str = ""
     accepts_image_input: bool = True
+    compaction_keep_messages: int = DEFAULT_COMPACTION_KEEP_MESSAGES
+    compaction_trigger_tokens: int | None = None
+    repeated_tool_compaction: RepeatedToolCompaction | None = None
 
     def __post_init__(self) -> None:
         if not KNOWLEDGE_CUTOFF_RE.match(self.knowledge_cutoff):
@@ -75,6 +93,17 @@ class ModelSpec:
             )
         if self.reasoning.default_on and not self.reasoning.supported:
             raise ValueError(f"model {self.id!r} declares default reasoning without reasoning")
+        if self.compaction_keep_messages < 1:
+            raise ValueError(f"model {self.id!r} compaction_keep_messages must be positive")
+        if self.compaction_trigger_tokens is not None and self.compaction_trigger_tokens < 1:
+            raise ValueError(f"model {self.id!r} compaction_trigger_tokens must be positive")
+        if (
+            self.compaction_trigger_tokens is not None
+            and self.compaction_trigger_tokens >= self.context_window
+        ):
+            raise ValueError(
+                f"model {self.id!r} compaction_trigger_tokens must be below its context window"
+            )
 
     def key_rejected(self) -> CredentialValueInvalid:
         """The credential fault a provider's 401 is: the key this spec resolved is not one it

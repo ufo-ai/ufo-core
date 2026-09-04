@@ -27,7 +27,7 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.harness.models.spec import ReasoningSupport
+from ufo.harness.models.spec import ReasoningSupport, RepeatedToolCompaction
 from ufo.host.ext.loader import BoundHook, HookChain
 from ufo.runtime.compaction import (
     ANCHOR_RETRY_INSTRUCTION,
@@ -194,6 +194,31 @@ def _compaction(tmp_path: Path, model: object = None, **overrides: object) -> Co
     )
 
 
+def _capture_metrics(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
+    metrics: list[tuple[str, dict[str, str]]] = []
+
+    def capture(name: str, **dimensions: str) -> None:
+        metrics.append((name, dimensions))
+
+    monkeypatch.setattr("ufo.runtime.compaction.emit_metric", capture)
+    return metrics
+
+
+def _compaction_metric(trigger: str) -> list[tuple[str, dict[str, str]]]:
+    return [
+        (
+            "compaction_verified_total",
+            {
+                "model": "claude-opus-4-8",
+                "outcome": "clean",
+                "provider": "anthropic",
+                "retried": "false",
+                "trigger": trigger,
+            },
+        )
+    ]
+
+
 def _history() -> tuple[Message, ...]:
     """A head that outweighs any summary of it: the budget invariant fails a compaction whose
     replacement window is not smaller than the window it replaced, which a five-line history only
@@ -245,6 +270,28 @@ def _many_rounds(count: int) -> tuple[Message, ...]:
     return tuple(messages)
 
 
+def _repeated_tool_history(
+    calls: tuple[tuple[str, dict[str, object]], ...], pad: str = ""
+) -> tuple[Message, ...]:
+    messages: list[Message] = []
+    for index, (name, arguments) in enumerate(calls):
+        tool_use_id = f"tool-{index}"
+        messages.extend(
+            (
+                Message(role="user", content=f"request {index} {pad}"),
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id=tool_use_id, name=name, input=arguments),),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id=tool_use_id, content="done"),),
+                ),
+            )
+        )
+    return tuple(messages)
+
+
 async def test_history_under_the_window_is_left_untouched(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, keep_messages=2)
     messages = _history()
@@ -254,7 +301,134 @@ async def test_history_under_the_window_is_left_untouched(tmp_path: Path) -> Non
     assert await compaction.read_record(1) is None
 
 
-async def test_force_compacts_below_the_trigger(tmp_path: Path) -> None:
+async def test_repeated_tool_calls_compact_above_the_early_trigger(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = _capture_metrics(monkeypatch)
+    policy = RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50)
+    compaction = _compaction(
+        tmp_path,
+        trigger_tokens=1_000,
+        keep_messages=2,
+    )
+    compaction.serving.spec = replace(
+        compaction.serving.spec,
+        repeated_tool_compaction=policy,
+    )
+    call = ("bash", {"command": "pwd"})
+    messages = (
+        *_repeated_tool_history((call, call, call, call), pad="x" * 200),
+        Message(role="user", content="new request"),
+    )
+    assert 500 < compaction.window.tokens(messages) < 1_000
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        result, usage = await compaction.maybe_compact(messages)
+
+    assert len(usage) == 1
+    assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
+    trigger = next(
+        record for record in caplog.records if record.message == "compaction.repeated_tool_trigger"
+    )
+    assert trigger.ufo["trigger_tokens"] == 500
+    assert trigger.ufo["normal_trigger_tokens"] == 1_000
+    assert trigger.ufo["consecutive_turns"] == 4
+    assert metrics == _compaction_metric("repeated_tool")
+
+
+async def test_a_completed_turn_without_the_call_resets_the_early_trigger(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
+    compaction.serving.spec = replace(
+        compaction.serving.spec,
+        repeated_tool_compaction=RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50),
+    )
+    call = ("bash", {"command": "pwd"})
+    messages = (
+        *_repeated_tool_history((call, call, call, call), pad="x" * 200),
+        Message(role="user", content="no tool needed"),
+        Message(role="assistant", content="done"),
+        Message(role="user", content="new request"),
+    )
+    assert 500 < compaction.window.tokens(messages) < 1_000
+
+    result, usage = await compaction.maybe_compact(messages)
+
+    assert result is messages
+    assert usage == ()
+
+
+@pytest.mark.parametrize(
+    ("calls", "pad", "above_early_trigger"),
+    [
+        pytest.param(
+            (("bash", {"command": "pwd"}),) * 4,
+            "",
+            False,
+            id="below_token_floor",
+        ),
+        pytest.param(
+            tuple(("bash", {"command": f"pwd {index}"}) for index in range(4)),
+            "x" * 200,
+            True,
+            id="changed_arguments",
+        ),
+        pytest.param(
+            (("bash", {"command": "pwd"}),) * 3,
+            "x" * 300,
+            True,
+            id="three_turns",
+        ),
+    ],
+)
+async def test_early_trigger_requires_tokens_and_four_exact_tool_turns(
+    tmp_path: Path,
+    calls: tuple[tuple[str, dict[str, object]], ...],
+    pad: str,
+    above_early_trigger: bool,
+) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
+    compaction.serving.spec = replace(
+        compaction.serving.spec,
+        repeated_tool_compaction=RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50),
+    )
+    messages = _repeated_tool_history(calls, pad=pad)
+    assert (compaction.window.tokens(messages) > 500) is above_early_trigger
+    assert compaction.window.tokens(messages) < 1_000
+
+    result, usage = await compaction.maybe_compact(messages)
+
+    assert result is messages
+    assert usage == ()
+
+
+async def test_a_multimodal_member_turn_resets_the_early_trigger(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
+    compaction.serving.spec = replace(
+        compaction.serving.spec,
+        repeated_tool_compaction=RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50),
+    )
+    call = ("bash", {"command": "pwd"})
+    messages = (
+        *_repeated_tool_history((call, call, call, call), pad="x" * 200),
+        Message(role="user", content=(TextBlock(text="look at this"),)),
+        Message(role="assistant", content="done"),
+        Message(role="user", content="new request"),
+    )
+    assert 500 < compaction.window.tokens(messages) < 1_000
+
+    result, usage = await compaction.maybe_compact(messages)
+
+    assert result is messages
+    assert usage == ()
+
+
+async def test_force_compacts_below_the_trigger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = _capture_metrics(monkeypatch)
     compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
     messages = _history()
     result, usage = await compaction.maybe_compact(messages, force=True)
@@ -263,6 +437,7 @@ async def test_force_compacts_below_the_trigger(tmp_path: Path) -> None:
     assert isinstance(result[0].content, str)
     assert result[0].content.startswith(COMPACTED_CONTEXT_PREFIX)
     assert result[-1].content == messages[-1].content
+    assert metrics == _compaction_metric("force")
 
 
 async def test_compaction_preserves_each_active_ref_with_its_exact_request(tmp_path: Path) -> None:
@@ -786,7 +961,11 @@ async def test_a_tail_that_leaves_no_room_installs_the_window_and_records_stayin
     assert verification.retried is False
 
 
-async def test_a_clean_compaction_records_its_own_counts(tmp_path: Path) -> None:
+async def test_a_clean_compaction_records_its_own_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = _capture_metrics(monkeypatch)
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
 
     result, _ = await compaction.maybe_compact(_history())
@@ -801,6 +980,7 @@ async def test_a_clean_compaction_records_its_own_counts(tmp_path: Path) -> None
     assert verification.dropped_paths == ()
     assert verification.retried is False
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
+    assert metrics == _compaction_metric("window")
 
 
 async def test_loaded_skills_come_from_the_tracker_and_the_tracker_ends_empty(

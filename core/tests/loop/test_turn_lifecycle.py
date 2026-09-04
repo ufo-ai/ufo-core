@@ -55,6 +55,7 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
 )
 from ufo.harness.models.registry import ModelRegistry, ServingModel
+from ufo.harness.models.spec import RepeatedToolCompaction
 from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     UNSIGNED_RUN_TOKEN,
@@ -397,7 +398,23 @@ class StandInModel:
 
 STANDIN_REGISTRY = ModelRegistry(
     specs={
-        spec.id: replace(spec, client=lambda spec, key: StandInModel(), key_slot="", key_env="")
+        spec.id: replace(
+            spec,
+            client=lambda spec, key: StandInModel(),
+            key_slot="",
+            key_env="",
+            compaction_keep_messages=(
+                3 if spec.id == PINNED_MODEL else spec.compaction_keep_messages
+            ),
+            compaction_trigger_tokens=(
+                123_000 if spec.id == PINNED_MODEL else spec.compaction_trigger_tokens
+            ),
+            repeated_tool_compaction=(
+                RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50)
+                if spec.id == PINNED_MODEL
+                else spec.repeated_tool_compaction
+            ),
+        )
         for spec in CORE_MODEL_SPECS
     },
     pricing=CORE_PRICING,
@@ -846,14 +863,21 @@ async def test_turn_prompt_uses_the_models_knowledge_cutoff(
     assert cutoffs != [STANDIN_REGISTRY.spec("claude-opus-4-8").knowledge_cutoff]
 
 
-async def test_turn_compaction_uses_the_models_context_window(
+async def test_turn_compaction_uses_the_models_policy(
     surface: Turns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     windows: list[int] = []
+    tails: list[int] = []
+    triggers: list[int | None] = []
+    repeated: list[RepeatedToolCompaction | None] = []
     compaction = loop_queue.Compaction
 
     def capture_context_window(**kwargs: object) -> object:
-        windows.append(cast(ServingModel, kwargs["serving"]).spec.context_window)
+        spec = cast(ServingModel, kwargs["serving"]).spec
+        windows.append(spec.context_window)
+        tails.append(spec.compaction_keep_messages)
+        triggers.append(spec.compaction_trigger_tokens)
+        repeated.append(spec.repeated_tool_compaction)
         return compaction(**kwargs)
 
     monkeypatch.setattr(loop_queue, "Compaction", capture_context_window)
@@ -863,6 +887,12 @@ async def test_turn_compaction_uses_the_models_context_window(
     assert terminal["status"] == "done"
     assert windows == [STANDIN_REGISTRY.spec(PINNED_MODEL).context_window]
     assert windows != [STANDIN_REGISTRY.spec("claude-opus-4-8").context_window]
+    assert tails == [STANDIN_REGISTRY.spec(PINNED_MODEL).compaction_keep_messages]
+    assert tails != [STANDIN_REGISTRY.spec("claude-opus-4-8").compaction_keep_messages]
+    assert triggers == [STANDIN_REGISTRY.spec(PINNED_MODEL).compaction_trigger_tokens]
+    assert triggers != [STANDIN_REGISTRY.spec("claude-opus-4-8").compaction_trigger_tokens]
+    assert repeated == [STANDIN_REGISTRY.spec(PINNED_MODEL).repeated_tool_compaction]
+    assert repeated != [STANDIN_REGISTRY.spec("claude-opus-4-8").repeated_tool_compaction]
 
 
 async def test_a_turn_reads_its_provider_from_the_spec_registered_for_its_model(
