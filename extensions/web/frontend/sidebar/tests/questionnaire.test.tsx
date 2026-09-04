@@ -77,6 +77,32 @@ test("an answer row shrinks inside the card rather than carrying past it", async
   expect(document.querySelector("[data-slot=questionnaire-write]")!.className).toContain("min-w-0");
 });
 
+/** A description cut at the row's edge loses the clause that tells one answer from the next, so it
+ *  wraps and holds to two lines. The chosen one states itself whole: jsdom lays nothing out, so the
+ *  clamp and the release the checked row carries are the contract. */
+test("an answer stacks its description under its label, clamped until it is the chosen one", async () => {
+  const wordy = "a description far longer than the card is wide";
+  asking({
+    title: "Pick one",
+    questions: [
+      {
+        question: "Which?",
+        options: [{ label: "left", description: wordy }, { label: "right" }],
+      },
+    ],
+  });
+
+  const description = await screen.findByText(wordy);
+  expect(description.className).toContain("line-clamp-2");
+  expect(description.className).not.toContain("truncate");
+  expect(description.className).toContain(
+    "group-data-checked/questionnaire-choice:line-clamp-none",
+  );
+  expect(description.closest("[data-slot=questionnaire-choice-label]")!.className).toContain(
+    "flex-col",
+  );
+});
+
 test("an ask carrying no mark is headed by its words alone", async () => {
   asking({ title: "Pick one", questions: [ASKED] });
 

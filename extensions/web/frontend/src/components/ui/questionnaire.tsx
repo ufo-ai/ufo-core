@@ -114,7 +114,11 @@ export function QuestionnaireChoices({
 
 /** One answer the member presses. The native control is laid over the row invisibly and still
  *  carries the focus, the name and the value, so nothing here reimplements what a radio already
- *  is; the key states which answer it is, and the row states that it is the chosen one. */
+ *  is; the key states which answer it is, and the row states that it is the chosen one.
+ *
+ *  The key sits on the line naming the answer rather than in the middle of however many lines
+ *  explain it, so the row's own inset carries its height in place of the touch floor — which is
+ *  what keeps a one-line answer reading as centred inside it. */
 export function QuestionnaireChoice({
   children,
   className,
@@ -125,6 +129,7 @@ export function QuestionnaireChoice({
       data-slot="questionnaire-choice"
       className={cn(
         ROW,
+        "items-start py-lg",
         "group/questionnaire-choice cursor-pointer outline-none select-none",
         "has-[>input:focus-visible]:border-edge-strong",
         "data-checked:border-edge-strong data-checked:bg-fill",
@@ -150,7 +155,7 @@ export function QuestionnaireChoice({
       />
       <QuestionnairePrimitive.ChoiceLabel
         data-slot="questionnaire-choice-label"
-        className="flex min-w-0 flex-1 items-baseline gap-sm leading-chrome"
+        className="flex min-w-0 flex-1 flex-col gap-2xs leading-chrome"
       >
         {children}
       </QuestionnairePrimitive.ChoiceLabel>
@@ -158,12 +163,20 @@ export function QuestionnaireChoice({
   );
 }
 
-/** The second line inside an answer — what the option means, under what it is called. */
+/** What the option means, under what it is called. It wraps rather than truncating — a sentence
+ *  cut at the row's edge loses the clause that distinguishes it from the option above — and holds
+ *  to two lines, so a column of answers stays a column the member can read down. The answer they
+ *  chose states itself whole: it is the one they are acting on, and its length no longer costs
+ *  them the ones they are comparing it against. */
 export function QuestionnaireChoiceDescription({ className, ...props }: ComponentProps<"span">) {
   return (
     <span
       data-slot="questionnaire-choice-description"
-      className={cn("min-w-0 truncate text-label text-ink-soft", className)}
+      className={cn(
+        "min-w-0 line-clamp-2 text-label wrap-anywhere text-ink-soft",
+        "group-data-checked/questionnaire-choice:line-clamp-none",
+        className,
+      )}
       {...props}
     />
   );

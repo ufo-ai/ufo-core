@@ -220,8 +220,8 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
-  // The line states the step, and the fold it opens onto stands it as a row while the turn runs.
-  expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(2);
+  // The line states the step. The fold it opens onto stands closed until the member asks for it.
+  expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(1);
   expect(screen.queryByText("Thinking…")).toBeNull();
 
   StreamFake.last().emit("terminal", {
@@ -241,20 +241,18 @@ test("the working line is not taken down when the turn's first step lands", asyn
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   const opening = await screen.findByText("Thinking…");
-  const line = opening.closest("[data-slot=marker]")!.querySelector("[data-slot=decode-text]");
-  expect(line).toBeTruthy();
-  // Nothing stands behind the line yet, so it offers no disclosure to open.
-  expect(opening.closest("[data-slot=marker]")!.querySelector("svg")).toBeNull();
+  // The wait states itself with a glyph. Nothing stands behind the line yet, so no chevron opens it.
+  const waiting = opening.closest("[data-slot=marker]")!;
+  expect(waiting.querySelector("svg")).toBeTruthy();
+  expect(waiting.querySelector("svg.size-icon")).toBeNull();
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
-  expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(2);
-
-  // The same element, not one that replaced it: a remount here cuts the glyphing short.
-  expect(document.querySelector("[data-slot=decode-text]")).toBe(line);
-  expect(document.querySelector("[data-slot=marker] svg")).toBeTruthy();
+  // The same element, not one that replaced it: the words change in place under the glyph.
+  expect(await screen.findByText("Reviewing the pull request.")).toBe(opening);
+  expect(document.querySelector("[data-slot=marker] svg.size-icon")).toBeTruthy();
 });
 
-test("a running turn stands the calls behind its latest open, until the member closes them", async () => {
+test("a running turn keeps its calls behind the line until the member opens them", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
 
@@ -262,12 +260,12 @@ test("a running turn stands the calls behind its latest open, until the member c
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
   StreamFake.last().emit("activity", { text: "Loading coding guidance." });
 
-  const summary = await screen.findByText("Loading coding guidance.", { selector: ".sr-only" });
-  expect(screen.getByText("Reviewing the pull request.")).toBeTruthy();
-  expect(document.querySelector("[data-slot=decode-text]")).toBeTruthy();
+  const summary = await screen.findByText("Loading coding guidance.");
+  expect(screen.queryByText("Reviewing the pull request.")).toBeNull();
+  expect(document.querySelector("[data-slot=marker] svg.animate-working")).toBeTruthy();
 
   await userEvent.click(summary);
-  expect(screen.queryByText("Reviewing the pull request.")).toBeNull();
+  expect(screen.getByText("Reviewing the pull request.")).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -278,7 +276,7 @@ test("a running turn stands the calls behind its latest open, until the member c
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
   expect(screen.getByText("Completed 2 steps")).toBeTruthy();
-  expect(document.querySelector("[data-slot=decode-text]")).toBeNull();
+  expect(document.querySelector("[data-slot=marker] svg.animate-working")).toBeNull();
 });
 
 test("a live subagent run nests under the reply it produced", async () => {
@@ -358,6 +356,7 @@ test("a live run states its name and current step, and clears the wait when it e
   StreamFake.last().emit("activity", { text: "Handing the research off." });
   StreamFake.last().emit("subagent_activity", frame);
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  await userEvent.click(screen.getByText("Awaiting 1 subagent"));
 
   StreamFake.last().emit("subagent_activity", {
     ...frame,
@@ -3245,9 +3244,13 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   StreamFake.last().emit("activity", { text: "Applying the migration." });
   StreamFake.last().emit("resumed", { attempt: "attempt-one" });
 
-  // The line stands where the work does, so the wait reads as interrupted rather than as stopped:
-  // once as the open disclosure's summary and once in the step list standing behind it.
-  expect(await screen.findAllByText("Resumed after a restart")).toHaveLength(2);
+  // The line stands where the work does, so the wait reads as interrupted rather than as stopped.
+  // Opening it states the resume a second time, as a step beside the one it interrupted.
+  const resumed = await screen.findByText("Resumed after a restart");
+  expect(screen.queryByText("Applying the migration.")).toBeNull();
+
+  await userEvent.click(resumed);
+  expect(screen.getAllByText("Resumed after a restart")).toHaveLength(2);
   expect(screen.getByText("Applying the migration.")).toBeTruthy();
 });
 

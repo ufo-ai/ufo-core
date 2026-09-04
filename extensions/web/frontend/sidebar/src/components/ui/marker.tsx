@@ -14,7 +14,7 @@ export function Marker({
   ...props
 }: ComponentProps<"div"> & { render?: ReactElement<{ className?: string }> }) {
   const drawn = cn(
-    "relative flex min-h-(--size-glyph) w-full items-center gap-sm",
+    "relative flex min-h-(--size-glyph) w-full items-center gap-xs",
     "text-left text-label text-ink-soft",
     "[&_svg:not([class*=size-])]:size-(--size-glyph)",
     "[&_a]:underline [&_a]:underline-offset-2 [&_a]:hover:text-ink",

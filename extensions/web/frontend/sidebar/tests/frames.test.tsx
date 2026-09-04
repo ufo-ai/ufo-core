@@ -28,32 +28,26 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("an activity frame decodes its complete description", async () => {
+test("an activity frame states its complete description on the line", async () => {
   const stream = await streaming();
   const label = "Reading the calendar."
   stream.emit("activity", { text: label });
-  // The open fold states the step too, so the line is the one reading it out.
-  const dock = await screen.findByText(label, { selector: ".sr-only" });
-  const decoded = dock.parentElement!.querySelector("[data-slot=decode-text]")!;
-  expect(decoded.textContent).toHaveLength(label.length);
-  expect(decoded.textContent).not.toBe(label);
-  expect(decoded.textContent?.replaceAll(" ", "")).not.toMatch(/[A-Za-z]/);
-  // A space is a break between words rather than a cell, so it is the only character without one.
-  expect(decoded.querySelectorAll("[data-slot=decode-cell]")).toHaveLength(
-    label.replaceAll(" ", "").length,
-  );
-  expect(decoded.querySelector("[data-slot=decode-cell]")?.className).toContain(
-    "w-(--size-decode-cell)",
-  );
+  const line = await screen.findByText(label, { selector: "[data-slot=marker-content]" });
+  expect(line.textContent).toBe(label);
+
   stream.emit("activity", { text: "Listing the workspace." });
-  expect(await screen.findByText("Listing the workspace.", { selector: ".sr-only" })).toBeTruthy();
+  expect(
+    await screen.findByText("Listing the workspace.", { selector: "[data-slot=marker-content]" }),
+  ).toBeTruthy();
 });
 
 test("an activity frame names the guidance being loaded", async () => {
   const stream = await streaming();
   stream.emit("activity", { text: "Loading calendar guidance." });
   expect(
-    await screen.findByText("Loading calendar guidance.", { selector: ".sr-only" }),
+    await screen.findByText("Loading calendar guidance.", {
+      selector: "[data-slot=marker-content]",
+    }),
   ).toBeTruthy();
 });
 
@@ -125,14 +119,19 @@ test("a late activity frame leaves the reply already streaming where it stands",
   expect([...rows].map((row) => row.textContent)).toEqual(["Reading the changelog."]);
 });
 
-test("the fold a running turn writes into stands open on its steps", async () => {
+test("the fold a running turn writes into stays closed, and takes its steps once opened", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Reading the changelog first." });
   stream.emit("activity", { text: "Reading the changelog." });
   expect(await screen.findByText(saying("Reading the changelog first."))).toBeTruthy();
 
   const fold = document.querySelector("details") as HTMLDetailsElement;
-  await waitFor(() => expect(fold.open).toBe(true));
+  expect(fold.open).toBe(false);
+  expect(fold.querySelectorAll("li")).toHaveLength(0);
+
+  await userEvent.click(fold.querySelector("summary")!);
+  await delivered();
+  expect(fold.open).toBe(true);
 
   stream.emit("message", { text: "Checking the tags now." });
   stream.emit("activity", { text: "Checking the release tags." });
@@ -144,15 +143,12 @@ test("the fold a running turn writes into stands open on its steps", async () =>
   );
 });
 
-// The step and the terminal frame land in renders of their own, which is what a turn does over the
-// wire: the fold is written open while the turn runs, and the browser answers that write with a
-// `toggle` event of its own. A test that emits both frames in one batch renders once and never
-// opens the fold, so it cannot see what that event leaves behind.
-test("the fold the running turn stood open folds when the turn settles", async () => {
+test("the fold stays closed through the turn settling", async () => {
   const stream = await streaming();
   stream.emit("activity", { text: "Listing the workspace." });
   const fold = (await waitFor(() => document.querySelector("details")!)) as HTMLDetailsElement;
-  await waitFor(() => expect(fold.open).toBe(true));
+  expect(fold.open).toBe(false);
+  expect(fold.querySelectorAll("li")).toHaveLength(0);
 
   stream.emit("terminal", {
     status: "done",
@@ -167,24 +163,24 @@ test("the fold the running turn stood open folds when the turn settles", async (
   expect(screen.queryByText("Listing the workspace.")).toBeNull();
 });
 
-// The member's own toggle is the one state that outlives the default, so the frames a running turn
-// keeps emitting must not open the fold again behind the member who folded it away.
-test("a member who folds a running turn away keeps it away over the frames after it", async () => {
+// The member's own toggle is the one state there is, so the frames a running turn keeps emitting
+// must not close the fold behind the member who opened it.
+test("a member who opens a running turn keeps it open over the frames after it", async () => {
   const stream = await streaming();
   stream.emit("activity", { text: "Reading the changelog." });
 
-  const fold = document.querySelector("details") as HTMLDetailsElement;
-  await waitFor(() => expect(fold.open).toBe(true));
+  const fold = (await waitFor(() => document.querySelector("details")!)) as HTMLDetailsElement;
+  expect(fold.open).toBe(false);
   await delivered();
 
   await userEvent.click(fold.querySelector("summary")!);
   await delivered();
-  expect(fold.open).toBe(false);
+  expect(fold.open).toBe(true);
 
   stream.emit("activity", { text: "Loading calendar guidance." });
-  expect(await screen.findByText("Loading calendar guidance.")).toBeTruthy();
+  expect(await screen.findAllByText("Loading calendar guidance.")).toHaveLength(2);
   await delivered();
-  expect(fold.open).toBe(false);
+  expect(fold.open).toBe(true);
 });
 
 test("an activity stays a step when the turn is stopped", async () => {

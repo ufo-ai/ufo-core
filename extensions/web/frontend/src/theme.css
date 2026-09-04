@@ -277,7 +277,9 @@
   /* An answer keeps short of a capsule at its 40px pitch, so the choices still read as rows. */
   --radius-answer: 16px;
   --radius-panel: var(--radius);
-  --radius-bubble: var(--radius);
+  /* The chat column's corner. A message, the files attached to it and the box it is written in are
+     one family of rounded objects, so they name one radius rather than three that drift apart. */
+  --radius-bubble: 16px;
   /* A menu is drawn as an overlay standing off the surface rather than as a panel set into it, so
      it carries a far rounder corner than the controls beneath it — its rows are pills, and a tight
      corner around them reads as a box someone forgot to round. */
@@ -362,6 +364,9 @@
   --container-app-settings: min(493px, 100vw);
   --container-spotlight: min(720px, calc(100vw - 32px));
   --container-bubble: 70ch;
+  /* What the member's own words are held to. A reply is read across the column; a message the
+     member sent is a quotation of what they asked, and a short measure keeps it reading as one. */
+  --container-said: 256px;
   --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
   --container-hint: 64ch;
@@ -382,8 +387,8 @@
   --media-card: 20rem;
   /* The square one attached file is drawn in, wherever a file is drawn as a picture rather than a
      name. Large enough that a rendered document page reads as that page and not as a grey square,
-     and small enough that three of them stand across the reading column. */
-  --size-thumbnail: 132px;
+     and small enough that a row of them stands inside the measure a member's words are held to. */
+  --size-thumbnail: 88px;
   /* The square a digest entry's picture is drawn in — small enough that the entry's words still set
      its height, large enough that a chart's shape reads. Square because the pictures a run shares
      are any shape at all, and a feed of one rectangle per entry ripples down its own right edge.
@@ -747,19 +752,8 @@
 @layer base {
   :root {
     color-scheme: light dark;
-    --size-decode-cell: 1ch;
-
-    /* The two channels a decoding line is drawn in. Ripple is the cool tone nearly every cell takes,
-       a wave travelling along the words; pulse is the warm one the few accent cells breathe on. Each
-       is a pair the cell mixes between by how far along its own wave it sits, and both ends are the
-       palette laid over the pane — so a scheme still turns on the seven declarations alone. Ember
-       stays a handful of points on a cool line, never a warm line. */
+    /* How long a glyph takes to swap for the one replacing it. */
     --duration-glyph: 200ms;
-
-    --ripple-lo: color-mix(in srgb, var(--text-secondary) 55%, var(--bkgd-100));
-    --ripple-hi: var(--text-secondary);
-    --pulse-lo: color-mix(in srgb, var(--accent-secondary) 25%, var(--text-secondary));
-    --pulse-hi: color-mix(in srgb, var(--accent-secondary) 55%, var(--text-secondary));
   }
 
   /* The appearance control writes one of these onto the root, and `light-dark()` reads it. A member
@@ -860,25 +854,6 @@
    declared with `@utility` rather than as a rule in a layer: Tailwind compiles a variant form —
    `data-autoscrolling:scrollbar-quiet` — only for a name it knows is a utility, and a hand-written
    class under the same name silently compiles nothing at all behind a variant. */
-
-/* The mono face carries neither braille nor the accents, so both come out of a fallback — and there
-   the braille is a small dot pattern while the accents are drawn to full cap height. Left alone the
-   ember reads as a symbol stamped over the line rather than one more cell of the same cipher, so an
-   accent is held to the optical size of the dots beside it. */
-[data-slot="decode-cell"][data-accent] {
-  font-size: 0.72em;
-}
-
-/* A decoding cell mixes the two ends of its channel by how far along its wave it sits. `--f` is
-   written per cell, so the mix has to resolve on the cell — a custom property declared at the root
-   would substitute the root's `--f`, which is nothing at all. */
-@utility decode-ripple {
-  color: color-mix(in srgb, var(--ripple-hi) calc(var(--f) * 1%), var(--ripple-lo));
-}
-
-@utility decode-pulse {
-  color: color-mix(in srgb, var(--pulse-hi) calc(var(--f) * 1%), var(--pulse-lo));
-}
 
 /* The line an app prints while its work is moving: a band of the reading tone travelling along
    words otherwise set in the resting one. shadcn draws its `shimmer` as a gradient clipped to the

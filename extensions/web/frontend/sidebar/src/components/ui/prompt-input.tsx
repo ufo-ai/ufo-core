@@ -120,7 +120,7 @@ export function PromptInput({
           held.attach(event.dataTransfer.files);
         }}
         data-field-card
-        className={cn(CONTROL, "flex flex-col gap-2xl border-0 p-lg", className)}
+        className={cn(CONTROL, "flex flex-col gap-5xl rounded-bubble border-0 p-lg", className)}
       >
         <input
           ref={picker}
@@ -159,7 +159,7 @@ export function PromptInputEyebrow({
   onDismiss: () => void;
 }) {
   return (
-    <div className="-mx-lg -mt-lg -mb-2xs flex h-(--size-row) items-center justify-between rounded-t-panel bg-fill-strong pl-2xl pr-2xs text-label text-ink-soft">
+    <div className="-mx-lg -mt-lg -mb-2xs flex h-(--size-row) items-center justify-between rounded-t-bubble bg-fill-strong pl-2xl pr-2xs text-label text-ink-soft">
       <span className="flex min-w-0 items-center gap-xs">
         {glyph}
         <span className="truncate">{label}</span>
@@ -253,14 +253,14 @@ export function PromptInputTextarea({
 /** The acts, under the words they act on: what the member adds to the message on the left, what
  *  sends it on the right. */
 export function PromptInputToolbar({ children }: { children: ReactNode }) {
-  return <div className="flex items-stretch justify-between gap-sm">{children}</div>;
+  return <div className="flex items-stretch justify-between gap-lg">{children}</div>;
 }
 
 export function PromptInputAttach() {
   const { choose } = useAttached();
   const label = "Attach files";
   return (
-    <Button variant="outline" size="icon" aria-label={label} title={label} onClick={choose}>
+    <Button variant="mark" size="glyph" aria-label={label} title={label} onClick={choose}>
       <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
         <path d="M8 4v8M4 8h8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
       </svg>

@@ -165,7 +165,7 @@ const GROWING_CELL = "col-start-1 row-start-1 w-full";
  *  the row it sizes is the row the member is typing into. */
 const BARE = cn(
   "border-0 bg-transparent p-0 text-field-ink font-sans",
-  "text-subtitle narrow:text-ui placeholder:text-ink-faint",
+  "text-label placeholder:text-ink-faint",
 );
 
 /** A textarea exactly as tall as what is in it, to a fold. The value is drawn twice — once in a

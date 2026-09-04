@@ -314,20 +314,6 @@ test("every mark the portal claims is one the built sheet can draw", () => {
 test("the reading plane's tokens survive into the built sheet", () => {
   const css = packedStyles();
   expect(css).toContain("--leading-reading:1.65");
-  expect(css).toContain("--size-decode-cell:1ch");
-  // Both channels are declared, and each mix resolves on the cell that carries `--f` rather than at
-  // the root, where there is no such value to read. The weights themselves are taste and move.
-  for (const end of ["--ripple-lo", "--ripple-hi", "--pulse-lo", "--pulse-hi"]) {
-    expect(css).toContain(end + ":");
-  }
-  expect(css).toContain(
-    ".decode-ripple{color:color-mix(insrgb,var(--ripple-hi)calc(var(--f)*1%),var(--ripple-lo))}",
-  );
-  expect(css).toContain(
-    ".decode-pulse{color:color-mix(insrgb,var(--pulse-hi)calc(var(--f)*1%),var(--pulse-lo))}",
-  );
-  // Every colour is the palette's own steps: the ember channel names no gold of its own.
-  expect(css).toContain("--pulse-hi:color-mix(insrgb,var(--accent-secondary)");
   expect(css).toContain("--shadow-raised:");
   expect(css).toContain("box-shadow:var(--shadow-raised)");
   expect(css).toContain("--color-link:color-mix(insrgb,var(--accent-primary)70%,var(--text-primary))");

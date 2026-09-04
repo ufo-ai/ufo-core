@@ -11,7 +11,7 @@ import { cn } from "@/lib/cn";
  *  in the reading column, not a card. */
 const bubbleVariants = cva(
   cn(
-    "group/bubble relative flex w-fit max-w-bubble min-w-0 flex-col gap-2xs",
+    "group/bubble relative flex w-fit max-w-said min-w-0 flex-col gap-2xs",
     "group-data-[align=end]/message:self-end data-[align=end]:self-end",
     "data-[variant=ghost]:max-w-full",
   ),
@@ -55,7 +55,7 @@ export function BubbleContent({ className, ...props }: ComponentProps<"div">) {
       data-slot="bubble-content"
       className={cn(
         "w-fit max-w-full min-w-0 overflow-hidden rounded-bubble",
-        "px-lg py-sm text-ui leading-reading wrap-anywhere",
+        "p-2xl text-label leading-reading wrap-anywhere",
         "group-data-[align=end]/bubble:self-end",
         className,
       )}

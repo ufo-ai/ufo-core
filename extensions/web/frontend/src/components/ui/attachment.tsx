@@ -84,7 +84,7 @@ export function AttachmentGroup({ className, ...props }: ComponentProps<"div">) 
     <div
       data-slot="attachment-group"
       className={cn(
-        "-mx-sm flex min-w-0 gap-lg overflow-x-auto overscroll-x-contain px-sm py-2xs",
+        "-mx-sm flex min-w-0 gap-2xs overflow-x-auto overscroll-x-contain px-sm py-2xs",
         "scroll-fade-x scrollbar-none snap-x snap-mandatory scroll-px-sm",
         "*:data-[slot=attachment]:flex-none *:data-[slot=attachment]:snap-start",
         "*:data-[slot=attachment-thumbnail]:snap-start",
@@ -159,7 +159,7 @@ export function AttachmentThumbnail({
       data-slot="attachment-thumbnail"
       className={cn(
         "relative flex size-(--size-thumbnail) shrink-0 items-end",
-        "overflow-hidden rounded-panel border border-edge bg-card text-card-foreground",
+        "overflow-hidden rounded-bubble border border-edge bg-card text-card-foreground",
         className,
       )}
     >

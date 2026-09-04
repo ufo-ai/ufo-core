@@ -587,7 +587,7 @@ function Question({
                           moving.current = setTimeout(() => setAt(next), ANSWERED_MS);
                         }}
                       >
-                        <span className="shrink-0">{option.label}</span>
+                        <span>{option.label}</span>
                         {option.description ? (
                           <QuestionnaireChoiceDescription>
                             {option.description}
