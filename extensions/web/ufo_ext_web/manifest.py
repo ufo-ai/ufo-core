@@ -44,6 +44,7 @@ FLAGS = (
     FlagSpec(key=APP_FLAGS["issues"], what="The Issues app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["meetings"], what="The Meetings app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["metrics"], what="The Metrics app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["notification"], what="The Notification app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["radar"], what="The Radar app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["wiki"], what="The Wiki app is listed in the portal."),
     FlagSpec(key=MAIN_AGENT_FLAG, what="The workspace's main agent is listed in the portal."),

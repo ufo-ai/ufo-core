@@ -32,6 +32,7 @@ RETAINED_GLOBAL_TOOLS = frozenset(
         "record_step",
         "read_objective",
         "report_problem",
+        "notify",
         "load_skill",
         "memory_search",
         "memory_update",

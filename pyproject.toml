@@ -56,6 +56,7 @@ app_code = "ufo_ext_app_code.manifest:manifest"
 app_issues = "ufo_ext_app_issues.manifest:manifest"
 app_meetings = "ufo_ext_app_meetings.manifest:manifest"
 app_metrics = "ufo_ext_app_metrics.manifest:manifest"
+app_notification = "ufo_ext_app_notification.manifest:manifest"
 app_radar = "ufo_ext_app_radar.manifest:manifest"
 app_wiki = "ufo_ext_app_wiki.manifest:manifest"
 bedrock = "ufo_ext_bedrock:manifest"
@@ -175,6 +176,7 @@ packages = [
     "extensions/app_issues/ufo_ext_app_issues",
     "extensions/app_meetings/ufo_ext_app_meetings",
     "extensions/app_metrics/ufo_ext_app_metrics",
+    "extensions/app_notification/ufo_ext_app_notification",
     "extensions/app_radar/ufo_ext_app_radar",
     "extensions/app_wiki/ufo_ext_app_wiki",
     "extensions/brief_pipeline/ufo_ext_brief_pipeline",

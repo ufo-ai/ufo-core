@@ -48,6 +48,7 @@ from evals.suites import (
     monitor_arm,
     new_application,
     non_refusal,
+    notify_raise,
     object_tools,
     onboarding_help,
     pdf_build,
@@ -107,6 +108,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
         "bash_waiting", bash_waiting.CASES, wait_seconds=bash_waiting.WORKFLOW_WAIT_SECONDS
     ),
     capability_task("problem_report", problem_report.CASES),
+    capability_task("notify_raise", notify_raise.CASES),
     capability_task(
         "site_restart",
         site_restart.CASES,

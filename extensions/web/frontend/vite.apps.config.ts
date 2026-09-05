@@ -28,6 +28,7 @@ const APPS = [
   "issues",
   "meetings",
   "metrics",
+  "notification",
   "radar",
   "wiki",
 ];

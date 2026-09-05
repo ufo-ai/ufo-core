@@ -51,6 +51,7 @@ EXTENSIONS = (
     "app_issues",
     "app_meetings",
     "app_metrics",
+    "app_notification",
     "app_radar",
     "app_wiki",
     "turbopuffer",

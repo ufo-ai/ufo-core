@@ -1213,6 +1213,7 @@ APP_FLAGS = {
     "issues": "enable-issues-app",
     "meetings": "enable-meetings-app",
     "metrics": "enable-metrics-app",
+    "notification": "enable-notification-app",
     "radar": "enable-radar-app",
     "wiki": "enable-wiki-app",
 }
