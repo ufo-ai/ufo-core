@@ -54,7 +54,9 @@ from those, so a denial withholds that member's authority here exactly as it doe
 Elsewhere omission means `WorkspaceAuthority`, except a turn carrying a durable `on_behalf_of`
 member — a scheduled fire, a subagent, a monitor's arrival — retains `MemberAuthority`; a handler
 that refuses for want of a member raises `SpeakerRequired`, and the tool error then lists the active
-member refs so the model retries with the right one.
+member refs so the model retries with the right one. Connector account selection is one such
+handler: a `WorkspaceAuthority` call in a channel sees only shared connections, so when the
+provider's accounts are all members' private ones the miss is `SpeakerRequired`, not "no account".
 
 `speaker_member_id` and `on_behalf_of_member_id` are mutually exclusive durable encodings. Core
 decodes them once, passes the exact value through model selection, internal invocation, probes,

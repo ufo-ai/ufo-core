@@ -774,7 +774,9 @@ class ToolContext:
         targets any account this turn may use; omitted, MemberAuthority prefers that member's own
         private grants and agent-shared ones are the fallback, while WorkspaceAuthority admits only
         agent-shared grants — exactly one account must exist in the winning tier. Fails loud when no
-        grant subsystem is configured or the selection is absent or ambiguous."""
+        grant subsystem is configured or the selection is absent or ambiguous. A WorkspaceAuthority
+        call that misses only because the accounts are members' private ones raises
+        `SpeakerRequired`, so the engine can name the member refs a retry may carry."""
         return (await self.connector_connection(provider, account_id)).account_id
 
     async def connector_connection(
@@ -783,7 +785,7 @@ class ToolContext:
         """The exact member-owned connection generation this turn may use. Source registration
         persists its id so disconnecting and reconnecting the same external account cannot revive a
         prior member's sync."""
-        private, shared = await self._connector_account_tiers(provider)
+        private, shared, withheld = await self._connector_account_tiers(provider)
         if account_id is not None:
             match = next(
                 (grant for grant in (*private, *shared) if grant.account_id == account_id),
@@ -797,11 +799,21 @@ class ToolContext:
                     account_id=match.account_id,
                     owner_member_id=match.owner_member_id,
                 )
+            if any(grant.account_id == account_id for grant in withheld):
+                raise SpeakerRequired(
+                    f"{provider!r} account {account_id!r} is a member's private account, and this "
+                    "call names no member"
+                )
             raise ValueError(
                 f"no active {provider!r} account {account_id!r} is available to this turn"
             )
         preferred = private or shared
         if not preferred:
+            if withheld:
+                raise SpeakerRequired(
+                    f"every {provider!r} account is a member's private account, and this call "
+                    "names no member"
+                )
             raise ValueError(
                 f"no {provider!r} account is available to this turn — connect one with "
                 "connect_account"
@@ -825,7 +837,7 @@ class ToolContext:
         this call's authority. A connector call can stage files after selecting its account; this
         last-mile read keeps a revoke, disconnect, regrant, or sharing change during that work from
         reaching the broker as an external side effect."""
-        private, shared = await self._connector_account_tiers(selected.provider)
+        private, shared, _ = await self._connector_account_tiers(selected.provider)
         current = next(
             (
                 grant
@@ -847,26 +859,32 @@ class ToolContext:
         that member's own grants plus grants shared with the agent; `WorkspaceAuthority` admits
         shared grants only. A member's scheduled job and delegated subagents therefore keep their
         private connections without turning workspace work into member work."""
-        private, shared = await self._connector_account_tiers(provider)
+        private, shared, _ = await self._connector_account_tiers(provider)
         return tuple(sorted({grant.account_id for grant in (*private, *shared)}))
 
-    async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], list[Grant]]:
+    async def _connector_account_tiers(
+        self, provider: str
+    ) -> tuple[list[Grant], list[Grant], list[Grant]]:
+        """The provider's grants this call may use, private then shared, and third the private
+        grants a WorkspaceAuthority call cannot use — the ones a member ref would have unlocked."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         acting = authority_member_id(self.authority)
-        granted = await self.grants.active_grants()
+        granted = [
+            grant for grant in await self.grants.active_grants() if grant.provider == provider
+        ]
         private = sorted(
             (
                 grant
                 for grant in granted
-                if grant.provider == provider
-                and not grant.connection_shared
-                and grant.owner_member_id == acting
+                if not grant.connection_shared and grant.owner_member_id == acting
             ),
             key=lambda grant: grant.account_id,
         )
         shared = sorted(
-            (grant for grant in granted if grant.provider == provider and grant.connection_shared),
+            (grant for grant in granted if grant.connection_shared),
             key=lambda grant: grant.account_id,
         )
-        return private, shared
+        if acting is not None:
+            return private, shared, []
+        return private, shared, [grant for grant in granted if not grant.connection_shared]

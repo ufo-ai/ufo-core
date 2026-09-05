@@ -48,7 +48,7 @@ from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.runtime.surfaces.admission import Admission, ConnectResume
 from ufo.runtime.surfaces.cli import CONNECTED_PARAM, callback_router, portal_url
-from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.context import SpeakerRequired, ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -1740,7 +1740,9 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(db: None) -> None:
     """The runtime check: a private grant resolves only for its grantor's turns; a shared grant
-    for anyone's; a speakerless (scheduled/internal) turn sees only shared grants."""
+    for anyone's; a speakerless (scheduled/internal) turn sees only shared grants. A speakerless
+    miss that a member ref would have unlocked is `SpeakerRequired`; a provider nobody connected
+    is a plain refusal."""
     workspace_id = await _workspace()
     grantor_id, agent_id = await _member_agent(workspace_id)
     other_id = uuid4()
@@ -1756,16 +1758,17 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
         )
     conversation_id = await _conversation(workspace_id, grantor_id)
     store = GrantStore()
-    for account_id, member, shared in (
-        ("acct-private", grantor_id, False),
-        ("acct-shared", other_id, True),
-        ("acct-other-private", other_id, False),
+    for provider, account_id, member, shared in (
+        ("stub", "acct-private", grantor_id, False),
+        ("stub", "acct-shared", other_id, True),
+        ("stub", "acct-other-private", other_id, False),
+        ("solo", "acct-solo", grantor_id, False),
     ):
         await _record(
             store,
             workspace_id,
             agent_id,
-            provider="stub",
+            provider=provider,
             account_id=account_id,
             host=GRANTED_HOST,
             grantor_member_id=member,
@@ -1782,6 +1785,12 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
         assert await speakerless.connector_accounts("stub") == ("acct-shared",)
         with pytest.raises(ValueError, match="acct-other-private"):
             await ctx.connector_account("stub", "acct-other-private")
+        with pytest.raises(SpeakerRequired, match="acct-private"):
+            await speakerless.connector_account("stub", "acct-private")
+        with pytest.raises(SpeakerRequired, match="every 'solo' account"):
+            await speakerless.connector_account("solo")
+        with pytest.raises(ValueError, match="connect one with connect_account"):
+            await speakerless.connector_account("nobody")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
