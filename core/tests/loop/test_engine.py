@@ -3257,9 +3257,15 @@ async def test_a_refused_intent_meters_the_refusal_as_the_turn_it_failed(
     assert "ufo.turn_rounds_total" not in points
 
 
-async def test_terminal_records_cached_share_of_prompt_tokens(db: None, tmp_path: Path) -> None:
+async def test_terminal_records_cached_share_of_prompt_tokens(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     turn = await _seed_turn("queued", None)
-    frame = await _engine(turn, CachedModel(), tmp_path).run()
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        frame = await _engine(turn, CachedModel(), tmp_path).run()
+    (record,) = [r for r in caplog.records if r.getMessage() == "turn.terminal"]
+    assert record.levelno == logging.INFO
+    assert record.ufo["turn_status"] == "done"
     assert frame.tokens == 10
     assert frame.cache_percent == 57
     async with workspace_tx() as connection:
@@ -5404,9 +5410,11 @@ async def test_the_terminal_log_carries_the_error_class_and_never_the_message(
     with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(ModelStreamError):
         await engine.run()
 
-    terminal = [r.ufo for r in caplog.records if r.getMessage() == "turn.terminal"]
-    assert len(terminal) == 1
-    assert terminal[0]["status"] == "failed"
+    records = [r for r in caplog.records if r.getMessage() == "turn.terminal"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    terminal = [r.ufo for r in records]
+    assert terminal[0]["turn_status"] == "failed"
     assert terminal[0]["error_class"] == "RuntimeError"
     assert terminal[0]["profile"] == "main"
     assert terminal[0]["parent_turn_id"] == ""

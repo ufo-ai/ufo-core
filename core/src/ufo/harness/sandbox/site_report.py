@@ -101,7 +101,7 @@ class SiteReporter:
             warn(
                 "ingress.site_report_refused",
                 conversation_id=str(claims.conversation_id),
-                status=answered.status_code,
+                http_status=answered.status_code,
             )
 
 

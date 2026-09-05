@@ -866,7 +866,7 @@ class BalanceTopup:
                 raise _ChargeInFlight(str(refused), refused.status) from refused
             if refused.status != HTTPStatus.PAYMENT_REQUIRED:
                 raise
-            warn("metronome.topup_declined", workspace_id=str(workspace_id), status="402")
+            warn("metronome.topup_declined", workspace_id=str(workspace_id), http_status="402")
             return None
         match intent:
             case {"id": str() as intent_id, "status": "succeeded"}:
@@ -874,7 +874,7 @@ class BalanceTopup:
         warn(
             "metronome.topup_declined",
             workspace_id=str(workspace_id),
-            status=str(intent.get("status")),
+            intent_status=str(intent.get("status")),
         )
         return None
 

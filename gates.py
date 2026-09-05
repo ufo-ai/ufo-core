@@ -1179,6 +1179,31 @@ def _init_code_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+LOG_EMITTERS = frozenset({"log", "warn", "log_error"})
+RESERVED_LOG_FIELDS = frozenset({"status"})
+
+
+def _log_field_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """`status` on a log record is Datadog's reserved level attribute: its remapper re-levels the
+    record from the value, so a turn's `failed` filed as emergency, `done` as debug, and no failure
+    ever answered `status:error`. The emitter alone sets a record's level; the field takes a name
+    that says what it is (`turn_status`, `http_status`)."""
+    failures: list[str] = []
+    for rel, tree in trees.items():
+        for node in ast.walk(tree):
+            match node:
+                case ast.Call(
+                    func=ast.Name(id=name) | ast.Attribute(attr=name), keywords=keywords
+                ) if name in LOG_EMITTERS:
+                    failures.extend(
+                        f"{rel}: {name}() field {keyword.arg!r} is Datadog's reserved level "
+                        f"attribute — name the field for what it holds"
+                        for keyword in keywords
+                        if keyword.arg in RESERVED_LOG_FIELDS
+                    )
+    return failures
+
+
 def _to_thread_failures(trees: dict[Path, ast.Module]) -> list[str]:
     failures = []
     for rel, tree in trees.items():
@@ -2257,6 +2282,7 @@ def main() -> int:
     failures.extend(_consent_mark_failures(trees))
     failures.extend(_drawn_mark_failures())
     failures.extend(_to_thread_failures(trees))
+    failures.extend(_log_field_failures(trees))
     failures.extend(_ingress_containment_failures(trees))
     failures.extend(_sandbox_program_failures(trees))
     failures.extend(_lexical_containment_failures(trees))

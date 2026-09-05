@@ -3785,10 +3785,10 @@ class TurnEngine:
                 profile=self.profile,
             )
         meter.exited(frame.status)
-        log(
+        (log_error if frame.status == "failed" else log)(
             "turn.terminal",
             turn_id=str(self.turn.id),
-            status=frame.status,
+            turn_status=frame.status,
             error_class=frame.error_class or "",
             profile=self.profile,
             parent_turn_id=str(self.turn.parent_turn_id or ""),
@@ -3861,7 +3861,7 @@ class TurnEngine:
                     log(
                         "turn.commit_refused_by_arrivals",
                         turn_id=str(self.turn.id),
-                        status=status,
+                        turn_status=status,
                         pending=pending,
                         absorbed=len(absorbed),
                     )

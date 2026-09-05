@@ -99,7 +99,7 @@ class PreviewRenderer:
             log("render_previews.unreachable", filename=filename, error_class=type(error).__name__)
             return
         if response.status_code != 200:
-            log("render_previews.refused", filename=filename, status=response.status_code)
+            log("render_previews.refused", filename=filename, http_status=response.status_code)
             return
         size_bytes = int(response.json()["size_bytes"])
         async with workspace_tx() as connection:

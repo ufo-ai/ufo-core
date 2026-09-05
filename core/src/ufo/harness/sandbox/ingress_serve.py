@@ -647,7 +647,7 @@ class IngressServe:
                 warn(
                     "ingress.upstream_not_answering",
                     conversation_id=str(authorized.conversation_id),
-                    status=upstream.status_code,
+                    http_status=upstream.status_code,
                 )
                 return self._not_answering(request, authorized)
             try:

@@ -695,7 +695,7 @@ async def test_a_pending_arrival_refuses_the_commit_and_the_refusal_is_logged(
     recycled = [
         record.ufo for record in caplog.records if record.getMessage() == "turn.answer_recycled"
     ]
-    assert [(entry["status"], entry["pending"]) for entry in guard] == [("done", 1)]
+    assert [(entry["turn_status"], entry["pending"]) for entry in guard] == [("done", 1)]
     assert [entry["answer_chars"] for entry in recycled] == [len("first answer")]
 
 

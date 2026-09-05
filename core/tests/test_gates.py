@@ -50,6 +50,19 @@ def _check_the_gate_walk_skips_vendored_dependency_trees() -> None:
     assert not gates._vendored(Path("extensions/web/tests/test_ext_web.py"))
 
 
+def _check_log_field_gate_rejects_the_reserved_status_field() -> None:
+    reserved = ast.parse(
+        'log("turn.terminal", turn_id="t", status="failed")\n'
+        'o11y.warn("ingress.refused", status=502)\n'
+        'log_error("jobs.failed", job="j", turn_status="failed")\n'
+        'emit_metric("turn_terminal_total", status="done")\n'
+    )
+    failures = gates._log_field_failures({CORE_FILE: reserved})
+    assert len(failures) == 2
+    assert all("'status'" in failure and "reserved" in failure for failure in failures)
+    assert gates._log_field_failures({CORE_FILE: ast.parse('log("x", http_status=200)\n')}) == []
+
+
 def _check_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("from ufo.db import workspace_tx\n")}
     failures = gates._sdk_import_failures(trees)
@@ -1027,6 +1040,7 @@ def _check_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> 
 def test_repository_gates() -> None:
     for check in (
         _check_the_gate_walk_skips_vendored_dependency_trees,
+        _check_log_field_gate_rejects_the_reserved_status_field,
         _check_sdk_only_gate_rejects_core_internal_import_from_extensions,
         _check_sdk_only_gate_rejects_bare_ufo_import_from_extensions,
         _check_sdk_only_gate_allows_sdk_import_from_extensions,
