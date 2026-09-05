@@ -57,7 +57,7 @@ producer turn ──notify(subject, body)──▶ inbox row (for one agent, abo
 
 ### Data model
 
-One table, extension-owned, own migration, `workspace_id` on every row. Borrowed from sources: a row
+One table, extension-owned, one migration per unit, `workspace_id` on every row. Borrowed from sources: a row
 is keyed by the agent it is for, the way a page is keyed by the source that holds it, and folded by
 `subject` the way a page is folded by identity. `subject` is the identity, `body` the latest
 revision, `occurrences` the revision count. Today every row is for the Notification agent and
@@ -395,7 +395,7 @@ eval is stable, not before.
 | `store.post` | two posts on one subject are one row with `occurrences=2` and the second body; a post after triage reopens the row, counted on, with the new producer; the same subject for two members is two rows; the ninth subject in a turn refuses; a relay turn refuses; the Notification agent's own turn refuses |
 | `member_reach` | a live-surface conversation is absent; another member's private conversation is absent; a conversation the member never spoke in is absent; newest first |
 | `InboxDrain.run` | twenty-five rows for one lane produce one turn whose inbound carries all twenty-five; two members are two lanes and two turns; a lane inside the cooldown is skipped and rows stay untriaged; a failed invoke leaves the lease to lapse; the lane conversation is opened on the first batch and reused on the second |
-| `deliver` | picks the newest reach; records the relay turn on the rows; a second `deliver` in the same triage turn refuses; a second call on the same rows settles on the same relay turn through the key; no reach marks portal-only |
+| `deliver` | picks the newest reach; records the relay turn on the rows; a second `deliver` in the same turn — triage turn or not — meets the relay the first founded and refuses, its rows left undelivered; no reach marks portal-only |
 | the loop test (load-bearing) | seed, drain, deliver, then have the relay turn call `notify` and assert refusal, and that a second tick founds no turn. Mutation-check by deleting the `delivered_turn_id` lookup. |
 | seam, via `extensions/sample` | an agent with no allowlist is not offered `action:notification:deliver`; naming it in an `object_apply agent` spec grants nothing; only one installed provision names it |
 
@@ -405,7 +405,7 @@ ship first (the `problem_report.py` shape: opposing pairs, deterministic scorers
 | Suite | Cases |
 |---|---|
 | `notify_raise` | A founder with Gmail, GitHub, and Stripe connected. Signal: a churn spike, a deploy failed on main, an investor deadline unanswered, a customer turning, a failed-payment cluster (pass = one call, the source's subject), and churn plus a failed deploy in one report (pass = exactly two calls, two subjects). Restraint: green CI, newsletters and receipts, one small refund, a member reading the answer now, the agent's own failed step (pass = zero calls), and a sync whose connection broke (pass = `report_problem`, never `notify`). |
-| `notify_triage` | one batch of twelve rows of which three merit a member; pass = one `deliver` naming exactly those three, text carrying the load-bearing fact. A second case seeds a recalled "stop telling me about source/ashby" memory item and two Ashby rows; pass = neither delivered. |
+| `notify_triage` | The same founder, on the `notification` agent. Twelve rows of which three merit a push (a churn spike taking the two largest accounts, a deploy failed on main, an investor deadline unanswered) beside nine routine ones (pass = one `deliver` naming exactly those three); nine routine rows alone (pass = no `deliver`); one outage among eight routine rows (pass = one `deliver` naming it alone). Every case also refuses a `notify` from the app on its own batch. |
 
 `notify-text.toml` arms: control; `notify` description with and without the "one call per subject"
 sentence (the SQL fold already makes it true, so it must prove itself); the triage prompt with and

@@ -62,7 +62,7 @@ from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import ConnectionRecorded
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
-from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.context import ExtensionContext, TurnInvoker, context_for
 from ufo.runtime.ext.hooks import (
     CONNECTION_RECORDED,
     HOOK_TIMEOUT_SECONDS,
@@ -410,6 +410,7 @@ def turn_tools(
     artifact_token_secret: str = "",
     member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY,
     member_context_blob: WorkspaceBlobStore | None = None,
+    invoker: TurnInvoker | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — the workspace-scoped ExtensionContext each extension tool's
@@ -463,6 +464,7 @@ def turn_tools(
             member_context_read=manifest.member_context_read,
             member_context_authority=member_context_authority,
             member_context_blob=member_context_blob,
+            invoker=invoker,
         )
         for tool in declared_tools:
             if tool.bound is not None:

@@ -414,6 +414,8 @@ def test_the_drain_message_walls_each_body_and_escapes_its_own_close() -> None:
         produced_in_conversation_id=uuid4(),
         triaged_turn_id=None,
         triaged_at=None,
+        delivered_turn_id=None,
+        delivered_surface=None,
         last_raised_at=now,
         created_at=now,
         updated_at=now,

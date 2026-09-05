@@ -7,11 +7,14 @@ spoken: a tool call never enters a delivered reply, so no redaction stands betwe
 member. What the model sees back is one line, plus the reason when a fence refuses, which is what
 makes the fences steerable rather than silent.
 
-Two refusals are structural. A turn carrying workspace authority names no member, and a
+Three refusals are structural. A turn carrying workspace authority names no member, and a
 notification nobody is the recipient of is not one. The Notification agent's own turns cannot
-post: an inbox that mails itself is the loop this whole design must be unable to enter. The inbox
-is the agent this extension provisioned, found by that provision and never by name — a member's own
-agent may hold `notification`, and the shipped one then lands on a free variant."""
+post: an inbox that mails itself is the loop this whole design must be unable to enter. And a relay
+turn — the one a delivery founded in the member's own conversation — cannot post either, so a
+delivery can never raise a notification about itself; the fence is the exact turn id the delivery
+recorded, never a window. The inbox is the agent this extension provisioned, found by that
+provision and never by name — a member's own agent may hold `notification`, and the shipped one then
+lands on a free variant."""
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,6 +48,9 @@ NOTIFY_NEEDS_A_MEMBER = (
 )
 NOTIFY_NO_INBOX = "the Notification app is not live in this workspace, so there is no inbox"
 NOTIFY_SELF = "the notification agent does not notify itself"
+NOTIFY_INSIDE_A_DELIVERY = (
+    "this turn is delivering a notification; it does not raise one about that"
+)
 NOTIFY_QUEUED = "Queued. Nothing answers back on this conversation."
 NOTIFY_FOLDED = (
     "Folded into the notification on this subject, now raised {n} times. Nothing answers "
@@ -88,12 +94,15 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
     if member_id is None:
         return _refusal(NOTIFY_NEEDS_A_MEMBER)
     ext = _require_ext(ctx.ext)
+    store = NotificationStore(ext)
+    if await store.is_delivery_turn(ctx.turn.id):
+        return _refusal(NOTIFY_INSIDE_A_DELIVERY)
     inbox = await inbox_agent_id(ext)
     if inbox is None:
         return _refusal(NOTIFY_NO_INBOX)
     if inbox == ctx.turn.agent_id:
         return _refusal(NOTIFY_SELF)
-    posted = await NotificationStore(ext).post(
+    posted = await store.post(
         to_agent_id=inbox,
         member_id=member_id,
         subject=args.subject,

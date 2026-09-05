@@ -13,8 +13,10 @@ grant."""
 import copy
 import json
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, Field, create_model
 
@@ -48,7 +50,7 @@ from ufo.host.tools.builtins import SPAWN_TOOL
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
-from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.ext.context import ExtensionContext, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
 from ufo.runtime.ext.surface import TurnTailer
@@ -90,6 +92,7 @@ from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolDef, ToolRegistry
 from ufo.runtime.tools.tasks import run_task
 from ufo.runtime.turns.audience import Audience
+from ufo.runtime.workspace import ws_current
 from ufo.schema.records import SCHEDULED_ADMISSION
 
 RUN_INPUT_TYPES: dict[str, type] = {
@@ -116,6 +119,11 @@ class HostEnvironment:
     public_base_url: str | None = None
     home_surface: str | None = None
     artifact_token_secret: str = ""
+    invoker_for: Callable[[UUID], TurnInvoker] | None = None
+    """The internal turn seam an extension tool reaches through its context — the same factory the
+    jobs role and the delivery sweep hold, bound to the turn's workspace at assembly. A tool that
+    admits a turn elsewhere (a notification delivered into a member's own conversation) needs it;
+    a deploy that wires none leaves every tool context without one, and such a tool fails loud."""
 
     async def assemble(self, request: AssembleRequest) -> AssembledTurn:
         turn, agent, profile = request.turn, request.agent, request.profile
@@ -239,6 +247,9 @@ class HostEnvironment:
             artifact_token_secret=self.artifact_token_secret,
             member_context_authority=member_context_authority,
             member_context_blob=self.blob,
+            invoker=(
+                None if self.invoker_for is None else self.invoker_for(ws_current().workspace_id)
+            ),
         )
 
     def hooks(self, *, audience: Audience) -> HookChain:

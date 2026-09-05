@@ -49,6 +49,7 @@ from evals.suites import (
     new_application,
     non_refusal,
     notify_raise,
+    notify_triage,
     object_tools,
     onboarding_help,
     pdf_build,
@@ -109,6 +110,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("problem_report", problem_report.CASES),
     capability_task("notify_raise", notify_raise.CASES),
+    capability_task("notify_triage", notify_triage.CASES, agent=notify_triage.AGENT),
     capability_task(
         "site_restart",
         site_restart.CASES,

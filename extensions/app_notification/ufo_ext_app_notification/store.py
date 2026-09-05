@@ -51,12 +51,15 @@ notification = sa.Table(
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("triaged_turn_id", sa.Uuid, nullable=True),
     sa.Column("triaged_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("delivered_turn_id", sa.Uuid, nullable=True),
+    sa.Column("delivered_surface", sa.Text, nullable=True),
     sa.Column("last_raised_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.Index(
         "notification_subject", "workspace_id", "to_agent_id", "member_id", "subject", unique=True
     ),
+    sa.Index("notification_delivered_turn", "workspace_id", "delivered_turn_id"),
 )
 
 _COLUMNS = tuple(notification.c)
@@ -89,6 +92,8 @@ class Notification:
     produced_in_conversation_id: UUID
     triaged_turn_id: UUID | None
     triaged_at: datetime | None
+    delivered_turn_id: UUID | None
+    delivered_surface: str | None
     last_raised_at: datetime
     created_at: datetime
     updated_at: datetime
@@ -130,6 +135,8 @@ def _row(row: sa.RowMapping) -> Notification:
         produced_in_conversation_id=row["produced_in_conversation_id"],
         triaged_turn_id=row["triaged_turn_id"],
         triaged_at=None if row["triaged_at"] is None else _aware(row["triaged_at"]),
+        delivered_turn_id=row["delivered_turn_id"],
+        delivered_surface=row["delivered_surface"],
         last_raised_at=_aware(row["last_raised_at"]),
         created_at=_aware(row["created_at"]),
         updated_at=_aware(row["updated_at"]),
@@ -245,6 +252,8 @@ class NotificationStore:
                         claim_expires_at=None,
                         triaged_turn_id=None,
                         triaged_at=None,
+                        delivered_turn_id=None,
+                        delivered_surface=None,
                         last_raised_at=sa.func.now(),
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
@@ -277,6 +286,8 @@ class NotificationStore:
                                 (_TRIAGED, sa.null()), else_=notification.c.claim_expires_at
                             ),
                             "triaged_turn_id": None,
+                            "delivered_turn_id": None,
+                            "delivered_surface": None,
                             "last_raised_at": sa.func.now(),
                             "updated_at": sa.func.now(),
                         },
@@ -414,5 +425,47 @@ class NotificationStore:
                     triaged_at=sa.func.now(),
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
+                )
+            )
+
+    async def is_delivery_turn(self, turn_id: UUID) -> bool:
+        """Whether `turn_id` is a relay turn a delivery founded — the loop fence `notify` reads."""
+        async with self.ctx.transaction() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(notification.c.id)
+                    .where(
+                        notification.c.workspace_id == self.ctx.workspace_id,
+                        notification.c.delivered_turn_id == turn_id,
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        return found is not None
+
+    async def deliverable(
+        self, member_id: UUID, names: tuple[str, ...]
+    ) -> tuple[Notification, ...]:
+        """The named rows that concern `member_id` and have not been delivered."""
+        rows = await self.rows()
+        wanted = set(names)
+        return tuple(
+            row
+            for row in rows
+            if row.name in wanted and row.member_id == member_id and row.delivered_surface is None
+        )
+
+    async def mark_delivered(
+        self, rows: tuple[Notification, ...], *, turn_id: UUID | None, surface: str
+    ) -> None:
+        async with self.ctx.transaction() as connection:
+            await connection.execute(
+                sa.update(notification)
+                .where(
+                    notification.c.workspace_id == self.ctx.workspace_id,
+                    notification.c.id.in_([row.id for row in rows]),
+                )
+                .values(
+                    delivered_turn_id=turn_id, delivered_surface=surface, updated_at=sa.func.now()
                 )
             )

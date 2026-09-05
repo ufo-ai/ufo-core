@@ -543,7 +543,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "web_0002",
         "report_digest_0002",
         "enrichment_0002",
-        "notification_0002",
+        "notification_0003",
     } <= set(heads)
     assert len(heads) == 17
 

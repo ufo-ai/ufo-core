@@ -381,6 +381,7 @@ def run() -> None:
             public_base_url=config.connect.public_base_url,
             home_surface=browser_home,
             artifact_token_secret=artifact_secret,
+            invoker_for=invoker_for,
         ),
         registry=registry,
         skills=skills,

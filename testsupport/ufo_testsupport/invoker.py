@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 from dbos import DBOSClient
 
 from ufo.runtime.authority import ExecutionAuthority
-from ufo.runtime.ext.context import TurnRuntimeConfig
+from ufo.runtime.ext.context import MemberReach, TurnRuntimeConfig
 from ufo.runtime.jobs import InvokerFactory
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 
@@ -74,3 +74,6 @@ class RecordingInvoker:
             )
         )
         return uuid4()
+
+    async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]:
+        return ()

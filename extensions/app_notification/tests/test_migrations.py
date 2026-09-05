@@ -1,9 +1,10 @@
 """The extension's migrations carry each release's declaration onto the `notification` agent rows a
 workspace already holds: a provisioning pass writes setup and purpose alone, so without this the
-prompt a release declares reaches new workspaces only. A row moves where it still says what the
-release that created it said; a member's own wording, an archived row, and another extension's row
-stand."""
+prompt and the allowlist a release declares reach new workspaces only. The prompt moves where the
+row still says what the release before said — a member's own wording stands — the allowlist moves on
+every live shipped row, and an archived row and another extension's row stand."""
 
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -11,7 +12,12 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from ufo_ext_app_notification.manifest import NAME, NOTIFICATION_AGENT_PROMPT, VERSION
+from ufo_ext_app_notification.manifest import (
+    NAME,
+    NOTIFICATION_AGENT,
+    NOTIFICATION_AGENT_PROMPT,
+    VERSION,
+)
 
 from ufo.db import MIGRATIONS_DIR
 from ufo.host.ext.loader import migration_locations
@@ -19,6 +25,8 @@ from ufo.host.ext.loader import migration_locations
 CORE_HEAD = (MIGRATIONS_DIR / "versions" / "HEAD").read_text().strip()
 RELEASED = "notification_0001"
 TRIAGE = "notification_0002"
+DELIVERY = "notification_0003"
+EDITED_PROMPT = "only tell me about churn"
 
 
 def _config(database_path: Path) -> Config:
@@ -33,17 +41,25 @@ def _config(database_path: Path) -> Config:
     return config
 
 
-def _revision(config: Config, revision: str) -> ModuleType:
-    return ScriptDirectory.from_config(config).get_revision(revision).module
+def _revision(revision: str) -> ModuleType:
+    return ScriptDirectory.from_config(_config(Path("unused.db"))).get_revision(revision).module
 
 
-TRIAGE_MODULE = _revision(_config(Path("unused.db")), TRIAGE)
+TRIAGE_MODULE = _revision(TRIAGE)
+DELIVERY_MODULE = _revision(DELIVERY)
 RELEASED_PROMPT: str = TRIAGE_MODULE.RELEASED_PROMPT
 RELEASED_VERSION: str = TRIAGE_MODULE.RELEASED_VERSION
+TRIAGE_PROMPT: str = DELIVERY_MODULE.PREVIOUS_PROMPT
+TRIAGE_VERSION: str = DELIVERY_MODULE.PREVIOUS_VERSION
+TRIAGE_TOOLS: list[str] = list(DELIVERY_MODULE.PREVIOUS_TOOLS)
+DELIVERY_TOOLS = list(NOTIFICATION_AGENT.tools or ())
 
 
-def _seed(database_path: Path) -> sa.Engine:
+def _seed(database_path: Path, prompt: str, version: str, tools: list[str] | None) -> sa.Engine:
+    """One workspace holding the shipped row as the release left it, one whose member rewrote the
+    prompt, one whose shipped row is archived, and another extension's row saying the same words."""
     engine = sa.create_engine(f"sqlite:///{database_path}")
+    encoded = None if tools is None else json.dumps(tools)
     with engine.connect() as connection:
         connection.execute(
             sa.text(
@@ -55,62 +71,69 @@ def _seed(database_path: Path) -> sa.Engine:
         )
         connection.execute(
             sa.text(
-                "insert into agent (id, workspace_id, name, prompt, model, is_main, visibility, "
-                "provisioned_by, provisioned_name, provisioned_version, created_at, updated_at) "
-                "values (:id, :ws, :name, :prompt, 'auto', 0, 'workspace', :by, :declared, "
-                ":version, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                "insert into agent (id, workspace_id, name, prompt, tools, model, is_main, "
+                "visibility, provisioned_by, provisioned_name, provisioned_version, created_at, "
+                "updated_at) values (:id, :ws, :name, :prompt, :tools, 'auto', 0, 'workspace', "
+                ":by, :declared, :version, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             [
                 {
                     "id": "shipped",
                     "ws": "w",
                     "name": "notification",
-                    "prompt": RELEASED_PROMPT,
+                    "prompt": prompt,
+                    "tools": encoded,
                     "by": NAME,
                     "declared": "notification",
-                    "version": RELEASED_VERSION,
+                    "version": version,
                 },
                 {
                     "id": "edited",
                     "ws": "x",
                     "name": "notification-app-notification",
-                    "prompt": "only tell me about churn",
+                    "prompt": EDITED_PROMPT,
+                    "tools": encoded,
                     "by": NAME,
                     "declared": "notification",
-                    "version": RELEASED_VERSION,
+                    "version": version,
                 },
                 {
                     "id": "other",
                     "ws": "w",
                     "name": "radar",
-                    "prompt": RELEASED_PROMPT,
+                    "prompt": prompt,
+                    "tools": encoded,
                     "by": "app_radar",
                     "declared": "radar",
-                    "version": RELEASED_VERSION,
+                    "version": version,
                 },
             ],
         )
         connection.execute(
             sa.text(
                 "insert into agent (id, workspace_id, name, archived_name, archived_at, prompt, "
-                "model, is_main, visibility, provisioned_by, provisioned_name, "
+                "tools, model, is_main, visibility, provisioned_by, provisioned_name, "
                 "provisioned_version, created_at, updated_at) values "
                 "('archived', 'y', '~archived-a', 'notification', CURRENT_TIMESTAMP, :prompt, "
-                "'auto', 0, 'workspace', :by, 'notification', :version, CURRENT_TIMESTAMP, "
+                ":tools, 'auto', 0, 'workspace', :by, 'notification', :version, CURRENT_TIMESTAMP, "
                 "CURRENT_TIMESTAMP)"
             ),
-            {"prompt": RELEASED_PROMPT, "by": NAME, "version": RELEASED_VERSION},
+            {"prompt": prompt, "tools": encoded, "by": NAME, "version": version},
         )
         connection.commit()
     return engine
 
 
-def _rows(engine: sa.Engine) -> dict[str, tuple[str, str]]:
+def _rows(engine: sa.Engine) -> dict[str, tuple[str, str, list[str] | None]]:
     with engine.connect() as connection:
         return {
-            row.id: (row.prompt, row.provisioned_version)
+            row.id: (
+                row.prompt,
+                row.provisioned_version,
+                None if row.tools is None else json.loads(row.tools),
+            )
             for row in connection.execute(
-                sa.text("select id, prompt, provisioned_version from agent")
+                sa.text("select id, prompt, provisioned_version, tools from agent")
             ).all()
         }
 
@@ -120,14 +143,36 @@ def test_the_triage_prompt_reaches_the_shipped_row_and_no_other(tmp_path: Path) 
     config = _config(database_path)
     command.upgrade(config, CORE_HEAD)
     command.upgrade(config, RELEASED)
-    engine = _seed(database_path)
+    engine = _seed(database_path, RELEASED_PROMPT, RELEASED_VERSION, None)
     command.upgrade(config, TRIAGE)
     after = _rows(engine)
     command.downgrade(config, RELEASED)
     restored = _rows(engine)
 
-    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION)
-    assert after["edited"] == ("only tell me about churn", RELEASED_VERSION)
-    assert after["other"] == (RELEASED_PROMPT, RELEASED_VERSION)
-    assert after["archived"] == (RELEASED_PROMPT, RELEASED_VERSION)
-    assert restored["shipped"] == (RELEASED_PROMPT, RELEASED_VERSION)
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, None)
+    assert after["edited"] == (EDITED_PROMPT, RELEASED_VERSION, None)
+    assert after["other"] == (RELEASED_PROMPT, RELEASED_VERSION, None)
+    assert after["archived"] == (RELEASED_PROMPT, RELEASED_VERSION, None)
+    assert restored["shipped"] == (RELEASED_PROMPT, RELEASED_VERSION, None)
+
+
+def test_the_deliver_grant_reaches_every_live_shipped_row_and_the_prompt_the_unedited_one(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, TRIAGE)
+    engine = _seed(database_path, TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+    command.upgrade(config, DELIVERY)
+    after = _rows(engine)
+    command.downgrade(config, TRIAGE)
+    restored = _rows(engine)
+
+    assert "action:notification:deliver" in DELIVERY_TOOLS
+    assert "action:notification:deliver" not in TRIAGE_TOOLS
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["other"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+    assert after["archived"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+    assert restored["shipped"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)

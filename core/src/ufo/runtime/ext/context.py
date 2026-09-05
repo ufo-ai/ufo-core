@@ -708,9 +708,24 @@ class AgentArchived(ValueError):
     it."""
 
 
+@dataclass(frozen=True)
+class MemberReach:
+    """One conversation an invoke reaches a member through: a durable-surface conversation whose
+    audience is that member's own and in which they spoke, with the agent it binds, the surface
+    that posts to it, and when they last spoke there. Identity and routing only: no title, no
+    body, no transcript."""
+
+    surface: str
+    conversation_id: UUID
+    agent_id: UUID
+    last_spoke_at: datetime
+
+
 class TurnInvoker(Protocol):
     """The internal turn seam a background handler drives. It never consumes a member's pause;
-    idempotency collapses a redelivered invocation to the turn already admitted."""
+    idempotency collapses a redelivered invocation to the turn already admitted. It also answers
+    where an invoke reaches a member who is not in the invoking conversation: the durable-surface
+    conversations they speak in, which admission registers a writeback for."""
 
     async def invoke(
         self,
@@ -727,6 +742,8 @@ class TurnInvoker(Protocol):
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None: ...
+
+    async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]: ...
 
 
 class ModelResolver(Protocol):
@@ -1826,6 +1843,18 @@ class ExtensionContext:
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
         )
+
+    async def member_reach(self, member_id: UUID, limit: int = 4) -> tuple[MemberReach, ...]:
+        """The durable-surface conversations `member_id` speaks in, newest first — where an
+        `invoke` reaches them when they are not in the invoking conversation, because admission
+        registers a writeback for a turn entering one. Member data, so gated like the roster; a
+        live surface's conversations are absent by construction, since its members tail the hub
+        and register no writeback."""
+        if not self.member_context_read_allowed:
+            raise PermissionError("this extension cannot read a member's conversations")
+        if self.invoker is None:
+            raise RuntimeError("member_reach requires a turn invoker; none is wired")
+        return await self.invoker.member_reach(member_id, limit)
 
     def tail(
         self, turn_id: UUID, since: str = ""

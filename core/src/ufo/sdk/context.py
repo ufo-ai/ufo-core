@@ -25,6 +25,9 @@ from ufo.runtime.ext.context import (
     MemberContextRecord as MemberContextRecord,
 )
 from ufo.runtime.ext.context import (
+    MemberReach as MemberReach,
+)
+from ufo.runtime.ext.context import (
     ModelAccess as ModelAccess,
 )
 from ufo.runtime.ext.context import (

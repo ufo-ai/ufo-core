@@ -44,7 +44,7 @@ because every member surface resolves its speaker, so one that did not is a stra
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -63,10 +63,11 @@ from ufo.runtime.authority import (
     turn_authority,
 )
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
-from ufo.runtime.ext.context import AgentArchived
+from ufo.runtime.ext.context import AgentArchived, MemberReach
 from ufo.runtime.ext.surface import Admitted, conversation_name
 from ufo.runtime.hub import ArrivalQueued, Hub, Reply
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats
+from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -1240,6 +1241,60 @@ class AdmissionInvoker:
             unless_member_arrival_since=unless_member_arrival_since,
             runtime_config=runtime_config,
         )
+
+    async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]:
+        """The conversations an invoke reaches `member_id` through: on a surface this admission
+        registers writebacks for, bound to a live agent, with the member's own audience, and
+        holding a turn the member spoke — newest such turn first. `speaker_member_id` is the
+        privacy fence as well as the recency signal: only a conversation this member personally
+        spoke in, on their own private audience, is ever returned. An archived agent's
+        conversation admits no turn, so it is no reach."""
+        last_spoke_at = sa.func.max(tables.turn.c.created_at).label("last_spoke_at")
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.surface,
+                        tables.conversation.c.id,
+                        tables.conversation.c.agent_id,
+                        last_spoke_at,
+                    )
+                    .select_from(
+                        tables.conversation.join(
+                            tables.turn,
+                            tables.turn.c.conversation_id == tables.conversation.c.id,
+                        ).join(tables.agent, tables.agent.c.id == tables.conversation.c.agent_id)
+                    )
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.agent.c.archived_at.is_(None),
+                        tables.conversation.c.surface.in_(tuple(self.admission.durable_surfaces)),
+                        tables.conversation.c.audience == str(conversation_audience(member_id)),
+                        tables.turn.c.speaker_member_id == member_id,
+                    )
+                    .group_by(
+                        tables.conversation.c.surface,
+                        tables.conversation.c.id,
+                        tables.conversation.c.agent_id,
+                    )
+                    .order_by(last_spoke_at.desc(), tables.conversation.c.id)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(
+            MemberReach(
+                surface=row.surface,
+                conversation_id=row.id,
+                agent_id=row.agent_id,
+                last_spoke_at=_aware(row.last_spoke_at),
+            )
+            for row in rows
+        )
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)

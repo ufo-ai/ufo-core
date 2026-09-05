@@ -78,6 +78,7 @@ class NotificationObjects(MemberReadableObjects[NotificationSpec, ObjectOwner]):
                     "occurrences": row.occurrences,
                     "producer": row.produced_by_agent_name,
                     "triaged": row.triaged_turn_id is not None,
+                    "delivered_surface": row.delivered_surface,
                     "created_at": row.created_at.isoformat(),
                     "mine": row.member_id == member_id,
                 },
@@ -125,6 +126,7 @@ class NotificationObjects(MemberReadableObjects[NotificationSpec, ObjectOwner]):
             "first_raised_at": row.created_at.isoformat(),
             "last_raised_at": row.last_raised_at.isoformat(),
             "triaged_turn": None if row.triaged_turn_id is None else str(row.triaged_turn_id),
+            "delivered_surface": row.delivered_surface,
         }
 
     async def _apply_owned(
@@ -161,13 +163,16 @@ NOTIFICATION_OBJECT = ObjectKind(
     guidance=(
         "List to see what has been raised for the member and how often; get to read one "
         "notification's subject and body beside when it was first and last raised and whether a "
-        "triage turn has read it. Listing filters and orders on `subject`, `occurrences`, "
-        "`producer`, `triaged`, `created_at`, and `mine`; get "
+        "triage turn has read it and where it was delivered. Listing filters and orders on "
+        "`subject`, `occurrences`, `producer`, `triaged`, `delivered_surface`, `created_at`, and "
+        "`mine`; get "
         "shows a `created_in` link naming the conversation it was raised in and a `scoped_to` link "
         "naming the agent that raised it. Applying a manifest is refused: raise with `notify`. "
         "When a member says a notification is handled or unwanted, delete it by name."
     ),
     spec_model=NotificationSpec,
     store=NotificationObjects(),
-    list_fields=frozenset({"subject", "occurrences", "producer", "triaged", "created_at", "mine"}),
+    list_fields=frozenset(
+        {"subject", "occurrences", "producer", "triaged", "delivered_surface", "created_at", "mine"}
+    ),
 )
