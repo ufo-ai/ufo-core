@@ -1,1677 +1,1593 @@
-# Source sync, indexing, memory, and enrichment pipelines  `stage-15`
+# Scheduled jobs, automations, and asynchronous apps  `stage-15`
 
-This stage is the system’s background knowledge pipeline. It runs after a member connects an account, during scheduled syncs, or when stored knowledge is needed for a later prompt. First, external source connectors poll outside tools like Slack, GitHub, or Stripe and translate their records into a common “page” format. The core sync code then saves those pages in the database and blob storage, and keeps an ordered feed so indexers can replay changes safely.
+This stage is the system’s background shift. It runs work that should happen later, repeat regularly, or continue after a user has stopped waiting. The durable schedules and wake-ups pieces act like an alarm clock: they store future tasks, pauses, monitors, source-change triggers, and notification inbox items, then let only one worker claim each due item. The job runtime decides which workspaces have pending work, keeps each job inside that workspace’s safety boundary, and runs both built-in and extension-declared jobs without duplicates.
 
-Not all sources are remote services. The gbrain files let a local folder of Markdown notes act like a source too. They check file safety, read valid text, and choose useful page titles.
+Several extensions plug into this loop. Scheduled-task runners fire due tasks and pauses. Monitor tools set up watches on outside systems, and the monitor runner checks them until something changes, fails, or expires. Notification drain and delivery turn stored app updates into controlled chat messages. Report digest code summarizes newly published reports once. Preview rendering retries missing document thumbnails. Homepage cleanup removes an old seeded page only when the chat app has replaced it.
 
-Next, the indexing and memory parts split pages into searchable chunks, make optional “embeddings” or meaning fingerprints, store them in a local or Turbopuffer-backed index, and recall relevant facts later. The memory condenser cleans raw notes into summaries and durable facts.
-
-Finally, the enrichment extension adds consent-based profile lookup. Its manifest defines the feature, providers fetch or replay person and company data, and the store records consent, results, and rate-limit pauses.
+Finally, the offline improvement loop studies past failures, replays saved conversations with proposed instruction changes, and opens only cautious, human-reviewable improvements.
 
 ## Sub-stages
 
-- [External source connector polling](stage-15.1.md) `stage-15.1` — 60 files
-- [Indexing, embeddings, and recall](stage-15.2.md) `stage-15.2` — 8 files
+- [Durable schedules and wake-ups](stage-15.1.md) `stage-15.1` — 7 files
+- [Offline evaluation and improvement loops](stage-15.2.md) `stage-15.2` — 8 files
 
 ## Files in this stage
 
-### Source sync runtime
-Core source package plumbing and synchronization machinery normalize external pages into durable database and blob-storage feeds for downstream consumers.
+### Job orchestration runtime
+Core runtime files discover workspace-scoped pending work and execute scheduled jobs safely across core features and extensions.
 
-### `core/src/ufo/runtime/sources/__init__.py`
+### `core/src/ufo/runtime/candidates.py`
 
-`other` · `import time`
+`domain_logic` · `job scheduling / dispatcher candidate lookup`
 
-This is an empty Python package marker. In Python projects, a file named `__init__.py` tells Python that the folder should be treated as an importable package. Here, it makes `ufo.runtime.sources` a valid place for code to import from. Think of it like putting a label on a drawer: the drawer may contain useful tools in other files, but this label lets the rest of the program find the drawer reliably. Because the file is empty, it does not run setup code, expose shortcuts, or change how the source modules behave. Its main value is structural: without it, some Python environments or packaging tools might not recognize this directory as part of the package, which could make imports fail.
+Jobs in this system are not supposed to run in a vague, global context. They must run inside a specific workspace, so tenant data stays separated. This file exists to answer one narrow question before a job runs: “Which workspaces might have work ready?”
 
+Normally, database reads are protected by row-level security, or RLS, which means the database only shows rows belonging to the current workspace. But finding candidate workspaces requires a special cross-workspace read. This file makes that exception small and controlled. It reads only workspace IDs, not the actual job data. Think of it like looking at mailbox labels in an apartment building, not opening anyone’s mail.
 
-### `core/src/ufo/runtime/sources/sync.py`
+The main helper, `owner_candidates`, lets an extension provide a query builder. That builder creates a database query that selects distinct workspace IDs from the extension’s own tables. The query is built fresh each time the scheduler checks for work, so time-based rules like “due before now” use the current time instead of a stale time captured at startup.
 
-`orchestration` · `startup, scheduled sync polling, and downstream indexing`
-
-This file solves the problem of turning many kinds of content sources into a steady, reliable stream of pages the rest of the system can use. A source might be a local folder, or an extension such as Slack, GitHub, S3, or another connector. The file defines the contract each source backend must follow: given a typed configuration, an old cursor, and workspace authentication, return pages, deletions, and a new cursor.
-
-The main worker is SyncDriver. On each polling tick, it finds source rows that are due, claims them so two workers do not sync the same source at once, fetches content from the right backend, writes page bodies to the blob store, and updates page rows in the database. It avoids rewriting unchanged pages by comparing content digests, which are like fingerprints of the text. If a source gives a full snapshot, missing old pages are tombstoned, meaning marked as deleted instead of removed outright.
-
-The file is careful about failure. Temporary failures back off so providers are not hammered. Refused streams can be skipped or parked without waking operators. Finally, CorePageFeed lets an indexer read page changes in revision order, like following a bookmark through a logbook.
+The returned `candidates` function runs that query through `owner_tx`, the privileged database path that can see across workspaces. It then returns just the first column from each row as a tuple of workspace UUIDs. The dispatcher can then enter each workspace safely before running the actual job handler.
 
 #### Function details
 
-##### `SourceRowConfig.requested_fields`  (lines 95–98)
+##### `owner_candidates`  (lines 27–40)
 
 ```
-def requested_fields(cls) -> frozenset[str]
+def owner_candidates(due: Callable[[], sa.Select[tuple[UUID]]]) -> WorkspaceCandidates
 ```
 
-**Purpose**: Returns the configuration fields that a caller explicitly requested and that must match when the same source is registered again. This helps avoid creating duplicate source rows when some fields are resolved automatically by the backend.
+**Purpose**: Turns a caller-provided database query builder into a reusable candidate finder for jobs. It gives extensions a safe way to say which workspaces may have pending work without giving them direct access to the privileged cross-workspace database connection.
 
-**Data flow**: It reads the class-level sets of non-identity fields and resolved fields, subtracts the resolved ones, and returns the remaining field names as a frozen set. Nothing outside the class is changed.
+**Data flow**: It receives `due`, a no-argument function that builds a SQL query selecting workspace IDs. It wraps that builder in an async `candidates` function. The result is a callable that, when later run, will build the fresh query, execute it safely through the core-owned privileged path, and return only workspace UUIDs.
 
-**Call relations**: This is part of the source configuration model contract. Registration code and backend-specific models can use it to decide which settings identify a source request and which settings are merely computed results.
-
-
-##### `normalize_page_timestamp`  (lines 101–121)
-
-```
-def normalize_page_timestamp(value: str) -> str
-```
-
-**Purpose**: Turns a page timestamp into one consistent UTC text format. This lets pages from different providers be compared and replayed without guessing time zones later.
-
-**Data flow**: It receives a timestamp string, accepts either a numeric Unix time or an ISO-style date/time string, checks that a real timezone is present when needed, converts the moment to UTC, and returns a normalized ISO string with microseconds. Bad or ambiguous input becomes a clear ValueError.
-
-**Call relations**: Page.normalize_timestamp calls this whenever a Page is validated. That means timestamps are cleaned at the edge, before sync results are committed.
-
-*Call graph*: called by 1 (normalize_timestamp); 2 external calls (fromisoformat, fromtimestamp).
+**Call relations**: This is the outer setup step. An extension or core job supplies the query-building recipe, and `owner_candidates` packages it into the shape the dispatcher expects: an async function returning workspace IDs. The actual database read is deferred to the inner `owner_candidates.candidates` function so it happens each time the scheduler checks for due work.
 
 
-##### `Page.digest`  (lines 138–139)
+##### `owner_candidates.candidates`  (lines 35–38)
 
 ```
-def digest(self) -> str
+async def candidates() -> tuple[UUID, ...]
 ```
 
-**Purpose**: Computes a stable fingerprint for a page body. The sync driver uses this fingerprint to know whether the page text actually changed.
+**Purpose**: Runs the candidate query and returns the workspace IDs it names. This is the carefully limited place where the system uses the privileged cross-workspace read path.
 
-**Data flow**: It reads the page body text, encodes it as bytes, hashes it with SHA-256, and returns a string beginning with `sha256:`. It does not store anything by itself.
+**Data flow**: It starts with no direct arguments, but it closes over the `due` query builder from `owner_candidates`. Each time it runs, it asks `due()` to build a current SQL query, opens `owner_tx()` to get a privileged database connection, executes the query, collects all rows, and returns a tuple containing the first value from each row, which should be a workspace UUID. It does not return the underlying tenant rows or job data.
 
-**Call relations**: SyncDriver._commit reads this property while deciding whether to write a new body blob and update the page row. It is the cheap comparison that prevents unnecessary rewrites.
+**Call relations**: This function is the candidate finder that the dispatcher can call before running a job. Inside, it calls `ufo.db.owner_tx` because this one read must see across workspaces. After it returns IDs, the dispatcher is expected to bind and run the real handler separately inside each named workspace, so the privileged read is not used for the actual work.
 
-*Call graph*: 1 external calls (sha256).
+*Call graph*: 1 external calls (owner_tx).
 
 
-##### `Page.normalize_timestamp`  (lines 143–146)
+### `core/src/ufo/runtime/jobs.py`
 
-```
-def normalize_timestamp(cls, value: str | None) -> str | None
-```
+`orchestration` · `startup and scheduled background execution`
 
-**Purpose**: Validates and standardizes the created and updated timestamps on a fetched page. It keeps page metadata predictable no matter how a provider formats dates.
+This file is the background-job traffic controller for the runtime. At startup, jobs are discovered from the core system and from installed extensions, then registered with DBOS, a durable workflow system that stores work so it can survive crashes and retries. Without this file, source syncing, page-change hooks, queued turn recovery, result delivery, product census, previews, and extension jobs would not reliably run.
 
-**Data flow**: It receives either a timestamp string or None. None passes through unchanged; a string is sent to normalize_page_timestamp and returned in normalized UTC form.
+The design has two stages. A small scheduled “tick” asks, “Which workspaces actually have work for this job?” Then it queues one durable execution per matching workspace. This matters because one slow or stuck workspace should not block every other workspace, and repeated ticks should not pile up duplicate copies of the same job.
 
-**Call relations**: Pydantic, the data validation library used here, calls this during Page construction. It delegates the actual timestamp parsing to normalize_page_timestamp.
+The file also protects ordering and safety. Turn dispatch only starts a turn when no earlier turn in the same conversation is ahead of it. Page-change hooks each keep their own cursor, like a bookmark in a book, so every consumer resumes where it left off. Job handlers always run inside a specific workspace context, so they see the right tenant data and credentials. If a job is refused because spending limits block model use, the file treats that as a pause, not a crash, and tries to tell the member once.
 
-*Call graph*: calls 1 internal fn (normalize_page_timestamp).
+#### Function details
 
-
-##### `StreamSkipped.__init__`  (lines 196–199)
-
-```
-def __init__(self, reason: str, *, awaits_grant: bool=False) -> None
-```
-
-**Purpose**: Creates an exception that means a provider refused this stream, but the data pipeline itself did not break. Examples include a missing permission scope or a plan gate.
-
-**Data flow**: It receives a human-readable reason and an optional flag saying whether the stream is waiting for a grant event. It stores both on the exception so the sync driver can choose the right reschedule behavior.
-
-**Call relations**: Connector backends raise this while fetching when they know a stream should be skipped rather than treated as a hard failure. SyncDriver._sync_claimed catches it and sends the source through the skip and possible park path.
-
-*Call graph*: called by 58 (_credential, paginate, paginate, paginate, _paginate_named, paginate, paginate, _org_stream, paginate, paginate (+15 more)).
-
-
-##### `validation_fault`  (lines 202–208)
-
-```
-def validation_fault(error: ValidationError) -> str
-```
-
-**Purpose**: Turns a validation error into a safe, compact explanation. It reports which fields failed and why, without including provider data or user-supplied secret values.
-
-**Data flow**: It receives a ValidationError, reads each structured error entry, formats the field path and error type, and joins them into one semicolon-separated string.
-
-**Call relations**: SyncDriver._report_failed uses this when a backend returns data that does not fit the expected model. It helps logs say what was wrong without leaking the rejected payload.
-
-*Call graph*: called by 1 (_report_failed); 1 external calls (errors).
-
-
-##### `response_fault`  (lines 211–237)
-
-```
-def response_fault(response: httpx.Response) -> str
-```
-
-**Purpose**: Extracts a safe provider-facing reason from an HTTP response, especially GraphQL responses that put useful messages in an `errors` array. It avoids logging the whole body because that body may contain sensitive request details.
-
-**Data flow**: It receives an httpx response, tries to parse JSON, looks for a list named `errors`, and collects each error message plus an optional error code. If the response is unreadable or does not have that shape, it returns an empty string.
-
-**Call relations**: SyncDriver._report_failed calls this for HTTP status failures. It adds provider context to failure logs without exposing credentials or full response bodies.
-
-*Call graph*: called by 1 (_report_failed); 1 external calls (json).
-
-
-##### `StreamFault.__init__`  (lines 247–249)
-
-```
-def __init__(self, reason: str) -> None
-```
-
-**Purpose**: Creates an exception for a provider response that the backend cannot safely interpret. It lets the backend provide a clean reason that can be logged as the provider fault.
-
-**Data flow**: It receives a reason string, initializes the runtime error, and stores the same reason on the object. No external state changes.
-
-**Call relations**: Several source extensions raise this when they detect a broken or unsupported provider shape. SyncDriver._report_failed recognizes it and logs its authored reason.
-
-*Call graph*: called by 8 (_read, _markdown_entries, _spool_tarball, _refuse_client_error, decoded, _account_base, _sheet_value_records, _ensure_tenant).
-
-
-##### `SourceBackend.config_model`  (lines 289–289)
-
-```
-def config_model(self) -> type[ConfigT]
-```
-
-**Purpose**: Declares the typed configuration model a source backend expects. This prevents source settings from being treated as an unstructured bag of values.
-
-**Data flow**: A backend implementation provides a model class. The sync driver later feeds the source row’s stored JSON configuration into that model for validation.
-
-**Call relations**: SyncDriver._fetch depends on this property before calling the backend. Each backend owns its own configuration shape, while the core driver stays generic.
-
-
-##### `SourceBackend.fetch`  (lines 291–291)
-
-```
-async def fetch(self, config: ConfigT, cursor: str | None, auth: SourceAuth) -> SyncResult
-```
-
-**Purpose**: Defines the required method every source backend must implement to fetch pages. It is the seam between the core sync engine and provider-specific code.
-
-**Data flow**: It receives validated backend config, the previous cursor if any, and workspace authentication details. It returns a SyncResult containing fetched pages, deletions, snapshot status, dropped count, and the next cursor.
-
-**Call relations**: SyncDriver._fetch calls this after preparing config and auth. FolderSource and extension backends implement this contract.
-
-
-##### `FolderSource.fetch`  (lines 305–316)
-
-```
-async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
-```
-
-**Purpose**: Reads a configured local folder and turns every file into a page. This is the built-in source backend shipped by core.
-
-**Data flow**: It receives folder source config, ignores cursor and auth, reads files in a background thread, wraps each file’s relative path and text into a Page, and returns a snapshot SyncResult. Because it is a snapshot, files missing from the folder on later runs can be tombstoned.
-
-**Call relations**: SyncDriver._fetch calls this when the source backend is `folder`. It delegates the disk scan to FolderSource._read, then hands pages back to the normal commit path.
-
-*Call graph*: 4 external calls (__init__, __init__, to_thread, Path).
-
-
-##### `FolderSource._read`  (lines 319–326)
-
-```
-def _read(root: Path) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Performs the actual local directory scan for FolderSource. It reads each file as UTF-8 text and records its path relative to the source root.
-
-**Data flow**: It receives a root Path, checks that it is a directory, walks all files below it in sorted order, reads each file’s bytes, decodes them as UTF-8, and returns pairs of relative path and text. If the root is missing, it raises FileNotFoundError rather than pretending all files were deleted.
-
-**Call relations**: FolderSource.fetch runs this in a background thread so file I/O does not block the async event loop. The returned file entries become Page objects.
-
-*Call graph*: 2 external calls (is_dir, rglob).
-
-
-##### `source_row_id`  (lines 329–349)
-
-```
-def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object], *, connection_id: UUID | None=None, non_identity_keys: frozenset[str]=frozenset()) -> UUID
-```
-
-**Purpose**: Builds a deterministic ID for a source row. Restarting the service or registering the same source again produces the same ID instead of creating duplicates.
-
-**Data flow**: It receives workspace ID, backend name, config, optional connection ID, and config keys that should not count as identity. It removes non-identity keys, serializes the remaining config in sorted order, and hashes the whole identity into a UUID.
-
-**Call relations**: register_sources uses this when bootstrapping configured sources. Backend models influence it by declaring which fields are not part of the source’s identity.
-
-*Call graph*: called by 1 (register_sources); 2 external calls (dumps, uuid5).
-
-
-##### `page_id_for`  (lines 352–355)
-
-```
-def page_id_for(source_id: UUID, source_ref: str) -> UUID
-```
-
-**Purpose**: Builds a deterministic ID for a page inside a source. The same source reference always maps to the same page row.
-
-**Data flow**: It receives a source ID and a source reference string, combines them into a stable namespace string, and returns a UUID. It does not read or write storage.
-
-**Call relations**: SyncDriver._commit uses this for fetched pages and explicit delete references. It is what lets updates and tombstones land on the right existing row.
-
-*Call graph*: called by 1 (_commit); 1 external calls (uuid5).
-
-
-##### `source_body_ref_matches`  (lines 358–368)
-
-```
-def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool
-```
-
-**Purpose**: Checks whether a blob reference looks like the expected stored body for a particular source, page, and digest. This is a safety check for blob naming.
-
-**Data flow**: It receives a blob reference, source ID, page ID, and digest. It checks the expected prefix, suffix, and claim-shaped middle segment, then returns true or false.
-
-**Call relations**: This helper supports code that needs to verify source-sync blob references. It follows the naming pattern used by SyncDriver._commit when writing page bodies.
-
-
-##### `register_sources`  (lines 371–436)
-
-```
-async def register_sources(configured: tuple[SourceEntry, ...]) -> None
-```
-
-**Purpose**: Creates database rows for statically configured sources at startup. It ensures configured sources exist without duplicating rows on every restart.
-
-**Data flow**: It receives configured source entries, opens a workspace transaction, finds the workspace and main agent, computes each deterministic source ID, and inserts missing source and grant rows. Removed sources are left alone instead of silently resurrected.
-
-**Call relations**: This runs outside the polling sync loop, typically during boot. It calls source_row_id and writes to source-related tables so SyncDriver can later claim and sync those rows.
-
-*Call graph*: calls 1 internal fn (source_row_id); 4 external calls (now, insert, select, workspace_tx).
-
-
-##### `_rescheduled`  (lines 454–465)
-
-```
-def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]
-```
-
-**Purpose**: Chooses the next sync time without overwriting a resync request made while the current worker held the source claim. It protects a fresh `sync now` request from being pushed into the future by an older run finishing late.
-
-**Data flow**: It receives the claimed source and a proposed next time. It returns a SQL expression: use the proposed time only if the database’s next_sync_at is not newer than when the claim began; otherwise keep the database’s newer value.
-
-**Call relations**: SyncDriver._write, SyncDriver._release, and SyncDriver._skip all use this when freeing a claim. It is the shared guard for successful, failed, and skipped runs.
-
-*Call graph*: called by 3 (_release, _skip, _write); 1 external calls (case).
-
-
-##### `_stream_tags`  (lines 468–473)
-
-```
-def _stream_tags(source: ClaimedSource) -> dict[str, str]
-```
-
-**Purpose**: Builds low-cardinality metric tags that identify the provider and stream involved in a sync result. These tags are suitable for counters and logs without exploding the number of metric series.
-
-**Data flow**: It receives a claimed source, reads the backend name and optional `stream` config value, and returns them as a small dictionary of strings.
-
-**Call relations**: Reporting paths use this for success, failure, skip, park, and claim-lost records. _check_tags builds on it when service checks need a specific source row too.
-
-*Call graph*: calls 1 internal fn (_config_value); called by 6 (_report_failed, _report_ok, _report_parked, _run_with_lease, _sync_claimed, _check_tags).
-
-
-##### `_check_tags`  (lines 476–484)
-
-```
-def _check_tags(source: ClaimedSource) -> dict[str, str]
-```
-
-**Purpose**: Builds service-check tags that identify one exact source row. Service checks need this precision so one healthy source does not accidentally clear another source’s failure status.
-
-**Data flow**: It receives a claimed source, starts with provider and stream tags from _stream_tags, adds the source row ID, and returns the tag dictionary.
-
-**Call relations**: SyncDriver._report_ok and SyncDriver._report_failed use this when sending health status. It extends _stream_tags specifically for row-level health tracking.
-
-*Call graph*: calls 1 internal fn (_stream_tags); called by 2 (_report_failed, _report_ok).
-
-
-##### `_config_value`  (lines 487–489)
-
-```
-def _config_value(source: ClaimedSource, key: str) -> str
-```
-
-**Purpose**: Safely reads a string value from a source’s stored config. It avoids putting non-string values directly into logs or metrics.
-
-**Data flow**: It receives a claimed source and a key, reads that key from the config mapping, and returns the value only if it is a string. Otherwise it returns an empty string.
-
-**Call relations**: _stream_tags and the reporting functions use this for fields such as stream and account. It keeps telemetry formatting predictable.
-
-*Call graph*: called by 3 (_report_failed, _report_ok, _stream_tags).
-
-
-##### `_readers_remain`  (lines 513–539)
-
-```
-def _readers_remain() -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds a database condition that says a source still has at least one live reader, or has no grants at all. If every granted agent is archived, syncing would waste provider calls and indexing work for content nobody can use.
-
-**Data flow**: It creates SQL subqueries over source grants and agents, then returns a SQL boolean expression. It does not execute the query itself.
-
-**Call relations**: SyncDriver.candidate_workspaces and SyncDriver._claim_due include this condition when choosing work. It keeps unreadable-by-anyone sources out of the sync queue until a reader returns.
-
-*Call graph*: called by 2 (_claim_due, candidate_workspaces); 5 external calls (and_, exists, literal, or_, select).
-
-
-##### `SyncDriver.candidate_workspaces`  (lines 562–583)
-
-```
-async def candidate_workspaces(self) -> tuple[UUID, ...]
-```
-
-**Purpose**: Finds workspaces that currently have at least one due source. This lets a scheduler avoid opening per-workspace transactions when there is nothing to do.
-
-**Data flow**: It reads the current time, opens an owner-level transaction, selects distinct workspace IDs for due, unremoved, unclaimed or expired-claim sources with remaining readers, and returns those IDs as a tuple.
-
-**Call relations**: A higher-level dispatcher can call this before binding work to a workspace. It uses _readers_remain so the dispatcher only wakes workspaces with useful sync work.
-
-*Call graph*: calls 1 internal fn (_readers_remain); 4 external calls (now, or_, select, owner_tx).
-
-
-##### `SyncDriver.run`  (lines 585–596)
+##### `ResultDeliverer.run`  (lines 105–105)
 
 ```
 async def run(self) -> None
 ```
 
-**Purpose**: Runs one sync polling pass for the currently bound workspace. It claims due sources, starts lease-renewal tasks, and processes each claimed source.
+**Purpose**: This protocol method describes the work needed to sweep finished child-agent results back into their parent conversations. It is a contract: anything used as a result deliverer must provide this operation.
 
-**Data flow**: It creates a fresh claim token, asks _claim_due for source rows, starts one renewal task per source, runs each source through _run_with_lease, and finally cancels and waits for renewal tasks. It changes database claim state through the helpers it calls.
+**Data flow**: The caller provides no direct data. An implementation is expected to read finished child results from the system, post whatever arrivals are due, and finish without returning a value.
 
-**Call relations**: This is the main entry method for the scheduled source sync job. It orchestrates claiming, lease renewal, and per-source syncing without knowing provider details.
-
-*Call graph*: calls 3 internal fn (_claim_due, _renew_claim, _run_with_lease); 3 external calls (create_task, gather, uuid4).
+**Call relations**: Core job setup wraps this method in a scheduled job. The actual implementation lives outside this file, so this file can schedule the sweep without importing the turn-loop internals.
 
 
-##### `SyncDriver._run_with_lease`  (lines 598–618)
+##### `ResultDeliverer.candidate_workspaces`  (lines 107–107)
 
 ```
-async def _run_with_lease(self, source: ClaimedSource, renewal: asyncio.Task[None]) -> None
+async def candidate_workspaces(self) -> tuple[UUID, ...]
 ```
 
-**Purpose**: Runs one claimed source while watching the lease-renewal task. If the lease is lost, it stops rather than writing under a claim it no longer owns.
+**Purpose**: This protocol method identifies which workspaces have result-delivery work waiting. It lets the job runner avoid opening workspaces that have nothing to do.
 
-**Data flow**: It receives a claimed source and its renewal task, starts the actual sync task, waits until either sync or renewal finishes, handles claim loss specially, logs it, and cancels any remaining task. It returns nothing but may raise if renewal failed.
+**Data flow**: The caller provides no direct data. An implementation checks its own storage or state and returns workspace IDs where finished child results may need delivery.
 
-**Call relations**: SyncDriver.run calls this for each claimed source. It wraps SyncDriver._sync_claimed with the safety rail provided by SyncDriver._renew_claim.
-
-*Call graph*: calls 2 internal fn (_sync_claimed, _stream_tags); called by 1 (run); 4 external calls (create_task, gather, wait, log).
+**Call relations**: The core result-delivery job uses this as its candidate finder. JobRunner later fans the job out only to the returned workspaces.
 
 
-##### `SyncDriver._sync_claimed`  (lines 620–639)
+##### `TurnDispatcher.run`  (lines 176–212)
 
 ```
-async def _sync_claimed(self, source: ClaimedSource) -> None
+async def run(self) -> None
 ```
 
-**Purpose**: Performs the fetch-and-commit flow for one claimed source and routes errors to the right recovery path. This is where success, skipped streams, cursor expiry, and real failures branch apart.
+**Purpose**: This scans for turns that are ready to be offered to the turn-processing queues. It also rechecks parked turns against seats, spending rules, and balance rules before letting them run.
 
-**Data flow**: It receives a claimed source, fetches a SyncResult, and commits it. If the backend says the stream was skipped, it logs and calls _skip. For other errors, it computes backoff, reports failure, and releases the claim with updated error state.
+**Data flow**: It reads dispatchable turn records from the current workspace. For parked turns, it gathers the relevant members, checks whether they have seats, asks the spend evaluator and balance gate whether the work is allowed, and skips blocked turns. Ready turns are passed to the enqueue step; nothing is returned.
 
-**Call relations**: SyncDriver._run_with_lease starts this as the actual sync task. It calls _fetch, _commit, _skip, _error_backoff, _report_failed, and _release depending on what happens.
+**Call relations**: A scheduled core job calls this through core_jobs. It first asks _dispatchable_turns for safe candidates, then hands each approved turn to _enqueue so DBOS can run the turn workflow.
 
-*Call graph*: calls 7 internal fn (_commit, _error_backoff, _fetch, _release, _report_failed, _skip, _stream_tags); called by 1 (_run_with_lease); 3 external calls (suppress, now, log).
-
-
-##### `SyncDriver._renew_claim`  (lines 641–644)
-
-```
-async def _renew_claim(self, source: ClaimedSource) -> None
-```
-
-**Purpose**: Keeps a claimed source lease alive while a slow fetch or commit is running. This prevents another worker from assuming the source is abandoned too soon.
-
-**Data flow**: It repeatedly sleeps for the refresh interval and then calls _refresh_claim. It runs until cancelled or until refreshing fails.
-
-**Call relations**: SyncDriver.run starts this in the background for every claimed source. SyncDriver._run_with_lease watches it alongside the sync task.
-
-*Call graph*: calls 1 internal fn (_refresh_claim); called by 1 (run); 1 external calls (sleep).
+*Call graph*: calls 2 internal fn (_dispatchable_turns, _enqueue); 7 external calls (__init__, __init__, __init__, select, workspace_tx, authority_member_id, turn_authority).
 
 
-##### `SyncDriver._refresh_claim`  (lines 646–662)
+##### `TurnDispatcher.candidate_workspaces`  (lines 214–222)
 
 ```
-async def _refresh_claim(self, source: ClaimedSource) -> None
+async def candidate_workspaces(self) -> tuple[UUID, ...]
 ```
 
-**Purpose**: Extends the current worker’s lease on a source row. A lease is a time-limited claim that says, in effect, `I am syncing this source now.`
+**Purpose**: This finds workspaces that have queued or parked turns worth checking. It is the broad fleet-level filter before running the dispatcher inside each workspace.
 
-**Data flow**: It receives a claimed source, computes a new expiry time, updates the matching source row only if the claim token still matches, and raises _SourceClaimLost if no row was updated.
+**Data flow**: It reads the owner-level database view, builds the same eligibility test used by the dispatcher, and returns distinct workspace IDs that contain eligible turns.
 
-**Call relations**: SyncDriver._renew_claim calls this repeatedly, and SyncDriver._commit calls it before committing writes. It is the database-level guard against two workers writing the same source at once.
+**Call relations**: JobRunner calls this during a turn-dispatch tick. The returned workspaces are then scheduled separately, so each workspace dispatch pass runs in its own workspace context.
 
-*Call graph*: called by 2 (_commit, _renew_claim); 5 external calls (__init__, now, timedelta, update, workspace_tx).
-
-
-##### `SyncDriver._claim_due`  (lines 664–715)
-
-```
-async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]
-```
-
-**Purpose**: Claims a batch of due source rows for this worker. Claiming is like putting a temporary reservation on each row so other workers skip it.
-
-**Data flow**: It receives a claim token, selects due source rows in the workspace, optionally uses database row locking on Postgres, updates selected rows with the claim and expiry, and returns ClaimedSource objects containing the data needed to sync them.
-
-**Call relations**: SyncDriver.run calls this at the start of a polling pass. It uses _readers_remain and feeds the resulting ClaimedSource values into renewal and sync processing.
-
-*Call graph*: calls 1 internal fn (_readers_remain); called by 1 (run); 7 external calls (__init__, now, timedelta, or_, select, update, workspace_tx).
+*Call graph*: calls 1 internal fn (_eligible); 3 external calls (now, select, owner_tx).
 
 
-##### `SyncDriver._fetch`  (lines 717–736)
+##### `TurnDispatcher._dispatchable_turns`  (lines 224–265)
 
 ```
-async def _fetch(self, source: ClaimedSource) -> SyncResult
+async def _dispatchable_turns(self) -> tuple[_DispatchTurn, ...]
 ```
 
-**Purpose**: Calls the correct backend to fetch content for one source. It prepares typed configuration and authentication so provider-specific code can do its job.
+**Purpose**: This selects the actual turn rows that can be considered for dispatch in the current workspace. It keeps the batch bounded so one run does not try to process unlimited work.
 
-**Data flow**: It receives a claimed source, looks up its backend, validates the stored config using that backend’s model, optionally resolves the current external self user, builds SourceAuth, and awaits the backend’s fetch result.
+**Data flow**: It reads turns joined with their conversation data, filters them with _eligible, orders queued turns before parked ones and older turns before newer ones, then converts database rows into _DispatchTurn objects.
 
-**Call relations**: SyncDriver._sync_claimed calls this before committing. It is the bridge from core scheduling logic to backend-specific fetch implementations.
+**Call relations**: TurnDispatcher.run calls this first. The resulting turn objects carry the information run needs for seat and spend checks and for later enqueueing.
 
-*Call graph*: called by 1 (_sync_claimed); 1 external calls (__init__).
-
-
-##### `SyncDriver._commit`  (lines 738–840)
-
-```
-async def _commit(self, source: ClaimedSource, result: SyncResult) -> None
-```
-
-**Purpose**: Turns a backend’s SyncResult into blob writes and database page updates. It writes only material changes, updates metadata-only changes separately, and tombstones deleted pages.
-
-**Data flow**: It receives a claimed source and SyncResult, refreshes the claim, reads prior pages, assigns stable page IDs, writes changed bodies to the blob store, prepares changed and metadata lists, computes deletions, and calls _write to commit database changes. If database commit fails after blob writes, it cleans up unreferenced blobs where safe.
-
-**Call relations**: SyncDriver._sync_claimed calls this after _fetch succeeds. It relies on _prior_pages, page_id_for, _write, and _report_ok to finish the happy path.
-
-*Call graph*: calls 5 internal fn (_prior_pages, _refresh_claim, _report_ok, _write, page_id_for); called by 1 (_sync_claimed); 4 external calls (__init__, __init__, gather, uuid5).
+*Call graph*: calls 1 internal fn (_eligible); called by 1 (run); 5 external calls (__init__, now, case, select, workspace_tx).
 
 
-##### `SyncDriver._prior_pages`  (lines 842–886)
+##### `TurnDispatcher._enqueue`  (lines 267–298)
 
 ```
-async def _prior_pages(self, source_id: UUID) -> tuple[dict[UUID, tuple[str, bool, PageBrowse]], dict[str, tuple[str, bool, PageBrowse]]]
+async def _enqueue(self, turn: _DispatchTurn) -> None
 ```
 
-**Purpose**: Loads the existing pages for a source so the commit step can compare old and new state. This is how the driver knows whether a fetched page changed, moved identity, or is already tombstoned.
+**Purpose**: This claims one turn for dispatch and offers it to the right DBOS queue. The database claim prevents two sweepers from offering the same turn at the same time.
 
-**Data flow**: It receives a source ID, reads matching page rows from the database, builds PageBrowse summaries keyed by page ID, and also builds a second lookup keyed by source identity. It returns both lookup dictionaries.
+**Data flow**: It receives a _DispatchTurn, checks that the row is still in the same state, still due, still stale enough to retry, and still first in order. If the update succeeds, it builds enqueue options, chooses a workflow ID, and queues the turn workflow. If the row was already claimed or no longer eligible, it does nothing.
 
-**Call relations**: SyncDriver._commit calls this before examining fetched pages. The two lookup shapes support stable IDs both by source reference and by provider identity.
+**Call relations**: TurnDispatcher.run calls this after a turn passes any parked-turn gates. It relies on _first_in_status, _retry_due, and _stale to repeat the safety checks at the moment of claiming.
 
-*Call graph*: called by 1 (_commit); 3 external calls (__init__, select, workspace_tx).
-
-
-##### `SyncDriver._write`  (lines 888–1016)
-
-```
-async def _write(self, source: ClaimedSource, next_cursor: str | None, changed: list[ChangedPage], metadata: list[PageBrowse], fetched: list[UUID], deleted: list[UUID], snapshot: bool) -> int
-```
-
-**Purpose**: Persists one completed sync batch to the database. It updates or inserts changed pages, applies metadata-only updates, marks deletions, resets success state, and releases the claim.
-
-**Data flow**: It receives source state, next cursor, changed pages, metadata updates, fetched page IDs, explicit deleted page IDs, and a snapshot flag. Inside one workspace transaction it verifies the claim, writes page rows, tombstones explicit or snapshot-missing pages, updates live page subjects, updates the source cursor and next sync time, clears errors and parking, and returns the number of pages tombstoned.
-
-**Call relations**: SyncDriver._commit calls this after blob bodies have been written. It uses _rescheduled so it does not erase a newer resync request made during the run.
-
-*Call graph*: calls 1 internal fn (_rescheduled); called by 1 (_commit); 7 external calls (__init__, now, timedelta, insert, select, update, workspace_tx).
+*Call graph*: calls 3 internal fn (_first_in_status, _retry_due, _stale); called by 1 (run); 6 external calls (now, timedelta, update, workspace_tx, turn_queue_for, uuid4).
 
 
-##### `SyncDriver._report_ok`  (lines 1018–1041)
+##### `TurnDispatcher._eligible`  (lines 300–321)
 
 ```
-async def _report_ok(self, source: ClaimedSource, fetched: int, written: int, tombstoned: int, dropped: int) -> None
+def _eligible(self, now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Reports a successful source sync to logs and health checks. It records how many pages were fetched, changed, tombstoned, or dropped.
+**Purpose**: This builds the database condition for turns that may be dispatched. It enforces the rule that one conversation runs only one turn at a time and later turns cannot overtake earlier ones.
 
-**Data flow**: It receives counts and source details, builds telemetry tags, writes a success log, and emits an OK service check. Telemetry errors are suppressed so reporting cannot break a successful sync.
+**Data flow**: It receives the current time and returns a SQL condition. The condition allows queued or parked turns that are stale, due for retry, first among turns of their status, and have no running sibling in the same conversation.
 
-**Call relations**: SyncDriver._commit calls this after _write succeeds. Its OK service check is what clears a previous critical status for that source row.
+**Call relations**: candidate_workspaces uses this to find workspaces with possible work, and _dispatchable_turns uses it to fetch the concrete turns. It combines helper conditions from _stale, _retry_due, and _first_in_status.
 
-*Call graph*: calls 3 internal fn (_check_tags, _config_value, _stream_tags); called by 1 (_commit); 3 external calls (suppress, emit_service_check, log).
-
-
-##### `SyncDriver._error_backoff`  (lines 1043–1051)
-
-```
-def _error_backoff(self, source: ClaimedSource, now: datetime) -> tuple[int, datetime]
-```
-
-**Purpose**: Calculates how long to wait before retrying a failing source. Repeated failures wait longer, up to a cap, so the system does not hammer a broken provider.
-
-**Data flow**: It receives the source and current time, increments the consecutive error count, computes an exponential backoff from the normal sync interval, caps it, and returns the new count plus the next retry time.
-
-**Call relations**: SyncDriver._sync_claimed calls this when fetch or commit raises an error. The result is passed to _report_failed and _release so logs and database state agree.
-
-*Call graph*: called by 1 (_sync_claimed); 1 external calls (timedelta).
+*Call graph*: calls 3 internal fn (_first_in_status, _retry_due, _stale); called by 2 (_dispatchable_turns, candidate_workspaces); 5 external calls (timedelta, and_, exists, or_, select).
 
 
-##### `SyncDriver._report_failed`  (lines 1053–1111)
+##### `TurnDispatcher._retry_due`  (lines 323–324)
 
 ```
-async def _report_failed(self, source: ClaimedSource, error: Exception, cursor_reset: bool, errors: int, next_sync_at: datetime) -> None
+def _retry_due(self, now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Reports a failed source sync in a safe and useful way. It names the error class and, where possible, a sanitized provider fault without leaking credentials or raw payloads.
+**Purpose**: This builds the database condition that says a turn is no longer waiting for a future retry time. It keeps timed parks invisible until their retry time arrives.
 
-**Data flow**: It receives the source, exception, cursor reset flag, new error count, and next retry time. It derives a safe fault string for HTTP, stream, or validation errors, logs the failure, increments a failure metric, and emits a critical service check.
+**Data flow**: It receives the current time and returns a SQL condition accepting rows with no retry time or a retry time at or before now.
 
-**Call relations**: SyncDriver._sync_claimed calls this before releasing a failed source. It uses response_fault, validation_fault, and tag helpers to produce searchable but safe telemetry.
+**Call relations**: _eligible uses it during scans, and _enqueue uses it again during the final claim so a race cannot enqueue a turn that became not-due.
 
-*Call graph*: calls 5 internal fn (_check_tags, _config_value, _stream_tags, response_fault, validation_fault); called by 1 (_sync_claimed); 5 external calls (suppress, isoformat, emit_metric, emit_service_check, log_error).
-
-
-##### `SyncDriver._release`  (lines 1113–1139)
-
-```
-async def _release(self, source: ClaimedSource, cursor_reset: bool, errors: int, next_sync_at: datetime) -> None
-```
-
-**Purpose**: Frees a source claim after a real failure and records retry state. It makes sure the source can be picked up later instead of staying stuck as claimed.
-
-**Data flow**: It receives source state, whether the cursor should be reset, the new error count, and next retry time. It updates the source row to clear the claim, set the cursor or clear it, store the error count, and schedule the next attempt using _rescheduled.
-
-**Call relations**: SyncDriver._sync_claimed calls this after reporting a failure. Successful runs release through _write, while skipped runs release through _skip.
-
-*Call graph*: calls 1 internal fn (_rescheduled); called by 1 (_sync_claimed); 2 external calls (update, workspace_tx).
+*Call graph*: called by 2 (_eligible, _enqueue); 1 external calls (or_).
 
 
-##### `SyncDriver._skip`  (lines 1141–1206)
+##### `TurnDispatcher._stale`  (lines 326–330)
 
 ```
-async def _skip(self, source: ClaimedSource, reason: str, *, awaits_grant: bool) -> None
+def _stale(self, cutoff: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Handles a stream that the provider refused but that should not count as a broken sync. It keeps existing pages untouched, preserves the cursor, and may slow future attempts by parking the source.
+**Purpose**: This builds the database condition for turns whose previous dispatch offer is missing or old enough to retry. It is the recovery path for a process that stamped a row but failed before enqueueing it.
 
-**Data flow**: It receives a source, refusal reason, and whether the refusal waits on a grant event. It increments the stored refusal count, chooses either normal retry time or a park hold time, clears the claim, resets consecutive errors, and stores park metadata when the threshold is reached. If the row was parked, it reports that separately.
+**Data flow**: It receives a cutoff time and returns a SQL condition accepting rows with no dispatch timestamp or one older than the cutoff.
 
-**Call relations**: SyncDriver._sync_claimed calls this after catching StreamSkipped. It uses _rescheduled and may call _report_parked after the database update.
+**Call relations**: _eligible uses it when searching for dispatchable work, and _enqueue repeats it while claiming the row.
 
-*Call graph*: calls 2 internal fn (_report_parked, _rescheduled); called by 1 (_sync_claimed); 5 external calls (now, timedelta, case, update, workspace_tx).
-
-
-##### `SyncDriver._report_parked`  (lines 1208–1233)
-
-```
-async def _report_parked(self, source: ClaimedSource, reason: str, refusals: int) -> None
-```
-
-**Purpose**: Reports that a repeatedly refused stream has been parked, meaning it will retry less often. This is a warning for humans to notice, not an alert that wakes someone up.
-
-**Data flow**: It receives source details, the refusal reason, and refusal count. It writes a warning log and emits a parked metric, suppressing telemetry failures.
-
-**Call relations**: SyncDriver._skip calls this only after the source row is successfully marked parked. It uses _stream_tags to keep the metric dimensions bounded.
-
-*Call graph*: calls 1 internal fn (_stream_tags); called by 1 (_skip); 3 external calls (suppress, emit_metric, warn).
+*Call graph*: called by 2 (_eligible, _enqueue); 1 external calls (or_).
 
 
-##### `PageFeed.pages_changed_since`  (lines 1273–1273)
+##### `TurnDispatcher._first_in_status`  (lines 332–341)
 
 ```
-async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
+def _first_in_status(self, status: TurnStatus) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Defines the interface an indexer uses to read page changes after a saved cursor. It lets downstream code replay source content without knowing how sync writes are stored.
+**Purpose**: This builds the database condition that a turn has no earlier turn in the same conversation with the same status. It protects turn order.
 
-**Data flow**: An implementation receives a cursor and limit, reads changes newer than that cursor, and returns a PageBatch with changes and the next cursor. The protocol itself does not implement storage access.
+**Data flow**: It receives a turn status and returns a SQL condition that rejects a row if another row in the same workspace and conversation has that status with a lower sequence number.
 
-**Call relations**: CorePageFeed implements this method for the core database and blob store. Extensions receive this seam through their context when they need to index pages.
+**Call relations**: _eligible uses it to decide which queued or parked rows can be considered. _enqueue uses it again before claiming, so an earlier turn inserted or changed by another worker is respected.
 
-
-##### `page_cursor`  (lines 1276–1285)
-
-```
-def page_cursor(cursor: object) -> tuple[int, UUID]
-```
-
-**Purpose**: Parses a page feed cursor into its revision number and page ID. The cursor is the bookmark that says where an indexer last stopped reading.
-
-**Data flow**: It receives an object, requires it to be a string shaped like `revision|uuid`, validates the revision and UUID, and returns them as typed values. Invalid input raises ValueError.
-
-**Call relations**: CorePageFeed.pages_changed_since calls this when a caller supplies a cursor. The parsed values become the database filter for reading only later changes.
-
-*Call graph*: called by 1 (pages_changed_since); 1 external calls (UUID).
+*Call graph*: called by 2 (_eligible, _enqueue); 2 external calls (exists, select).
 
 
-##### `CorePageFeed.pages_changed_since`  (lines 1297–1355)
+##### `_page_beyond_cursor`  (lines 344–349)
 
 ```
-async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
+def _page_beyond_cursor(revision: int, page_id: UUID, cursor: object) -> bool
 ```
 
-**Purpose**: Reads changed pages from the core page table in a stable order and includes each page body for indexing. Tombstoned pages are returned with an empty body so readers know to delete their derived data.
+**Purpose**: This answers whether a page change is newer than a stored cursor. The cursor acts like a bookmark showing how far a page-change consumer has already read.
 
-**Data flow**: It receives an optional cursor and requested limit, caps the limit, builds a query ordered by revision and page ID, filters after the cursor when present, reads rows from the database, fetches each non-tombstoned body from the blob store, converts rows into PageChange objects, and returns them with the next cursor.
+**Data flow**: It receives a page revision, a page ID, and a stored cursor value. If there is no cursor, it returns true. Otherwise it parses the cursor and compares revision first, then page ID, returning whether the page lies after that bookmark.
 
-**Call relations**: This is the concrete PageFeed used by downstream indexers. It calls page_cursor for cursor parsing and returns PageBatch values that consumers can process and then save as their new bookmark.
+**Call relations**: PageChangeRunner.workspaces_with_changes uses this while deciding which workspaces have page changes pending for a specific consumer.
 
-*Call graph*: calls 1 internal fn (page_cursor); 7 external calls (__init__, __init__, fromisoformat, and_, or_, select, workspace_tx).
+*Call graph*: called by 1 (workspaces_with_changes); 1 external calls (page_cursor).
 
 
-### Markdown folder source
-The gbrain source adapter safely reads local Markdown files and converts them into titled, searchable pages for the shared sync pipeline.
+##### `PageChangeConsumer.spec_name`  (lines 370–372)
 
-### `extensions/gbrain/ufo_ext_gbrain/folder.py`
+```
+def spec_name(self) -> str
+```
 
-`io_transport` · `source sync`
+**Purpose**: This creates the unique job name for one page-change hook. The name separates consumers so two hooks do not share a schedule or cursor by accident.
 
-This backend is for a simple but important use case: someone has a directory full of Markdown notes, and they want the system to read those notes as pages. The configuration names an absolute root folder on the host machine. During a sync, the code scans that folder, finds Markdown files, reads their bytes, and turns each one into a page using the shared gbrain page helpers.
+**Data flow**: It reads the consumer's extension name and discriminator, then returns a string shaped like a page-change job name.
 
-The careful part is safety. The folder path can come from outside the program, so the code does not trust it blindly. It first turns the root into a contained root, meaning a checked directory boundary. Then every file is opened through a containment guard, like a librarian making sure every requested book really belongs to the allowed shelf. Symbolic links are skipped, because they can point somewhere else on the machine. Files that are not Markdown are skipped too.
+**Call relations**: core_jobs uses this property indirectly when it builds one JobSpec per page-change consumer.
 
-The source reads the whole folder each time rather than keeping an incremental cursor. It returns a snapshot, meaning “this is the current complete set.” The wider sync driver can then skip unchanged pages and remove pages whose files disappeared. There is also a total size limit, so a very large folder cannot flood the sync with too much Markdown data.
+
+##### `PageChangeConsumer.job`  (lines 375–380)
+
+```
+def job(self) -> str
+```
+
+**Purpose**: This creates the accounting key used when the core page-change runner executes an extension hook. It lets model cost and latency be attributed to the exact consumer.
+
+**Data flow**: It reads the consumer's generated spec name and returns a core-namespaced job key string.
+
+**Call relations**: PageChangeRunner._context_for uses this when building the extension context for a hook, so model calls inside that hook are labeled correctly.
+
+
+##### `PageChangeRunner.consumers`  (lines 423–447)
+
+```
+def consumers(self) -> tuple[PageChangeConsumer, ...]
+```
+
+**Purpose**: This discovers all registered page-change hooks from active extension manifests. It turns each hook into a PageChangeConsumer with its own name and cursor identity.
+
+**Data flow**: It reads every manifest, collects credential slot names, filters hooks whose event is page_change, checks that two hooks in the same extension do not share the same handler name, and returns the consumers.
+
+**Call relations**: core_jobs calls this at setup time to create one scheduled JobSpec per consumer. If duplicate handler names would collide, this function stops startup with a clear error.
+
+*Call graph*: called by 1 (core_jobs); 1 external calls (__init__).
+
+
+##### `PageChangeRunner.workspaces_with_changes`  (lines 449–514)
+
+```
+async def workspaces_with_changes(self, consumer: PageChangeConsumer) -> tuple[UUID, ...]
+```
+
+**Purpose**: This finds the workspaces where a particular page-change consumer has unread page changes. It avoids running page-change work for tenants whose pages have not changed.
+
+**Data flow**: It receives a PageChangeConsumer, reads that consumer's stored cursor per workspace, reads each workspace's newest page position, compares the newest page to the cursor, and returns workspace IDs that are behind. If one cursor is malformed, that workspace is treated as pending and a warning is logged.
+
+**Call relations**: The candidate function created by core_jobs calls this before each page-change tick. It uses _page_beyond_cursor for the comparison and feeds the result to JobRunner for per-workspace fan-out.
+
+*Call graph*: calls 1 internal fn (_page_beyond_cursor); 3 external calls (select, owner_tx, warn).
+
+
+##### `PageChangeRunner.drive`  (lines 516–566)
+
+```
+async def drive(self, consumer: PageChangeConsumer) -> None
+```
+
+**Purpose**: This runs one page-change consumer inside one workspace until it catches up or reaches the batch limit. It gives the consumer batches of changed pages and advances its cursor only after the handler succeeds.
+
+**Data flow**: It builds an extension context, reads the stored cursor, fetches changed pages after that cursor, calls the consumer's hook with a PageChangeBatch, and then tries to update the cursor from the old value to the new one. On handler failure, it logs and counts the stalled consumer, leaves the cursor unchanged, and raises the error.
+
+**Call relations**: The per-consumer handler made by core_jobs calls this. It uses _context_for to build the safe extension environment, and it is run by JobRunner inside a workspace binding.
+
+*Call graph*: calls 1 internal fn (_context_for); 6 external calls (__init__, __init__, emit_metric, formatted_stack, log_error, ws_current).
+
+
+##### `PageChangeRunner._context_for`  (lines 568–586)
+
+```
+def _context_for(self, consumer: PageChangeConsumer) -> ExtensionContext
+```
+
+**Purpose**: This builds the ExtensionContext used by a page-change hook. That context is the hook's toolbox: store, model access, page feed, blobs, index, and other runtime services.
+
+**Data flow**: It reads the consumer details and the current workspace, optionally creates a turn invoker, swaps in the background model if configured, and returns a context tied to the consumer's extension and job key.
+
+**Call relations**: PageChangeRunner.drive calls this before invoking a hook. It relies on _background_registry to make page-change model calls use the background-job model when appropriate.
+
+*Call graph*: calls 1 internal fn (_background_registry); called by 1 (drive); 2 external calls (context_for, ws_current).
+
+
+##### `_background_registry`  (lines 589–600)
+
+```
+def _background_registry(registry: ModelRegistry | None, background_model: str | None) -> ModelRegistry | None
+```
+
+**Purpose**: This returns a model registry adjusted for background jobs. If a background model is configured, it replaces the default automatic model with that background model.
+
+**Data flow**: It receives an optional registry and optional background model name. If either is missing, it returns the registry unchanged; otherwise it returns a copied registry with its automatic model changed.
+
+**Call relations**: PageChangeRunner._context_for and JobRunner.fire use this while building contexts, so background jobs do not accidentally use the same default model as member-facing turns unless requested.
+
+*Call graph*: called by 2 (fire, _context_for); 1 external calls (replace).
+
+
+##### `core_jobs`  (lines 603–709)
+
+```
+def core_jobs(sync_driver: SyncDriver, turn_dispatcher: TurnDispatcher, page_change_runner: PageChangeRunner, delivery_sweep: ResultDeliverer, preview_renderer: PreviewRenderer | None) -> tuple[JobSpe
+```
+
+**Purpose**: This builds the list of built-in jobs that every deployment may run. It wraps core services, such as source sync and turn dispatch, into the same JobSpec shape used by extensions.
+
+**Data flow**: It receives service objects such as the sync driver, turn dispatcher, page-change runner, delivery sweep, and optional preview renderer. It creates small handler and candidate functions around those services, discovers page-change consumers, and returns a tuple of JobSpec objects.
+
+**Call relations**: Startup code can combine this output with extension job specs through bindings_from. The returned jobs are later registered and run by JobRunner.
+
+*Call graph*: calls 1 internal fn (consumers); 2 external calls (__init__, seated_member_workspaces).
+
+
+##### `core_jobs._sync_sources`  (lines 627–628)
+
+```
+async def _sync_sources(context: ExtensionContext) -> None
+```
+
+**Purpose**: This small wrapper runs source synchronization as a job handler. It exists so the sync driver fits the standard JobSpec handler signature.
+
+**Data flow**: It receives an ExtensionContext but does not need to read it. It calls the sync driver's run method and returns nothing.
+
+**Call relations**: core_jobs installs this as the handler for the source-sync JobSpec. JobRunner eventually calls it inside each candidate workspace.
+
+
+##### `core_jobs._dispatch_turns`  (lines 630–631)
+
+```
+async def _dispatch_turns(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs the turn dispatcher as a job handler. It lets scheduled turn recovery use the same job machinery as every other background task.
+
+**Data flow**: It receives an ExtensionContext but does not use it. It calls the turn dispatcher's run method and returns nothing.
+
+**Call relations**: core_jobs installs this on the turn-dispatch JobSpec. JobRunner calls it for each workspace returned by the dispatcher's candidate finder.
+
+
+##### `core_jobs._deliver_results`  (lines 633–634)
+
+```
+async def _deliver_results(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs the result-delivery sweep as a job handler. It connects finished child-agent result delivery to the shared job runner.
+
+**Data flow**: It receives an ExtensionContext but does not use it. It calls the delivery sweep's run method and returns nothing.
+
+**Call relations**: core_jobs installs this on the result-delivery JobSpec. The implementation behind the ResultDeliverer protocol does the real turn-loop work.
+
+
+##### `core_jobs._census_product`  (lines 636–638)
+
+```
+async def _census_product(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs the product and onboarding census jobs. These jobs count product usage and onboarding state from core data.
+
+**Data flow**: It receives an ExtensionContext but does not use it. It runs product_census and onboarding_census, then returns nothing.
+
+**Call relations**: core_jobs installs this on the product census JobSpec. JobRunner schedules it for candidate workspaces chosen by seated_member_workspaces.
+
+*Call graph*: 2 external calls (onboarding_census, product_census).
+
+
+##### `core_jobs._render_previews`  (lines 640–642)
+
+```
+async def _render_previews(context: ExtensionContext) -> None
+```
+
+**Purpose**: This wrapper runs preview rendering when a preview renderer is configured. It adapts the renderer to the standard job handler shape.
+
+**Data flow**: It receives an ExtensionContext, checks that the renderer exists, calls the renderer's run method, and returns nothing.
+
+**Call relations**: core_jobs includes this handler only when preview rendering is available. JobRunner later executes it for workspaces returned by the preview candidate function.
+
+
+##### `core_jobs._preview_candidates`  (lines 644–646)
+
+```
+async def _preview_candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: This wrapper asks the preview renderer which workspaces need preview work. It exists so preview rendering can participate in the normal candidate-and-fan-out flow.
+
+**Data flow**: It checks that a preview renderer exists, calls its candidate_workspaces method, and returns those workspace IDs.
+
+**Call relations**: core_jobs attaches this as the candidate finder for the preview-rendering JobSpec. JobRunner calls it during each preview tick.
+
+
+##### `core_jobs._drive_consumer`  (lines 648–654)
+
+```
+def _drive_consumer(consumer: PageChangeConsumer) -> Callable[[ExtensionContext], Awaitable[None]]
+```
+
+**Purpose**: This creates a job handler for one page-change consumer. It closes over the consumer so each generated JobSpec drives the correct hook and cursor.
+
+**Data flow**: It receives a PageChangeConsumer and returns an async handler function. That handler will later call PageChangeRunner.drive for the captured consumer.
+
+**Call relations**: core_jobs calls this once per page-change consumer while building JobSpecs. The returned _handler is what JobRunner eventually invokes.
+
+
+##### `core_jobs._drive_consumer._handler`  (lines 651–652)
+
+```
+async def _handler(context: ExtensionContext) -> None
+```
+
+**Purpose**: This is the actual job handler produced for a specific page-change consumer. It runs that consumer's cursor loop in the current workspace.
+
+**Data flow**: It receives an ExtensionContext but relies on the runner's workspace binding rather than the argument. It calls page_change_runner.drive with the captured consumer and returns nothing.
+
+**Call relations**: JobRunner calls this through the JobSpec made by core_jobs. The heavy lifting is handed to PageChangeRunner.drive.
+
+
+##### `core_jobs._consumer_candidates`  (lines 656–660)
+
+```
+def _consumer_candidates(consumer: PageChangeConsumer) -> WorkspaceCandidates
+```
+
+**Purpose**: This creates a candidate finder for one page-change consumer. It lets each consumer skip workspaces where its own cursor is already up to date.
+
+**Data flow**: It receives a PageChangeConsumer and returns an async candidate function. That function later asks PageChangeRunner which workspaces have changes for that consumer.
+
+**Call relations**: core_jobs uses this beside _drive_consumer when creating page-change JobSpecs. JobRunner calls the returned _candidates function during ticks.
+
+
+##### `core_jobs._consumer_candidates._candidates`  (lines 657–658)
+
+```
+async def _candidates() -> tuple[UUID, ...]
+```
+
+**Purpose**: This is the actual candidate finder for a specific page-change consumer. It returns only workspaces where that consumer has unread page changes.
+
+**Data flow**: It receives no direct data. It calls page_change_runner.workspaces_with_changes for the captured consumer and returns the workspace IDs.
+
+**Call relations**: JobRunner calls this during a page-change tick. PageChangeRunner.workspaces_with_changes performs the database comparison work.
+
+
+##### `bindings_from`  (lines 721–752)
+
+```
+def bindings_from(manifests: tuple[Manifest, ...], core_jobs: tuple[JobSpec, ...], disabled: frozenset[str]=frozenset()) -> tuple[_Binding, ...]
+```
+
+**Purpose**: This turns core jobs and extension jobs into runnable bindings with stable keys. A binding says which extension owns a job, which credentials it declared, and what JobSpec should run.
+
+**Data flow**: It receives manifests, core JobSpecs, and an optional set of disabled job keys. It creates core bindings under the core namespace, extension bindings under each extension name, checks that every disabled key actually exists, removes disabled bindings, and returns the rest.
+
+**Call relations**: Startup code uses this before creating a JobRunner. JobRunner later uses the binding keys to register schedules, find candidates, and build the right ExtensionContext.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `JobRunner.launch`  (lines 782–806)
+
+```
+def launch(self) -> None
+```
+
+**Purpose**: This registers all jobs with DBOS at startup. Scheduled jobs are published as cron-like schedules, while one-shot jobs are enqueued once with deduplication.
+
+**Data flow**: It stores this runner in the module-level firing slot, walks every binding, and either enqueues an immediate tick for unscheduled jobs or creates a ScheduleInput for scheduled ones. It logs what happened and applies all schedules in one call.
+
+**Call relations**: This is the boot-time entry into the job system. The DBOS workflows job_tick and job_fire later use the stored runner to get back to this JobRunner instance.
+
+*Call graph*: 6 external calls (now, apply_schedules, ScheduleInput, SetEnqueueOptions, log, warn).
+
+
+##### `JobRunner.tick`  (lines 808–830)
+
+```
+async def tick(self, scheduled_time: datetime, key: str) -> None
+```
+
+**Purpose**: This handles one scheduled firing of one job key. It fans the job out to the workspaces that currently have work, while preventing duplicate per-workspace executions from stacking up.
+
+**Data flow**: It receives the scheduled time and job key. If this process does not know that key, it logs a warning and stops. Otherwise it asks for candidate workspaces and enqueues one job_workflow per workspace using a deduplication ID made from the job key and workspace ID.
+
+**Call relations**: The DBOS workflow job_tick calls this. It uses _registered to tolerate old or foreign schedules, candidates to ask the JobSpec where work exists, and DBOS queueing to hand off actual execution.
+
+*Call graph*: calls 2 internal fn (_registered, candidates); 2 external calls (SetEnqueueOptions, warn).
+
+
+##### `JobRunner.candidates`  (lines 832–833)
+
+```
+async def candidates(self, key: str) -> tuple[UUID, ...]
+```
+
+**Purpose**: This asks a registered job which workspaces need to run it. It is a small lookup wrapper around the JobSpec's candidate function.
+
+**Data flow**: It receives a job key, finds the matching binding, calls that binding's candidates function, and returns the workspace IDs.
+
+**Call relations**: JobRunner.tick calls this after confirming the key is registered. _binding provides the binding or raises if the key is not runnable here.
+
+*Call graph*: calls 1 internal fn (_binding); called by 1 (tick).
+
+
+##### `JobRunner.fire`  (lines 835–879)
+
+```
+async def fire(self, key: str, workspace_id: UUID) -> None
+```
+
+**Purpose**: This runs one job for one workspace. It is the only path that actually calls a job handler, and it always binds the workspace first.
+
+**Data flow**: It receives a job key and workspace ID, finds the binding, enters the workspace context, applies agent provisioning once per workspace per process, builds an ExtensionContext, and calls the job handler. Spend refusals are deferred and possibly reported to a member; other errors are logged, counted, and re-raised.
+
+**Call relations**: job_fire calls this as a DBOS step inside job_workflow. It uses _background_registry for model choice and _deferred_on_spend when spending policy pauses the work.
+
+*Call graph*: calls 3 internal fn (_binding, _deferred_on_spend, _background_registry); 7 external calls (__init__, failed_statement, emit_metric, formatted_stack, log_error, context_for, ws).
+
+
+##### `JobRunner._deferred_on_spend`  (lines 881–929)
+
+```
+async def _deferred_on_spend(self, key: str, workspace_id: UUID, refusal: OffTurnSpendRefused) -> None
+```
+
+**Purpose**: This turns a spending refusal from a job into a quiet deferral instead of a job failure. It also tries to notify the member once for the same refusal outcome.
+
+**Data flow**: It receives the job key, workspace ID, and refusal object. It logs the deferral, reads a scoped marker for that refused model, writes a new marker only if this outcome has not already been told, and asks _tell_the_member to open a notice turn. If no notice can be sent, it removes the marker so a later refusal can try again.
+
+**Call relations**: JobRunner.fire calls this when a handler raises OffTurnSpendRefused. It uses the core scoped store to coordinate repeated refusals and delegates member notification to _tell_the_member.
+
+*Call graph*: calls 1 internal fn (_tell_the_member); called by 1 (fire); 3 external calls (__init__, log, spend_refusal_notice_key).
+
+
+##### `JobRunner._tell_the_member`  (lines 931–1002)
+
+```
+async def _tell_the_member(self, key: str, workspace_id: UUID, refusal: str) -> UUID | None
+```
+
+**Purpose**: This tries to create a conversation turn telling a member that background work is paused by spending rules. It chooses a recent valid member conversation rather than posting into an arbitrary room.
+
+**Data flow**: It receives the job key, workspace ID, and refusal text. If no invoker is available, it returns None. Otherwise it searches for the latest seated member turn in a safe audience with a live agent, and if found invokes the agent with a one-off instruction and a fresh idempotency key. It returns the created turn ID or None.
+
+**Call relations**: JobRunner._deferred_on_spend calls this after claiming the notice marker. It uses workspace database reads to find the right speaker and MemberAuthority so the notification is made on behalf of that member.
+
+*Call graph*: called by 1 (_deferred_on_spend); 8 external calls (__init__, and_, or_, select, workspace_tx, warn, agent_is_live, uuid4).
+
+
+##### `JobRunner._registered`  (lines 1004–1005)
+
+```
+def _registered(self, key: str) -> _Binding | None
+```
+
+**Purpose**: This checks whether the current process knows a job key. It is used when old schedules or jobs from another code version may still exist in the shared DBOS schedule table.
+
+**Data flow**: It receives a key, scans this runner's bindings, and returns the matching binding or None.
+
+**Call relations**: JobRunner.tick uses this to skip unknown scheduled fires harmlessly. JobRunner._binding uses it as the lookup step before deciding whether to raise.
+
+*Call graph*: called by 2 (_binding, tick).
+
+
+##### `JobRunner._binding`  (lines 1007–1014)
+
+```
+def _binding(self, key: str) -> _Binding
+```
+
+**Purpose**: This returns the binding for a job key and treats a missing binding as a real error. It is used only once the code expects the key to be runnable here.
+
+**Data flow**: It receives a key, calls _registered, and either returns the binding or raises a RuntimeError.
+
+**Call relations**: JobRunner.candidates and JobRunner.fire call this before using a JobSpec. Unlike tick, these paths should not silently ignore an unknown key because work has already been handed to this process.
+
+*Call graph*: calls 1 internal fn (_registered); called by 2 (candidates, fire).
+
+
+##### `job_tick`  (lines 1021–1025)
+
+```
+async def job_tick(scheduled_time: datetime, key: str) -> None
+```
+
+**Purpose**: This is the durable DBOS workflow for a job tick. It connects DBOS schedule fires back to the active JobRunner.
+
+**Data flow**: It receives the scheduled time and job key from DBOS, reads the module-level runner set by JobRunner.launch, and calls runner.tick. If jobs were not launched, it raises an error.
+
+**Call relations**: DBOS schedules and one-shot enqueues call this workflow. JobRunner.launch registers it, and the workflow delegates all real fan-out logic to JobRunner.tick.
+
+
+##### `job_workflow`  (lines 1029–1030)
+
+```
+async def job_workflow(scheduled_time: datetime, key: str, workspace_id: str) -> None
+```
+
+**Purpose**: This is the durable DBOS workflow for one job running in one workspace. It exists so each workspace execution is separately tracked and retried by DBOS.
+
+**Data flow**: It receives the scheduled time, job key, and workspace ID string. It passes the key and workspace ID to job_fire; the scheduled time is part of the workflow identity and history rather than used directly here.
+
+**Call relations**: JobRunner.tick enqueues this workflow for each candidate workspace. It hands off to job_fire, which is the DBOS step that actually calls JobRunner.fire.
+
+*Call graph*: calls 1 internal fn (job_fire).
+
+
+##### `job_fire`  (lines 1034–1038)
+
+```
+async def job_fire(key: str, workspace_id: str) -> None
+```
+
+**Purpose**: This DBOS step runs the actual job handler through the active JobRunner. Marking it as a step lets DBOS remember completed work during recovery instead of rerunning it unnecessarily.
+
+**Data flow**: It receives the job key and workspace ID string, converts the workspace ID to a UUID, reads the module-level runner, and calls runner.fire. If no runner is registered, it raises an error.
+
+**Call relations**: job_workflow calls this for every per-workspace job execution. It is the final bridge from durable workflow plumbing into JobRunner.fire.
+
+*Call graph*: called by 1 (job_workflow); 1 external calls (UUID).
+
+
+### Media preview retries
+A core scheduled job retries failed preview generation for recently shared documents and records the outcome.
+
+### `core/src/ufo/runtime/media/preview_renderer.py`
+
+`domain_logic` · `scheduled background retry`
+
+When someone shares a document, the system tries to make a preview image right away. That first try is only “best effort”: if the preview service is briefly down, the file is still shared, but the database row is left without preview information. This file is the safety net for that situation.
+
+The job looks for shared artifacts whose preview fields are still empty, whose filenames look like supported document types, and whose share time is recent enough to be worth retrying. The time limit matters because some files can never be rendered, such as corrupt documents. Without a cutoff, the system would keep retrying hopeless files forever.
+
+For each candidate, the code does not download the file itself. Instead, it creates short-lived signed URLs: one URL lets the preview service read the original file, and another lets it upload the PNG preview. This is like giving a courier two temporary keys: one to pick up a package and one to drop off the finished item. The core service only receives the preview size back, then writes the preview key, media type, and byte size into the database.
+
+The work is done in small batches. If one file fails during this run, it is simply left for the next scheduled run rather than retried in a tight loop.
 
 #### Function details
 
-##### `GbrainFolderSource.fetch`  (lines 35–40)
+##### `_eligible`  (lines 42–43)
 
 ```
-async def fetch(self, config: GbrainFolderConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
+def _eligible(filename_column: sa.Column) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This is the public sync entry point for the folder source. It reads the configured folder, converts each Markdown file into a page, and returns a complete snapshot of the folder’s current contents.
+**Purpose**: Builds the database test for whether a filename has one of the document extensions that the preview renderer knows how to handle. It is used to avoid sending unsupported files to the preview service.
 
-**Data flow**: It receives a folder configuration, an optional cursor, and authentication information. The cursor and authentication are not used here because this source is just reading local files. It asks a background thread to do the blocking disk read, decodes each file’s bytes into text, turns the text into page objects, and returns a SyncResult with those pages, no next cursor, and snapshot mode turned on.
+**Data flow**: It receives a database column that contains filenames. It turns the list of supported suffixes, such as .pdf or .docx, into a combined “filename ends like one of these” condition. The result is not a true or false value yet; it is a database filter used later in a query.
 
-**Call relations**: The sync system calls this when it wants fresh content from a local gbrain folder. To avoid blocking the main asynchronous event loop, it hands the disk work to GbrainFolderSource._read through asyncio.to_thread. After that, it relies on the page helpers decoded and markdown_page to interpret the Markdown files, then wraps the finished pages in SyncResult for the rest of the source pipeline.
+**Call relations**: PreviewRenderer.run uses this filter when choosing rows inside one workspace to render now. PreviewRenderer.candidate_workspaces uses the same filter when looking across workspaces to find which ones have pending preview work.
 
-*Call graph*: 4 external calls (__init__, to_thread, decoded, markdown_page).
+*Call graph*: called by 2 (candidate_workspaces, run); 2 external calls (ilike, or_).
 
 
-##### `GbrainFolderSource._read`  (lines 43–57)
+##### `PreviewRenderer.run`  (lines 57–79)
 
 ```
-def _read(root: str, max_bytes: int) -> tuple[tuple[str, bytes], ...]
+async def run(self) -> None
 ```
 
-**Purpose**: This function does the actual safe folder scan. It finds Markdown files under the chosen root, reads their bytes, and refuses to read too much data or anything outside the allowed folder.
+**Purpose**: Performs one batch of preview retry work for the current workspace. It finds recent shared files that still need previews, then asks the preview service to render each one.
 
-**Data flow**: It starts with a root path and a maximum byte limit. It checks the root with contained_root, walks all paths below it in sorted order, skips symbolic links, non-files, and non-Markdown paths, then opens each accepted file through contained_file. It adds up the bytes read across all files; if the total is over the limit, it raises StreamFault instead of returning partial data. Otherwise it returns a tuple of pairs: each file’s relative path and its raw bytes.
+**Data flow**: It calculates a cutoff time so only recent failed previews are considered. It opens a workspace-scoped database transaction, reads up to a small batch of matching shared artifacts, and stops if there are none. If rows are found, it opens an HTTP client and passes each file’s blob key and filename to _render_one.
 
-**Call relations**: GbrainFolderSource.fetch calls this when a sync begins. This function delegates the path-safety checks to contained_root and contained_file, and delegates the Markdown filename decision to is_markdown_path. If the folder is too large, it raises StreamFault so the surrounding sync can fail clearly instead of silently indexing an unsafe or excessive amount of data.
+**Call relations**: This is the main body of the scheduled renderer for a workspace. It calls _eligible to build the database search condition, then calls PreviewRenderer._render_one for each selected row so the actual preview request and database update happen file by file.
 
-*Call graph*: calls 1 internal fn (__init__); 3 external calls (contained_file, contained_root, is_markdown_path).
+*Call graph*: calls 2 internal fn (_render_one, _eligible); 4 external calls (now, AsyncClient, select, workspace_tx).
 
 
-### `extensions/gbrain/ufo_ext_gbrain/pages.py`
+##### `PreviewRenderer._render_one`  (lines 81–117)
 
-`domain_logic` · `source sync`
+```
+async def _render_one(self, client: httpx.AsyncClient, blob_key: str, filename: str) -> None
+```
 
-This file is the shared “Markdown page preparation” code for gbrain backends. Its job is to decide which files are real Markdown pages, safely read their text, and wrap each page in the standard Page object used by the rest of the system. Without this file, a sync could accidentally pull in hidden files like .git contents, crash with unclear text-decoding errors, or index YAML frontmatter as if it were part of the article body.
+**Purpose**: Tries to render a preview for one shared file and record it if successful. It prepares temporary read and write links, calls the preview service, and stores the returned preview information.
 
-The flow is simple. First, a path is checked: only files ending in .md or .markdown are accepted, and anything inside a hidden path segment, such as .git or .drafts, is rejected. Next, the raw file bytes are decoded as UTF-8, which is the common text format expected here. If decoding fails, the code raises a StreamFault, a structured error that names the bad file so the user can fix it.
+**Data flow**: It receives an HTTP client, the original file’s blob key, and the filename. From the filename it decides the document kind and creates a new preview storage key. It asks the blob store for a temporary download URL for the source file and a temporary upload URL for the preview image. It sends those URLs and rendering limits to the preview service. If the service cannot be reached or refuses the request, it logs the problem and leaves the database unchanged. If the service succeeds, it reads the preview size from the response and updates the shared artifact row with the preview key, PNG media type, and size.
 
-Finally, the Markdown text is turned into a Page. The file looks for a frontmatter block, which is a small YAML metadata section at the top of many Markdown files, surrounded by --- or ended by .... If that metadata contains a title, it becomes the page title and the metadata is removed from the indexed body. If there is no metadata title, the first top-level Markdown heading, like “# Project Notes”, is used. If neither exists, the file path becomes the fallback title.
+**Call relations**: PreviewRenderer.run calls this once for each pending artifact in its batch. This function hands the heavy work to the external preview service through an HTTP request, then uses a workspace-scoped database transaction to save the result only if the artifact still has no preview.
+
+*Call graph*: called by 1 (run); 7 external calls (post, dumps, PurePosixPath, update, workspace_tx, log, uuid4).
+
+
+##### `PreviewRenderer.candidate_workspaces`  (lines 119–133)
+
+```
+async def candidate_workspaces(self) -> tuple[UUID, ...]
+```
+
+**Purpose**: Finds which workspaces currently have shared documents that may need preview retry work. This lets the scheduler avoid running the renderer for workspaces that have nothing to do.
+
+**Data flow**: It calculates the same recent-time cutoff used by the renderer. It opens an owner-level database transaction, which can see workspace identifiers across the system, and searches for distinct workspace IDs on shared artifact rows with no preview, a recent creation time, and an eligible filename. It returns those workspace IDs as a tuple.
+
+**Call relations**: The scheduling layer can call this before running workspace-specific preview jobs. It uses _eligible for the same supported-file filter as PreviewRenderer.run, but instead of rendering files, it only reports where pending work exists.
+
+*Call graph*: calls 1 internal fn (_eligible); 3 external calls (now, select, owner_tx).
+
+
+### Notification draining
+The Notification app limits and traces delivery, then drains pending notifications into the owned inbox agent on schedule.
+
+### `extensions/app_notification/ufo_ext_app_notification/deliver.py`
+
+`domain_logic` · `request handling during notification delivery`
+
+Most notifications can sit safely in a portal, but some need to reach a person in the chat thread they already use. This file provides that bridge. Think of it like a trusted mail clerk: it checks who is allowed to send the message, chooses the best mailbox, sends one combined note, and records exactly what happened.
+
+The public tool is `DELIVER`, backed by the `deliver` function. It accepts notification references and a short text message. Before sending anything, it confirms that the caller is really the Notification app’s own agent, not another app pretending to use the same action name. It then checks which named notifications are still undelivered for the current member.
+
+If there is something to send, it asks the platform for the member’s recent durable chat conversations. “Durable” means the conversation can store the message so the member can see and reply later. It tries the newest suitable conversation first. If that conversation’s agent was archived, it skips to the next one.
+
+A successful push is recorded on the notification rows with the turn id and surface. That record prevents loops and duplicate deliveries. If no chat surface is available, the notifications are marked as delivered only to the portal, so they remain readable there but are not pushed into chat.
 
 #### Function details
 
-##### `is_markdown_path`  (lines 16–22)
-
-```
-def is_markdown_path(relpath: str) -> bool
-```
-
-**Purpose**: This function decides whether a root-relative path should be treated as a Markdown page. It keeps the sync focused on visible Markdown files and avoids hidden folders, dotfiles, and unrelated file types.
-
-**Data flow**: It takes a path string such as notes/today.md. It splits the path into parts, rejects it if any part starts with a dot, then checks the file extension in a case-insensitive way. It returns true for accepted Markdown paths and false for everything else.
-
-**Call relations**: This is the first gate in the page-reading flow. Code that scans a source can call it before opening files, so only likely Markdown documents move on to decoding and page creation.
-
-*Call graph*: 1 external calls (PurePosixPath).
-
-
-##### `decoded`  (lines 25–31)
-
-```
-def decoded(source_ref: str, data: bytes) -> str
-```
-
-**Purpose**: This function converts raw file bytes into normal text using UTF-8. If the file is not valid UTF-8, it reports a clear source-stream error that includes the file name or path.
-
-**Data flow**: It receives a source reference, which identifies the file, and the file’s bytes. It tries to decode those bytes as UTF-8 text. On success it returns the decoded string; on failure it raises a StreamFault saying that this specific source is not UTF-8 text.
-
-**Call relations**: After a path has been accepted as Markdown, callers use this before parsing the page. If decoding fails, it stops the run with a useful, named fault instead of letting a low-level Unicode error appear without context.
-
-*Call graph*: calls 1 internal fn (__init__).
-
-
-##### `markdown_page`  (lines 34–43)
-
-```
-def markdown_page(source_ref: str, text: str) -> Page
-```
-
-**Purpose**: This function turns one Markdown document into a Page object that the rest of the system can index or sync. It also chooses the best available title for that page.
-
-**Data flow**: It receives the source reference and the Markdown text. It first asks _split_frontmatter to separate any top-of-file metadata from the real body. Then it chooses a title: frontmatter title first, first Markdown heading second, source reference last. It returns a Page containing the source reference, cleaned body, stream name, and title.
-
-**Call relations**: This is the main assembly step after a file has passed filtering and decoding. It relies on _split_frontmatter to remove metadata and on _first_heading when metadata does not provide a title, then hands the finished Page to the broader source pipeline.
-
-*Call graph*: calls 2 internal fn (_first_heading, _split_frontmatter); 1 external calls (__init__).
-
-
-##### `_split_frontmatter`  (lines 46–60)
-
-```
-def _split_frontmatter(text: str) -> tuple[str | None, str]
-```
-
-**Purpose**: This helper looks for a YAML frontmatter block at the top of a Markdown file and extracts a title from it if possible. It also removes that metadata block from the page body so it is not indexed as normal content.
-
-**Data flow**: It receives the full Markdown text. If the text does not start with a frontmatter delimiter, it returns no title and the original text. If it finds a closing delimiter, it tries to parse the lines between as YAML, reads the title field when it is a non-empty string, and returns that title plus the body after the metadata. If the YAML is invalid or no closing delimiter is found, it safely falls back to no title and the original text.
-
-**Call relations**: markdown_page calls this before choosing the final title. Its output decides whether the page gets a metadata title immediately or whether markdown_page needs to fall back to scanning headings.
-
-*Call graph*: called by 1 (markdown_page); 1 external calls (safe_load).
-
-
-##### `_first_heading`  (lines 63–68)
-
-```
-def _first_heading(body: str) -> str | None
-```
-
-**Purpose**: This helper finds the first top-level Markdown heading in the page body. It is used as a friendly title when the file has no usable frontmatter title.
-
-**Data flow**: It receives the Markdown body as text. It checks each line, trims surrounding whitespace, and looks for a line starting with “# ”. If it finds one, it returns the heading text after the marker; if not, it returns nothing.
-
-**Call relations**: markdown_page calls this only after frontmatter title extraction has not produced a title. It provides the second-best title choice before the source path is used as the final fallback.
-
-*Call graph*: called by 1 (markdown_page).
-
-
-### Consented enrichment
-The enrichment extension records lookup consent, chooses live or recorded profile providers, stores results and throttling state, and exposes confirmed profile guesses to the product.
-
-### `extensions/enrichment/ufo_ext_enrichment/__init__.py`
-
-`other` · `import time`
-
-This is the package entry file for the enrichment extension. In Python, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package, like labeling a drawer so other parts of the program know what is inside. Here, the file only contains a short docstring: “The enrichment extension.” That means it does not run setup code, define functions, or store configuration. Its main value is structural. Without it, depending on the Python version and import style, code that expects `extensions.enrichment.ufo_ext_enrichment` to behave like a regular package might fail or become harder to discover. It also gives documentation tools and readers a simple description of what this package is meant to contain.
-
-
-### `extensions/enrichment/ufo_ext_enrichment/manifest.py`
-
-`domain_logic` · `startup, scheduled enrichment runs, object reads, and user prompt hooks`
-
-This file is the front door and main behavior for the enrichment feature. The real-world problem it solves is: when a new workspace member signs up, the system may want a helpful starting guess about who they are and what company they represent, but it must not send them to an outside data provider unless they agree. The file treats a confirmed website as that agreement. Clearing the website means “do not look me up.”
-
-The flow is split into a few parts. First, the `confirm_website` action records the member’s choice and website, but does not contact the provider right away. Then a scheduled job runs about once a minute, finds consenting members without profiles, and asks the configured provider for person and company information. If the provider is missing, the action and job are not registered at all, so the portal will not ask for a website it cannot use.
-
-The file also exposes stored enrichment rows as a read-only object called `enrichment_profile`. Users can list and view the guessed data, but cannot edit or delete it directly; the website confirmation is the only write path. Finally, on each user prompt, the file may inject a short, clearly walled-off note into the agent’s context. That note is deliberately framed as an unverified outside guess, like a sticky note saying “starting clue, not truth.”
-
-#### Function details
-
-##### `website_host`  (lines 162–172)
-
-```
-def website_host(raw: str) -> str | None
-```
-
-**Purpose**: Turns whatever a member typed as a website into a clean host name, such as changing `https://www.example.com/path` into `example.com`. It rejects values that do not look like a real website.
-
-**Data flow**: It receives a raw text string from the website field. It trims spaces, lowercases it, parses it like a URL, removes a leading `www.`, and checks that the host contains a dot. It returns the cleaned host, returns `None` for an empty field, or raises an error for something that is not a website.
-
-**Call relations**: The website confirmation action calls this before storing the member’s answer. That keeps later lookup code working with a simple domain instead of many possible URL shapes.
-
-*Call graph*: called by 1 (confirm_website); 1 external calls (urlsplit).
-
-
-##### `Enrichment.confirm_website`  (lines 182–203)
-
-```
-async def confirm_website(self, ctx: ToolContext, args: ConfirmWebsiteInput) -> ToolResult
-```
-
-**Purpose**: Records a speaking member’s consent choice and confirmed company website. It intentionally does not perform the lookup immediately; it leaves that work for the scheduled job.
-
-**Data flow**: It receives the tool context and the submitted website. It checks that extension context exists, verifies there is a speaking member, normalizes the website, loads the seated member, records whether consent was granted, stores the website unless it is a free email provider domain, and deletes any older profile for that member. It returns a short message saying either that a profile is being built or that nothing was looked up.
-
-**Call relations**: This is the write path declared by `manifest` when a provider is available. It relies on `website_host` to clean the submitted website and `_require_ext` to ensure it has workspace access. The later `Enrichment.tick` job picks up the recorded consent and actually builds the profile.
-
-*Call graph*: calls 2 internal fn (_require_ext, website_host); 5 external calls (__init__, __init__, __init__, __init__, __init__).
-
-
-##### `Enrichment.tick`  (lines 205–224)
-
-```
-async def tick(self, ctx: ExtensionContext) -> None
-```
-
-**Purpose**: Runs the background enrichment work for members who already gave consent and still have no stored profile. It processes a small batch so the system does not try to enrich everyone at once.
-
-**Data flow**: It receives an extension context for a workspace. It reads the next due seated members, looks each one up, writes the resulting profile, and clears any provider backoff after successful work. If the provider reports a retryable problem, it records a pause for the workspace, logs a warning, and stops early.
-
-**Call relations**: The scheduled job registered by `manifest` calls this. For each member it hands the email and website to `Enrichment._lookup`; when provider trouble occurs, it uses the backoff store so the next run waits instead of hammering a failing service.
-
-*Call graph*: calls 2 internal fn (transaction, _lookup); 3 external calls (__init__, __init__, warn).
-
-
-##### `Enrichment._lookup`  (lines 226–233)
-
-```
-async def _lookup(self, email: str, website: str | None) -> Profile
-```
-
-**Purpose**: Asks the provider for the person and company data needed to build one profile. It avoids treating common email services, such as Gmail, as someone’s employer.
-
-**Data flow**: It receives an email address and an optional confirmed website. It asks the provider for person information using the email. It chooses the company domain from the confirmed website if present, otherwise from the email domain, but skips company lookup for known free mail domains. It returns a `Profile` created from those results.
-
-**Call relations**: `Enrichment.tick` calls this for each due member. After gathering raw provider answers, it hands them to `Enrichment._profile` to turn them into the stored profile shape.
-
-*Call graph*: calls 1 internal fn (_profile); called by 1 (tick).
-
-
-##### `Enrichment._profile`  (lines 235–249)
-
-```
-def _profile(self, email: str, website: str | None, person: Person | None, company: Company | None) -> Profile
-```
-
-**Purpose**: Packages provider results into one stored profile record. It decides whether the lookup matched anything and stamps the result with the current time.
-
-**Data flow**: It receives the member email, confirmed website, optional person data, and optional company data. It sets the status to `matched` if either person or company data exists, otherwise `no_match`, adds the provider source, and records the fetch time. It returns a complete `Profile` object.
-
-**Call relations**: `Enrichment._lookup` calls this after provider requests finish. The returned profile is later written to storage by `Enrichment.tick`.
-
-*Call graph*: called by 1 (_lookup); 2 external calls (__init__, now).
-
-
-##### `inject`  (lines 252–274)
-
-```
-async def inject(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Adds a short enrichment note to an agent turn when useful profile data exists. The note is marked as third-party, unverified information so the agent should not treat it as certain truth.
-
-**Data flow**: It receives hook context for a user prompt. If there is no turn, it returns nothing. Otherwise it reads the speaker’s profile and other workspace profiles, chooses company information from the best available row, formats company and member lines, wraps them in an untrusted-data wall, and returns an injection context. If there is nothing useful to say, it returns nothing.
-
-**Call relations**: `manifest` registers this as a best-effort hook for user prompt submission. It calls `_company_lines` and `_member_lines` to make the short text, and uses `wall` so the agent sees the information as externally sourced.
-
-*Call graph*: calls 2 internal fn (_company_lines, _member_lines); 3 external calls (__init__, __init__, wall).
-
-
-##### `_company_lines`  (lines 277–285)
-
-```
-def _company_lines(company: Company | None) -> list[str]
-```
-
-**Purpose**: Builds the company part of the short prompt note. It keeps the text compact by including only a name and a few useful details.
-
-**Data flow**: It receives optional company data. If there is no company name, it returns an empty list. Otherwise it clips the company name and selected details such as industry, size, and location, then returns one formatted line.
-
-**Call relations**: `inject` calls this while preparing the walled-off note for the agent. It uses `_clip` so long provider values cannot make the injected text too large.
-
-*Call graph*: calls 1 internal fn (_clip); called by 1 (inject).
-
-
-##### `_member_lines`  (lines 288–292)
-
-```
-def _member_lines(person: Person | None) -> list[str]
-```
-
-**Purpose**: Builds the member part of the short prompt note, usually the person’s name and job title. It only emits a line when there is something meaningful to say.
-
-**Data flow**: It receives optional person data. If there is no name or job title, it returns an empty list. Otherwise it clips the available pieces and returns one formatted member line.
-
-**Call relations**: `inject` calls this after reading the speaker’s profile. Like `_company_lines`, it relies on `_clip` to keep outside data concise.
-
-*Call graph*: calls 1 internal fn (_clip); called by 1 (inject).
-
-
-##### `_clip`  (lines 295–297)
-
-```
-def _clip(value: str, limit: int) -> str
-```
-
-**Purpose**: Shortens text to a safe display length and collapses awkward whitespace. It is a small guardrail against long or messy provider strings.
-
-**Data flow**: It receives a text value and a maximum length. It turns all runs of whitespace into single spaces. If the result fits, it returns it unchanged; if not, it cuts it short and adds an ellipsis.
-
-**Call relations**: Formatting helpers call this before putting provider text into summaries or prompt injections. That keeps `inject`, `_company_lines`, `_member_lines`, and `summary` from producing oversized text.
-
-*Call graph*: called by 3 (_company_lines, _member_lines, summary).
-
-
-##### `summary`  (lines 300–312)
-
-```
-def summary(profile: Profile) -> str
-```
-
-**Purpose**: Creates the one-line summary shown for a profile row. It tries to say the most useful thing available, such as a job title at a company.
-
-**Data flow**: It receives a profile. It looks for a person job title, company name, person name, and company industry, in that order of usefulness. It combines what it finds into one line, falls back to `No match` if nothing was found, clips the result, and returns the summary text.
-
-**Call relations**: `_row` calls this when converting a stored profile into an object row for lists and detail views. It uses `_clip` so row summaries stay short.
-
-*Call graph*: calls 1 internal fn (_clip); called by 1 (_row).
-
-
-##### `_row`  (lines 315–338)
-
-```
-def _row(profile: Profile) -> ObjectRow
-```
-
-**Purpose**: Converts a stored profile into the row format used by the object system. This is what makes enrichment data visible in lists with named fields.
-
-**Data flow**: It receives a `Profile`. It copies the email, website, status, source, person fields, and company fields into a plain field dictionary, creates a readable summary, and returns an `ObjectRow` named by the email address.
-
-**Call relations**: Both `ProfileObjects._page` and `ProfileObjects._entry` use this before returning data to callers. It depends on `summary` for the row’s human-friendly label.
-
-*Call graph*: calls 1 internal fn (summary); called by 2 (_entry, _page); 1 external calls (__init__).
-
-
-##### `_require_ext`  (lines 341–344)
+##### `_require_ext`  (lines 85–88)
 
 ```
 def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
 ```
 
-**Purpose**: Checks that an extension context is present before code tries to read or write workspace data. Without that context, the file cannot know which workspace’s storage to use.
-
-**Data flow**: It receives an optional extension context. If the context exists, it returns it unchanged. If it is missing, it raises an error explaining that enrichment objects were dispatched without the needed context.
-
-**Call relations**: The website action and object read methods call this at their boundaries. It acts like a front-door check before functions open transactions or query profile storage.
-
-*Call graph*: called by 5 (confirm_website, get, list, member_detail, member_page).
+*Call graph*: called by 1 (deliver).
 
 
-##### `ProfileObjects.list`  (lines 353–356)
+##### `_refusal`  (lines 91–92)
 
 ```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+def _refusal(text: str) -> ToolResult
 ```
 
-**Purpose**: Returns a page of enrichment profile rows for callers allowed to read shared workspace data. If the caller does not have the shared subject, it returns an empty page.
-
-**Data flow**: It receives a tool context and list query. It checks the caller’s read subjects, and either returns an empty object page or uses the extension context to load a real page of profile rows. The result is an `ObjectPage` ready for display or API use.
-
-**Call relations**: The object system calls this when someone lists `enrichment_profile`. It delegates the actual loading and row formatting to `ProfileObjects._page` after `_require_ext` confirms workspace context.
-
-*Call graph*: calls 2 internal fn (_page, _require_ext); 1 external calls (object_page).
+*Call graph*: called by 1 (deliver); 2 external calls (__init__, __init__).
 
 
-##### `ProfileObjects.member_page`  (lines 358–374)
+##### `_require_notification_agent`  (lines 95–97)
 
 ```
-async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
+async def _require_notification_agent(ext: ExtensionContext, ctx: ToolContext) -> None
 ```
 
-**Purpose**: Returns enrichment rows through the member-object view, but only from the main agent lane. This prevents the same workspace-level profile rows from appearing once per agent.
-
-**Data flow**: It receives optional extension context, member information, admin flag, and a list query. It checks whether the current object agent is the main one. If not, it returns an empty page; if yes, it loads and returns the normal profile page.
-
-**Call relations**: The broader member-object listing path calls this when it fans out over agents. It checks `agent_is_main`, then either stops with an empty page or delegates to `ProfileObjects._page`.
-
-*Call graph*: calls 2 internal fn (_page, _require_ext); 3 external calls (object_agent_id, object_page, agent_is_main).
+*Call graph*: called by 1 (deliver); 1 external calls (inbox_agent_id).
 
 
-##### `ProfileObjects.get`  (lines 376–380)
+##### `_names`  (lines 100–102)
 
 ```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[Profile] | None
+def _names(refs: tuple[str, ...]) -> tuple[str, ...]
 ```
 
-**Purpose**: Fetches one enrichment profile by name, where the name is the member email. It only returns data to callers allowed to read shared workspace information.
-
-**Data flow**: It receives a tool context and row name. It checks read permission through the shared subject, then asks `_entry` for that email’s stored profile. It returns the object detail if found, or `None` if access is denied or no row exists.
-
-**Call relations**: The object system calls this when a caller opens one `enrichment_profile` row. It uses `_require_ext` for workspace context and `ProfileObjects._entry` for the storage lookup.
-
-*Call graph*: calls 2 internal fn (_entry, _require_ext).
+*Call graph*: called by 1 (deliver).
 
 
-##### `ProfileObjects.member_detail`  (lines 382–397)
+##### `deliver`  (lines 105–135)
 
 ```
-async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[Profile] | None
+async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult
 ```
 
-**Purpose**: Fetches one member-object enrichment detail, but only from the main agent lane. This mirrors `member_page` for single-row reads.
-
-**Data flow**: It receives optional extension context, row name, member information, and admin flag. It checks whether the current object agent is the main one. If not, it returns nothing; if yes, it loads the named profile entry and returns it if present.
-
-**Call relations**: The member-object detail path calls this when asking an agent for one row. It uses `agent_is_main` to avoid duplicate workspace rows and then delegates to `ProfileObjects._entry`.
-
-*Call graph*: calls 2 internal fn (_entry, _require_ext); 2 external calls (object_agent_id, agent_is_main).
+*Call graph*: calls 4 internal fn (_names, _refusal, _require_ext, _require_notification_agent); 6 external calls (__init__, __init__, __init__, __init__, authority_member_id, wall).
 
 
-##### `ProfileObjects.status`  (lines 399–406)
+### `extensions/app_notification/ufo_ext_app_notification/drain.py`
 
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
+`orchestration` · `recurring scheduled job`
 
-**Purpose**: Reports no special write or sync status for enrichment profiles. These profiles are read-only objects built by the confirmation action and background job.
+This file is the “drain” for the notification inbox. Think of the notification store as a set of mail slots. Notifications can pile up in each member’s slot, and this code periodically scoops up a small batch and delivers it into that member’s inbox conversation as one message.
 
-**Data flow**: It receives the context, row name, and optional expected generation value. It does not inspect or change anything and always returns `None`.
+The drain is careful because it is moving work between two systems: stored notification rows and agent conversation turns. On each run, it first finds the extension’s inbox agent. If there is no such agent, it does nothing. It then looks for lanes with notifications that have not yet been triaged, meaning they have not yet been turned into inbox work. It only processes lanes addressed to this extension’s own inbox agent; notifications for other agents are left alone.
 
-**Call relations**: The object system may call this as part of its standard object interface. In this file, it is intentionally a quiet no-op because enrichment rows are not edited through normal apply-style updates.
-
-
-##### `ProfileObjects.apply`  (lines 408–417)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: Profile, old: Profile | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Refuses attempts to create or edit an enrichment profile directly. This protects the rule that profiles are produced only from confirmed consent and provider lookup.
-
-**Data flow**: It receives the proposed profile, old profile, row name, context, and optional generation check. Instead of saving anything, it raises a `VerbNotSupported` error with an explanation of the allowed write path.
-
-**Call relations**: The object system calls this if someone tries to apply a change to an enrichment profile. The function stops that path and points back to `confirm_website` as the correct way to influence the data.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ProfileObjects.delete`  (lines 419–426)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: Refuses direct deletion of an enrichment profile through the object interface. Clearing the confirmed website is the supported way to withdraw consent and remove stored data.
-
-**Data flow**: It receives the context, row name, and optional generation check. It does not delete anything directly and raises a `VerbNotSupported` error explaining that normal object deletion is not supported.
-
-**Call relations**: The object system calls this if someone tries to delete an enrichment row. The function blocks the direct mutation so all changes continue to go through the consent-aware website confirmation flow.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ProfileObjects._page`  (lines 428–431)
-
-```
-async def _page(self, ext: ExtensionContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Loads stored enrichment profiles and turns them into a paged object-list response. It is the shared helper behind the public list methods.
-
-**Data flow**: It receives an extension context and list query. It opens a transaction, reads up to the configured maximum profile rows for the workspace, converts each stored profile into an object row, and applies the requested paging. It returns an `ObjectPage`.
-
-**Call relations**: `ProfileObjects.list` and `ProfileObjects.member_page` call this after doing their access and agent-lane checks. It uses `_row` to translate stored profile data into the object system’s list format.
-
-*Call graph*: calls 2 internal fn (transaction, _row); called by 2 (list, member_page); 2 external calls (__init__, object_page).
-
-
-##### `ProfileObjects._entry`  (lines 433–445)
-
-```
-async def _entry(self, ext: ExtensionContext, name: str) -> MemberObject[Profile] | None
-```
-
-**Purpose**: Loads one stored profile by email and wraps it in the object-detail shape used by the rest of the system. It is the shared helper behind single-row reads.
-
-**Data flow**: It receives an extension context and row name. It opens a transaction, looks up the profile by email, and returns `None` if no row exists. If found, it builds a row plus detailed profile data with created and updated times set to the fetch time.
-
-**Call relations**: `ProfileObjects.get` and `ProfileObjects.member_detail` call this after permission or main-agent checks. It uses `_row` for the list-style part and then adds the full stored profile as detail.
-
-*Call graph*: calls 2 internal fn (transaction, _row); called by 2 (get, member_detail); 3 external calls (__init__, __init__, __init__).
-
-
-##### `manifest`  (lines 468–510)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds the extension manifest, which tells the host system what this enrichment extension offers. It always exposes read access and the prompt hook, and only exposes lookup-producing actions and jobs when a provider is configured.
-
-**Data flow**: It reads provider configuration from the environment. If no provider is available, it creates a manifest with the read-only object and prompt hook only. If a provider exists, it creates an `Enrichment` instance, declares the `confirm_website` tool, schedules the enrichment job, and returns a full `Manifest` containing tools, objects, jobs, hooks, and deploy-key information.
-
-**Call relations**: The host calls this at extension startup to discover the extension’s capabilities. It wires `Enrichment.confirm_website` into the tool system, `Enrichment.tick` into scheduled jobs, `PROFILE_OBJECT` into object reads, and `inject` into user prompt submission.
-
-*Call graph*: 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, owner_candidates, provider_from_env).
-
-
-### `extensions/enrichment/ufo_ext_enrichment/providers.py`
-
-`io_transport` · `startup and enrichment lookup`
-
-When someone signs up with an email address or a company website, this extension can try to learn more about the person or company behind it. This file is the bridge between that need and the outside data source, People Data Labs, often shortened to PDL. It also supports a “recorded” mode, where the system reads saved PDL response bodies from a local JSON file instead of contacting the internet. That is useful for repeatable tests, demos, or deployments that should not make live enrichment calls.
-
-The file starts by defining a common Provider shape: anything that can look up a person by email and a company by website. Then it defines small parsers that convert raw PDL-style JSON into the project’s own Person, Company, and Location models. Both live and recorded providers use the same parsers, so a saved response means the same thing as a live response.
-
-The Recordings helper treats a JSON file like a small replay notebook: each lookup key points to the raw body returned earlier. The live PDL provider can use that file as a read-through cache. It checks the notebook first, calls PDL only if needed, and then writes the new body back.
-
-Finally, provider_from_env chooses the mode from environment variables at startup. Without this file, enrichment would either have no safe way to contact PDL, no reliable replay mode, or inconsistent parsing between live and saved data.
+For each lane, it claims a limited batch under a lease. A lease is a temporary claim, like putting a sticky note on a stack saying “I’m working on these.” If the process crashes, the lease eventually expires and another run can try again. The file opens or reuses a conversation for that member, builds a safe text message containing the batch, invokes the agent, and only then marks the rows as triaged. This order matters: if something fails after the agent call but before marking, retrying uses the same idempotency key, so it does not create duplicate work.
 
 #### Function details
 
-##### `RateLimited.__init__`  (lines 80–82)
+##### `InboxDrain.run`  (lines 51–62)
 
 ```
-def __init__(self, message: str, retry_after: float | None=None) -> None
+async def run(self) -> None
 ```
 
-**Purpose**: This creates a special enrichment error for the case where People Data Labs says the system is asking too often. It can carry a suggested wait time, so the caller can pause instead of immediately trying again.
+**Purpose**: This is the scheduled entry point for draining pending notifications into inbox conversations. It finds the correct inbox agent, scans for member lanes with waiting notifications, claims a small batch from each eligible lane, and asks `_wake` to deliver that batch.
 
-**Data flow**: It receives an error message and an optional retry delay in seconds. It stores the normal error message through the parent error class, then saves the retry delay on the exception object. The result is an exception that tells the rest of the system both what went wrong and, if known, how long to wait.
+**Data flow**: It starts with the extension context stored on the `InboxDrain`. From that context it looks up the inbox agent id and creates a notification store. It reads lanes that have untriaged notifications, skips lanes for any other agent, claims up to the configured batch size from each matching lane, and passes non-empty claimed batches onward. It returns nothing, but it may cause notifications to be claimed and then delivered into conversations.
 
-**Call relations**: PdlProvider._get uses this when the PDL HTTP response is 429, which means rate limited. Instead of treating that as a normal failure, it raises RateLimited so the enrichment worker can leave the lookup for a later tick.
+**Call relations**: This function is the top-level driver for the file. It calls `inbox_agent_id` to learn which agent belongs to this extension, builds a `NotificationStore` to read and claim notification rows, and calls `InboxDrain._wake` whenever it has a real batch to deliver.
 
-*Call graph*: called by 1 (_get).
-
-
-##### `Provider.source`  (lines 87–87)
-
-```
-def source(self) -> ProfileSource
-```
-
-**Purpose**: This is part of the provider contract. It says every provider must identify where its enrichment data came from, such as live PDL or recorded replay.
-
-**Data flow**: A concrete provider supplies no input to this property beyond itself. It returns a short source label that can be stored with or attached to enriched profile data.
-
-**Call relations**: The Provider protocol sets the expectation; RecordedProvider.source and PdlProvider.source provide the actual answers. Code using a Provider can ask for the source without needing to know which provider implementation it received.
+*Call graph*: calls 1 internal fn (_wake); 2 external calls (__init__, inbox_agent_id).
 
 
-##### `Provider.person`  (lines 89–89)
+##### `InboxDrain._wake`  (lines 64–88)
 
 ```
-async def person(self, email: str) -> Person | None
+async def _wake(self, store: NotificationStore, lane: Lane, batch: tuple[Notification, ...]) -> None
 ```
 
-**Purpose**: This is part of the provider contract for looking up a person by email address. It promises that provider implementations will return either a Person record or no match.
+**Purpose**: This function delivers one claimed batch of notifications into the member’s inbox conversation. It also marks the batch as triaged, but only after the conversation turn has been successfully admitted.
 
-**Data flow**: It takes an email address as input. A concrete provider uses that email to find or replay a raw response, turns that response into a Person when possible, and returns either the Person or None.
+**Data flow**: It receives a notification store, a lane, and a tuple of claimed notification rows. It opens or reuses the lane’s conversation for the member, creates a fingerprint of the exact rows and occurrence counts in the batch, and formats the batch with `drain_message`. It invokes the inbox agent using the member’s authority, which means the work is done as that member rather than as some unrelated system actor. If the invoke returns a turn id, it writes that turn id back to the store by marking the rows triaged. If the agent has been archived, that situation is suppressed and the batch is not marked as triaged here.
 
-**Call relations**: The protocol lets the rest of the enrichment extension call person lookups in one uniform way. RecordedProvider.person and PdlProvider.person are the concrete versions that do the real work.
+**Call relations**: `InboxDrain.run` calls this after it has claimed a batch. `_wake` hands message-building to `drain_message`, uses `authority_from_member_id` so the turn carries the member’s permissions, and then calls `NotificationStore.mark_triaged` after the agent invocation succeeds. The idempotency key is based on the exact batch contents, so a retry of the same batch does not create duplicate conversation work.
 
-
-##### `Provider.company`  (lines 91–91)
-
-```
-async def company(self, website: str) -> Company | None
-```
-
-**Purpose**: This is part of the provider contract for looking up a company by website. It promises that provider implementations will return either a Company record or no match.
-
-**Data flow**: It takes a website string as input. A concrete provider uses that website to find or replay a raw response, turns that response into a Company when possible, and returns either the Company or None.
-
-**Call relations**: The protocol lets higher-level enrichment code ask for company data without caring whether the answer comes from PDL or a recordings file. RecordedProvider.company and PdlProvider.company fulfill this contract.
+*Call graph*: calls 2 internal fn (drain_message, mark_triaged); called by 1 (run); 3 external calls (suppress, sha256, authority_from_member_id).
 
 
-##### `person_from_body`  (lines 137–148)
+##### `drain_message`  (lines 91–104)
 
 ```
-def person_from_body(body: object) -> Person | None
+def drain_message(batch: tuple[Notification, ...]) -> str
 ```
 
-**Purpose**: This turns one raw People Data Labs person response into the project’s Person model. It also recognizes PDL’s “not found” response and returns no match instead of treating it as an error.
+**Purpose**: This function turns a batch of notification rows into the plain text message that the inbox agent will read. It includes the notification reference, subject, count, producer, timestamps, and body for each row.
 
-**Data flow**: It receives an arbitrary response body, usually parsed JSON. First it checks whether the body represents a 404 not-found result. If so, it returns None. Otherwise it validates that the body has the expected person-match shape, copies the nested person fields, adds the likelihood score, and returns a Person. If the shape is wrong, it raises EnrichmentError.
+**Data flow**: It receives a tuple of notification objects. It starts a `<notifications>` block with the batch count, then adds one readable block per notification. Each notification body is wrapped with `wall`, which marks it as untrusted data so it cannot pretend to be instructions or close the surrounding notification block. Finally it escapes any literal closing notification tag found in the assembled text and returns the complete message string.
 
-**Call relations**: Both PdlProvider.person and RecordedProvider.person send raw bodies here. This shared path is important because live PDL responses and replayed recorded responses are interpreted in exactly the same way.
+**Call relations**: `InboxDrain._wake` calls this right before invoking the inbox agent. This function calls `ufo.sdk.untrusted.wall` to safely include another agent’s words inside the message, preventing notification content from breaking out of its data container and changing the meaning of the delivery.
 
-*Call graph*: calls 1 internal fn (_is_not_found); called by 2 (person, person); 2 external calls (__init__, __init__).
+*Call graph*: called by 1 (_wake); 1 external calls (wall).
 
 
-##### `company_from_body`  (lines 151–163)
+### Monitor checks
+Monitor automation sets up one-shot watches and runs scheduled probes that wake agents on changes, failures, or deadlines.
 
-```
-def company_from_body(body: object) -> Company | None
-```
+### `extensions/monitors/ufo_ext_monitors/monitor_tool.py`
 
-**Purpose**: This turns one raw People Data Labs company response into the project’s Company model. It treats PDL’s “not found” response as no match, not as a crash.
+`domain_logic` · `tool call during request handling, then background monitor lifecycle`
 
-**Data flow**: It receives an arbitrary response body. It first checks for the not-found shape and returns None if present. Otherwise it validates the company response, converts any nested location information into a Location model, and returns a Company. If the response is not shaped like a valid company match, it raises EnrichmentError.
+This file solves a practical waiting problem: an agent often needs to stop working until something changes, but it should not keep polling noisily inside the conversation. The `monitor` tool lets the agent say, “run this shell command every few minutes, and wake me once when the output changes, fails repeatedly, or the deadline arrives.”
 
-**Call relations**: PdlProvider.company and RecordedProvider.company both hand raw company bodies to this function. That keeps the meaning of a live result and a recorded result aligned.
+The important safety choice is that the command is tested right away, during the current live turn. That means a broken command fails immediately instead of creating a useless background watch. The first successful output becomes the baseline, like taking a “before” photo. Later checks compare against that exact output.
 
-*Call graph*: calls 1 internal fn (_is_not_found); called by 2 (company, company); 3 external calls (__init__, __init__, __init__).
+`MonitorInput` describes what the caller must provide: a short name, the shell command, the polling interval, the deadline, what to say to the user now, and instructions for the future turn when the monitor fires. The main `monitor` function checks that the monitor extension is available, enforces limits such as the maximum number of armed monitors, prevents duplicate names, runs the command in the sandbox, and stores the watch in `MonitorStore`.
 
-
-##### `_is_not_found`  (lines 166–167)
-
-```
-def _is_not_found(body: object) -> bool
-```
-
-**Purpose**: This is a small helper that recognizes the response shape People Data Labs uses for a clean “no match found.”
-
-**Data flow**: It receives any object. It checks whether the object is a dictionary and whether its status field is 404. It returns true for that exact not-found shape and false otherwise.
-
-**Call relations**: person_from_body and company_from_body call this before trying to validate a response as a real match. That lets them return None for a normal miss instead of raising an error.
-
-*Call graph*: called by 2 (company_from_body, person_from_body).
-
-
-##### `Recordings.body`  (lines 180–182)
-
-```
-async def body(self, key: str) -> object | None
-```
-
-**Purpose**: This reads a saved raw provider response from the recordings file for one lookup key. It lets recorded mode, and live mode with caching, replay an earlier answer.
-
-**Data flow**: It receives a key such as a person email key or company website key. It reads the JSON file in a background thread so the asynchronous event loop is not blocked by disk work, then returns the saved body for that key or None if the key is absent.
-
-**Call relations**: RecordedProvider.person, RecordedProvider.company, and PdlProvider._body rely on this behavior. It is the lookup side of the recordings notebook.
-
-*Call graph*: 1 external calls (to_thread).
-
-
-##### `Recordings.append`  (lines 184–186)
-
-```
-async def append(self, key: str, body: object) -> None
-```
-
-**Purpose**: This saves a raw provider response into the recordings file. It is used so a live PDL lookup can be replayed later without making another network call.
-
-**Data flow**: It receives a lookup key and a raw response body. It takes an asynchronous lock, which is a guard that stops two tasks writing the same file at the same time, then runs the file-writing work in a background thread. The recordings file ends up containing the new key and body.
-
-**Call relations**: PdlProvider._body calls this after it gets a fresh response from PDL and recordings are enabled. It hands off to Recordings._append to do the actual disk rewrite safely.
-
-*Call graph*: 1 external calls (to_thread).
-
-
-##### `Recordings._read`  (lines 188–194)
-
-```
-def _read(self) -> dict[str, object]
-```
-
-**Purpose**: This reads the entire recordings JSON file from disk and checks that it is shaped like a dictionary of saved response bodies.
-
-**Data flow**: It uses the Recordings path stored on the object. If the file does not exist, it returns an empty dictionary. If the file exists, it parses the text as JSON and verifies the top-level value is an object. If not, it raises EnrichmentError.
-
-**Call relations**: Recordings.body uses this through a background thread to fetch saved values. Recordings._append also calls it before adding or replacing one entry.
-
-*Call graph*: called by 1 (_append); 2 external calls (__init__, loads).
-
-
-##### `Recordings._append`  (lines 196–201)
-
-```
-def _append(self, key: str, body: object) -> None
-```
-
-**Purpose**: This rewrites the recordings file with one new or updated saved response. It writes through a temporary file so readers do not see a half-written JSON file.
-
-**Data flow**: It receives a key and a raw body. It reads the current recordings, inserts or replaces the entry for that key, writes the full updated JSON to a temporary file named with the current process id, then atomically replaces the real file with the temporary one. The result is a complete recordings file containing the new body.
-
-**Call relations**: Recordings.append calls this while holding the lock. The lock prevents competing writes inside this process, and the temporary-file replacement protects readers from partial writes.
-
-*Call graph*: calls 1 internal fn (_read); 2 external calls (dumps, getpid).
-
-
-##### `RecordedProvider.source`  (lines 213–214)
-
-```
-def source(self) -> ProfileSource
-```
-
-**Purpose**: This labels the provider’s data as coming from recorded responses. That lets later code know the data was replayed locally, not freshly fetched.
-
-**Data flow**: It reads no external input. It simply returns the source label "recorded".
-
-**Call relations**: This is the RecordedProvider implementation of the Provider.source contract. Code that receives a Provider can use this source label without knowing it is talking to RecordedProvider specifically.
-
-
-##### `RecordedProvider.person`  (lines 216–218)
-
-```
-async def person(self, email: str) -> Person | None
-```
-
-**Purpose**: This looks up a person using only the recordings file. It never contacts People Data Labs or any other outside service.
-
-**Data flow**: It receives an email address, builds the matching recordings key, and asks Recordings for the saved raw body. If there is no saved body, it returns None. If a body exists, it passes that body to person_from_body and returns the resulting Person or None.
-
-**Call relations**: This is used when provider_from_env selects recorded mode. It depends on Recordings.body for the saved data and on person_from_body for consistent parsing.
-
-*Call graph*: calls 1 internal fn (person_from_body).
-
-
-##### `RecordedProvider.company`  (lines 220–222)
-
-```
-async def company(self, website: str) -> Company | None
-```
-
-**Purpose**: This looks up a company using only the recordings file. It gives the system a local replay path for company enrichment.
-
-**Data flow**: It receives a website, builds the matching recordings key, and reads the saved raw body from Recordings. If the key is missing, it returns None. If the body exists, it sends it to company_from_body and returns the resulting Company or None.
-
-**Call relations**: This is used when provider_from_env selects recorded mode. It mirrors RecordedProvider.person, but for company data, and shares the same parser used by live PDL results.
-
-*Call graph*: calls 1 internal fn (company_from_body).
-
-
-##### `PdlProvider.source`  (lines 236–237)
-
-```
-def source(self) -> ProfileSource
-```
-
-**Purpose**: This labels the provider’s data as coming from People Data Labs. The label can be attached to enriched records so their origin is clear.
-
-**Data flow**: It reads no external input. It simply returns the source label "pdl".
-
-**Call relations**: This is the PdlProvider implementation of the Provider.source contract. Higher-level code can record or display the source without knowing how PdlProvider performs its lookups.
-
-
-##### `PdlProvider.person`  (lines 239–247)
-
-```
-async def person(self, email: str) -> Person | None
-```
-
-**Purpose**: This looks up a person in People Data Labs by email address, optionally using recordings as a cache. It also rejects emails that are too long for safe provider use.
-
-**Data flow**: It receives an email address. It first checks the length limit and raises EnrichmentError if the email is too long. Then it builds the PDL request parameters, asks _body for the raw response, and passes that body to person_from_body. The output is a Person, None for no match, or an enrichment error if the lookup cannot be completed.
-
-**Call relations**: This is the live provider’s implementation of Provider.person. It delegates fetching or replaying to PdlProvider._body, then delegates interpretation to person_from_body.
-
-*Call graph*: calls 2 internal fn (_body, person_from_body); 1 external calls (__init__).
-
-
-##### `PdlProvider.company`  (lines 249–257)
-
-```
-async def company(self, website: str) -> Company | None
-```
-
-**Purpose**: This looks up a company in People Data Labs by website, optionally using recordings as a cache. It also rejects website strings that are too long.
-
-**Data flow**: It receives a website string. It checks the length limit and raises EnrichmentError if the website is too long. Then it builds the PDL request parameters, asks _body for the raw response, and passes that body to company_from_body. The output is a Company, None for no match, or an enrichment error.
-
-**Call relations**: This is the live provider’s implementation of Provider.company. It uses PdlProvider._body for the raw data and company_from_body to convert that data into the project’s Company model.
-
-*Call graph*: calls 2 internal fn (_body, company_from_body); 1 external calls (__init__).
-
-
-##### `PdlProvider._body`  (lines 259–267)
-
-```
-async def _body(self, key: str, path: str, params: dict[str, str]) -> object
-```
-
-**Purpose**: This is the live provider’s fetch-or-replay step. It checks the recordings file first when one is configured, and only calls People Data Labs when there is no saved body.
-
-**Data flow**: It receives a recordings key, a PDL API path, and request parameters. If recordings are available, it asks for the saved body and immediately returns it if found. Otherwise it calls _get to make the HTTP request. If recordings are available, it appends the fresh response body before returning it.
-
-**Call relations**: PdlProvider.person and PdlProvider.company call this after building their lookup-specific paths and parameters. It hands network work to PdlProvider._get and hands disk caching to Recordings.body and Recordings.append.
-
-*Call graph*: calls 1 internal fn (_get); called by 2 (company, person).
-
-
-##### `PdlProvider._get`  (lines 269–298)
-
-```
-async def _get(self, path: str, params: dict[str, str]) -> object
-```
-
-**Purpose**: This makes the actual HTTPS request to People Data Labs and turns HTTP-level outcomes into clear enrichment outcomes. It is where API keys, timeouts, status codes, JSON parsing, and rate limits are dealt with.
-
-**Data flow**: It receives a PDL path and query parameters. It reads the deploy API key from the environment. If no key is available, it raises EnrichmentError. It sends a GET request with the API key header. A 200 or 404 response is parsed as JSON and returned. A 429 response raises RateLimited with any usable retry delay. Other failures raise EnrichmentError with a shortened response message.
-
-**Call relations**: PdlProvider._body calls this only when there is no recorded response to replay. It calls _retry_after to interpret rate-limit headers and creates RateLimited when PDL asks the caller to slow down.
-
-*Call graph*: calls 2 internal fn (__init__, _retry_after); called by 1 (_body); 3 external calls (__init__, AsyncClient, deploy_env).
-
-
-##### `_retry_after`  (lines 301–310)
-
-```
-def _retry_after(header: str | None) -> float | None
-```
-
-**Purpose**: This interprets a Retry-After HTTP header when People Data Labs rate limits the system. It only accepts simple positive second counts.
-
-**Data flow**: It receives the header value or None. If there is no header, if the value is not a number, or if the number is not positive, it returns None. Otherwise it returns the number of seconds as a float.
-
-**Call relations**: PdlProvider._get calls this when PDL returns a 429 rate-limit response. The result is placed into the RateLimited exception so the caller can choose an appropriate delay.
-
-*Call graph*: called by 1 (_get).
-
-
-##### `provider_from_env`  (lines 313–348)
-
-```
-def provider_from_env() -> Provider | None
-```
-
-**Purpose**: This chooses and builds the enrichment provider for the current deployment based on environment variables. It is the startup decision point for live PDL mode, recorded replay mode, or no provider at all.
-
-**Data flow**: It reads the provider mode from UFO_ENRICHMENT_PROVIDER, defaulting to PDL, and reads the optional recordings file path from UFO_ENRICHMENT_RECORDINGS. In PDL mode, it checks for the deploy API key; without one it warns and returns None. With a recordings path, it verifies the path is outside the extension package before returning a PdlProvider with Recordings. In recorded mode, it requires an existing recordings file, warns that replay mode is active, and returns a RecordedProvider. Unknown modes raise RuntimeError.
-
-**Call relations**: Startup code calls this to decide what enrichment capability exists in this run. It constructs PdlProvider, RecordedProvider, and Recordings as needed, and uses warnings to make important deployment choices visible.
-
-*Call graph*: 6 external calls (__init__, __init__, __init__, Path, deploy_env, warn).
-
-
-### `extensions/enrichment/ufo_ext_enrichment/store.py`
-
-`io_transport` · `request handling and background enrichment jobs`
-
-This file is the memory cabinet for the enrichment feature. Enrichment means taking a member’s email or confirmed website and asking an outside data provider for extra person or company details. Because that can involve personal data, the file keeps consent separate and explicit: only members with a granted consent row are eligible. Someone who has not answered is treated the same as someone who declined: they are not enriched.
-
-The file defines three database tables. One table stores enrichment profiles, one row per member. One stores consent decisions, including the website the member confirmed. One stores a temporary “backoff” delay for a workspace after a provider refusal, so the system does not keep retrying every minute like someone repeatedly pressing a doorbell.
-
-It also defines typed shapes for the JSON data saved in the profile table. `Person`, `Company`, and `Profile` describe what the provider returned in a safer, predictable form. The `Profiles`, `Consents`, and `Backoff` classes are small database helpers that read and write those tables inside a caller-provided transaction. A few helper functions find workspaces ready for enrichment, check whether an agent is the main agent for a workspace, and turn raw database rows back into typed profile objects.
+At the end, the tool returns a directive telling the agent to reply with the supplied waiting message and end its turn. Without this file, agents could not durably watch external state between turns using the monitor object kind.
 
 #### Function details
 
-##### `due_workspaces`  (lines 161–176)
+##### `_require_ext`  (lines 77–80)
 
 ```
-def due_workspaces() -> sa.Select[tuple[UUID]]
+def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
 ```
 
-**Purpose**: Builds a database query for finding workspaces that have enrichment work waiting. A workspace qualifies only if it has seated members who granted consent, do not already have profile rows, and are not currently paused by backoff.
+**Purpose**: This function makes sure the monitor tool has the extension context it needs. The extension context is the shared environment that gives the tool access to monitor storage and related extension services.
 
-**Data flow**: It takes no direct input. It reads the member, consent, profile, and backoff table definitions, compares backoff times with the current time, and produces a SQL query object. Nothing is fetched yet; the caller can run the query to get workspace IDs.
+**Data flow**: It receives a possible `ExtensionContext`. If the value is missing, it stops immediately by raising an error. If it is present, it returns the same context unchanged so the caller can safely use it.
 
-**Call relations**: This is used at the start of a background enrichment pass to decide which workspaces deserve attention. It leans on `_has_profile` so the same “already enriched” test is shared with the per-workspace member lookup.
+**Call relations**: The `monitor` function calls this before creating a `MonitorStore`. This is an early guard: the tool cannot arm or read monitors unless the extension context exists.
 
-*Call graph*: calls 1 internal fn (_has_profile); 3 external calls (now, exists, select).
-
-
-##### `_has_profile`  (lines 179–180)
-
-```
-def _has_profile() -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Creates the small database condition that answers, “Does this member already have an enrichment profile?” It exists so multiple queries use the same rule and do not accidentally disagree.
-
-**Data flow**: It takes no explicit input, but it refers to the current member row in the surrounding SQL query. It returns a SQL condition that checks for a matching row in the enrichment profile table.
-
-**Call relations**: It is a helper for both `due_workspaces` and `Profiles.due`. Those larger queries use it to skip members who have already been enriched.
-
-*Call graph*: called by 2 (due, due_workspaces); 1 external calls (exists).
+*Call graph*: called by 1 (monitor).
 
 
-##### `Profiles.due`  (lines 190–212)
+##### `_refusal`  (lines 83–84)
 
 ```
-async def due(self, limit: int) -> tuple[SeatedMember, ...]
+def _refusal(text: str) -> ToolResult
 ```
 
-**Purpose**: Finds the next seated members in one workspace who gave permission and still need enrichment. It also brings along the website each member confirmed, because that website is part of what the lookup should use.
+**Purpose**: This function builds a standard error result for cases where the tool refuses to arm a monitor. It keeps all refusal responses shaped the same way.
 
-**Data flow**: It receives a maximum number of members to return and uses the `Profiles` object's database connection and workspace ID. It queries members joined with their consent records, filters to seated and granted members without profiles, orders them predictably, and returns `SeatedMember` objects containing member ID, email, and confirmed website.
+**Data flow**: It receives a plain text explanation. It wraps that text in `TextContent`, then wraps the content in a `ToolResult` marked as an error. The returned result tells the caller why no monitor was created.
 
-**Call relations**: After `due_workspaces` identifies a workspace, the enrichment job can call this method to get the actual members to process. It calls `_has_profile` to avoid returning members who already have stored enrichment data.
+**Call relations**: The `monitor` function uses this whenever arming must stop, such as when there are already too many monitors, the name is duplicated, or the probe command fails. It hands the refusal directly back to the tool caller.
 
-*Call graph*: calls 1 internal fn (_has_profile); 2 external calls (__init__, select).
-
-
-##### `Profiles.seated`  (lines 214–224)
-
-```
-async def seated(self, member_id: UUID) -> SeatedMember | None
-```
-
-**Purpose**: Checks whether a specific member is seated in this workspace and, if so, returns the basic information needed for enrichment. “Seated” here means the member is active enough to count for this feature.
-
-**Data flow**: It receives a member ID and uses the stored connection and workspace ID. It queries the member table for that exact seated member. If found, it returns a `SeatedMember` with ID and email; otherwise it returns `None`.
-
-**Call relations**: This is useful when code starts from one member rather than from the background job queue. It hands back the same simple `SeatedMember` shape that `Profiles.due` uses.
-
-*Call graph*: 2 external calls (__init__, select).
+*Call graph*: called by 1 (monitor); 2 external calls (__init__, __init__).
 
 
-##### `Profiles.write`  (lines 226–249)
+##### `monitor`  (lines 87–134)
 
 ```
-async def write(self, member_id: UUID, profile: Profile) -> None
+async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult
 ```
 
-**Purpose**: Saves a member’s enrichment result. It updates the existing profile row if one is already there, or inserts a new row if this is the first result for that member.
+**Purpose**: This is the actual tool handler that arms a new monitor. It checks whether the request is allowed, runs the shell probe once now, saves the successful result as the baseline, and returns instructions for the agent to end the turn.
 
-**Data flow**: It receives a member ID and a typed `Profile`. It turns nested person and company objects into JSON-friendly dictionaries, then writes those values to the enrichment profile table for this workspace. The output is no returned value; the database row is changed or created.
+**Data flow**: It receives the current tool context and the caller’s monitor settings. It reads the conversation and agent information from the context, looks up already armed monitors, rejects requests that exceed the cap or reuse a name, then runs the requested shell command in the sandbox. If the command fails, it returns an error and stores nothing. If it succeeds, it records the monitor with its command, interval, deadline, baseline output, reason, next steps, metadata, and creator information. It returns a tool result containing the user-facing waiting message plus JSON details about the armed monitor.
 
-**Call relations**: The enrichment job calls this after a provider lookup succeeds or after it determines there was no match. It is the point where in-memory provider results become durable data that later UI or hook code can read.
+**Call relations**: This function is called as the handler for `MONITOR_TOOL`. It relies on `_require_ext` to get the extension context, uses `MonitorStore` to read and save monitor rows, calls `_refusal` for all clean rejection paths, uses the sandbox to run the first probe, and finally returns a `ToolResult` that tells the agent to reply with `ai_response` and end the turn.
 
-*Call graph*: 2 external calls (insert, update).
-
-
-##### `Profiles.forget`  (lines 251–257)
-
-```
-async def forget(self, member_id: UUID) -> None
-```
-
-**Purpose**: Deletes the stored enrichment profile for one member in this workspace. This supports cases where the system must remove enrichment data, such as consent changes or cleanup.
-
-**Data flow**: It receives a member ID and uses the stored workspace ID. It issues a delete against the profile table for that workspace-member pair. It returns nothing; the before-and-after change is that the profile row is gone if it existed.
-
-**Call relations**: Other parts of the enrichment flow can call this when a stored profile should no longer be kept. Unlike `Profiles.write`, it removes the saved result rather than creating or updating one.
-
-*Call graph*: 1 external calls (delete).
+*Call graph*: calls 2 internal fn (_refusal, _require_ext); 10 external calls (__init__, __init__, __init__, now, timedelta, dumps, authority_member_id, capped, qualified_name, stderr_tail).
 
 
-##### `Profiles.rows`  (lines 259–268)
+### `extensions/monitors/ufo_ext_monitors/monitor_runner.py`
+
+`domain_logic` · `recurring background monitor tick`
+
+A monitor is like a watchman for a command: run this command every so often, compare its output with the saved baseline, and alert the agent if something important happens. This file is the watchman’s shift schedule and decision-maker.
+
+On each run, `MonitorRunner` asks the monitor store for monitors that are due and temporarily claims them with a lease, so two overlapping runs do not check the same monitor at the same time. For each claimed monitor, it first checks whether the monitor’s deadline has passed. If so, it fires the monitor without running another probe. Otherwise it runs the saved command using the authority of the member who created the monitor, so private access stays tied to that member. If that authority is not currently available, or the terminal is gone, the tick is counted as skipped rather than treated as a failure.
+
+Probe results are interpreted carefully. A successful probe with unchanged output just advances the next check time. Changed output fires the monitor. A failing command is tolerated for a short streak, but the third consecutive failure fires it. When a monitor fires, the file sends a message back into the conversation first, using an idempotency key so a crash retry does not duplicate the alert, and only then retires the monitor. Large output is written to conversation files and linked from the alert.
+
+#### Function details
+
+##### `MonitorRunner.run`  (lines 54–64)
 
 ```
-async def rows(self, limit: int) -> tuple[StoredProfile, ...]
+async def run(self) -> None
 ```
 
-**Purpose**: Reads a page of stored enrichment profiles for one workspace. It returns them in a stable order so callers can display or process them consistently.
+**Purpose**: Runs one scheduled sweep of the monitor system. It claims every monitor that is due right now, checks each one, and reports if any checks crashed unexpectedly.
 
-**Data flow**: It receives a limit and uses the stored database connection and workspace ID. It selects profile columns from the enrichment profile table, orders by fetch time and member ID, converts each raw row with `_stored`, and returns a tuple of `StoredProfile` objects.
+**Data flow**: It starts with the extension context stored on the runner. From that context it creates a monitor store, reads the current time, and asks the store for due monitors under a short lease. Each monitor row is passed into `_tick`. If a tick raises an unexpected error, the monitor name and error type are collected; after all rows are attempted, those collected failures become one runtime error.
 
-**Call relations**: This is a bulk-reading path for code that needs several saved profiles. It delegates the row-to-object conversion to `_stored` so the same validation and date handling are used everywhere profiles are read.
+**Call relations**: This is the top-level method the recurring extension job calls. It does not decide probe outcomes itself; it hands each claimed monitor to `_tick`, then acts as the sweep supervisor that makes sure one bad monitor does not stop the rest from being attempted.
 
-*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
-
-
-##### `Profiles.one`  (lines 270–279)
-
-```
-async def one(self, member_id: UUID) -> StoredProfile | None
-```
-
-**Purpose**: Reads the stored enrichment profile for one member, if it exists. It is the direct lookup form of `Profiles.rows`.
-
-**Data flow**: It receives a member ID and queries the profile table for that member in the current workspace. If no row is found, it returns `None`; if a row is found, it passes the row to `_stored` and returns a `StoredProfile`.
-
-**Call relations**: Callers use this when rendering or checking one member’s enrichment data. Like the other read methods, it relies on `_stored` to rebuild the typed profile object from database JSON.
-
-*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
+*Call graph*: calls 1 internal fn (_tick); 2 external calls (__init__, now).
 
 
-##### `Profiles.by_email`  (lines 281–290)
+##### `MonitorRunner._tick`  (lines 66–108)
 
 ```
-async def by_email(self, email: str) -> StoredProfile | None
+async def _tick(self, store: MonitorStore, row: Monitor) -> None
 ```
 
-**Purpose**: Finds a stored enrichment profile by email address within one workspace. It compares email addresses case-insensitively and ignores extra spaces around the input.
+**Purpose**: Performs one monitor’s actual check and decides whether it should stay quiet, count a failure or skip, or fire an alert. This is where the monitor’s saved command is run and compared with its baseline.
 
-**Data flow**: It receives an email string, trims and lowercases it for comparison, then queries the profile table in the current workspace. It returns `None` if there is no match, or a `StoredProfile` converted through `_stored` if one is found.
+**Data flow**: It receives the store and one claimed monitor row. It calculates the monitor’s interval, checks the deadline, and, if still active, runs the probe command through the context’s probe service using the creator member’s authority. A missing authority or gone terminal becomes a skipped tick with a new next-check time. A nonzero exit code becomes either a counted failure or, after the failure threshold, a fired monitor with the exit code and recent error output. A successful probe has its output capped for safe posting; matching output becomes a quiet tick, while changed output becomes a fire, with the full output saved separately if it was too large.
 
-**Call relations**: This supports flows that know an email address but not the member ID. After the database finds the row, `_stored` performs the shared conversion into the application’s profile shape.
+**Call relations**: `run` calls this once for each claimed due monitor. When the monitor needs to alert the agent, `_tick` hands off to `_fire`; when nothing alert-worthy happened yet, it records the outcome through the monitor store’s quiet, failed, or skipped tick methods.
 
-*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
-
-
-##### `Consents.record`  (lines 301–316)
-
-```
-async def record(self, member_id: UUID, *, granted: bool, website: str | None=None) -> None
-```
-
-**Purpose**: Records a member’s answer about whether enrichment is allowed. It stores both the yes-or-no decision and the website the member confirmed, if any.
-
-**Data flow**: It receives a member ID, a required `granted` value, and an optional website. It adds the current time as the decision time, then updates the existing consent row or inserts a new one if none exists. It returns nothing; the consent table becomes the source of truth for that member’s answer.
-
-**Call relations**: This is called when a member or related workflow captures an enrichment consent decision. The background job later depends on these rows through `due_workspaces` and `Profiles.due`; without a granted row, those queries will not pick the member.
-
-*Call graph*: 3 external calls (now, insert, update).
+*Call graph*: calls 4 internal fn (_fire, failed_tick, quiet_tick, skipped_tick); called by 1 (run); 5 external calls (now, timedelta, authority_from_member_id, capped, stderr_tail).
 
 
-##### `Backoff.pause`  (lines 328–354)
+##### `MonitorRunner._fire`  (lines 110–132)
 
 ```
-async def pause(self, retry_after: float | None) -> float
+async def _fire(self, store: MonitorStore, row: Monitor, cause: str, payload: str, spill: str | None, probes_run: int) -> None
 ```
 
-**Purpose**: Pauses enrichment attempts for one workspace after the provider refuses or asks the system to wait. The delay either follows the provider’s requested wait time or grows gradually from one minute up to one hour.
+**Purpose**: Sends the monitor-fired message to the agent and then retires the monitor so it will not keep firing. It also protects against duplicate firing when two pieces of work overlap or when a crash is retried.
 
-**Data flow**: It receives an optional retry delay in seconds and reads the current number of failed attempts for the workspace. It calculates the next wait time, stores the increased attempt count and the future retry time in the backoff table, and returns the number of seconds chosen.
+**Data flow**: It receives the store, monitor row, fire cause, message payload, optional full-output spill text, and probe count. First it asks the store to claim the monitor’s holds, which is a final permission check that this runner is allowed to fire it. If the claim succeeds, it builds the message body, invokes the agent in the original conversation with the creator member’s authority and a stable idempotency key, then retires the monitor in the store. If the agent has been archived, it stops without retiring through the normal path.
 
-**Call relations**: The enrichment job calls this when provider lookup should stop temporarily. `due_workspaces` later reads the backoff table and skips the workspace until the stored retry time has passed.
+**Call relations**: `_tick` calls this whenever a deadline, changed output, or repeated failure should alert the agent. `_fire` depends on `_body` to prepare the exact text the agent will read, then uses the monitor store to mark the monitor finished after the invoke succeeds.
 
-*Call graph*: 5 external calls (now, timedelta, insert, select, update).
-
-
-##### `Backoff.clear`  (lines 356–361)
-
-```
-async def clear(self) -> None
-```
-
-**Purpose**: Removes the pause for a workspace. This lets the workspace resume normal enrichment after a successful tick or recovery.
-
-**Data flow**: It uses the stored workspace ID to delete that workspace’s row from the backoff table. It returns nothing; the before-and-after change is that future due-workspace checks no longer see this workspace as paused.
-
-**Call relations**: The enrichment job can call this after it successfully enriches someone. It complements `Backoff.pause`: one adds a waiting period, the other clears it.
-
-*Call graph*: 1 external calls (delete).
+*Call graph*: calls 3 internal fn (_body, claim_holds, retire); called by 1 (_tick); 1 external calls (authority_from_member_id).
 
 
-##### `agent_is_main`  (lines 364–375)
+##### `MonitorRunner._body`  (lines 134–153)
 
 ```
-async def agent_is_main(connection: AsyncConnection, workspace_id: UUID, agent_id: UUID) -> bool
+async def _body(self, row: Monitor, cause: str, payload: str, spill: str | None, probes_run: int) -> str
 ```
 
-**Purpose**: Checks whether a given agent is the main agent for a workspace. This mirrors the core member feature’s rule for narrowing what should appear on a portal page.
+**Purpose**: Builds the message that tells the agent a monitor fired. It includes the reason, next steps, metadata, run counts, and any relevant probe output in a form that is safe to insert into the conversation.
 
-**Data flow**: It receives a database connection, workspace ID, and agent ID. It queries the agent table for that exact agent in that workspace and reads its `is_main` flag. It returns `True` or `False`.
+**Data flow**: It takes the monitor row, the fire cause, the short payload to show, optional oversized output, and the probe count. It assembles a structured text block with the monitor name, cause, reason, next steps, metadata as JSON, and counters. If there is oversized output, it calls `_spilled` to write the full text to a file and includes the returned path. It escapes the closing marker so command output cannot pretend to end the block and inject new instructions. If there is a payload, it appends it through `wall`, a safety wrapper for untrusted command output.
 
-**Call relations**: Code that needs to decide whether an agent has the main-agent role can call this small lookup. It does not write anything; it simply turns one database flag into a boolean answer for the caller.
+**Call relations**: `_fire` calls this right before invoking the agent. If the probe output was too large to include directly, `_body` delegates file writing to `_spilled`; otherwise it returns the complete fire message directly.
 
-*Call graph*: 2 external calls (execute, select).
+*Call graph*: calls 1 internal fn (_spilled); called by 1 (_fire); 2 external calls (dumps, wall).
 
 
-##### `_stored`  (lines 378–392)
+##### `MonitorRunner._spilled`  (lines 155–163)
 
 ```
-def _stored(row: sa.Row) -> StoredProfile
+async def _spilled(self, row: Monitor, output: str) -> str
 ```
 
-**Purpose**: Turns a raw database row from the enrichment profile table into the typed object used by the rest of the code. This keeps profile reading consistent and validates the saved JSON shapes.
+**Purpose**: Writes oversized probe output into the conversation’s runtime files and returns the path to that saved file. This keeps the agent message readable while still preserving the full command output.
 
-**Data flow**: It receives a SQL row containing profile columns. It builds a `Profile`, validating person and company JSON when present, fixes a missing timezone on `fetched_at` by treating it as UTC, then wraps the profile with the member ID in a `StoredProfile`.
+**Data flow**: It receives the monitor row and the full output text. It checks that the extension context has file access available, creates a timestamped filename under the monitor spill directory, encodes the text as bytes, and writes it into the conversation’s workspace files. The returned value is the file path that `_body` can mention in the fired message.
 
-**Call relations**: `Profiles.rows`, `Profiles.one`, and `Profiles.by_email` all call this after reading from the database. It is the shared doorway from stored table data back into clean application objects.
+**Call relations**: `_body` calls this only when the displayed output was capped and the full version needs to be saved elsewhere. It relies on the context’s file service; if that service is not wired, it raises an error because there would be nowhere safe to put the oversized output.
 
-*Call graph*: called by 3 (by_email, one, rows); 2 external calls (__init__, __init__).
+*Call graph*: called by 1 (_body); 1 external calls (now).
+
+
+### Report digests
+Report digest helpers define concise entries and the scheduled writer creates bounded summaries for newly published reports.
+
+### `extensions/report_digest/ufo_ext_report_digest/digest.py`
+
+`domain_logic` · `report digest generation and validation`
+
+This file is the quality gate for turning a longer report into a tiny, useful digest. The digest is meant to answer a reader’s first question: “Is there something new here worth opening the full report for?” If not, the entry can say there is no change and avoid taking up space.
+
+The file defines two main data shapes using Pydantic, a validation library that checks and reshapes incoming data. A DigestEntry is the whole digest for one report. It may contain a title, a short summary, and up to two DigestPoint lines. A DigestPoint is one concrete finding, with an optional actor, meaning the person, group, or system the report says did the thing.
+
+The important behavior is that this file does not simply trust generated text. It trims fields to fixed lengths, cuts at word boundaries so text does not end mid-word, removes extra findings from titles, and filters out lines that mostly repeat what was already said above them. Think of it like an editor fitting a story into a small newspaper sidebar: the best new facts stay, repeated wording gets cut.
+
+It also limits how much of the original report is sent to the digest writer, and builds the instruction text that tells the writer how to produce entries. Without this file, digest output could become too long, repetitive, inconsistent, or dependent on hidden context instead of the report itself.
+
+#### Function details
+
+##### `_clipped`  (lines 96–107)
+
+```
+def _clipped(value: str, ceiling: int) -> str
+```
+
+**Purpose**: Shortens a piece of prose to a maximum length without rejecting it outright. It tries to cut cleanly at a word boundary so the result still looks intentional and readable.
+
+**Data flow**: It receives a text value and a character limit. It trims outside whitespace, checks whether the text already fits, and if not, cuts it down before the limit and removes any dangling punctuation or partial trailing phrase. It returns the shortened string and changes nothing else.
+
+**Call relations**: The field validators for titles, summaries, point text, and actors call this whenever a digest field might be too long. It is the shared ruler that keeps every visible digest line inside its allotted space.
+
+*Call graph*: called by 4 (_summary, _title, _actor, _text).
+
+
+##### `_stem`  (lines 110–117)
+
+```
+def _stem(word: str) -> str
+```
+
+**Purpose**: Reduces a word to a short rough root so similar words can be compared as the same idea. For example, this helps treat words with common endings as related instead of completely different.
+
+**Data flow**: It receives one lowercase word. It considers the last part after a hyphen, removes a known suffix when that leaves enough meaningful letters, then returns only the first few characters of the remaining root. It produces a compact comparison token.
+
+**Call relations**: This is used by _content when digest text is being prepared for repetition checks. It supports the later decision about whether a summary or point adds genuinely new information.
+
+*Call graph*: called by 1 (_content).
+
+
+##### `_content`  (lines 120–121)
+
+```
+def _content(text: str) -> tuple[str, ...]
+```
+
+**Purpose**: Turns a sentence or line into the meaningful word roots used for novelty checks. It ignores very common words such as “the” and “and” because they do not tell the reader anything specific.
+
+**Data flow**: It receives a block of text. It lowercases it, finds word-like pieces, drops stopwords, sends each remaining word through _stem, and returns the resulting roots as a tuple. The output is a simplified fingerprint of the text’s real content.
+
+**Call relations**: It calls _stem for each useful word. _adds_to uses it to measure whether one line brings new content, and DigestEntry._said_once uses it to remember what the reader has already been told.
+
+*Call graph*: calls 1 internal fn (_stem); called by 2 (_said_once, _adds_to).
+
+
+##### `_adds_to`  (lines 124–126)
+
+```
+def _adds_to(text: str, said: set[str]) -> bool
+```
+
+**Purpose**: Decides whether a line says enough that is new to deserve space in the digest. This prevents the summary or later bullet points from repeating the title in different words.
+
+**Data flow**: It receives a text line and a set of content roots already seen. It extracts the line’s content roots with _content, counts how many are new, and compares that share with the minimum novelty rule. It returns true when the line adds enough new content, otherwise false.
+
+**Call relations**: DigestEntry._said_once calls this while reading the entry from top to bottom. It is the simple test that decides whether each lower line earns its place.
+
+*Call graph*: calls 1 internal fn (_content); called by 1 (_said_once).
+
+
+##### `DigestPoint._text`  (lines 139–140)
+
+```
+def _text(cls, value: str) -> str
+```
+
+**Purpose**: Keeps the text of one digest finding within the allowed length. This makes each point fit as a single compact line.
+
+**Data flow**: It receives the proposed point text during model validation. It passes that text to _clipped with the point-text length limit, then stores the clipped result as the point’s text.
+
+**Call relations**: Pydantic calls this automatically when a DigestPoint is built. It relies on _clipped so point text follows the same clean-cutting rule as other digest fields.
+
+*Call graph*: calls 1 internal fn (_clipped).
+
+
+##### `DigestPoint._actor`  (lines 144–145)
+
+```
+def _actor(cls, value: str) -> str
+```
+
+**Purpose**: Keeps the actor field short enough to fit the digest format. The actor is whoever or whatever the report says is responsible for the finding.
+
+**Data flow**: It receives the proposed actor string during model validation. It clips the string to the actor length limit and returns the cleaned value for storage in the DigestPoint.
+
+**Call relations**: Pydantic runs this while creating or validating a DigestPoint. It delegates the actual shortening to _clipped, matching the rest of the file’s text-cleaning behavior.
+
+*Call graph*: calls 1 internal fn (_clipped).
+
+
+##### `DigestEntry._decoded`  (lines 161–167)
+
+```
+def _decoded(cls, value: object) -> object
+```
+
+**Purpose**: Accepts point data even when a provider returns it as JSON text instead of a normal nested list. This makes the digest parser tolerant of a common model-output shape without accepting unrelated formats blindly.
+
+**Data flow**: It receives the raw value supplied for points before normal validation. If that value is a string, it parses it as JSON; if the parsed value is a dictionary with a points field, it extracts that field, otherwise it uses the parsed value itself. If the input is not a string, it passes it through unchanged.
+
+**Call relations**: Pydantic calls this before validating DigestEntry.points. It uses json.loads to turn JSON text into normal data so the later DigestPoint validation can proceed.
+
+*Call graph*: 1 external calls (loads).
+
+
+##### `DigestEntry._title`  (lines 171–172)
+
+```
+def _title(cls, value: str) -> str
+```
+
+**Purpose**: Cleans the digest title so it carries only the first finding and stays within the title length limit. This protects the title from becoming a packed list of multiple findings.
+
+**Data flow**: It receives the proposed title. It splits the title at the configured join mark, keeps only the part before that mark, clips it to the title limit, and returns the final title string.
+
+**Call relations**: Pydantic calls this when a DigestEntry is validated. It uses _clipped for the final length control, before later whole-entry checks decide whether the entry is complete and non-repetitive.
+
+*Call graph*: calls 1 internal fn (_clipped).
+
+
+##### `DigestEntry._summary`  (lines 176–177)
+
+```
+def _summary(cls, value: str) -> str
+```
+
+**Purpose**: Keeps the digest summary short enough to be a single useful clause. The goal is a quick hint, not a second mini-report.
+
+**Data flow**: It receives the proposed summary text. It passes the text through _clipped with the summary length limit and returns the shortened result.
+
+**Call relations**: Pydantic calls this during DigestEntry validation. Its result is later examined by DigestEntry._said_once, which may remove the summary entirely if it mostly repeats the title.
+
+*Call graph*: calls 1 internal fn (_clipped).
+
+
+##### `DigestEntry._titled`  (lines 180–183)
+
+```
+def _titled(self) -> 'DigestEntry'
+```
+
+**Purpose**: Enforces the rule that a digest claiming there is a real change must have a title. A change without a title would give the reader no clear reason to open the report.
+
+**Data flow**: It receives the already-built DigestEntry. If holds_a_change is true and the title is empty, it raises a validation error; otherwise it returns the entry unchanged.
+
+**Call relations**: Pydantic runs this after field-level validation. It acts as a final completeness check before the entry is accepted.
+
+
+##### `DigestEntry._said_once`  (lines 186–205)
+
+```
+def _said_once(self) -> 'DigestEntry'
+```
+
+**Purpose**: Removes parts of a digest that do not add enough new information. It keeps the entry compact by making the title, summary, and points earn their space in reading order.
+
+**Data flow**: It starts with the title’s content roots as already said. It checks whether the summary adds enough new content; if not, it clears the summary. Then it walks through the proposed points, keeping only points whose text adds enough new content, stopping once the maximum number of points is reached. It updates the entry’s summary and points, then returns the entry.
+
+**Call relations**: Pydantic calls this after a DigestEntry is built. It uses _content to remember what has already been said and _adds_to to judge each later line, shaping the final digest that readers will see.
+
+*Call graph*: calls 2 internal fn (_adds_to, _content).
+
+
+##### `bounded`  (lines 208–210)
+
+```
+def bounded(report: str) -> str
+```
+
+**Purpose**: Cuts the original report down to the maximum amount the digest writer is allowed to read. This controls cost and keeps the digest focused on the report’s opening findings.
+
+**Data flow**: It receives the full report text. It returns only the first configured number of characters and does not inspect or rewrite the content otherwise.
+
+**Call relations**: Other digest-writing code can call this before sending a report into the writer. It provides the input boundary that matches the file’s rule that the digest should be reproducible from a limited report payload.
+
+
+##### `writing_standard`  (lines 213–227)
+
+```
+def writing_standard() -> str
+```
+
+**Purpose**: Builds the instruction text given to the digest writer. It combines the local prompt, the shared delivery rules, and the report-digest skill instructions into one standard.
+
+**Data flow**: It reads the skill document from disk, removes its frontmatter, reads the digest subagent prompt, adds the shared delivery register block, and joins these pieces with blank lines. It returns the complete instruction string.
+
+**Call relations**: Digest-writing code can call this when preparing the model or agent that will create digest entries. It reads files from the prompts and skills folders and includes DELIVERY_REGISTER_BLOCK so job-written and agent-written entries follow the same rules.
+
+
+### `extensions/report_digest/ufo_ext_report_digest/writer.py`
+
+`domain_logic` · `scheduled background tick`
+
+This file is the “digest writer” for report summaries. A scheduled app may publish a Markdown report, but raw reports can be long and hard to scan. This code finds recent reports that have not yet been read by the digest system, asks a language model to summarize each one in a strict format, and stores the result so the feed can show a useful short entry.
+
+It is careful about cost and failure. Each tick only processes a small batch, like taking a few letters from an inbox instead of emptying the whole mailroom at once. It only looks back seven days, so a permanently broken report cannot block the job forever. It also reads only a limited number of bytes from each report file, so a huge file cannot overwhelm the process.
+
+The main worker is `DigestWriter`. It finds candidate reports, reads their blobs, builds a reader description, asks the model for a `DigestEntry`, and stores either the digest or a small “unchanged” marker. That marker matters: if the model decides the report contains no meaningful change, the system records that fact so it does not pay to ask again every tick.
+
+`DigestRebuild` is the reset button for recent digests. It deletes recent digest rows and unchanged markers so the writer can recreate them, for example after the digest rules change.
+
+#### Function details
+
+##### `DigestWriter.run`  (lines 117–126)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs one digest-writing tick. It finds reports that still need digest work and processes them one by one, while making sure one bad report does not stop later reports.
+
+**Data flow**: It reads the workspace context and calls `_unwritten` to get a small list of candidate reports. For each report, it calls `_digest`. If one report raises an error, the error is swallowed and the loop continues, leaving that report for a future attempt while allowing the rest of the batch to move forward.
+
+**Call relations**: This is the top-level method for the writer. It starts by asking `_unwritten` what work is due, then hands each report to `_digest` for the actual read, model call, and database write.
+
+*Call graph*: calls 2 internal fn (_digest, _unwritten).
+
+
+##### `DigestWriter._digest`  (lines 128–139)
+
+```
+async def _digest(self, report: Report) -> None
+```
+
+**Purpose**: Processes one report from start to finish. It reads the report body, asks the model to create a digest, and records either the digest or the fact that the report had no meaningful change.
+
+**Data flow**: A `Report` goes in. The method fetches its text with `_body`; if the blob is missing, nothing is written. It builds a reader description with `_reader`, asks the model for a structured digest with `_written`, then stores either a full digest entry through `_store` or an unchanged marker through `_store_unchanged`.
+
+**Call relations**: This is called by `DigestWriter.run` for each candidate report. It is the central handoff point between storage, reader wording, model output, and final database records.
+
+*Call graph*: calls 5 internal fn (_body, _reader, _store, _store_unchanged, _written); called by 1 (run).
+
+
+##### `DigestWriter._unwritten`  (lines 141–213)
+
+```
+async def _unwritten(self) -> tuple[Report, ...]
+```
+
+**Purpose**: Finds recent scheduled reports in this workspace that still need digest attention. It skips reports that already have a digest and reports already marked as unchanged.
+
+**Data flow**: It reads the current workspace id, the current time, and several database tables: turns, conversations, agents, members, shared artifacts, existing digest entries, and unchanged markers. It selects completed scheduled runs from the last seven days that published a Markdown report, chooses the first shared Markdown file for each run, limits the result to the batch size, and returns them as `Report` objects.
+
+**Call relations**: This is called at the start of `DigestWriter.run`. It defines the job’s work queue, so later steps only see reports that are recent, successful, Markdown-based, and not already settled.
+
+*Call graph*: called by 1 (run); 3 external calls (__init__, now, select).
+
+
+##### `DigestWriter._body`  (lines 215–228)
+
+```
+async def _body(self, report: Report) -> str | None
+```
+
+**Purpose**: Reads the report text safely from blob storage. It keeps the amount of data small enough for both the process and the model request.
+
+**Data flow**: A `Report` with a blob key goes in. The function streams bytes from blob storage until it reaches the read limit, returns `None` if the blob is missing, decodes the bytes into text, and then uses `bounded` to cut the text to the model-facing size limit.
+
+**Call relations**: This is called by `_digest` before any model work happens. If it cannot produce report text, `_digest` stops early and no database row is written.
+
+*Call graph*: called by 1 (_digest); 1 external calls (bounded).
+
+
+##### `DigestWriter._reader`  (lines 230–239)
+
+```
+def _reader(self, report: Report) -> str
+```
+
+**Purpose**: Builds a plain-language description of who the digest is for. This helps the model write the summary for the right audience.
+
+**Data flow**: A `Report` goes in with its audience, owner email, and app name. If the report belongs to a specific member conversation and an owner email is known, it returns a sentence naming that member. Otherwise it returns a sentence describing the whole workspace as the reader.
+
+**Call relations**: This is called by `_digest` after the report body is available. Its output is passed into `_written` for the model prompt and later into `_store` so the saved digest records who it was written for.
+
+*Call graph*: called by 1 (_digest).
+
+
+##### `DigestWriter._written`  (lines 241–278)
+
+```
+async def _written(self, body: str, reader: str) -> DigestEntry | None
+```
+
+**Purpose**: Asks the language model to turn a report into a structured digest entry. It accepts only the expected tool-style response, not free-form prose.
+
+**Data flow**: The report body and reader description go in. The function builds a model request containing the writing instructions, the report and reader as compact JSON, the maximum output size, and a required tool schema based on `DigestEntry`. If the model returns the expected tool call, the tool input is validated into a `DigestEntry`; otherwise the function returns `None`.
+
+**Call relations**: This is called by `_digest` after `_body` and `_reader`. It hands the digest-writing decision to the model, then gives `_digest` either a validated digest object to store or `None` to skip for now.
+
+*Call graph*: called by 1 (_digest); 7 external calls (__init__, __init__, __init__, model_json_schema, model_validate, dumps, writing_standard).
+
+
+##### `DigestWriter._store_unchanged`  (lines 280–286)
+
+```
+async def _store_unchanged(self, report: Report) -> None
+```
+
+**Purpose**: Records that a report was read and found to contain no meaningful change. This prevents the system from repeatedly paying to analyze the same quiet report.
+
+**Data flow**: A `Report` goes in. The function opens a database transaction and inserts the workspace id and turn id into the `report_digest_unchanged` table. It returns nothing, but it changes the database so this report will no longer appear as unwritten.
+
+**Call relations**: This is called by `_digest` when `_written` returns a valid digest result whose `holds_a_change` flag is false. It is the quiet-report counterpart to `_store`.
+
+*Call graph*: called by 1 (_digest); 1 external calls (insert).
+
+
+##### `DigestWriter._store`  (lines 288–301)
+
+```
+async def _store(self, report: Report, entry: DigestEntry, reader: str) -> None
+```
+
+**Purpose**: Saves a finished digest entry in the database. This is what makes the summarized report available to the feed or other readers.
+
+**Data flow**: A `Report`, a validated `DigestEntry`, and the reader description go in. The function opens a database transaction and inserts the title, summary, bullet points, reader, model name, workspace id, turn id, and current timestamp into `report_digest_entry`. It returns nothing, but creates the permanent digest row for that report.
+
+**Call relations**: This is called by `_digest` when the model says the report contains a change worth showing. After this row exists, `_unwritten` will skip the same report in future ticks.
+
+*Call graph*: called by 1 (_digest); 2 external calls (now, insert).
+
+
+##### `DigestRebuild.run`  (lines 321–339)
+
+```
+async def run(self) -> int
+```
+
+**Purpose**: Clears recent digest results so they can be rebuilt. This is useful when the digest format or writing standard changes and recent reports should be summarized again.
+
+**Data flow**: It reads the workspace id and current time, finds turns in the rebuild window, then deletes matching rows from both the digest-entry table and the unchanged-marker table. It returns the total number of rows removed.
+
+**Call relations**: This method is separate from the normal writer flow. By deleting the writer’s own recent records, it makes those reports eligible for `DigestWriter._unwritten` again on later scheduled ticks.
+
+*Call graph*: 3 external calls (now, delete, select).
+
+
+##### `undigested_workspaces`  (lines 342–366)
+
+```
+def undigested_workspaces() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: Builds a database query that identifies workspaces with at least one recent report still needing digest work. A scheduler can use this to avoid waking the writer for quiet workspaces.
+
+**Data flow**: It uses the current time and database table definitions to construct a SQL query. The query looks for completed scheduled turns with Markdown artifacts inside the seven-day window, excluding turns that already have a digest entry or unchanged marker, and groups the result by workspace id. The function returns the query itself, not the final rows.
+
+**Call relations**: This supports the larger scheduling flow outside this file. It mirrors the same due-work rules used by `DigestWriter._unwritten`, so the scheduler and the writer agree about which workspaces actually have pending digest work.
+
+*Call graph*: 2 external calls (now, select).
+
+
+### Scheduled conversation wakeups
+Scheduled task runners fire due pauses and recurring tasks exactly once, retiring or rescheduling them as appropriate.
+
+### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/pause_runner.py`
+
+`orchestration` · `recurring scheduled background tick`
+
+A pause is like setting an alarm inside a conversation: if nobody responds before the alarm time, the system should continue the workflow automatically. This file is the alarm clock. On each scheduled tick, it asks the pause storage layer for pauses that are due, claims them for a short lease so another overlapping tick does not do the same work, and then tries to fire each one.
+
+The important safety idea is that a pause can end in two ways: a member sends a message, or the timer fires. When firing, the runner asks the main conversation system to admit the saved resume prompt only if no member has spoken since the pause began. Those saved sequence markers are the “watermarks” that make the two paths meet cleanly. If a member already spoke, the scheduled turn is not admitted, but the pause is still finished because the wait has already ended.
+
+The runner fires before it retires the pause. That order matters. If the process crashes after firing but before cleanup, the next tick may try again, but it uses the same idempotency key, meaning the conversation system can recognize it as the same scheduled action rather than a duplicate. If the app is archived, no turn is admitted and the pause is left in place so it can be restored later.
+
+#### Function details
+
+##### `PauseRunner.run`  (lines 34–43)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: This is the main tick of the pause runner. It finds pauses whose time has arrived, tries to fire each one, and reports if any of them failed.
+
+**Data flow**: It starts with the runner’s extension context and lease length. It creates a pause store, asks for all pauses due at the current UTC time, then passes each claimed pause to the firing helper. Successful pauses continue normally; failed pauses are remembered by conversation id and error type. At the end, it either returns with no value if everything worked, or raises one combined error describing the failures.
+
+**Call relations**: A scheduler or background job calls this method periodically. It creates the storage helper, gets due pause rows, and hands each row to PauseRunner._fire, which does the careful conversation-level work. The method collects errors instead of stopping at the first one, so one bad pause does not prevent later due pauses from being attempted.
+
+*Call graph*: calls 1 internal fn (_fire); 2 external calls (__init__, now).
+
+
+##### `PauseRunner._fire`  (lines 45–61)
+
+```
+async def _fire(self, store: PauseStore, row: Pause) -> None
+```
+
+**Purpose**: This tries to complete one specific pause. It either resumes the conversation with the stored prompt, retires the pause because the wait is over, or leaves it alone if the app is archived.
+
+**Data flow**: It receives a pause store and one pause row. First it asks the store to claim the row’s hold, which is an extra guard that says this runner is allowed to act on it now; if that fails, nothing changes. If the hold is claimed, it asks the conversation system to run the saved prompt as a scheduled turn, using the member who created the pause as the authority and using the pause id as a repeat-safe key. It also sends the saved “no member has spoken since then” markers. If the agent is archived, it stops and leaves the pause stored. Otherwise, whether the scheduled turn was admitted or skipped because a member already spoke, it retires the pause from the store.
+
+**Call relations**: PauseRunner.run calls this once for each due pause it claimed. This helper coordinates the storage layer, the authority lookup from the original member id, and the conversation invocation. After the invocation attempt settles the wait, it hands back to the store to retire the pause, unless the archived-agent case means the pause should remain for a future restore.
+
+*Call graph*: calls 2 internal fn (claim_holds, retire); called by 1 (run); 1 external calls (authority_from_member_id).
+
+
+### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/runner.py`
+
+`orchestration` · `recurring scheduled job`
+
+This file is the clock-driven worker for scheduled tasks. Think of it like a delivery person who checks a mailbox every few minutes: it looks for tasks whose scheduled time has arrived, temporarily marks them as claimed so another worker will not take the same job, and then delivers the task into the right conversation.
+
+The runner first asks the schedule store for tasks that are due. Before firing a task, it checks whether the task has expired. If it has, the task is retired instead of run. If it is still valid, the runner calculates the next time the task should run from its cron schedule. A cron schedule is a repeating time rule, such as “every Monday at 9.”
+
+The file also builds the message that the agent will receive. That message includes the exact scheduled time and the user’s original task prompt. It also adds instructions: normally the agent should publish a report only if there is something worth reporting; on the final allowed run, it must ask the user whether to continue, change, or stop the schedule.
+
+A key safety detail is the idempotency key, which is a unique label for this task and exact scheduled occurrence. If the same fire is retried after a deployment or temporary failure, the system can recognize it as the same run rather than starting a duplicate. Successful runs are rescheduled. Failed runs keep their claimed occurrence so they can be retried.
+
+#### Function details
+
+##### `fire_body`  (lines 43–61)
+
+```
+def fire_body(task: ScheduledTask, runtime_instruction: str | None) -> tuple[str, str]
+```
+
+**Purpose**: Builds the actual message sent to the agent for one scheduled task run, plus the unique key used to prevent duplicate fires. Someone uses this when a due task is about to be invoked in its conversation.
+
+**Data flow**: It receives a scheduled task and an optional extra instruction for this run. It reads the task’s next scheduled time, prompt, and id, then formats a message that says when this scheduled fire is happening and what the task should do. It returns two things: the message text to deliver and a stable scheduled-fire key made from the task id and exact scheduled time.
+
+**Call relations**: ScheduledTaskRunner._fire calls this after it has confirmed the task is still claimed and ready to run. fire_body hands the task id and time to scheduled_fire_key so the wider system can recognize retries of the same scheduled occurrence as the same event, not a new one.
+
+*Call graph*: called by 1 (_fire); 1 external calls (scheduled_fire_key).
+
+
+##### `ScheduledTaskRunner.run`  (lines 69–78)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Performs one full polling tick for scheduled tasks. It finds tasks that are due now, tries to fire each one, and reports if any of those fires failed.
+
+**Data flow**: It starts with the runner’s extension context, creates a ScheduleStore for reading and updating schedule rows, and records the current time. It asks the store to claim tasks due at that time for a limited lease period. For each claimed task, it calls _fire and collects any failure names. If no failures happen, it finishes quietly; if one or more tasks fail, it raises an error naming them.
+
+**Call relations**: This is the top-level action for the recurring scheduled-task job. It creates the store, gets the current time, and delegates each individual task attempt to ScheduledTaskRunner._fire. _fire returns either no problem or a failure label, and run turns those labels into one combined error for the job tick.
+
+*Call graph*: calls 1 internal fn (_fire); 2 external calls (__init__, now).
+
+
+##### `ScheduledTaskRunner._fire`  (lines 80–117)
+
+```
+async def _fire(self, store: ScheduleStore, task: ScheduledTask, tick_at: datetime, expiry_checked_at: datetime) -> str | None
+```
+
+**Purpose**: Attempts to run one claimed scheduled task once. It checks expiry, confirms the claim is still valid, invokes the agent, and only advances the schedule after the system accepts the new turn.
+
+**Data flow**: It receives the schedule store, the claimed task, the tick time, and the time used for expiry checking. First it asks the store to retire the task if it has expired. If not expired, it calculates the following scheduled time with next_fire. It chooses either the normal reporting instruction or the final-run instruction if the next fire would be past the task’s expiry. It then asks the store whether this worker’s claim still holds. If the claim is valid, it builds the inbound message and idempotency key with fire_body, derives the creator’s authority from the member id, and invokes the conversation as a scheduled turn. If the agent is archived or the turn is not admitted, it leaves the task in place without counting it as a failure. If invocation succeeds with a turn id, it reschedules the task to its next fire time. If an unexpected exception happens, it returns a short failure label containing the task name and error type.
+
+**Call relations**: ScheduledTaskRunner.run calls this once for each due task it claimed. _fire coordinates the lower-level pieces: ScheduleStore.retire_if_expired decides whether the task is already over, next_fire calculates the next cron occurrence, ScheduleStore.claim_holds protects against overlapping workers, fire_body prepares the message and duplicate-prevention key, authority_from_member_id gives the invocation the creator’s permissions, and ScheduleStore.reschedule records the next run only after the scheduled turn is accepted.
+
+*Call graph*: calls 4 internal fn (fire_body, claim_holds, reschedule, retire_if_expired); called by 1 (run); 2 external calls (authority_from_member_id, next_fire).
+
+
+### Homepage cleanup
+A site maintenance job removes obsolete seeded homepages once the chat app has taken over the workspace’s main agent.
+
+### `extensions/sites/ufo_ext_sites/main_homepage.py`
+
+`domain_logic` · `scheduled background sweep`
+
+This file fixes a careful one-time transition problem. Older setup code could attach a hosted site page as the homepage for every agent, including the workspace’s main agent. Later, the chat app became the thing behind that main agent, and its real home screen is served from the app bundle, not from a hosted-site database row. If the old hosted page stays attached, it wins the lookup and users see the wrong home screen.
+
+The file defines a background sweep, like a cleaner walking through rooms that are ready to be tidied. It looks only for workspaces where the main agent has already been adopted by the chat app, where a hosted page is still bound as that agent’s homepage, and where this cleanup has not already been recorded. When it finds one, it releases the binding so the chat bundle can show through, then writes a small marker saying this workspace has been processed.
+
+The marker matters because the main agent can still be used by members. If a member later chooses a homepage, the sweep must not remove that new choice. The file also protects privacy when releasing the old page: while a page is bound to an agent, its own visibility setting is dormant. When the binding is removed, the file chooses the narrower of the page’s stored visibility and the agent’s visibility, so releasing the page does not accidentally make it visible to more people.
+
+#### Function details
+
+##### `_the_chat_main_agent`  (lines 67–75)
+
+```
+def _the_chat_main_agent() -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the database test for the exact agent this cleanup cares about: the workspace’s main agent after it has been provisioned as the chat app’s declared agent. This prevents the cleanup from touching an agent before the chat app has actually taken over.
+
+**Data flow**: It reads no live rows by itself. Instead, it creates a reusable database condition from three facts: the agent is marked as main, it was provisioned by the chat extension, and its provisioned name is the chat declaration. The result is a filter that other queries can include when looking for the right agent.
+
+**Call relations**: The candidate search uses this condition to find workspaces that still have an old bound homepage on the chat main agent. The release job also uses it before making any change, so both the search step and the cleanup step agree about which agent is safe to touch.
+
+*Call graph*: called by 2 (release_main_homepage, with_a_bound_main_homepage); 1 external calls (and_).
+
+
+##### `unreleased_main_homepage_workspaces`  (lines 78–97)
+
+```
+def unreleased_main_homepage_workspaces(extension: str) -> WorkspaceCandidates
+```
+
+**Purpose**: Declares which workspaces are eligible for this cleanup job. A workspace qualifies only if it still has a homepage bound to the chat-owned main agent and has not already been marked as released.
+
+**Data flow**: It receives the extension name used for the marker record. It builds a candidate query that finds matching workspace IDs, then wraps that query in the job system’s owner-candidate format. The output is a workspace candidate provider that the scheduled job machinery can use to decide where to run.
+
+**Call relations**: This is the doorway between the scheduler and the cleanup logic. It hands the job system a way to discover workspaces needing attention, and that discovery relies on the inner query plus the shared chat-main-agent test.
+
+*Call graph*: 1 external calls (owner_candidates).
+
+
+##### `unreleased_main_homepage_workspaces.with_a_bound_main_homepage`  (lines 84–95)
+
+```
+def with_a_bound_main_homepage() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: Builds the actual database query for workspaces that still have an old hosted-site homepage attached to the chat main agent. It also excludes workspaces that already have the release marker.
+
+**Data flow**: It uses the hosted-site table, the agent table, and the extension store table. It joins hosted sites to agents through the homepage binding, checks that the agent is the chat main agent, checks that no release marker exists for that workspace, groups by workspace, and produces workspace IDs as the query result.
+
+**Call relations**: This helper sits inside the candidate provider. It calls the shared chat-main-agent condition so it searches for the same target that the release job later verifies before changing anything.
+
+*Call graph*: calls 1 internal fn (_the_chat_main_agent); 4 external calls (exists, literal, select, join).
+
+
+##### `released_visibility`  (lines 100–104)
+
+```
+def released_visibility(site: str, agent: str) -> Visibility
+```
+
+**Purpose**: Chooses the visibility level a page should have after it is no longer hidden behind an agent binding. It deliberately picks the more restrictive of the page’s stored visibility and the agent’s visibility.
+
+**Data flow**: It receives two visibility names: one from the hosted page and one from the agent. It converts both names into their ordered visibility levels, compares them using the project’s visibility ordering, and returns the narrower setting. The result is used as the released page’s active visibility.
+
+**Call relations**: The release job calls this just before unbinding the homepage. It gives the storage layer the safe visibility value to write, so the act of releasing the page does not accidentally widen who can see it.
+
+*Call graph*: called by 1 (release_main_homepage); 1 external calls (visibility_level).
+
+
+##### `release_main_homepage`  (lines 107–130)
+
+```
+async def release_main_homepage(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Performs the one-workspace cleanup: find the chat main agent, release any hosted-site homepage bound to it, and record that this workspace has been processed. This is the action the scheduled sweep ultimately exists to run.
+
+**Data flow**: It receives an extension context, which provides the current workspace, a database transaction, and a small key-value store for markers. First it looks up the workspace’s chat main agent. If none exists, it stops. If it finds one, it asks the hosted-sites storage for that agent’s homepage. If a bound page exists, it releases the binding using the safe visibility chosen by `released_visibility`. Finally, it writes the release marker with the agent ID, so future sweeps know not to remove a member’s later homepage choice.
+
+**Call relations**: This function is the cleanup step after the candidate system has selected a workspace. It uses `_the_chat_main_agent` to confirm the target, uses `HostedSites` to read and release the homepage binding, and uses `released_visibility` to preserve the safest audience setting during the release.
+
+*Call graph*: calls 3 internal fn (transaction, _the_chat_main_agent, released_visibility); 2 external calls (__init__, select).
 
 ## 📊 State Registers Touched
 
-- `reg-credentials-connections` — The stored secrets, connected accounts, grants, and refreshable permissions used to call outside services.
-- `reg-access-subjects` — The shared visibility rules that say which members or audiences may read conversations, sources, and objects.
-- `reg-connector-brokers` — The shared catalog and runtime state for service connectors, MCP servers, broker accounts, and approved actions.
-- `reg-source-index-memory` — The saved external pages, search chunks, embeddings, memories, and recall indexes used as workspace knowledge.
-- `reg-extension-store` — The per-workspace storage area where extensions keep their own durable settings and small JSON records.
-- `reg-conversation-slots-ui` — The shared side-panel and workspace UI state for artifacts, sources, tasks, sites, automations, and app home screens.
-- `reg-blob-store` — The durable binary-object namespace and storage keys for large files, imported page bodies, previews, attachments, and other non-row data.
-- `reg-source-sync-state` — The source-ingestion control state: source definitions, cursors/change-feed positions, error counters, backoff or parked status, and removal markers.
-- `reg-enrichment-state` — The consent, fetched profile/company enrichment results, replay data, and provider rate-limit pause state for enrichment pipelines.
+- `reg-pack-extension-registry` — The approved set of installed packs and extensions, including what tools, jobs, agents, hooks, providers, and surfaces they add.
+- `reg-extension-store` — The per-workspace saved data that extensions use to remember their own settings and state.
+- `reg-agent-records` — The saved assistant profiles, including their model choice, tools policy, setup needs, visibility, reasoning level, and spawn contracts.
+- `reg-workspace-member-seat-state` — The shared record of workspaces, members, admins, invitations, seats, and workspace-level limits.
+- `reg-authority-context` — The current acting identity for runtime work, saying which workspace, member, and agent are allowed to act.
+- `reg-surface-routing-state` — The saved routing information that maps web, Slack, iMessage, terminal, hosted app, and public-link traffic to the right workspace and conversation.
+- `reg-conversation-records` — The durable conversation state, including conversation identity, title, surface label, sandbox handle, audience, and related metadata.
+- `reg-turn-queue-state` — The durable queue of conversation turns, including admission source, run claim, parked state, resume state, and final status.
+- `reg-live-updates-delivery` — The live reply and notification delivery state used to stream running turns and safely deliver mid-turn or delayed messages once.
+- `reg-runtime-fleet-claims` — The attendance and claim sheet for running service processes, including heartbeats, work ownership, and surface listener claims.
+- `reg-credential-vault-connections` — The lockbox of account connections, OAuth grants, API keys, BYOK attempts, and agent permissions to use outside services.
+- `reg-source-sync-state` — The saved state for connected information sources, including cursors, pages, deletions, warnings, backoff, and source access grants.
+- `reg-object-artifact-site-store` — The shared store of workspace objects, files, artifacts, previews, reports, websites, todos, and objective records.
+- `reg-schedules-automations` — The durable alarm clock for future work, pauses, monitors, source-change triggers, notification inbox items, and extension jobs.
+- `reg-billing-ledger-balance` — The shared money and usage record, including spend caps, model costs, sandbox and egress usage, prepaid balances, and export progress.
+- `reg-portal-slots-ui-state` — The structured conversation portal display state that extensions can fill with artifacts, sources, tasks, sites, and automations.
+- `reg-database-connection-pools` — Process-global database engines, sessions, transaction handles, and connection pools shared by serving, workers, migrations, and cleanup code.
+- `reg-inbound-message-buffer` — Durable inbound messages from external surfaces waiting to be rendered, admitted, deduplicated, or converted into conversation work.
+- `reg-improvement-proposals` — Durable proposed changes and offline-improvement candidates, including their pending, approved, or rejected review state.
+- `reg-indexing-enrichment-work-queue` — Dirty-page and processing markers that tell background workers which synced pages need chunking, embedding, memory/profile derivation, or enrichment refresh.
+- `reg-durable-workflow-checkpoints` — Saved workflow execution/checkpoint state used to resume, repair, cancel, or finalize long-running workflows after pauses, crashes, or worker handoff.
+- `reg-provider-rate-limit-backoff` — Shared throttling, retry-after, backoff, and concurrency state for AI providers and external connector APIs, separate from billing spend caps.
+- `reg-user-feedback-buffer` — Collected user/operator feedback events, ratings, comments, and review signals used by telemetry, diagnostics, and offline improvement loops.
+- `reg-service-worker-lifecycle-state` — Process-local supervisor state for background loops and workers, including async task handles, startup readiness, shutdown signals, and drain status not represented by durable job tables.

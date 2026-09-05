@@ -1,380 +1,164 @@
-# Deploy bundle and sandbox image validation  `stage-1.2`
+# Core and extension schema upgrades or rollbacks  `stage-1.2`
 
-This stage prepares UFO to be deployed safely and repeatably. It happens after the app has been built or configured, but before people rely on it in another environment. Think of it as packing a suitcase, checking the workshop it will run in, and testing the safety locks before travel.
+This stage is the database renovation path for the whole system. It runs during install, upgrade, or rollback, not during normal chat work. Alembic, the migration tool, applies the steps in order. env.py is the foreman: it connects to the database, checks the current table definitions, and runs changes safely. 0001_heartbeat.py lays the first foundation: workspaces, members, agents, conversations, turns, identities, and usage costs. 0006_ext_store.py adds a shared JSON storage drawer for extensions.
 
-`core/src/ufo/bundle.py` creates the suitcase. It builds a self-contained deployment bundle for `ufoctl`, the command-line tool. The bundle includes the app settings, the exact extension versions, the runtime package, and the sandbox client. This makes a Docker build context, meaning a folder Docker can use to build the same runnable image on another machine.
+The core migration groups then reshape the main product shelves: turns and subagents, conversation metadata, scheduling, message delivery, sources and pages, shared artifacts, workspace membership, grants and credentials, agent settings, model and tool rewrites, billing, retired-provider cleanup, and old iMessage cleanup. Extension groups do the same for optional features: Daily Brief, memory, search and research, skill creation, notifications, code review, Sites, monitors, objectives, reports, scheduled pauses, test utilities, samples, and old web chat data. Together they let old installations keep their history while the current code gets the tables and fields it expects.
 
-`sandbox/build_template.py` prepares the workshop where UFO runs untrusted or isolated code. It builds and checks both the hosted E2B sandbox template and the local Docker image, keeping them matched.
+## Sub-stages
 
-`sandbox/proxy_gate.py` is the safety inspection. It starts a temporary E2B sandbox, installs the trusted certificate, and confirms HTTPS proxy behavior fails in the expected controlled way before deployment is accepted.
+- [Core turn execution, subagent, and authority migrations](stage-1.2.1.md) `stage-1.2.1` — 20 files
+- [Core conversation metadata migrations](stage-1.2.2.md) `stage-1.2.2` — 6 files
+- [Core scheduling and runtime-instance migrations](stage-1.2.3.md) `stage-1.2.3` — 12 files
+- [Core surface, inbound, and delivery migrations](stage-1.2.4.md) `stage-1.2.4` — 10 files
+- [Core source, page, and knowledge-storage migrations](stage-1.2.5.md) `stage-1.2.5` — 13 files
+- [Core shared artifact and object-history migrations](stage-1.2.6.md) `stage-1.2.6` — 9 files
+- [Core workspace and member lifecycle migrations](stage-1.2.7.md) `stage-1.2.7` — 8 files
+- [Core grants, connections, credentials, and access migrations](stage-1.2.8.md) `stage-1.2.8` — 10 files
+- [Core agent configuration and ownership migrations](stage-1.2.9.md) `stage-1.2.9` — 13 files
+- [Core agent app, model, and tool-policy rewrites](stage-1.2.10.md) `stage-1.2.10` — 14 files
+- [Core ledger, billing, balance, and usage migrations](stage-1.2.11.md) `stage-1.2.11` — 19 files
+- [Core retired provider and source cleanup migrations](stage-1.2.12.md) `stage-1.2.12` — 4 files
+- [Core iMessage extension-store cleanup migrations](stage-1.2.13.md) `stage-1.2.13` — 3 files
+- [Daily Brief and Sweep migration history](stage-1.2.14.md) `stage-1.2.14` — 4 files
+- [Memory extension migrations](stage-1.2.15.md) `stage-1.2.15` — 16 files
+- [Search, source-trigger, enrichment, and research extension migrations](stage-1.2.16.md) `stage-1.2.16` — 7 files
+- [Skill-create extension migrations](stage-1.2.17.md) `stage-1.2.17` — 4 files
+- [Notification and coding workflow extension migrations](stage-1.2.18.md) `stage-1.2.18` — 7 files
+- [Sites extension migrations](stage-1.2.19.md) `stage-1.2.19` — 8 files
+- [Monitor, objective, report, and scheduled-pause extension migrations](stage-1.2.20.md) `stage-1.2.20` — 6 files
+- [Small utility and compatibility extension migrations](stage-1.2.21.md) `stage-1.2.21` — 4 files
 
 ## Files in this stage
 
-### Deployment Bundle Creation
-Build the frozen deployment context that packages UFO configuration, extensions, runtime artifacts, and sandbox client assets.
+### Migration orchestration
+Alembic entry-point configuration connects to the project database, compares metadata, and runs schema changes safely.
 
-### `core/src/ufo/bundle.py`
+### `core/src/ufo/schema/migrations/env.py`
 
-`orchestration` · `bundle creation before deployment`
+`orchestration` · `database migration startup`
 
-This file solves the problem of making a deploy reproducible. Instead of relying on whatever extensions and files happen to be installed on a machine at runtime, it creates a bundle that names exactly what should run and checks the exact contents of each extension. Think of it like packing a travel kit: the config, lockfile, client binary, and Docker instructions all go into one bag so nothing important is forgotten.
+When the project needs to upgrade or change its database layout, Alembic is the tool that runs those changes. This file is Alembic’s local instruction sheet. Without it, Alembic would not know which database tables belong to this project, how to open the database connection, or how to run migrations in an async SQLAlchemy setup.
 
-The main class, `Bundle`, is given the current config file, an optional extension catalog, an output directory, the built `ufo` Python wheel, and the sandbox client binary. When `build` runs, it decides which extensions must be pinned, copies the config and client binary into the bundle directory, writes a new lockfile, and creates a Dockerfile.
+The file imports the project’s shared table metadata, which is the map of what the database is supposed to look like. It then defines a small synchronous migration step, `run_migrations`, because Alembic itself expects to do the actual migration work on a normal database connection. Around that, `run` creates an asynchronous database engine from Alembic’s configuration, opens a connection, and asks SQLAlchemy to run the synchronous migration step safely inside that async connection.
 
-The most important part is `_pins`. It looks at the extensions already discovered in the local environment. If a lockfile already exists, it starts from that locked list; otherwise it pins every discovered extension. If an extension catalog is available, it also includes entries marked as disabled, because those are “bundle-only”: they are installed into the image now, not fetched later at runtime. For each extension, it opens the built wheel, extracts the extension’s package files, computes a digest, and writes that digest into the lockfile. That means the final image can verify the exact bytes it is booting with.
-
-#### Function details
-
-##### `wheel_name`  (lines 35–37)
-
-```
-def wheel_name() -> str
-```
-
-**Purpose**: This small helper creates the expected filename for the built `ufo` Python wheel that will be copied into the Docker image. A wheel is a packaged Python distribution, similar to an installable zip file.
-
-**Data flow**: It reads the current `ufo` version from the extension store helper, places that version into the standard wheel filename pattern, and returns the resulting string. It does not change any files or state.
-
-**Call relations**: When the Dockerfile text is being assembled, `Bundle._dockerfile` asks this helper for the wheel filename so the Dockerfile copies and installs the right package.
-
-*Call graph*: called by 1 (_dockerfile); 1 external calls (ufo_version).
-
-
-##### `Bundle.build`  (lines 61–81)
-
-```
-def build(self) -> BundleResult
-```
-
-**Purpose**: This is the main action for creating a bundle directory. It writes the frozen config, lockfile, sandbox client binary, and Dockerfile, then returns a summary of what it produced.
-
-**Data flow**: It starts with the paths stored on the `Bundle`: the source config, output directory, wheel, and client binary. First it asks `_pins` for the exact extension pins. Then it creates the output directory, copies the config text, writes a JSON lockfile with the current `ufo` version and extension pins, copies the client binary bytes, writes the generated Dockerfile text, and returns a `BundleResult` containing the output paths and pins.
-
-**Call relations**: This is the public build step that coordinates the whole file. It calls `_pins` before writing the lockfile, calls `_dockerfile` before writing the Dockerfile, uses the lockfile model to serialize pinned extension data, and packages the final paths into `BundleResult` for the caller.
-
-*Call graph*: calls 2 internal fn (_dockerfile, _pins); 3 external calls (__init__, __init__, ufo_version).
-
-
-##### `Bundle._pins`  (lines 83–127)
-
-```
-def _pins(self) -> tuple[ExtensionPin, ...]
-```
-
-**Purpose**: This decides which extensions belong in the bundle and records a content digest for each one. The digest is a fingerprint of the extension files, used later to prove that the runtime is loading the same code that was bundled.
-
-**Data flow**: It reads the currently discovered extensions from the local environment and checks whether a lockfile already exists. If a lockfile exists, it uses that as the base list of extension names; otherwise it uses every discovered extension. If a catalog is present, it adds catalog entries marked disabled, because those are installed only during bundling. For each chosen extension name, it finds the installed extension metadata, opens the built wheel, gathers the package files for that extension while skipping cache and compiled Python files, computes a digest from those files, and returns a tuple of `ExtensionPin` records. If an expected extension or package is missing, it stops with a runtime error.
-
-**Call relations**: This helper is called by `Bundle.build` before the lockfile is written. It relies on the extension loader to discover installed extensions, find and read any existing lockfile, and compute content digests. It also opens the wheel file directly so the lockfile describes the bytes that will be installed into the bundled image, not just whatever source files happen to be nearby.
-
-*Call graph*: called by 1 (build); 7 external calls (__init__, Path, discovered, extension_content_digest, lockfile_path, read_lockfile, ZipFile).
-
-
-##### `Bundle._dockerfile`  (lines 129–145)
-
-```
-def _dockerfile(self) -> str
-```
-
-**Purpose**: This creates the Dockerfile text used to build the runnable image. The Dockerfile installs the packaged `ufo` wheel, copies in the pinned config and lockfile, installs the sandbox client binary, and starts `ufoctl serve` by default.
-
-**Data flow**: It takes no outside input beyond the constants in this file and the current `ufo` version used by `wheel_name`. It builds a sequence of Dockerfile lines: base Python image, working directory, environment variables for config and lockfile paths, wheel copy and install, config and lockfile copy, client binary copy, client path environment variable, entrypoint, and default command. It joins those lines into one string and returns it.
-
-**Call relations**: This helper is called by `Bundle.build` when it is time to write the Dockerfile into the output directory. It calls `wheel_name` so the Dockerfile refers to the exact wheel filename expected in the bundle context.
-
-*Call graph*: calls 1 internal fn (wheel_name); called by 1 (build).
-
-
-### Sandbox Image Validation
-Build and verify the sandbox images and run proxy-certificate safety checks before deployment.
-
-### `sandbox/build_template.py`
-
-`entrypoint` · `build/deploy time`
-
-This file is the recipe and command-line tool for producing UFO's sandbox runtime: the isolated Linux environment where the agent can run tools, inspect files, use browsers, process PDFs, call the compiled `ufo` client, and load built-in skills. Without it, the project could accidentally run sandboxes that are missing tools, built from old sources, or different between E2B and Docker.
-
-The script has one shared set of layers, like one packing list used for two suitcases. It installs operating-system packages, Python packages, Node packages, Playwright's browser, the compiled `ufo` client binary, helper Python modules, and the system skill bundle. The only major difference is the base: E2B builds from an E2B template, while Docker builds from the public image that template is based on.
-
-A key idea is the build digest: a stable fingerprint of the sandbox definition. It includes package lists, environment variables, copied files, skill bundles, and E2B size settings. Published templates store this digest so `--check` can detect drift without republishing.
-
-The script can print a Dockerfile, build the Docker image locally, check existing E2B templates, or publish all E2B size tiers. Publishing also boots the new template and runs a readiness probe, so a broken image fails before it is accepted.
+One important detail is the SQLite setting: when the database is SQLite, migrations are rendered in “batch” mode. That is a compatibility trick Alembic uses because SQLite cannot directly perform some table-altering operations that larger databases support. At the bottom, the file immediately starts `run`, so simply loading this migration environment kicks off the migration process.
 
 #### Function details
 
-##### `template_name`  (lines 269–270)
+##### `run_migrations`  (lines 11–18)
 
 ```
-def template_name(size: str) -> str
+def run_migrations(connection: Connection) -> None
 ```
 
-**Purpose**: Creates the published E2B template name for a sandbox size such as small, medium, or large. This keeps naming consistent everywhere the script builds or checks templates.
+**Purpose**: This function tells Alembic exactly how to run the database migration once a database connection is available. It connects Alembic to the project’s table metadata and then runs the pending migration steps inside a transaction, which is a safe wrapper that can commit or roll back the work as one unit.
 
-**Data flow**: It receives a size string, adds it to the common base name `ufo-sbx`, and returns the full template name. It does not read or change outside state.
+**Data flow**: It receives an open database connection. It gives Alembic that connection, the project’s expected table layout, and a SQLite-specific compatibility flag. Then it opens a migration transaction and asks Alembic to apply the migrations. It does not return a value; its effect is changing the database schema if migrations are pending.
 
-**Call relations**: When the script builds templates, `_built` asks this function for the name to publish under. During `--check`, `main` uses it to find the already-published template for each size.
+**Call relations**: This is the inner migration worker. The async `run` function opens the database connection first, then hands that connection to `run_migrations`. Inside, `run_migrations` calls Alembic’s configuration, transaction, and migration-running steps in the order needed to apply schema changes safely.
 
-*Call graph*: called by 2 (_built, main).
-
-
-##### `client_definition`  (lines 273–299)
-
-```
-def client_definition() -> dict[str, str]
-```
-
-**Purpose**: Builds a stable description of the `ufo` client binary that will be baked into the sandbox. It hashes the client source code instead of the compiled binary so two machines building the same source do not appear different just because compiler output bytes vary.
-
-**Data flow**: It reads selected files and source directories from the client crate, feeds their paths and contents into a SHA-256 hash, and returns a small dictionary with the binary name, target platform, and source digest.
-
-**Call relations**: The build fingerprint made by `build_definition_digest` calls this function so the sandbox definition changes when the client source changes. Its only outside helper is the standard hash function.
-
-*Call graph*: called by 1 (build_definition_digest); 1 external calls (sha256).
+*Call graph*: 3 external calls (begin_transaction, configure, run_migrations).
 
 
-##### `stage_client_binary`  (lines 302–313)
+##### `run`  (lines 21–26)
 
 ```
-def stage_client_binary() -> Path
+async def run() -> None
 ```
 
-**Purpose**: Copies the compiled `ufo` client into a known artifacts directory where the sandbox build can copy it. This prevents the image from silently using an old or unknown binary.
+**Purpose**: This function prepares the database connection used for migrations. It reads Alembic’s database settings, builds an asynchronous SQLAlchemy engine, opens a connection, runs the migration work, and then closes the engine cleanly.
 
-**Data flow**: It asks `client_binary` for the compiled binary for the fixed Linux target, creates the staging folder if needed, copies the binary there, makes it executable, and returns the staged path.
+**Data flow**: It reads the configured Alembic settings, especially the SQLAlchemy database connection options. From those settings it creates an async database engine with no long-lived connection pool. It opens one connection, runs `run_migrations` through SQLAlchemy’s bridge from async code to sync code, then disposes of the engine. Nothing is returned; the visible result is that migrations have been attempted against the configured database.
 
-**Call relations**: Both `build_docker_image` and the normal publishing path in `main` call this before any real image build. Later, `apply_layers` refers to that staged file when adding the client to the image.
+**Call relations**: This is the outer driver for the file. When the migration environment is loaded, the file starts `run` through Python’s async event loop. `run` uses SQLAlchemy’s async engine factory to get connected, then hands off the actual Alembic migration work to `run_migrations`.
 
-*Call graph*: called by 2 (build_docker_image, main); 2 external calls (copyfile, client_binary).
+*Call graph*: 1 external calls (async_engine_from_config).
 
 
-##### `system_skill_bundle`  (lines 317–334)
+### Versioned schema changes
+Initial core tables are created first, followed by extension-owned storage for per-workspace JSON data.
 
-```
-def system_skill_bundle() -> SystemSkillBundle
-```
+### `core/src/ufo/schema/migrations/versions/0001_heartbeat.py`
 
-**Purpose**: Finds all built-in system skills and packs them into one reusable bundle. A skill is a packaged capability the sandbox can run, such as document or media processing.
+`data_model` · `database migration/setup`
 
-**Data flow**: It searches the repository for `SKILL.md` files while ignoring `node_modules`, reduces overlapping folders to top-level skill roots, discovers the skills in those roots, and returns a `SystemSkillBundle`. The result is cached, so repeated calls reuse the same bundle.
+This file is a database change script. It tells Alembic, the tool used to apply database migrations, how to build the project’s first database layout and how to undo it if needed. Think of it like the first blueprint for a filing system: it decides which filing cabinets exist, what labels each drawer must have, and which records are allowed to point to which other records.
 
-**Call relations**: The digest builder calls this to include the skill bundle fingerprint in the image fingerprint. `stage_system_skills` calls it to write the actual bundle archive that will be copied into the sandbox.
+The migration creates a workspace table first, because most other records belong to a workspace. It then adds agents, members, conversations, surface identities, turns, and a ledger. These names describe the core shape of the app: a workspace contains members and agents; members take part in conversations; conversations contain turns; turns can produce usage records in the ledger.
 
-*Call graph*: calls 1 internal fn (from_skills); called by 2 (build_definition_digest, stage_system_skills); 1 external calls (discover_skills).
+The file also adds rules that protect the data from becoming inconsistent. For example, agent names and member emails must be unique within a workspace. A conversation surface is currently limited to `cli`, meaning command-line use. A turn must have a valid status, a positive sequence number, and terminal result data only when it is no longer queued or running. The ledger records token usage and pricing, and it requires positive usage amounts.
 
-
-##### `stage_system_skills`  (lines 337–340)
-
-```
-def stage_system_skills() -> Path
-```
-
-**Purpose**: Writes the bundled system skills to a zip file inside the build artifacts directory. This makes the skills available to the image build as a normal file.
-
-**Data flow**: It creates the artifacts directory if needed, reads the archive bytes from `system_skill_bundle`, writes them to `system-skills.zip`, and returns that path.
-
-**Call relations**: The Docker build path and E2B publishing path both call this before building. Later, `apply_layers` copies this archive into the image and unpacks it into the sandbox's system skill directory.
-
-*Call graph*: calls 1 internal fn (system_skill_bundle); called by 2 (build_docker_image, main).
-
-
-##### `build_definition_digest`  (lines 343–385)
-
-```
-def build_definition_digest(sizing: Sizing | None) -> str
-```
-
-**Purpose**: Creates the fingerprint that says exactly what sandbox definition is being built. This is the script's drift detector: if the source recipe changes, the digest changes.
-
-**Data flow**: It receives either an E2B sizing choice or `None` for Docker. It gathers the base image/template, users, commands, package lists, environment variables, runtime directory permissions, client source digest, skill bundle digest, and helper module hashes, turns that data into stable JSON, hashes it, and returns a `sha256:` string.
-
-**Call relations**: `e2b_template` and `pod_dockerfile` call this before applying image layers so the digest can be baked into the image. `main` also calls it during `--check` to compare the live published template with the current source definition.
-
-*Call graph*: calls 2 internal fn (client_definition, system_skill_bundle); called by 3 (e2b_template, main, pod_dockerfile); 2 external calls (sha256, dumps).
-
-
-##### `apply_layers`  (lines 388–433)
-
-```
-def apply_layers(builder: TemplateBuilder, digest: str) -> TemplateFinal
-```
-
-**Purpose**: Applies the shared sandbox recipe to either an E2B template builder or a Docker image builder. This is the central packing list that keeps both targets aligned.
-
-**Data flow**: It receives a builder object and a digest. It switches to the build user, installs apt, Python, Node, GitHub CLI, and browser tools, creates required directories, writes the digest into the image, sets environment variables, copies and unpacks system skills, copies the client binary and helper modules, switches to the runtime user, and returns the finalized template with its start and readiness commands.
-
-**Call relations**: `e2b_template` and `pod_dockerfile` both hand their builders to this function. It hands all concrete build steps to the E2B SDK builder methods such as `run_cmd`, `copy`, `set_envs`, and `set_start_cmd`.
-
-*Call graph*: called by 2 (e2b_template, pod_dockerfile); 5 external calls (copy, run_cmd, set_envs, set_start_cmd, set_user).
-
-
-##### `e2b_template`  (lines 436–438)
-
-```
-def e2b_template(size: str) -> TemplateFinal
-```
-
-**Purpose**: Creates the E2B version of the sandbox template for one size tier. It uses E2B's hosted code-interpreter base and adds UFO's shared layers on top.
-
-**Data flow**: It receives a size name, creates a template builder using the repository root as the file context, starts from the configured E2B base template, computes the digest for that size's CPU and memory, applies the shared layers, and returns the final template definition.
-
-**Call relations**: `_built` calls this when it is ready to publish a specific E2B size tier. The function delegates the actual package and file setup to `apply_layers`.
-
-*Call graph*: calls 2 internal fn (apply_layers, build_definition_digest); called by 1 (_built); 1 external calls (Template).
-
-
-##### `pod_dockerfile`  (lines 441–443)
-
-```
-def pod_dockerfile() -> str
-```
-
-**Purpose**: Renders the Docker version of the sandbox recipe as a Dockerfile. This lets local Docker deployments use the same runtime contents as the E2B templates.
-
-**Data flow**: It creates a builder from the Docker base image, computes a digest without E2B sizing, applies the shared layers, converts the result into Dockerfile text, and returns that text.
-
-**Call relations**: `main` calls this directly for `--dockerfile`, while `build_docker_image` calls it before running `docker build`. It shares the same `apply_layers` recipe used by E2B builds.
-
-*Call graph*: calls 2 internal fn (apply_layers, build_definition_digest); called by 2 (build_docker_image, main); 2 external calls (Template, to_dockerfile).
-
-
-##### `build_docker_image`  (lines 446–459)
-
-```
-def build_docker_image() -> None
-```
-
-**Purpose**: Builds the local Docker sandbox image from the shared recipe. This mode does not need an E2B account because it only talks to the local Docker daemon.
-
-**Data flow**: It stages the client binary and system skills, renders the Dockerfile text, sends that text to `docker build` with the repository root as the build context, and either exits with an error on failure or prints the resulting image tag on success.
-
-**Call relations**: `main` calls this when the user passes `--build-docker`. It prepares artifacts through `stage_client_binary` and `stage_system_skills`, gets Dockerfile text from `pod_dockerfile`, then hands the actual build to the external Docker command.
-
-*Call graph*: calls 3 internal fn (pod_dockerfile, stage_client_binary, stage_system_skills); called by 1 (main); 1 external calls (run).
-
-
-##### `_booted`  (lines 462–479)
-
-```
-def _booted(name: str) -> Sandbox
-```
-
-**Purpose**: Starts an E2B sandbox from a template and retries temporary connection failures. It exists so checks do not fail just because E2B had a brief bad moment.
-
-**Data flow**: It receives a template name, tries to create a sandbox with the readiness timeout, and returns the sandbox if creation succeeds. If network or E2B service errors happen, it prints a warning, waits longer on each retry, and only raises the error after all attempts fail.
-
-**Call relations**: Both `verify_published_template` and `check_published_template` call this before running commands inside a published template. It hands off sandbox creation to the E2B `Sandbox.create` call and uses sleep between retries.
-
-*Call graph*: called by 2 (check_published_template, verify_published_template); 2 external calls (create, sleep).
-
-
-##### `_reap`  (lines 482–492)
-
-```
-def _reap(sandbox: Sandbox, name: str) -> None
-```
-
-**Purpose**: Stops a temporary E2B sandbox used for verification. It tries to clean up promptly without letting cleanup problems hide the real result of the check.
-
-**Data flow**: It receives a sandbox object and its name, calls `kill` on the sandbox, and returns nothing. If killing fails because of a transport or E2B service issue, it prints a warning and leaves the sandbox to expire naturally.
-
-**Call relations**: `verify_published_template` and `check_published_template` call this in their cleanup step after running their checks. It is deliberately secondary: the check result matters more than a failed cleanup call.
-
-*Call graph*: called by 2 (check_published_template, verify_published_template); 1 external calls (kill).
-
-
-##### `verify_published_template`  (lines 495–510)
-
-```
-def verify_published_template(name: str) -> None
-```
-
-**Purpose**: Checks that a freshly published E2B template actually contains the expected runtime tools. This stops a broken image from being treated as successfully published.
-
-**Data flow**: It receives a published template reference, boots a sandbox from it, runs the same readiness command that is baked into the template, cleans up the sandbox, and raises an error if the command fails or returns a non-zero exit code.
-
-**Call relations**: After `_built` publishes a template, `main` calls this as the publish gate. It depends on `_booted` to start the sandbox and `_reap` to clean it up afterward.
-
-*Call graph*: calls 2 internal fn (_booted, _reap); called by 1 (main).
-
-
-##### `check_published_template`  (lines 513–533)
-
-```
-def check_published_template(name: str, expected: str) -> None
-```
-
-**Purpose**: Checks whether an existing published E2B template still matches the current source recipe. It never publishes; it only reports drift.
-
-**Data flow**: It receives a template name and the digest expected from the current source. It boots the live template, reads the digest file baked into the image, cleans up the sandbox, compares live versus expected, and raises an error if the template is old, missing a digest, or different.
-
-**Call relations**: `main` calls this for every sandbox size when the user passes `--check`. It uses `_booted` and `_reap` around the remote command that reads the digest file.
-
-*Call graph*: calls 2 internal fn (_booted, _reap); called by 1 (main).
-
-
-##### `_built`  (lines 536–558)
-
-```
-def _built(size: str, sizing: Sizing) -> BuildInfo
-```
-
-**Purpose**: Publishes one E2B sandbox template size, retrying temporary E2B build-service failures. It is the safe wrapper around the actual remote build call.
-
-**Data flow**: It receives a size name and its CPU/memory sizing. It builds the template definition, asks E2B to publish it under the size-specific name, and returns E2B's build information. If the E2B service times out or cannot be reached, it waits and retries before giving up.
-
-**Call relations**: The normal publish path in `main` calls this for each size tier. `_built` gets the template definition from `e2b_template`, gets the publish name from `template_name`, and hands the remote build to `Template.build`.
-
-*Call graph*: calls 2 internal fn (e2b_template, template_name); called by 1 (main); 2 external calls (build, sleep).
-
-
-##### `main`  (lines 561–599)
-
-```
-def main() -> None
-```
-
-**Purpose**: Runs the command-line interface for this script. It decides whether to print a Dockerfile, build Docker, check E2B templates, or publish E2B templates.
-
-**Data flow**: It reads command-line flags. With `--dockerfile`, it writes Dockerfile text to standard output. With `--build-docker`, it builds the local Docker image. With `--check`, it recomputes expected digests and checks each published E2B size. With no special flag, it stages artifacts, builds every E2B size tier, verifies each published result, and prints the final size-to-template references.
-
-**Call relations**: This is the top-level entrypoint called when the file is run as a script. It coordinates the helper functions: staging artifacts, rendering Docker, building E2B templates, checking digests, and verifying newly published templates.
-
-*Call graph*: calls 9 internal fn (_built, build_definition_digest, build_docker_image, check_published_template, pod_dockerfile, stage_client_binary, stage_system_skills, template_name, verify_published_template); 1 external calls (ArgumentParser).
-
-
-### `sandbox/proxy_gate.py`
-
-`entrypoint` · `deployment validation`
-
-This script acts like a gate at deployment time: it checks that the off-cluster sandbox can use the TLS egress proxy correctly. In plain terms, it spins up a throwaway sandbox, teaches it to trust the proxy’s certificate authority certificate, then tries to reach Anthropic’s API through the proxy using a deliberately invalid run token. The expected answer is HTTP 403, meaning “the proxy received the request and rejected the bad credentials.” That is a success here, because it proves the connection reached the right proxy and TLS certificate trust is working. If the connection is still warming up, the script waits and tries again. If it sees a TLS failure, a strange status, or no good answer before the deadline, it fails the deployment check. The file also makes sure the sandbox is killed afterward, but it treats kill failures as non-fatal because the sandbox was created with an expiry timeout. Without this gate, a broken proxy route or missing certificate setup might only be discovered later when real sandbox work tries to make outbound HTTPS calls.
+Without this file, a fresh database would not know where to store the application’s main records, and later code that expects these tables would fail.
 
 #### Function details
 
-##### `ProxyTlsGate.run`  (lines 72–130)
+##### `upgrade`  (lines 12–114)
 
 ```
-def run(self) -> None
+def upgrade() -> None
 ```
 
-**Purpose**: This method performs the actual proxy check. It creates a temporary sandbox, installs the certificate authority certificate, runs a small HTTPS probe through the proxy, and succeeds only when the proxy returns the expected 403 response.
+**Purpose**: Builds the initial database schema. Someone runs this when setting up a new database or moving an empty database to the first version of the application’s expected structure.
 
-**Data flow**: It starts with three stored values: the public proxy URL, the certificate text, and the sandbox template name. It checks that the proxy URL is HTTPS, builds a proxy address using a deliberately invalid run token and the known proxy password, and turns the probe command into a shell-safe string. It then creates a sandbox, writes the certificate into it, runs the certificate installation command, and repeatedly runs the probe until it sees the expected status, sees a definite failure, or runs out of time. On success it prints a pass message. On failure it raises an error explaining what status it got. In all cases it tries to stop the sandbox afterward, while allowing cleanup network errors because the sandbox will expire on its own.
+**Data flow**: It starts with an empty or older database state. It sends table and index creation instructions to Alembic, using SQLAlchemy objects to describe columns, data types, primary keys, foreign keys, uniqueness rules, and safety checks. After it runs, the database contains the core tables: workspace, agent, member, conversation, surface_identity, turn, and ledger, plus an index that helps look up ledger rows by turn.
 
-**Call relations**: This is the worker step used after the command-line setup has gathered the proxy URL, certificate, and template. Inside the check it relies on URL parsing to understand the proxy address, shell quoting to build a safe command, E2B sandbox creation to get a clean temporary machine, and clock/sleep calls to retry while the proxy is still becoming ready.
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the function hands each table definition to Alembic’s table-creation operation, and finally asks Alembic to create the ledger index. Later application code relies on the structure created here when it stores or reads workspaces, conversations, turns, and usage records.
 
-*Call graph*: 5 external calls (create, join, monotonic, sleep, urlsplit).
+*Call graph*: 13 external calls (create_index, create_table, BigInteger, CheckConstraint, Column, DateTime, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint (+3 more)).
 
 
-##### `main`  (lines 133–144)
+##### `downgrade`  (lines 117–125)
 
 ```
-def main() -> None
+def downgrade() -> None
 ```
 
-**Purpose**: This is the command-line entry point for the proxy gate. It reads the required proxy URL and environment settings, chooses the right sandbox template, and starts the gate check.
+**Purpose**: Reverses this migration by removing the database objects created by `upgrade`. This is used if the database needs to be rolled back before this first schema version.
 
-**Data flow**: It reads `--proxy-url` from the command line, then reads the certificate and E2B template configuration from environment variables. If either required environment value is missing, it stops with a clear error. It converts the template configuration into available sandbox templates, picks the template for the first configured sandbox size, builds a `ProxyTlsGate` with those values, and runs the check.
+**Data flow**: It starts with a database that has the tables and index from this migration. It first removes the ledger index, then drops the tables in an order that respects their links to each other, so dependent tables are removed before the tables they point to. After it runs, the database no longer has this initial application schema.
 
-**Call relations**: This function is the setup step before the real validation work. It uses `argparse.ArgumentParser` to collect the user-provided proxy URL, calls `sandbox_templates` to interpret the E2B template configuration, constructs `ProxyTlsGate`, and hands control to the gate’s run logic.
+**Call relations**: Alembic calls this function when rolling the migration back. It delegates the actual removal work to Alembic’s drop operations. It mirrors `upgrade` in reverse, acting like an undo button for the schema created in this file.
 
-*Call graph*: 3 external calls (__init__, ArgumentParser, sandbox_templates).
+*Call graph*: 2 external calls (drop_index, drop_table).
+
+
+### `core/src/ufo/schema/migrations/versions/0006_ext_store.py`
+
+`data_model` · `database migration during deploy or schema setup`
+
+This migration changes the shape of the database. It creates an `ext_store` table, which is like a labeled storage box for each workspace. An extension can store a value under its own name and a key, and the value is saved as JSON, meaning it can hold structured data such as strings, numbers, lists, or small objects.
+
+The table is tied to the existing `workspace` table through `workspace_id`, so every stored extension value belongs to a real workspace. Its primary key is made from three parts: the workspace, the extension name, and the key. That means the same extension can use the same key in different workspaces, and different extensions can use the same key without colliding. It also means there can only be one value for a given workspace-extension-key combination.
+
+The timestamps `created_at` and `updated_at` record when a value was first made and last changed. Without this migration, any code expecting extensions to persist their own workspace-specific settings or state in `ext_store` would fail because the table would not exist.
+
+#### Function details
+
+##### `upgrade`  (lines 12–23)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Adds the `ext_store` table to the database. This is used when moving the database forward to this version of the application schema.
+
+**Data flow**: The migration runner starts with a database that does not yet have `ext_store`. This function describes the new table: its workspace link, extension name, key, JSON value, timestamps, foreign key, and combined primary key. After it runs, the database has a new table ready for extension-owned workspace data.
+
+**Call relations**: When Alembic, the database migration tool, applies this revision, it calls `upgrade`. Inside, the function hands the table definition to Alembic’s table-creation operation, using SQLAlchemy building blocks to describe each column and rule in a database-neutral way.
+
+*Call graph*: 8 external calls (create_table, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text, Uuid).
+
+
+##### `downgrade`  (lines 26–27)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Removes the `ext_store` table from the database. This is used if the schema needs to be rolled back to the earlier version.
+
+**Data flow**: The migration runner starts with a database that includes `ext_store`. This function tells the database to drop that table. After it runs, all data stored in `ext_store` is gone and the schema no longer includes that extension storage area.
+
+**Call relations**: When Alembic rolls this revision back, it calls `downgrade`. The function delegates the work to Alembic’s table-dropping operation, which reverses the table creation done by `upgrade`.
+
+*Call graph*: 1 external calls (drop_table).

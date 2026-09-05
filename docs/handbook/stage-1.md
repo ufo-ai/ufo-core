@@ -1,18 +1,21 @@
-# Process entry, launch mode selection, and deployment checks  `stage-1`
+# Deployment preparation and database migration  `stage-1`
 
-This stage is the system’s front door and pre-flight checkpoint. It runs at the start of a process, when UFO decides what kind of job it is doing: serving web requests, setting up a workspace, running an administrative command, building a deployment package, or checking sandbox infrastructure before release.
+This stage gets the system ready before normal serving begins. It has two jobs: pack the software so it can run in the right environment, and update the database so stored data matches what the current code expects.
 
-The command entry point, mainly `ufoctl` in `core/src/ufo/cli.py`, acts like a receptionist. It reads the user’s terminal command, loads the needed settings, and sends the request to the right place. A run command moves toward server startup. An init command prepares a workspace. Other commands inspect or maintain the system.
+The runtime bundle part is like packing a travel kit. It gathers the runtime code, fixed settings, allowed extensions, sandbox client program, and Docker instructions into a deployable bundle. It also checks the sandbox setup, which is the protected place where risky or untrusted code can run. One script makes sure hosted and local sandbox images are built from the same recipe. Another performs a safety check by starting a temporary sandbox and testing proxy certificate behavior before deployment.
 
-The deployment pieces act like packers and inspectors. `core/src/ufo/bundle.py` gathers the application, settings, extension versions, runtime package, and sandbox client into a Docker build context, a folder Docker can turn into a runnable image. The sandbox scripts then check the isolated execution environment. They build matching hosted and local sandbox images and test proxy behavior so deployment fails early if the safety setup is wrong.
+The migration part renovates the database. Alembic, a tool that applies database changes step by step, connects to storage and runs upgrades or rollbacks in order. Core migrations create and reshape the main tables. Extension migrations do the same for optional features. Together, they preserve old data while preparing storage for the new code.
 
 ## Sub-stages
 
-- [Server and CLI command entry points](stage-1.1.md) `stage-1.1` — 1 files
-- [Deploy bundle and sandbox image validation](stage-1.2.md) `stage-1.2` — 3 files
+- [Runtime bundle and sandbox image gates](stage-1.1.md) `stage-1.1` — 4 files
+- [Core and extension schema upgrades or rollbacks](stage-1.2.md) `stage-1.2` — 200 files
 
 ## 📊 State Registers Touched
 
-- `reg-config-stack` — The merged settings that tell the whole service how to start, connect, and behave.
-- `reg-database-schema` — The durable database layout and connection layer used to store and retrieve system records safely.
-- `reg-observability-trace` — The tracing, metrics, health, logs, and saved step history used to understand what the system did.
+- `reg-database-schema-version` — The current shape and migration level of the database, so old stored data can be upgraded and all code agrees on table layouts.
+- `reg-effective-config` — The merged deployment settings that tell the service how to start, where storage is, and which runtime options are enabled.
+- `reg-sandbox-handles` — The durable handles and leases that let conversations reconnect to their sandbox, files, ports, hosted previews, and work directories.
+- `reg-egress-proxy-policy` — The network access rules and proxy state that decide which outside hosts can be reached and when secrets may be attached.
+- `reg-deployment-artifact-state` — The built runtime bundle and sandbox image/client artifact state, including image recipe/version alignment and deployment preflight results used by startup and sandbox execution.
+- `reg-update-check-state` — Cached software/version update-check results, last-check timestamps, retry timing, and dismissed or shown update notices for CLI and service maintenance flows.

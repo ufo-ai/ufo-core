@@ -1,1038 +1,411 @@
-# Server and CLI command entry points  `stage-1.1`
+# Runtime bundle and sandbox image gates  `stage-1.1`
 
-This stage is the front door of the system. It covers the commands a person runs in a terminal to start or manage a UFO workspace, such as initializing a project, running the server, checking status, or performing administrative tasks. These commands happen at the beginning of a workflow, before the deeper server machinery takes over, but they can also be used later for inspection and maintenance.
+This stage is part of getting UFO ready to run safely outside a developer’s machine. It prepares the “runtime bundle,” which is like a packed travel kit containing the exact code, settings, allowed extensions, sandbox client program, and Docker instructions needed to reproduce the same runtime elsewhere.
 
-The main piece here is `core/src/ufo/cli.py`. It defines `ufoctl`, the command-line tool. A command-line tool is a text-based control panel: instead of clicking buttons, the user types commands. This file reads what the user asked for, gathers options and configuration, prepares the process state, and then sends the request to the right part of the system. For example, a “run” command hands off to server setup, while an “init” command helps create or prepare a workspace. In this way, `ufoctl` acts like a receptionist, translating human instructions into the internal actions the system needs to perform.
+core/src/ufo/bundle.py is the packer. It creates the folder used by ufoctl bundle, including the runtime wheel, pinned configuration, extension lockfile, sandbox client binary, and Dockerfile. core/src/ufo/harness/sandbox/client_binary.py is the locator for that client binary. It does not build the program; it checks that a suitable one already exists and gives a clear fix if it does not.
+
+The sandbox scripts guard the environment where untrusted code runs. sandbox/build_template.py builds both the hosted E2B sandbox template and the local Docker image from the same recipe, keeping them matched. sandbox/proxy_gate.py is a safety test before deployment: it launches a temporary sandbox, installs the proxy certificate, and confirms HTTPS proxy behavior fails in the expected controlled way.
 
 ## Files in this stage
 
-### Server and CLI command entry points
-### `core/src/ufo/cli.py`
+### Runtime bundle assembly
+Prepares the deployable UFO runtime bundle and locates the prebuilt sandbox client binary that must be included in it.
 
-`entrypoint` · `command invocation, startup, and operator/admin tasks`
+### `core/src/ufo/bundle.py`
 
-`ufoctl` is the project’s toolbox. Without it, a newcomer would have to create config files, generate secrets, prepare the database, start services, install extensions, and inspect billing or turn state by hand. This file gathers those jobs into clear terminal commands.
+`orchestration` · `bundle command execution`
 
-At startup, the command group loads a local `.env` file so development secrets are available. The `init` command then creates a default config if needed, writes safe development secrets, applies database migrations, creates the first workspace and owner, and stores a CLI login token. `serve`, `portal`, and `ingress` start or open the runtime surfaces: the web portal, backend services, and sandbox entry point.
+This file solves the problem of making a UFO deployment repeatable. Instead of relying on whatever extensions or source files happen to be on a developer’s machine, it writes down exactly what should be installed and checks the actual bytes that will go into the image. Think of it like packing a lunchbox with a checklist: the Docker image gets only the listed items, and each item is checked before use.
 
-The rest of the file is an operator console. It can set spending caps, credit prepaid balances, read spend reports, inspect transcript-read disclosures, list OAuth grants, store encrypted “bring your own key” credentials, manage extension pins, build a deployable bundle, cancel stuck turns, print durable turn steps, and seed demo data.
+The main `Bundle` object takes five inputs: the existing config file, an optional extension catalog, an output folder, the built UFO Python wheel, and the sandbox client binary. When `build` runs, it first decides which extensions must be pinned. It starts from the current lockfile if one exists, otherwise from the extensions discovered in the local environment. If a catalog is available, it also adds entries marked as disabled, because those are “bundle-only” extensions that should be installed into the image but not discovered later at runtime.
 
-A recurring pattern is: load config, open the right database scope, do one focused action, print a readable result, and always close database resources. The `BrowserHandoff` helper is a small secure bridge from terminal login to browser login: it serves one temporary local page that posts the CLI token to the portal without putting the token in the URL.
+For each extension, `_pins` opens the built wheel file, finds the extension’s package files inside it, ignores cache files, and computes a digest, meaning a fingerprint of the file contents. The resulting lockfile says both which extension versions are present and what their contents should be. Finally, `build` copies the config and client binary, writes the new lockfile, and writes a Dockerfile that installs the wheel and starts `ufoctl serve`.
 
 #### Function details
 
-##### `_ufoctl_dir`  (lines 127–129)
+##### `wheel_name`  (lines 35–37)
 
 ```
-def _ufoctl_dir() -> Path
+def wheel_name() -> str
 ```
 
-**Purpose**: Finds the private local directory where `ufoctl` stores machine-specific files, such as the CLI token. It lets users override the location with an environment variable.
+**Purpose**: Builds the expected filename for the UFO Python wheel that will be copied into the Docker image. It uses the current UFO version so the Dockerfile refers to the exact wheel produced for this release.
 
-**Data flow**: It reads the `UFOCTL_DIR` environment variable. If it is set, that path is used; otherwise it returns `~/.ufoctl` under the current user’s home directory.
+**Data flow**: It reads the current UFO version from the extension store helper, places that version into the standard Python wheel filename format, and returns the resulting string, such as a `ufo-...-py3-none-any.whl` name.
 
-**Call relations**: `init` calls this when saving the newly minted CLI token. `portal` calls it later to read that token back before opening the browser.
+**Call relations**: When `Bundle._dockerfile` writes the Dockerfile text, it asks this helper for the wheel filename so the `COPY` and `pip install` lines match the artifact the bundle expects.
 
-*Call graph*: called by 2 (init, portal); 2 external calls (Path, home).
-
-
-##### `_dotenv_path`  (lines 132–133)
-
-```
-def _dotenv_path() -> Path
-```
-
-**Purpose**: Locates the `.env` file that sits beside the main UFO config file. This keeps local secrets next to local configuration.
-
-**Data flow**: It asks the config system for the config path, takes that file’s parent folder, and returns the `.env` path inside it.
-
-**Call relations**: The environment-loading and secret-writing helpers use this shared path so they all agree on where local secrets live. `init` also mentions this path in messages to the user.
-
-*Call graph*: called by 4 (_load_dotenv, _missing_deploy_keys, _write_dev_secrets, init); 1 external calls (config_path).
+*Call graph*: called by 1 (_dockerfile); 1 external calls (ufo_version).
 
 
-##### `_dotenv_pairs`  (lines 136–170)
+##### `Bundle.build`  (lines 61–81)
 
 ```
-def _dotenv_pairs(text: str) -> list[tuple[str, str]]
+def build(self) -> BundleResult
 ```
 
-**Purpose**: Parses simple `.env` text into name/value pairs. It exists because the CLI needs to inspect and merge secrets carefully, not just blindly import them.
+**Purpose**: Creates the bundle folder on disk. It gathers extension pins, copies the deploy config and sandbox client, writes a new lockfile, writes the Dockerfile, and returns a summary of what it produced.
 
-**Data flow**: It receives raw text, skips blank lines and comments, accepts `KEY=VALUE` lines, strips an optional `export`, handles quoted values including multi-line secrets, and returns a list of pairs. If a quote is never closed, it raises an error.
+**Data flow**: It starts with the `Bundle` fields: paths to the source config, output folder, wheel, and client binary, plus the optional catalog. It asks `_pins` for the fixed extension list, creates the output folder, writes `ufo.toml`, writes `ufo.lock` with the current UFO version and extension fingerprints, copies the sandbox client binary, writes the Dockerfile text from `_dockerfile`, and returns a `BundleResult` containing the output paths and pins.
 
-**Call relations**: `_load_dotenv` uses it before putting values into the process environment. `_write_dev_secrets` and `_missing_deploy_keys` use it to see what secrets are already present.
+**Call relations**: This is the main action for the file. A higher-level bundle command would call it when the user asks to create a deploy artifact. Inside that flow, it delegates the careful extension fingerprinting to `_pins` and the container recipe text to `_dockerfile`, then packages their results into a `BundleResult` for the caller.
 
-*Call graph*: called by 3 (_load_dotenv, _missing_deploy_keys, _write_dev_secrets).
+*Call graph*: calls 2 internal fn (_dockerfile, _pins); 3 external calls (__init__, __init__, ufo_version).
 
 
-##### `_load_dotenv`  (lines 173–189)
+##### `Bundle._pins`  (lines 83–127)
 
 ```
-def _load_dotenv() -> None
+def _pins(self) -> tuple[ExtensionPin, ...]
 ```
 
-**Purpose**: Loads local `.env` secrets into the running CLI process. It also refuses unsafe bare provider key names that could accidentally be picked up by unrelated tools.
+**Purpose**: Decides exactly which extensions belong in the bundle and records a content fingerprint for each one. This prevents the final image from silently using a different extension than the one that was bundled.
 
-**Data flow**: It finds the `.env` file, parses it, checks for reserved names like `OPENAI_API_KEY`, and then writes accepted values into `os.environ`. If a reserved name appears, it stops with a readable CLI error.
+**Data flow**: It reads the extensions currently discovered in the local environment and looks for an existing lockfile. If a lockfile exists, its extension names are the starting list; otherwise, all discovered extensions are used. It then adds any catalog entries marked disabled, because those are intended to be included only at bundle time. For each extension name, it confirms the extension is installed, opens the built wheel, extracts the matching package files while skipping cache and compiled bytecode files, computes a digest from those files, and returns a tuple of `ExtensionPin` records. If an expected extension or package is missing, it raises an error instead of creating an unsafe bundle.
 
-**Call relations**: `main` calls this before any subcommand runs, so every command sees the same local secret environment.
+**Call relations**: This function is called by `Bundle.build` before any lockfile is written. It is the quality-control step: it consults discovery and lockfile helpers, inspects the wheel through `ZipFile`, and hands back pins that `build` writes into the bundled `ufo.lock`.
 
-*Call graph*: calls 2 internal fn (_dotenv_pairs, _dotenv_path); called by 1 (main); 1 external calls (ClickException).
+*Call graph*: called by 1 (build); 7 external calls (__init__, Path, discovered, extension_content_digest, lockfile_path, read_lockfile, ZipFile).
 
 
-##### `main`  (lines 193–195)
+##### `Bundle._dockerfile`  (lines 129–145)
+
+```
+def _dockerfile(self) -> str
+```
+
+**Purpose**: Writes the text of the Dockerfile used to turn the bundle folder into a runnable container image. The Dockerfile installs UFO, copies the locked config, installs the sandbox client, and starts the server command by default.
+
+**Data flow**: It uses fixed bundle filenames and the wheel filename from `wheel_name`, then assembles Dockerfile lines into one string. The output text says to start from a Python 3.12 slim image, work in `/app`, set environment variables for the config and lockfile, install the wheel with `pip`, copy the config and lockfile, copy the sandbox client to `/usr/local/bin`, point UFO at that client, and run `ufoctl serve` unless another command is supplied.
+
+**Call relations**: This function is called by `Bundle.build` near the end of bundle creation. It does not write files itself; it only produces the recipe text, and `build` saves that text as the bundle’s `Dockerfile`.
+
+*Call graph*: calls 1 internal fn (wheel_name); called by 1 (build).
+
+
+### `core/src/ufo/harness/sandbox/client_binary.py`
+
+`config` · `startup`
+
+A sandbox needs the `ufo` command-line program available inside it, much like a toolbox needs the right wrench before work can begin. This file is the shared place that answers the question: “Where is that `ufo` program?”
+
+It checks a few sensible locations in order. First, it looks for an environment variable called `UFO_CLIENT_BINARY`. An environment variable is a setting passed in from the outside, often used by continuous integration systems to point at a prebuilt artifact. If that setting is present, this file trusts it, but verifies that it names a real file.
+
+If no override is given, it looks in the Rust client project’s build output directory. Rust build outputs are usually placed under `target`, with separate folders for build profiles such as `release` and `debug`. If the caller asks for a specific target platform, it looks under that platform’s target folder. This matters because the machine creating a sandbox image may not be the same kind of machine that will run inside the sandbox.
+
+For host-only use, it also checks whether `ufo` is installed somewhere on the current command path. If none of these options works, it raises an error explaining exactly which `cargo build` command can create the missing binary.
+
+#### Function details
+
+##### `client_binary`  (lines 32–59)
+
+```
+def client_binary(target: str | None=None) -> Path
+```
+
+**Purpose**: Finds the `ufo` executable file that should be used for a sandbox or local subprocess. It supports both the current machine and an optional Rust target platform, and it refuses to silently build anything during a run.
+
+**Data flow**: It receives an optional target platform string. It first reads the `UFO_CLIENT_BINARY` environment setting; if present, it turns that text into a file path and returns it only if the file exists. If there is no override, it searches the client build output folders for `release` and then `debug` binaries, using the target-specific directory when a target was requested. If no target was requested, it also asks the operating system whether `ufo` is available on the command path. If all checks fail, it raises a `RuntimeError` with a build command the user can run.
+
+**Call relations**: This function is the single answer used by sandbox setup code, local carrier code, and tests that need a real `ufo` binary. Inside its search, it uses `pathlib.Path` to build and inspect file paths, and `shutil.which` to ask the operating system whether a host-installed `ufo` command exists.
+
+*Call graph*: 2 external calls (Path, which).
+
+
+### Sandbox image gates
+Builds consistent hosted and local sandbox images, then verifies deploy-time proxy behavior with a safety gate.
+
+### `sandbox/build_template.py`
+
+`entrypoint` · `build and deploy time`
+
+This file is the build recipe and safety gate for UFO's sandbox. A sandbox is the isolated computer where agent-created code and tools run, rather like a disposable workshop stocked with the right tools before each job. Without this file, the hosted E2B sandbox and the Docker version could be built differently, miss required programs, or keep running an old setup without anyone noticing.
+
+The script defines what must be baked into the image: system packages such as Git, Chromium, LibreOffice, PDF tools, and ffmpeg; Python and Node packages used by skills; the compiled `ufo` client command; the system skill bundle; environment variables; permissions; and a small digest file that records exactly what definition produced the image.
+
+It has several modes. With no arguments, it stages the compiled client and skills, builds one E2B template per sandbox size, boots each published template, and runs a readiness check inside it. With `--check`, it boots the live templates and compares their baked digest to the current source recipe, failing if they are stale. With `--dockerfile`, it prints the Dockerfile for the Docker carrier. With `--build-docker`, it renders that Dockerfile and asks the local Docker daemon to build the image. The important design idea is “one recipe, two targets”: E2B and Docker differ only in their base image, while the layers above stay synchronized.
+
+#### Function details
+
+##### `template_name`  (lines 269–270)
+
+```
+def template_name(size: str) -> str
+```
+
+**Purpose**: Builds the official E2B template name for a given sandbox size, such as small, medium, or large. This gives every size tier its own published template.
+
+**Data flow**: It receives a size name as text, adds it to the shared base name `ufo-sbx`, and returns the combined template name. It does not read or change anything else.
+
+**Call relations**: When publishing templates, `_built` uses this name to tell E2B what to build. During `--check`, `main` uses the same naming rule so it checks the live template for each size tier.
+
+*Call graph*: called by 2 (_built, main).
+
+
+##### `client_definition`  (lines 273–299)
+
+```
+def client_definition() -> dict[str, str]
+```
+
+**Purpose**: Describes the baked `ufo` client in a stable way for the build digest. Instead of hashing the compiled binary, which can vary between machines, it hashes the source files that produce that binary.
+
+**Data flow**: It reads selected files from the client crate, feeds their relative paths and bytes into a SHA-256 hash, and returns a small dictionary containing the client command name, target platform, and source hash. Nothing is written to disk.
+
+**Call relations**: The build digest function calls this when deciding whether the sandbox definition has changed. That lets the drift check notice real client source changes without being confused by harmless binary build differences.
+
+*Call graph*: called by 1 (build_definition_digest); 1 external calls (sha256).
+
+
+##### `stage_client_binary`  (lines 302–313)
+
+```
+def stage_client_binary() -> Path
+```
+
+**Purpose**: Copies the compiled `ufo` client into the sandbox build context so Docker or E2B can include it in the image. This avoids compiling Rust inside the sandbox image, which would make builds much slower and larger.
+
+**Data flow**: It asks the client build helper where the compiled binary is, creates the staging directory if needed, copies the binary to a known artifact path, marks it executable, and returns that path.
+
+**Call relations**: The Docker build path and the normal E2B publish path call this before they build. Later, `apply_layers` refers to the staged path when adding the `ufo` command to the image.
+
+*Call graph*: called by 2 (build_docker_image, main); 2 external calls (copyfile, client_binary).
+
+
+##### `system_skill_bundle`  (lines 317–334)
+
+```
+def system_skill_bundle() -> SystemSkillBundle
+```
+
+**Purpose**: Collects all built-in system skills and packages them as one bundle object. These skills are the reusable tool instructions and code that the sandbox needs available at runtime.
+
+**Data flow**: It searches the repository for `SKILL.md` files in the core, extensions, and packs areas, ignores anything under `node_modules`, finds the top-level skill folders, discovers the skills, and returns a `SystemSkillBundle`. The result is cached, so repeated calls reuse the same bundle.
+
+**Call relations**: The digest builder calls this to include the skill bundle's identity in the build definition. The staging function calls it to write the actual bundle archive into the build context.
+
+*Call graph*: calls 1 internal fn (from_skills); called by 2 (build_definition_digest, stage_system_skills); 1 external calls (discover_skills).
+
+
+##### `stage_system_skills`  (lines 337–340)
+
+```
+def stage_system_skills() -> Path
+```
+
+**Purpose**: Writes the system skill bundle archive into the sandbox build artifacts directory. This makes the skills available for the image build to copy and unpack.
+
+**Data flow**: It ensures the artifact directory exists, gets the cached system skill bundle, writes the bundle archive bytes to a fixed zip path, and returns that path.
+
+**Call relations**: Both the Docker image build and the normal E2B publish path call this before building. `apply_layers` later copies this archive into the image and extracts it into the system skills location.
+
+*Call graph*: calls 1 internal fn (system_skill_bundle); called by 2 (build_docker_image, main).
+
+
+##### `build_definition_digest`  (lines 343–385)
+
+```
+def build_definition_digest(sizing: Sizing | None) -> str
+```
+
+**Purpose**: Creates a fingerprint of the sandbox build recipe. This fingerprint is baked into the image so later checks can tell whether the live template matches the current source definition.
+
+**Data flow**: It receives either a sizing choice or `None` for Docker, gathers the base template, users, commands, package lists, environment, runtime paths, client source hash, system skill digest, and baked module hashes, serializes that information in a consistent order, and returns a SHA-256 digest string.
+
+**Call relations**: The E2B and Docker recipe builders call this before applying layers, so the image records the definition it came from. `main` also calls it during `--check` to compare today's expected digest with the digest read from a live template.
+
+*Call graph*: calls 2 internal fn (client_definition, system_skill_bundle); called by 3 (e2b_template, main, pod_dockerfile); 2 external calls (sha256, dumps).
+
+
+##### `apply_layers`  (lines 388–433)
+
+```
+def apply_layers(builder: TemplateBuilder, digest: str) -> TemplateFinal
+```
+
+**Purpose**: Applies the shared sandbox recipe to a template builder. This is the central place where the image is stocked with tools, files, environment variables, permissions, and its readiness command.
+
+**Data flow**: It receives a template builder and a digest string. It adds commands to install system tools, GitHub CLI, Node, Python packages, npm packages, and Playwright's browser; creates required directories; writes the digest file; sets environment variables; copies in the system skills archive, client binary, and helper modules; fixes permissions; switches to the runtime user; and returns the finalized template definition.
+
+**Call relations**: Both `e2b_template` and `pod_dockerfile` pass their builder through this function. That is how the hosted E2B template and Docker image stay aligned even though they start from different base images.
+
+*Call graph*: called by 2 (e2b_template, pod_dockerfile); 5 external calls (copy, run_cmd, set_envs, set_start_cmd, set_user).
+
+
+##### `e2b_template`  (lines 436–438)
+
+```
+def e2b_template(size: str) -> TemplateFinal
+```
+
+**Purpose**: Creates the E2B version of the sandbox template for one size tier. It starts from E2B's code-interpreter template and applies UFO's shared layers on top.
+
+**Data flow**: It receives a size name, creates an E2B template builder rooted at the repository, calculates the digest for that size's CPU and memory allocation, applies the shared layers, and returns the final template definition.
+
+**Call relations**: _built calls this when it is time to publish a specific size tier to E2B. It hands the result to E2B's build API.
+
+*Call graph*: calls 2 internal fn (apply_layers, build_definition_digest); called by 1 (_built); 1 external calls (Template).
+
+
+##### `pod_dockerfile`  (lines 441–443)
+
+```
+def pod_dockerfile() -> str
+```
+
+**Purpose**: Renders the Docker version of the sandbox recipe as a Dockerfile. This lets local Docker builds use the same layers as the hosted E2B build.
+
+**Data flow**: It creates a template builder from the public Docker base image, computes a digest with no E2B sizing attached, applies the shared layers, converts the final template to Dockerfile text, and returns that text.
+
+**Call relations**: `main` calls this directly for `--dockerfile`, and `build_docker_image` calls it before running `docker build`. It shares `apply_layers` with the E2B path to prevent recipe drift.
+
+*Call graph*: calls 2 internal fn (apply_layers, build_definition_digest); called by 2 (build_docker_image, main); 2 external calls (Template, to_dockerfile).
+
+
+##### `build_docker_image`  (lines 446–459)
+
+```
+def build_docker_image() -> None
+```
+
+**Purpose**: Builds the local Docker sandbox image from the shared recipe. This is for deployments that use Docker instead of E2B and does not require an E2B account.
+
+**Data flow**: It stages the compiled client and system skills, renders the Dockerfile text, sends that Dockerfile to `docker build` with the repository root as the build context, and tags the result as `ufo-sandbox:latest`. If Docker reports failure, it exits with an error; otherwise it prints the tag.
+
+**Call relations**: `main` calls this when the user passes `--build-docker`. Internally it depends on the staging helpers and `pod_dockerfile`, then hands the actual image creation to the local Docker command.
+
+*Call graph*: calls 3 internal fn (pod_dockerfile, stage_client_binary, stage_system_skills); called by 1 (main); 1 external calls (run).
+
+
+##### `_booted`  (lines 462–479)
+
+```
+def _booted(name: str) -> Sandbox
+```
+
+**Purpose**: Starts a sandbox from a named E2B template for verification. It retries temporary E2B connection or service problems so the build does not fail just because the remote service had a brief bad moment.
+
+**Data flow**: It receives a template name, tries to create an E2B sandbox with a readiness timeout, and returns the sandbox object if successful. On transport or E2B service errors, it waits longer after each failed attempt and retries, finally raising the error if all attempts fail.
+
+**Call relations**: Both `verify_published_template` and `check_published_template` call this before running commands inside a live sandbox. It isolates the retry behavior so both gates treat temporary boot trouble the same way.
+
+*Call graph*: called by 2 (check_published_template, verify_published_template); 2 external calls (create, sleep).
+
+
+##### `_reap`  (lines 482–492)
+
+```
+def _reap(sandbox: Sandbox, name: str) -> None
+```
+
+**Purpose**: Stops a temporary verification sandbox after a check is done. It treats cleanup failure as a warning, not as the main result of the check.
+
+**Data flow**: It receives a sandbox object and its name, asks E2B to kill the sandbox, and returns nothing. If the kill request cannot reach E2B or E2B reports a service problem, it prints a warning to standard error and lets the sandbox expire naturally.
+
+**Call relations**: The verification and drift-check functions call this in their cleanup path after booting a sandbox. It makes sure a failed cleanup does not hide the more important pass-or-fail result of the check that just ran.
+
+*Call graph*: called by 2 (check_published_template, verify_published_template); 1 external calls (kill).
+
+
+##### `verify_published_template`  (lines 495–510)
+
+```
+def verify_published_template(name: str) -> None
+```
+
+**Purpose**: Checks that a freshly published E2B template actually contains the required runtime tools. This prevents a broken image from being reported as successfully published.
+
+**Data flow**: It receives a template reference, boots a sandbox from it, runs the baked readiness command inside that sandbox, cleans up the sandbox, and raises an error if the command fails or exits with a nonzero code.
+
+**Call relations**: After `_built` publishes each size tier, `main` calls this before printing success. It uses `_booted` to create the sandbox and `_reap` to return it when the probe is finished.
+
+*Call graph*: calls 2 internal fn (_booted, _reap); called by 1 (main).
+
+
+##### `check_published_template`  (lines 513–533)
+
+```
+def check_published_template(name: str, expected: str) -> None
+```
+
+**Purpose**: Checks whether a live E2B template is stale compared with the current source recipe. It never publishes anything; it only reports drift.
+
+**Data flow**: It receives a template name and the expected digest, boots a sandbox from that template, reads the baked digest file inside it, cleans up the sandbox, and compares the live digest with the expected one. If the file is missing or the values differ, it raises an error telling the user to republish.
+
+**Call relations**: `main` calls this for every sandbox size when the user passes `--check`. It relies on `_booted` and `_reap` for the temporary sandbox lifecycle, and on `build_definition_digest` from `main` for the expected value.
+
+*Call graph*: calls 2 internal fn (_booted, _reap); called by 1 (main).
+
+
+##### `_built`  (lines 536–558)
+
+```
+def _built(size: str, sizing: Sizing) -> BuildInfo
+```
+
+**Purpose**: Publishes one E2B template size tier, with retries for temporary E2B build-service problems. It is the step that turns the recipe into a named live template.
+
+**Data flow**: It receives a size name and its CPU and memory settings, builds the final E2B template definition, asks E2B to build it under the tier's template name, and returns E2B's build information. If E2B times out or has a transport failure, it waits and retries before giving up.
+
+**Call relations**: `main` calls this once per sandbox size during a normal publish. `_built` gets the correct template name from `template_name`, gets the recipe from `e2b_template`, and hands it to E2B's build API.
+
+*Call graph*: calls 2 internal fn (e2b_template, template_name); called by 1 (main); 2 external calls (build, sleep).
+
+
+##### `main`  (lines 561–599)
 
 ```
 def main() -> None
 ```
 
-**Purpose**: Defines the top-level `ufoctl` command group. It is the doorway through which all subcommands in this file are reached.
+**Purpose**: Runs the command-line interface for this build script. It chooses between printing a Dockerfile, building a Docker image, checking existing E2B templates, or publishing new E2B templates.
 
-**Data flow**: When Click, the command-line framework, invokes it, it loads `.env` values into the process. It does not return user data; it prepares the environment for the selected command.
+**Data flow**: It reads command-line arguments, chooses exactly one mode, and then coordinates the needed steps. In Dockerfile mode it prints the rendered Dockerfile; in Docker build mode it builds the local image; in check mode it computes expected digests and compares live templates; in publish mode it stages artifacts, builds each E2B size tier, verifies each published template, and prints the resulting template references.
 
-**Call relations**: Click uses this as the parent command. All decorated commands such as `init`, `serve`, `portal`, `balance`, and `turn` hang under it.
+**Call relations**: This is the top-level driver called when the file is run as a script. It ties together all the helper functions: staging, digest creation, E2B building, verification, drift checking, and Docker output.
 
-*Call graph*: calls 1 internal fn (_load_dotenv).
+*Call graph*: calls 9 internal fn (_built, build_definition_digest, build_docker_image, check_published_template, pod_dockerfile, stage_client_binary, stage_system_skills, template_name, verify_published_template); 1 external calls (ArgumentParser).
 
 
-##### `_one_address`  (lines 198–203)
+### `sandbox/proxy_gate.py`
 
-```
-def _one_address(_ctx: click.Context, _param: click.Parameter, value: str) -> str
-```
-
-**Purpose**: Validates that an email option looks like one local address with a domain. It catches a typo early, before database setup tries to store it.
-
-**Data flow**: It receives the command-line value, asks the seat/email helper whether it has a domain, and returns the value if valid. If not, it raises a Click parameter error.
-
-**Call relations**: Click uses this as the validation callback for `init --email`, so bad owner addresses are rejected at the command-line boundary.
-
-*Call graph*: 2 external calls (BadParameter, email_domain).
-
-
-##### `init`  (lines 220–260)
-
-```
-def init(email: str, model: str, reasoning: ReasoningEffort, member_model_provider: str | None) -> None
-```
-
-**Purpose**: Sets up a usable UFO workspace on this machine. It writes default config, prepares secrets and schema, creates the owner/workspace/agent, and stores a CLI token.
-
-**Data flow**: It receives owner email, model choices, reasoning level, and an optional model provider. It creates or reads config, writes missing development secrets, prepares PostgreSQL if needed, applies migrations, runs onboarding, mints a bearer token, saves it under the local `ufoctl` directory, and prints next-step warnings for missing deploy keys.
-
-**Call relations**: This is the first command most users run. It delegates setup details to `_write_dev_secrets`, `_create_postgres_system_database`, `_onboard`, `_missing_deploy_keys`, and `_ufoctl_dir`.
-
-*Call graph*: calls 6 internal fn (_create_postgres_system_database, _dotenv_path, _missing_deploy_keys, _onboard, _ufoctl_dir, _write_dev_secrets); 7 external calls (run, ClickException, echo, config_path, load_config, apply_migrations, mint_token).
-
-
-##### `_missing_deploy_keys`  (lines 263–279)
-
-```
-def _missing_deploy_keys(config: Config) -> tuple[str, ...]
-```
-
-**Purpose**: Reports extension-required provider keys that are not currently available. It warns instead of blocking so a local server can still start without optional features.
-
-**Data flow**: It reads active extension manifests, gathers declared deploy key names, compares them with names found in `.env` and the current environment, and returns missing names in their `UFO_`-prefixed form.
-
-**Call relations**: `init` calls this at the end to tell the developer what to add before using features that need outside API keys.
-
-*Call graph*: calls 2 internal fn (_dotenv_pairs, _dotenv_path); called by 1 (init); 1 external calls (load_manifests).
-
-
-##### `_write_dev_secrets`  (lines 282–304)
-
-```
-def _write_dev_secrets(config: Config) -> tuple[str, ...]
-```
-
-**Purpose**: Creates local development secrets needed for a zero-config `serve`. It avoids overwriting anything the user already supplied.
-
-**Data flow**: It mints an encryption key and token-signing secrets, reads the existing `.env`, skips names already present in `.env` or the environment, appends only missing values, loads those new values into `os.environ`, and returns the names it added.
-
-**Call relations**: `init` calls this before onboarding so token minting and credential encryption have the secrets they need.
-
-*Call graph*: calls 2 internal fn (_dotenv_pairs, _dotenv_path); called by 1 (init); 2 external calls (generate_key, token_urlsafe).
-
-
-##### `_onboard`  (lines 307–361)
-
-```
-async def _onboard(config: Config, email: str, model: str, reasoning: ReasoningEffort, member_model_provider: str | None) -> Onboarded
-```
-
-**Purpose**: Creates the first workspace, owner member, default agent, and extension onboarding state. It is the database-backed heart of `ufoctl init`.
-
-**Data flow**: It opens the application database, optionally builds an encrypted credential store, prepares onboarding with config and extension manifests, optionally reads a member model API key from the environment, creates the core records, stores that key if requested, runs extension onboarding steps, returns the onboarding result, and closes the database.
-
-**Call relations**: `init` calls this after config, secrets, and migrations are ready. It hands most record creation to the `Onboarding` object and uses `CredentialStore` when secrets must be saved.
-
-*Call graph*: called by 1 (init); 9 external calls (__init__, __init__, Fernet, dispose_db, init_db, load_manifests, deploy_env, member_slot, items).
-
-
-##### `_create_postgres_system_database`  (lines 364–375)
-
-```
-async def _create_postgres_system_database(config: Config) -> None
-```
-
-**Purpose**: Creates the separate PostgreSQL system database if it does not already exist. This helps local or hosted PostgreSQL setups bootstrap themselves.
-
-**Data flow**: It derives a normal PostgreSQL connection string from config, connects to the app database, checks whether the named system database exists, creates it if missing, and closes the connection.
-
-**Call relations**: `init` calls this only when the configured app database is PostgreSQL, before migrations and onboarding need that system database.
-
-*Call graph*: called by 1 (init); 1 external calls (connect).
-
-
-##### `migrate`  (lines 379–396)
-
-```
-def migrate() -> None
-```
-
-**Purpose**: Applies database migrations so the schema matches the current code and active extensions. This is needed after installs or upgrades that add or change tables.
-
-**Data flow**: It loads config, optionally uses the owner database connection string from the environment, normalizes that string for async database access, applies migrations, and prints confirmation.
-
-**Call relations**: Operators run this directly, and `init` performs the same migration step during first setup. It delegates actual schema work to `apply_migrations`.
-
-*Call graph*: 3 external calls (echo, load_config, apply_migrations).
-
-
-##### `_one_slug`  (lines 399–402)
-
-```
-def _one_slug(_ctx: click.Context, _param: click.Parameter, value: str) -> str
-```
-
-**Purpose**: Checks that a new migration name is safe snake_case text. This keeps generated migration filenames predictable.
-
-**Data flow**: It receives a slug string, tests it against the migration-name pattern, returns it if valid, or raises a Click parameter error if not.
-
-**Call relations**: Click uses it to validate the `new-migration` argument before `new_migration` writes files.
-
-*Call graph*: 1 external calls (BadParameter).
-
-
-##### `new_migration`  (lines 407–424)
-
-```
-def new_migration(slug: str) -> None
-```
-
-**Purpose**: Creates a new core database migration file. It gives the file a timestamp revision and points it at the current migration head.
-
-**Data flow**: It reads the current core migration head, creates a UTC timestamp, writes a migration template into the versions directory, updates the `HEAD` marker file, and prints what was created.
-
-**Call relations**: Developers run this when changing the core database schema. It relies on containment helpers so generated files stay inside the migration directory.
-
-*Call graph*: 4 external calls (echo, now, core_migration_head, contained_file).
-
-
-##### `serve`  (lines 428–437)
-
-```
-def serve() -> None
-```
-
-**Purpose**: Starts the UFO runtime services for the configured pack. It also tells the user where the browser portal will be if the pack provides one.
-
-**Data flow**: It loads config, loads extension manifests, asks which surface is the home portal, prints the portal URL when available, and then hands control to the server runner.
-
-**Call relations**: This is the main local runtime command. It uses `_serve_base` to print the same base address that `portal` will later open.
-
-*Call graph*: calls 1 internal fn (_serve_base); 5 external calls (echo, load_config, load_manifests, home_surface, run).
-
-
-##### `portal`  (lines 441–459)
-
-```
-def portal() -> None
-```
-
-**Purpose**: Opens the web portal in the user’s browser and signs it in using the saved CLI token. It saves the user from copying tokens by hand.
-
-**Data flow**: It loads config and manifests, finds the home surface, reads the token created by `init`, checks that `serve` is reachable, then starts a `BrowserHandoff` to pass the token to the browser. It prints the opened URL.
-
-**Call relations**: Users run this after `serve`. It depends on `_ufoctl_dir` for the token path, `_serve_base` for the server address, and `BrowserHandoff` for secure browser sign-in.
-
-*Call graph*: calls 2 internal fn (_serve_base, _ufoctl_dir); 7 external calls (__init__, ClickException, echo, get, load_config, load_manifests, home_surface).
-
-
-##### `_serve_base`  (lines 462–469)
-
-```
-def _serve_base(config: Config) -> str
-```
-
-**Purpose**: Chooses the base URL that browser-facing commands should use. It prefers the configured public URL because cookies and absolute links must match the same host.
-
-**Data flow**: It reads the config. If `connect.public_base_url` is set, it returns that; otherwise it builds a local URL from the configured serve host and port.
-
-**Call relations**: `serve` uses it when printing the portal link. `portal` uses it when checking and opening the browser session.
-
-*Call graph*: called by 2 (portal, serve).
-
-
-##### `BrowserHandoff.open`  (lines 484–492)
-
-```
-def open(self) -> None
-```
-
-**Purpose**: Starts a one-use local web page that transfers the CLI token into the browser portal session. It keeps the token out of URLs and closes after delivery.
-
-**Data flow**: It creates a random path, starts a temporary HTTP server bound to loopback only, opens that URL in the default browser, and serves requests until the token page has been delivered.
-
-**Call relations**: `portal` creates a `BrowserHandoff` and calls this. This method builds the request handler with `_responder`, then relies on the browser to load the temporary page.
-
-*Call graph*: calls 1 internal fn (_responder); 5 external calls (echo, HTTPServer, token_urlsafe, Event, open).
-
-
-##### `BrowserHandoff._responder`  (lines 494–511)
-
-```
-def _responder(self, path: str, delivered: threading.Event) -> type[BaseHTTPRequestHandler]
-```
-
-**Purpose**: Builds the temporary HTTP request handler used by the browser handoff. The handler only serves the secret page at one random path.
-
-**Data flow**: It receives the allowed path and a delivery event, renders the HTML page once, and returns a handler class. That class sends the page on the right path, sends 404 for other paths, and marks delivery complete.
-
-**Call relations**: `BrowserHandoff.open` calls this before starting the local HTTP server. The returned handler uses `_page` for the actual form HTML.
-
-*Call graph*: calls 1 internal fn (_page); called by 1 (open).
-
-
-##### `BrowserHandoff._responder.do_GET`  (lines 498–507)
-
-```
-def do_GET(self) -> None
-```
-
-**Purpose**: Responds to the browser’s GET request during token handoff. It is the one place the temporary page is sent.
-
-**Data flow**: It reads the requested path. If it is not the random handoff path, it sends a 404 error; if it matches, it sends the HTML page, writes it to the response, and marks the token as delivered.
-
-**Call relations**: The local HTTP server created by `BrowserHandoff.open` calls this when the browser loads the handoff URL.
-
-
-##### `BrowserHandoff._responder.log_message`  (lines 509–509)
-
-```
-def log_message(self, *args: object) -> None
-```
-
-**Purpose**: Suppresses the default HTTP server request logs. This keeps the terminal output clean during browser handoff.
-
-**Data flow**: It receives log arguments from the HTTP server and intentionally does nothing.
-
-**Call relations**: The temporary handler class uses this whenever the built-in HTTP server would normally print an access log.
-
-
-##### `BrowserHandoff._page`  (lines 513–520)
-
-```
-def _page(self) -> str
-```
-
-**Purpose**: Renders the small HTML page that posts the token to the portal. It is like a self-submitting sign-in form.
-
-**Data flow**: It reads the handoff’s portal URL and token, HTML-escapes both for safety, and returns a page containing a hidden token input and JavaScript that submits the form automatically.
-
-**Call relations**: `BrowserHandoff._responder` calls this while preparing the one-use HTTP handler.
-
-*Call graph*: called by 1 (_responder); 1 external calls (escape).
-
-
-##### `ingress`  (lines 524–526)
-
-```
-def ingress() -> None
-```
-
-**Purpose**: Runs the sandbox ingress service, which is a protected doorway into sandbox ports. This is needed when conversations expose sandbox services through a controlled proxy.
-
-**Data flow**: It takes no command arguments and simply hands control to the sandbox ingress runner.
-
-**Call relations**: Click exposes it as `ufoctl ingress`. The real network proxy behavior lives in `ufo.harness.sandbox.ingress_serve.run`.
-
-*Call graph*: 1 external calls (run).
-
-
-##### `spend_cap`  (lines 530–531)
-
-```
-def spend_cap() -> None
-```
-
-**Purpose**: Defines the command group for viewing and changing spend caps. Spend caps limit how much can be spent over a time window.
-
-**Data flow**: It receives no data itself; it groups subcommands under `ufoctl spend-cap`.
-
-**Call relations**: Click uses it as the parent for `spend_cap_set` and `spend_cap_list`.
-
-
-##### `spend_cap_set`  (lines 542–560)
-
-```
-def spend_cap_set(scope: str, subject_id: str, window_seconds: int, limit_micro_usd: int, on_breach: str) -> None
-```
-
-**Purpose**: Creates or updates a spending cap for a workspace, member, or agent. This gives operators a simple safety limit on model spend.
-
-**Data flow**: It receives scope, optional subject id, time window, limit in micro-dollars, and breach behavior. It validates which scopes need a subject, converts the subject to a UUID when present, writes the cap, and prints the human-readable dollar limit.
-
-**Call relations**: This command delegates database work to `_write_spend_cap` and uses Click errors for invalid command combinations.
-
-*Call graph*: calls 1 internal fn (_write_spend_cap); 5 external calls (run, ClickException, echo, load_config, UUID).
-
-
-##### `spend_cap_list`  (lines 564–574)
-
-```
-def spend_cap_list() -> None
-```
-
-**Purpose**: Prints the spend caps currently set for the workspace. It gives operators a quick view of active limits.
-
-**Data flow**: It loads config, reads caps from the database, prints “no spend caps set” if empty, or formats each cap with scope, subject, dollar limit, window, and breach behavior.
-
-**Call relations**: This command calls `_read_spend_caps`, then turns database rows into terminal output.
-
-*Call graph*: calls 1 internal fn (_read_spend_caps); 3 external calls (run, echo, load_config).
-
-
-##### `_write_spend_cap`  (lines 577–631)
-
-```
-async def _write_spend_cap(config: Config, scope: str, subject: UUID | None, window_seconds: int, limit_micro_usd: int, on_breach: str) -> UUID
-```
-
-**Purpose**: Writes one spend cap record, updating an existing matching cap instead of creating a duplicate. Matching is based on workspace, scope, subject, and window.
-
-**Data flow**: It opens the database, finds the current workspace, searches for an existing cap with the same target and window, updates its limit if found, or inserts a new cap with a fresh UUID if not. It returns the cap id and closes the database.
-
-**Call relations**: `spend_cap_set` calls this after validating command input. It performs the low-level table reads and writes inside a workspace transaction.
-
-*Call graph*: called by 1 (spend_cap_set); 7 external calls (insert, select, update, dispose_db, init_db, workspace_tx, uuid4).
-
-
-##### `_read_spend_caps`  (lines 634–660)
-
-```
-async def _read_spend_caps(config: Config) -> list[tuple[UUID, str, UUID | None, int, int, str]]
-```
-
-**Purpose**: Reads all spend caps for the current workspace. It supplies the data that the list command prints.
-
-**Data flow**: It opens the database, finds the workspace id, selects cap fields ordered by scope, converts rows into plain tuples, returns them, and closes the database.
-
-**Call relations**: `spend_cap_list` calls this and handles user-facing formatting.
-
-*Call graph*: called by 1 (spend_cap_list); 4 external calls (select, dispose_db, init_db, workspace_tx).
-
-
-##### `balance`  (lines 664–665)
-
-```
-def balance() -> None
-```
-
-**Purpose**: Defines the command group for prepaid workspace balance operations. Balance controls how much paid model work can begin.
-
-**Data flow**: It receives no data itself; it groups balance subcommands.
-
-**Call relations**: Click uses it as the parent for `balance_show`, `balance_credit`, and `balance_reserve`.
-
-
-##### `balance_show`  (lines 670–685)
-
-```
-def balance_show(workspace_id: str) -> None
-```
-
-**Purpose**: Shows the current prepaid balance, reserve amount, total credits, total charges, and last purchase time. Operators use it to understand remaining budget.
-
-**Data flow**: It receives an optional workspace id, loads config, reads the balance, prints “no balance” if missing, or prints dollar-formatted totals.
-
-**Call relations**: It calls `_read_balance`, which opens the correct workspace scope and asks the billing layer for the stored balance.
-
-*Call graph*: calls 1 internal fn (_read_balance); 3 external calls (run, echo, load_config).
-
-
-##### `balance_credit`  (lines 693–706)
-
-```
-def balance_credit(granted_micro_usd: int, charged_micro_usd: int, reference: str, workspace_id: str) -> None
-```
-
-**Purpose**: Adds a credit to a workspace balance once per reference key. The reference makes the operation safe to retry without double-crediting.
-
-**Data flow**: It receives granted amount, charged amount, reference, and optional workspace id. It rejects zero granted amount, calls the balance credit helper, then prints whether a new credit was added or the reference had already been used.
-
-**Call relations**: It delegates the database and billing rules to `_credit_balance`.
-
-*Call graph*: calls 1 internal fn (_credit_balance); 4 external calls (run, ClickException, echo, load_config).
-
-
-##### `balance_reserve`  (lines 712–720)
-
-```
-def balance_reserve(micro_usd: int, workspace_id: str) -> None
-```
-
-**Purpose**: Sets the minimum headroom required before a turn may begin. This prevents work from starting when the account is too close to empty.
-
-**Data flow**: It receives a reserve amount and optional workspace id, rejects negative values, writes the reserve, prints success if a balance exists, or raises an error if there is no balance yet.
-
-**Call relations**: It calls `_set_reserve`, which uses the shared balance scope and billing helper.
-
-*Call graph*: calls 1 internal fn (_set_reserve); 4 external calls (run, ClickException, echo, load_config).
-
-
-##### `_target_workspace`  (lines 723–745)
-
-```
-async def _target_workspace(named: str) -> UUID
-```
-
-**Purpose**: Chooses which workspace an admin command should affect. If the user does not name one, it only guesses when there is exactly one workspace.
-
-**Data flow**: It reads through the owner database. If a workspace id was provided, it verifies it exists and returns it. If none was provided, it lists workspaces and either returns the only one or raises a clear error for zero or many.
-
-**Call relations**: `_balance_scope` and `_seed_target` use this to avoid accidentally acting on the wrong workspace in multi-workspace deployments.
-
-*Call graph*: called by 2 (_balance_scope, _seed_target); 4 external calls (ClickException, select, owner_tx, UUID).
-
-
-##### `_balance_scope`  (lines 749–766)
-
-```
-async def _balance_scope(config: Config, named: str) -> AsyncIterator[tuple[AsyncConnection, UUID]]
-```
-
-**Purpose**: Opens a database transaction for the one workspace targeted by a balance command. It makes sure hosted deployments use the correct owner and workspace context.
-
-**Data flow**: It initializes the app database, initializes the owner database when available, resolves the workspace id, pins that workspace in context, yields a workspace database connection and id, then closes database resources afterward.
-
-**Call relations**: `_read_balance`, `_credit_balance`, and `_set_reserve` all use this shared setup so balance operations behave consistently.
-
-*Call graph*: calls 1 internal fn (_target_workspace); called by 3 (_credit_balance, _read_balance, _set_reserve); 5 external calls (dispose_db, init_db, init_owner_db, workspace_tx, ws).
-
-
-##### `_read_balance`  (lines 769–771)
-
-```
-async def _read_balance(config: Config, named: str) -> Balance | None
-```
-
-**Purpose**: Reads the prepaid balance for a selected workspace. It is the small bridge between CLI code and the billing balance module.
-
-**Data flow**: It opens `_balance_scope`, passes the connection and workspace id to `read_balance`, and returns either a `Balance` object or `None`.
-
-**Call relations**: `balance_show` calls this, then formats the result for the terminal.
-
-*Call graph*: calls 1 internal fn (_balance_scope); called by 1 (balance_show); 1 external calls (read_balance).
-
-
-##### `_credit_balance`  (lines 774–780)
-
-```
-async def _credit_balance(config: Config, named: str, granted_micro_usd: int, charged_micro_usd: int, reference: str) -> bool
-```
-
-**Purpose**: Applies a one-time balance credit for a selected workspace. It returns whether the credit was newly applied.
-
-**Data flow**: It opens `_balance_scope`, passes amounts and reference to the billing `credit` function, and returns that boolean result.
-
-**Call relations**: `balance_credit` calls this after validating command input.
-
-*Call graph*: calls 1 internal fn (_balance_scope); called by 1 (balance_credit); 1 external calls (credit).
-
-
-##### `_set_reserve`  (lines 783–785)
-
-```
-async def _set_reserve(config: Config, named: str, reserve_micro_usd: int) -> bool
-```
-
-**Purpose**: Updates the reserve amount for a selected workspace balance. The reserve is the minimum required budget buffer.
-
-**Data flow**: It opens `_balance_scope`, calls the billing `set_reserve` helper with the workspace id and amount, and returns whether the update succeeded.
-
-**Call relations**: `balance_reserve` calls this and turns the boolean result into either success text or a Click error.
-
-*Call graph*: calls 1 internal fn (_balance_scope); called by 1 (balance_reserve); 1 external calls (set_reserve).
-
-
-##### `flags`  (lines 792–797)
-
-```
-def flags() -> None
-```
-
-**Purpose**: Defines the command group for changing feature flag output without redeploying code. A feature flag is a switch that lets code serve different behavior at runtime.
-
-**Data flow**: It receives no data itself; it groups flag commands.
-
-**Call relations**: Click uses it as the parent for `flags_set`.
-
-
-##### `flags_set`  (lines 803–825)
-
-```
-def flags_set(key: str, on: bool) -> None
-```
-
-**Purpose**: Sets a feature flag on or off in the configured flag backend. It refuses unknown flags so dashboards do not show switches that no active code reads.
-
-**Data flow**: It receives a flag key and desired on/off value, loads config, checks that a backend is configured, loads extension manifests, verifies the key is declared, imports the backend admin module, calls its `serve` method, and prints the new state.
-
-**Call relations**: This command connects extension-declared flag definitions to the external flag service selected in config.
-
-*Call graph*: 5 external calls (ClickException, echo, import_module, load_config, load_manifests).
-
-
-##### `spend`  (lines 833–856)
-
-```
-def spend(window_seconds: int) -> None
-```
-
-**Purpose**: Prints a spending report for a recent time window. It helps operators see total cost and where it came from.
-
-**Data flow**: It receives a window length in seconds, reads the spend rollup, converts micro-dollars to dollars, and prints totals by dimension, member, agent, origin, and price digest.
-
-**Call relations**: It calls `_read_spend` for database-backed accounting and then formats the returned `SpendReport`.
-
-*Call graph*: calls 1 internal fn (_read_spend); 3 external calls (run, echo, load_config).
-
-
-##### `_read_spend`  (lines 859–866)
-
-```
-async def _read_spend(config: Config, window_seconds: int) -> SpendReport
-```
-
-**Purpose**: Reads the billing ledger rollup for the current workspace and time window. A rollup is a summarized view of many ledger entries.
-
-**Data flow**: It opens the database, finds the workspace id, asks `SpendRollup` to read the report for the requested window, returns the report, and closes the database.
-
-**Call relations**: `spend` calls this before printing the report.
-
-*Call graph*: called by 1 (spend); 5 external calls (__init__, select, dispose_db, init_db, workspace_tx).
-
-
-##### `transcript_reads`  (lines 874–887)
-
-```
-def transcript_reads(limit: int) -> None
-```
-
-**Purpose**: Lists recorded admin disclosures for reading another member’s private transcript. This supports auditability for sensitive access.
-
-**Data flow**: It receives a limit, rejects values below one, reads recent transcript access records, prints a no-records message if empty, or prints reader, subject, conversation id, and time.
-
-**Call relations**: It calls `_read_transcript_accesses`, then formats the audit records for an operator.
-
-*Call graph*: calls 1 internal fn (_read_transcript_accesses); 4 external calls (run, ClickException, echo, load_config).
-
-
-##### `_read_transcript_accesses`  (lines 890–924)
-
-```
-async def _read_transcript_accesses(config: Config, limit: int) -> list[tuple[str, str, UUID, datetime]]
-```
-
-**Purpose**: Reads recent transcript-access disclosure records from the database. It joins member records so the output can show email addresses instead of only ids.
-
-**Data flow**: It opens the database, aliases the member table for reader and subject, selects recent transcript access rows for the workspace, limits the result, converts rows into tuples, and closes the database.
-
-**Call relations**: `transcript_reads` calls this and prints the returned records.
-
-*Call graph*: called by 1 (transcript_reads); 4 external calls (select, dispose_db, init_db, workspace_tx).
-
-
-##### `grants`  (lines 928–940)
-
-```
-def grants() -> None
-```
-
-**Purpose**: Lists OAuth account grants available to agents. OAuth is the common web authorization flow where a user grants an app access to an external account.
-
-**Data flow**: It loads config, reads grant summaries, prints “no grants” if empty, or prints each agent, provider, account id, sharing scope, and grant date.
-
-**Call relations**: It calls `_read_grants`, which gets summaries from the runtime access layer.
-
-*Call graph*: calls 1 internal fn (_read_grants); 3 external calls (run, echo, load_config).
-
-
-##### `_read_grants`  (lines 943–950)
-
-```
-async def _read_grants(config: Config) -> tuple[GrantSummary, ...]
-```
-
-**Purpose**: Reads summarized OAuth grants for the current workspace. It supplies the data for the `grants` command.
-
-**Data flow**: It opens the database, finds the workspace id, asks `workspace_grant_summaries` for grant summaries, returns them, and closes the database.
-
-**Call relations**: `grants` calls this and turns the summaries into terminal output.
-
-*Call graph*: called by 1 (grants); 5 external calls (select, dispose_db, init_db, workspace_tx, workspace_grant_summaries).
-
-
-##### `credential`  (lines 954–956)
-
-```
-def credential() -> None
-```
-
-**Purpose**: Defines the command group for encrypted extension credentials. These are “bring your own key” secrets supplied by the workspace operator.
-
-**Data flow**: It receives no data itself; it groups credential subcommands.
-
-**Call relations**: Click uses it as the parent for `credential_set` and `credential_list`.
-
-
-##### `credential_set`  (lines 961–979)
-
-```
-def credential_set(slot: str) -> None
-```
-
-**Purpose**: Stores a secret value for one declared credential slot. It avoids command-line arguments for the secret so it is less likely to appear in shell history or process lists.
-
-**Data flow**: It receives the slot name, loads config, checks the slot is declared by an active extension, checks the encryption key is available, reads the value from a hidden prompt or standard input, rejects empty values, writes the encrypted credential, and prints confirmation.
-
-**Call relations**: It uses `_declared_slots` to validate the slot and `_write_credential` to store the value.
-
-*Call graph*: calls 2 internal fn (_declared_slots, _write_credential); 5 external calls (run, ClickException, echo, prompt, load_config).
-
-
-##### `credential_list`  (lines 983–993)
-
-```
-def credential_list() -> None
-```
-
-**Purpose**: Shows declared credential slots and whether each one has a stored value. It never prints secret values.
-
-**Data flow**: It loads config, reads declared slots, prints a no-slots message if none exist, reads stored slot names, and prints each declared slot with its extension and set/unset status.
-
-**Call relations**: It uses `_declared_slots` for the expected slots and `_read_stored_slots` for what is already saved.
-
-*Call graph*: calls 2 internal fn (_declared_slots, _read_stored_slots); 3 external calls (run, echo, load_config).
-
-
-##### `_declared_slots`  (lines 996–1001)
-
-```
-def _declared_slots(config: Config) -> dict[str, str]
-```
-
-**Purpose**: Builds the list of credential slots declared by active extensions. This lets the CLI reject unknown secret names.
-
-**Data flow**: It loads extension manifests for the pack and returns a mapping from slot name to extension name. If manifests cannot be loaded, it turns that into a readable CLI error.
-
-**Call relations**: `credential_set` and `credential_list` call this before writing or displaying credential status.
-
-*Call graph*: called by 2 (credential_list, credential_set); 2 external calls (ClickException, load_manifests).
-
-
-##### `_write_credential`  (lines 1004–1011)
-
-```
-async def _write_credential(config: Config, key: str, slot: str, value: str) -> None
-```
-
-**Purpose**: Encrypts and stores one credential value for the current workspace. Encryption keeps stored provider keys from being plain text in the database.
-
-**Data flow**: It opens the database, finds the workspace id, builds a `CredentialStore` using the provided Fernet encryption key, stores the slot value, and closes the database.
-
-**Call relations**: `credential_set` calls this after reading the secret from the user.
-
-*Call graph*: called by 1 (credential_set); 6 external calls (__init__, Fernet, select, dispose_db, init_db, workspace_tx).
-
-
-##### `_read_stored_slots`  (lines 1014–1028)
-
-```
-async def _read_stored_slots(config: Config) -> frozenset[str]
-```
-
-**Purpose**: Reads which credential slots currently have stored values. It reads only slot names, not the secret contents.
-
-**Data flow**: It opens the database, finds the workspace id, selects credential slot names for that workspace, returns them as a frozen set, and closes the database.
-
-**Call relations**: `credential_list` calls this to mark declared slots as set or unset.
-
-*Call graph*: called by 1 (credential_list); 4 external calls (select, dispose_db, init_db, workspace_tx).
-
-
-##### `ext`  (lines 1032–1033)
-
-```
-def ext() -> None
-```
-
-**Purpose**: Defines the command group for extension store operations. Extensions are add-ons that can be searched, installed, and removed from the deploy lockfile.
-
-**Data flow**: It receives no data itself; it groups extension commands.
-
-**Call relations**: Click uses it as the parent for `ext_search`, `ext_install`, and `ext_remove`.
-
-
-##### `_store`  (lines 1036–1039)
-
-```
-def _store(config: Config) -> ExtensionStore
-```
-
-**Purpose**: Constructs the extension store object for the current config. It refuses extension commands when no store is configured.
-
-**Data flow**: It reads the configured store path or URL, reads the catalog, finds the lockfile path, and returns an `ExtensionStore`. If no store is enabled, it raises a Click error.
-
-**Call relations**: All three extension commands call this before searching, installing, or removing pins.
-
-*Call graph*: called by 3 (ext_install, ext_remove, ext_search); 4 external calls (__init__, ClickException, lockfile_path, read_catalog).
-
-
-##### `ext_search`  (lines 1044–1057)
-
-```
-def ext_search(query: str) -> None
-```
-
-**Purpose**: Searches the configured extension catalog and shows matching extensions. It also tells the user whether each match is installed, available, or bundle-only.
-
-**Data flow**: It receives a query string, loads config, builds the store, searches it, prints a no-match message if empty, or prints each listing with version and state.
-
-**Call relations**: It calls `_store` for access to the extension catalog.
-
-*Call graph*: calls 1 internal fn (_store); 2 external calls (echo, load_config).
-
-
-##### `ext_install`  (lines 1062–1068)
-
-```
-def ext_install(name: str) -> None
-```
-
-**Purpose**: Pins an extension from the store into the deploy lockfile. The next server run can then load that extension.
-
-**Data flow**: It receives an extension name, loads config, builds the store, asks it to install the name, catches store errors as CLI errors, and prints the pinned version and digest.
-
-**Call relations**: It uses `_store` to reach the catalog and lockfile, while the store object performs the actual pinning.
-
-*Call graph*: calls 1 internal fn (_store); 3 external calls (ClickException, echo, load_config).
-
-
-##### `ext_remove`  (lines 1073–1079)
-
-```
-def ext_remove(name: str) -> None
-```
-
-**Purpose**: Removes an extension pin from the deploy lockfile. The next server run will stop loading it.
-
-**Data flow**: It receives an extension name, loads config, builds the store, asks it to remove the name, converts errors into readable CLI errors, and prints confirmation.
-
-**Call relations**: It uses `_store` for lockfile access and delegates the lockfile edit to the extension store.
-
-*Call graph*: calls 1 internal fn (_store); 3 external calls (ClickException, echo, load_config).
-
-
-##### `_ufo_project_dir`  (lines 1085–1096)
-
-```
-def _ufo_project_dir() -> Path
-```
-
-**Purpose**: Finds the source project directory needed to build the UFO Python wheel. A wheel is a packaged Python distribution used in the deploy bundle.
-
-**Data flow**: It walks upward from this file, looks for a `pyproject.toml` whose project name is `ufo`, returns that directory if found, and raises a CLI error if running from an install that lacks source files.
-
-**Call relations**: `bundle` calls this before invoking `uv build`, so the build works no matter what the current terminal directory is.
-
-*Call graph*: called by 1 (bundle); 3 external calls (ClickException, Path, loads).
-
-
-##### `bundle`  (lines 1108–1138)
-
-```
-def bundle(out: Path, client_binary: Path) -> None
-```
-
-**Purpose**: Builds a runnable deployment bundle containing the UFO wheel, client binary, config, and extension pins. This freezes the current deploy setup into an artifact.
-
-**Data flow**: It receives output directory and client binary path, loads config, reads the extension catalog if configured, builds the UFO wheel with `uv`, verifies the wheel exists, asks `Bundle` to assemble the artifact, and prints the result and pinned extensions.
-
-**Call relations**: It uses `_ufo_project_dir` to locate source code, `wheel_name` to verify the build product, and the `Bundle` class for artifact assembly.
-
-*Call graph*: calls 1 internal fn (_ufo_project_dir); 8 external calls (__init__, ClickException, echo, run, wheel_name, config_path, load_config, read_catalog).
-
-
-##### `turn`  (lines 1142–1143)
-
-```
-def turn() -> None
-```
-
-**Purpose**: Defines the command group for acting on one conversation turn. A turn is one unit of agent work in a conversation.
-
-**Data flow**: It receives no data itself; it groups turn subcommands.
-
-**Call relations**: Click uses it as the parent for `turn_cancel` and `turn_steps`.
-
-
-##### `turn_cancel`  (lines 1149–1159)
-
-```
-def turn_cancel(turn_id: str, workspace_id: str) -> None
-```
-
-**Purpose**: Cancels one turn that may be stuck or no longer finishable. It gives operators a safe escape hatch for work that members cannot end themselves.
-
-**Data flow**: It receives a turn id and optional workspace id, loads config, converts the turn id to a UUID, calls the cancel helper, and prints whether cancellation happened or the turn was already terminal.
-
-**Call relations**: It delegates the workflow and database details to `_cancel_turn`.
-
-*Call graph*: calls 1 internal fn (_cancel_turn); 4 external calls (run, echo, load_config, UUID).
-
-
-##### `_cancel_turn`  (lines 1162–1196)
-
-```
-async def _cancel_turn(config: Config, turn_id: UUID, named_workspace: str) -> bool
-```
-
-**Purpose**: Finds the workspace for a turn if needed and asks the durable workflow system to cancel it. Durable means the workflow records enough state to recover after failures.
-
-**Data flow**: It opens the database, resolves the workspace from the owner database unless supplied, creates a replay-safe workflow client, pins the workspace context, optionally verifies the turn exists in that workspace, calls `cancel_one_turn`, returns whether a turn was cancelled, and closes database resources.
-
-**Call relations**: `turn_cancel` calls this. It coordinates the database, workspace context, and durable cancellation helper.
-
-*Call graph*: called by 1 (turn_cancel); 11 external calls (ClickException, select, dispose_db, init_db, init_owner_db, owner_tx, workspace_tx, replay_safe_client, cancel_one_turn, ws (+1 more)).
-
-
-##### `turn_steps`  (lines 1202–1210)
-
-```
-def turn_steps(turn_id: str, workspace_id: str) -> None
-```
-
-**Purpose**: Prints the durable step log for one turn. This lets an operator see what the turn actually did, even if the normal transcript no longer shows every detail.
-
-**Data flow**: It receives a turn id and optional workspace id, loads config, converts the id to a UUID, and calls the print helper.
-
-**Call relations**: It is the CLI wrapper around `_print_turn_steps`.
-
-*Call graph*: calls 1 internal fn (_print_turn_steps); 3 external calls (run, load_config, UUID).
-
-
-##### `_print_turn_steps`  (lines 1213–1245)
-
-```
-async def _print_turn_steps(config: Config, turn_id: UUID, named_workspace: str) -> None
-```
-
-**Purpose**: Reads and prints the recorded execution steps for a turn. It can resolve the workspace automatically when an owner database is available.
-
-**Data flow**: It opens databases, resolves the workspace, creates a replay-safe client, pins the workspace, reads the turn’s running attempt id, asks `DurableTurnSteps` for recorded steps, sends them to `_echo_turn_steps`, and closes resources.
-
-**Call relations**: `turn_steps` calls this. It hands final formatting to `_echo_turn_steps`.
-
-*Call graph*: calls 1 internal fn (_echo_turn_steps); called by 1 (turn_steps); 11 external calls (__init__, ClickException, select, dispose_db, init_db, init_owner_db, owner_tx, workspace_tx, replay_safe_client, ws (+1 more)).
-
-
-##### `_echo_turn_steps`  (lines 1248–1261)
-
-```
-def _echo_turn_steps(steps: tuple[TurnStep, ...]) -> None
-```
-
-**Purpose**: Formats durable turn steps for terminal output. It includes step number, kind, function, duration, and recorded messages.
-
-**Data flow**: It receives a tuple of steps. If empty, it prints a no-records message; otherwise it prints each step and each message, using `_echo_block` for structured message blocks.
-
-**Call relations**: `_print_turn_steps` calls this after reading the durable step log.
-
-*Call graph*: calls 1 internal fn (_echo_block); called by 1 (_print_turn_steps); 1 external calls (echo).
-
-
-##### `_echo_block`  (lines 1264–1274)
-
-```
-def _echo_block(block: object) -> str
-```
-
-**Purpose**: Turns structured message blocks into readable one-line text. It knows how to describe text, tool calls, and tool results.
-
-**Data flow**: It receives an unknown block object, pattern-matches known block types, returns text for text blocks, JSON-formatted arguments for tool calls, result text for tool results, or the type name for unknown blocks.
-
-**Call relations**: `_echo_turn_steps` calls this when a recorded message contains structured content instead of plain text.
-
-*Call graph*: called by 1 (_echo_turn_steps); 1 external calls (dumps).
-
-
-##### `seed`  (lines 1278–1279)
-
-```
-def seed() -> None
-```
-
-**Purpose**: Defines the command group for writing demonstration content. Seed data helps designers and developers test portal behavior with realistic records.
-
-**Data flow**: It receives no data itself; it groups seed subcommands.
-
-**Call relations**: Click uses it as the parent for `seed_kitchen_sink`.
-
-
-##### `seed_kitchen_sink`  (lines 1284–1293)
-
-```
-def seed_kitchen_sink(workspace_id: str) -> None
-```
+`entrypoint` · `deployment gate`
 
-**Purpose**: Writes a demonstration conversation containing many portal display shapes. It is useful for visual review because each run replaces the previous demo with consistent content.
+This script acts like a gate at deployment time: it checks that the off-cluster sandbox can send HTTPS traffic through the project’s proxy route, and that the proxy is actually seeing and judging the connection. Without this check, a broken proxy setup could be deployed silently, leaving sandboxes unable to reach external services or bypassing the expected traffic controls.
 
-**Data flow**: It receives an optional workspace id, loads config, writes the seed conversation, and prints the portal route where it can be viewed.
+The script receives a public HTTPS proxy URL, reads a certificate and sandbox template choice from environment variables, then creates a short-lived E2B sandbox. E2B is a service that provides temporary cloud sandboxes for running code. Inside that sandbox, the script writes and installs the certificate authority certificate, meaning the sandbox is taught to trust the proxy’s TLS certificate.
 
-**Call relations**: It delegates setup and writing to `_seed_kitchen_sink`.
+It then runs a small Python probe inside the sandbox. The probe tries to open an HTTPS connection to Anthropic’s API through the proxy using an intentionally invalid run token. A correct proxy should reject that connection with HTTP 403, meaning “forbidden.” That rejection is the success signal: it proves the sandbox reached the proxy, trusted its TLS setup, and got a policy decision back. If the connection is still unavailable, the script waits and retries for a limited time. If it gets any other result, it fails the deployment gate.
 
-*Call graph*: calls 1 internal fn (_seed_kitchen_sink); 3 external calls (run, echo, load_config).
+At the end, it tries to kill the temporary sandbox. If cleanup fails because the sandbox service is unreachable, the script does not turn a successful gate into a failure; the sandbox was created with an expiry timeout, so it will be removed later.
 
+#### Function details
 
-##### `_seed_kitchen_sink`  (lines 1296–1307)
+##### `ProxyTlsGate.run`  (lines 72–130)
 
 ```
-async def _seed_kitchen_sink(config: Config, named: str) -> UUID
+def run(self) -> None
 ```
 
-**Purpose**: Prepares database and blob storage access for the kitchen-sink seed. Blob storage is where larger attached content can be saved outside normal database rows.
+**Purpose**: This method performs the actual proxy health check. It creates a temporary sandbox, installs the certificate needed to trust the proxy, runs an HTTPS probe through the proxy, and accepts only the expected 403 rejection as proof that the route works correctly.
 
-**Data flow**: It opens the app database, optionally opens the owner database, builds a workspace blob store from config, calls `_seed_target`, returns the conversation id, and closes database resources.
+**Data flow**: It starts with three pieces of stored information: the public proxy URL, the certificate text, and the E2B sandbox template name. It checks that the proxy URL is HTTPS, builds a proxy address with an intentionally invalid token, creates a sandbox, copies the certificate into it, installs that certificate, and repeatedly runs a small Python network probe. If the probe prints 403, the method prints a success message and returns. If the probe reports a still-pending connection, it waits and retries until the deadline. If the final result is missing or unexpected, it raises an error. In all cases, it then tries to shut down the sandbox.
 
-**Call relations**: `seed_kitchen_sink` calls this. It hands workspace-specific work to `_seed_target`.
+**Call relations**: This is called after command-line parsing by main. It relies on the sandbox service to create the temporary machine, uses shell quoting to build a safe command string, uses time checks and short sleeps for retry timing, and uses URL parsing to safely pull apart the proxy address before testing it.
 
-*Call graph*: calls 1 internal fn (_seed_target); called by 1 (seed_kitchen_sink); 5 external calls (__init__, blob_store_for, dispose_db, init_db, init_owner_db).
+*Call graph*: 5 external calls (create, join, monotonic, sleep, urlsplit).
 
 
-##### `_seed_target`  (lines 1310–1341)
+##### `main`  (lines 133–144)
 
 ```
-async def _seed_target(blob: WorkspaceBlobStore, named: str) -> UUID
+def main() -> None
 ```
 
-**Purpose**: Finds the target workspace, main agent, and first member, then writes the kitchen-sink conversation. It ensures the demo content belongs to real workspace records.
+**Purpose**: This is the command-line entry point for the deploy gate. It collects the proxy URL from the command line, reads required environment settings, picks the right sandbox template, and starts the gate check.
 
-**Data flow**: It resolves the workspace, pins workspace context, reads the main agent and earliest member, raises an error if no member exists, creates a `KitchenSink` writer with blob, workspace, agent, member, and email, writes the content, and returns the conversation id.
+**Data flow**: It receives process inputs: the --proxy-url argument and two environment variables, one containing the egress certificate and one describing available E2B templates. If either required environment value is missing, it raises an error. It converts the template configuration into a template map, chooses the first configured sandbox size, builds a ProxyTlsGate object with the proxy URL, certificate, and template, then calls its run method to do the real test.
 
-**Call relations**: `_seed_kitchen_sink` calls this after storage and database setup. It uses `_target_workspace` to choose the workspace safely.
+**Call relations**: This function is invoked when the file is run as a script. It does the setup work and then hands control to ProxyTlsGate.run, which performs the sandbox creation, certificate install, proxy probing, retry loop, and cleanup.
 
-*Call graph*: calls 1 internal fn (_target_workspace); called by 1 (_seed_kitchen_sink); 5 external calls (__init__, ClickException, select, workspace_tx, ws).
+*Call graph*: 3 external calls (__init__, ArgumentParser, sandbox_templates).

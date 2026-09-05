@@ -1,3247 +1,3709 @@
-# Hosted sites and app homepage publishing  `stage-14.2`
+# Index, memory, and profile derivation  `stage-14.2`
 
-This stage is shared support for publishing small websites and app homepages. It turns work made inside a safe sandbox into links that other people can open, while keeping ownership, privacy, and cleanup under control.
+This stage is shared behind-the-scenes support for memory and search. It takes source text, cuts it into smaller chunks, turns those chunks into embeddings, which are number lists that capture meaning, and stores them so agents can find useful information later.
 
-The site registry in store.py is the record book: it remembers who owns each site, what serves it, and who may view or edit it. tools.py gives builder agents controlled actions to preview, deploy, publish, test, and assign sites as homepages. application_builder.py runs the full build workflow, while application_audit.py checks the finished app against design, behavior, and product requirements. source.py moves saved source files into and out of the sandbox and supplies the standard page-building kit.
+The core indexing file defines the common rules for chunking, embedding, storing, and searching text. The default index stores and searches chunks in the local database, while the Turbopuffer file can send the same kind of work to an external search service. The OpenAI embedding file supplies the meaning-vectors, carefully splitting requests so they are not too large.
 
-The ingress files are the public doorway. ingress_host.py and ingress_url.py create signed, temporary addresses; ingress_serve.py serves stored files or forwards traffic to a live sandbox port; site_report.py reports broken live sites without spamming repairs.
+The memory files build on that search base. The manifest connects memory tools, automatic recall, page-change reactions, cleanup, and scheduled writing to the rest of the system. The store records facts and searches pages or remembered items. The condenser turns messy notes and synced pages into clean facts, summaries, profiles, and wiki pages. The events and runtime memory files define the shared event names and result shapes.
 
-surface.py handles permanent share pages and visibility changes. conversation_slot.py shows conversation-owned sites in the chat view. share_card.py and site_previewer.py create preview images. main_homepage.py removes old seeded homepages when the built-in chat homepage should take over.
+The enrichment files add optional, consent-based profile lookup: they track permission, choose live or replayed providers, store results, and surface short summaries later.
 
 ## Files in this stage
 
-### Application builders and QA
-Agent-facing builders and tools create hosted app pages, validate their product and design evidence, and manage editable source bundles.
+### Memory orchestration and condensation
+Connects the memory extension to the runtime, turns raw material into usable knowledge, stores and searches memories, and defines emitted memory-event constants.
 
-### `extensions/sites/ufo_ext_sites/application_builder.py`
+### `extensions/memory/ufo_ext_memory/manifest.py`
 
-`orchestration` · `request handling`
+`orchestration` · `startup registration, prompt handling, page-change handling, scheduled background jobs`
 
-This file is the safety rail and assembly line for generated application pages. A member can ask for an app, but the system does not let an agent freely write and deploy anything it wants. Instead, the agent must first create a visual SVG design, then write one fixed source file, then pass compilation, browser checks, product QA, and deployment ownership checks.
+This file is like the switchboard for the memory system. It does not contain every detail of storage, indexing, or summarizing, but it decides when those parts are used and exposes them to agents and the user interface. Without it, agents could not search or write long-term memory, submitted prompts would not get relevant memories added automatically, synced pages would not be indexed or turned into facts, and nightly memory cleanup or summary jobs would not run.
 
-The file sets up a fixed project scaffold under `/workspace/ufo-app`, with `app.tsx` as the only app source. It validates that the SVG design is really an inert drawing, has the right page size, names visible regions, and identifies the UFO kit components it plans to use. Then it validates the React/TypeScript source: it may import only from `ufo/kit`, must mount into the root element, must directly render designed kit components, and must follow product styling rules.
+The file defines input shapes for memory tools, so callers must provide clear fields such as search queries, memory text, confidence, and optional dates. It provides tool handlers for searching memory, recording new facts, recording corrections, recording first-run setup information, and asking the system to rebuild facts derived from synced pages. It also defines a recall hook that runs just before the model answers: it searches for relevant memories, trims them to safe size limits, and injects them into the model context if possible.
 
-It also defines the public tools the main agent and builder subagent can call: design, accept a wireframe, write source, read source excerpts for repair, edit source, and delegate a full build. Think of it like a workshop with locked stations: the design station must finish before the coding station opens, and the deployment station stays locked until QA leaves a signed receipt.
+For background work, it registers jobs that index memories, consolidate old facts into summaries, remove duplicates, write wiki-like section and overview paragraphs, update member profiles, and curate whole memory pages. Finally, the `manifest` function packages all of these declarations so the core system can discover and run the extension.
 
 #### Function details
 
-##### `_local_source_bindings`  (lines 508–525)
+##### `_date_bound`  (lines 254–265)
 
 ```
-def _local_source_bindings(code: str) -> set[str]
+def _date_bound(value: str | None, *, end: bool) -> datetime | None
 ```
 
-**Purpose**: Finds names that are defined locally inside the app source, such as variables, functions, classes, destructured values, and function parameters. This matters because the validator needs to tell the difference between a real imported UI component and a local component with the same JSX-looking name.
+**Purpose**: This helper turns an optional date string from a search request into a real time boundary. It lets users filter memory search results by when items were created.
 
-**Data flow**: It receives the source code as text. It scans the text with regular expressions and collects locally declared names into a set. It returns that set so later checks can ignore those local names when looking for imported UFO kit components.
+**Data flow**: It receives a string such as `2026-01-31` or a full date-and-time, plus a flag saying whether this is an end boundary. If there is no string, it returns nothing. Otherwise it parses the string, assumes UTC time if no time zone was given, and for a plain end date moves the boundary to the next midnight so the whole day is included.
 
-**Call relations**: It is used by `_rendered_application_components` while checking `app.tsx`. That caller first removes comments and strings, then asks this helper which names are local before deciding which JSX tags really came from `ufo/kit`.
+**Call relations**: The memory search tool handler calls this before running a search. It uses Python's date parser and time-delta helper, then hands the resulting start and end times to the search service.
 
-*Call graph*: called by 1 (_rendered_application_components); 1 external calls (findall).
+*Call graph*: called by 1 (memory_search_handler); 2 external calls (fromisoformat, timedelta).
 
 
-##### `ApplicationBuilderTask.source_is_the_scaffolds_app_tsx`  (lines 684–696)
+##### `MemorySearchService.search`  (lines 274–352)
 
 ```
-def source_is_the_scaffolds_app_tsx(self) -> 'ApplicationBuilderTask'
+async def search(self, queries: tuple[str, ...], reader: SourceReader, start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
 ```
 
-**Purpose**: Checks that a builder task points to exactly the allowed source file: `app.tsx` directly inside the scaffold folder under `/workspace`. This prevents a build task from wandering into another path.
+**Purpose**: This is the shared search workflow for memory. It searches both stored memory items and synced source-page snippets, then combines the results into one list an agent or extension can read.
 
-**Data flow**: It reads `scaffold_path` and `source_path` from the task. It safely normalizes both paths inside `/workspace`, then verifies that the source path equals the scaffold path plus `app.tsx`. It returns the same task if valid, or raises a validation error if not.
+**Data flow**: It receives one to three search queries, a source reader that says what subjects the caller may read, and optional date bounds. It asks the memory store to run recall searches and source-document searches in parallel. It then interleaves results from the different queries, removes duplicates, wraps each result with a reference to the memory item or page it came from, and returns a tuple of `MemoryMatch` objects.
 
-**Call relations**: This validation runs whenever an `ApplicationBuilderTask` is created or loaded from JSON. The tools that spawn the builder rely on it so every later file operation is aimed at the fixed app source location.
+**Call relations**: Tool handlers and dependent extensions use this service when they need memory search. Inside, it calls the memory store through `store_for`, runs parallel work with `asyncio.gather`, uses `zip_longest` to fairly merge per-query result lists, and creates `ObjectRef` and `MemoryMatch` objects for the outside world.
 
-*Call graph*: 2 external calls (PurePosixPath, contained_relative).
+*Call graph*: 5 external calls (__init__, __init__, gather, zip_longest, store_for).
 
 
-##### `ApplicationWireframeResult.result_matches_status`  (lines 730–739)
+##### `MemorySearchService.listable_kinds`  (lines 354–357)
 
 ```
-def result_matches_status(self) -> 'ApplicationWireframeResult'
+def listable_kinds(self) -> tuple[str, ...]
 ```
 
-**Purpose**: Makes sure a wireframe result is internally consistent. A ready wireframe must include the shared filename and design digest, while a blocked wireframe must explain what stopped it.
+**Purpose**: This tells callers which memory item classes can appear in a browsable memory listing. It avoids maintaining a second hand-written list.
 
-**Data flow**: It reads the result status and related fields. It compares the fields against the meaning of the status. It returns the same result if the fields make sense, or raises a validation error if they contradict each other.
+**Data flow**: It reads the allowed item-class type definition and returns its possible string values as a tuple. It does not change any data.
 
-**Call relations**: This is used automatically by the data model when wireframe tool output is created or checked. It keeps callers like `design_ufo_application` from returning half-ready or misleading wireframe results.
+**Call relations**: This belongs to the memory search provider service. It uses `get_args` to extract the allowed values from the type definition so listing filters stay aligned with the store's item classes.
 
+*Call graph*: 1 external calls (get_args).
 
-##### `ApplicationBuilderResult.result_matches_status`  (lines 757–776)
 
-```
-def result_matches_status(self) -> 'ApplicationBuilderResult'
-```
-
-**Purpose**: Makes sure a full builder result says one clear thing: wireframe, deployed, or blocked. Each status has required evidence and forbidden extra fields.
-
-**Data flow**: It reads fields such as source path, design path, site name, site URL, QA counts, and blocker text. It verifies that those fields match the stated status. It returns the validated result, or raises an error if the result is contradictory.
-
-**Call relations**: This validation protects the boundary between the worker subagent and the rest of the product. Callers such as `build_ufo_application`, `design_ufo_application`, and `ApplicationBuildAcceptance.accept` can trust that a parsed result has the expected shape.
-
-
-##### `ApplicationBuildAcceptance.accept`  (lines 786–872)
-
-```
-async def accept(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult
-```
-
-**Purpose**: Performs the final acceptance checks before a worker-built app becomes the bound homepage. It verifies that the deployment, stored source, QA proof, and accepted source hash all match.
-
-**Data flow**: It receives a worker result. It first rejects obvious wrong results, then reads QA proof from extension storage, reads the deployed site record, checks site ownership and freshness, checks the deployed `app.tsx` hash, reads the accepted source hash from the sandbox, and finally binds the site as the homepage. It returns either an updated deployed result or a blocked result explaining what failed.
-
-**Call relations**: This is called by `build_ufo_application` after the builder subagent finishes. It uses `_initial_result`, `_proof`, `_blocked`, `_source_acceptance_path`, and `_runtime_root`, and also reads hosted site records, so it is the bridge between subagent output and product-owned acceptance.
-
-*Call graph*: calls 5 internal fn (_blocked, _initial_result, _proof, _runtime_root, _source_acceptance_path); 6 external calls (__init__, __init__, model_copy, model_validate_json, authority_member_id, site_url).
-
-
-##### `ApplicationBuildAcceptance._initial_result`  (lines 874–881)
-
-```
-def _initial_result(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult | None
-```
-
-**Purpose**: Rejects worker results that are clearly not an acceptable deployed app. For example, it blocks a wireframe returned during a build or a result pointing at the wrong source path.
-
-**Data flow**: It receives the worker result. It checks the status and source path. It returns `None` if the result can continue through deeper acceptance checks, or returns a blocked result if the basic shape is wrong.
-
-**Call relations**: It is the first checkpoint inside `ApplicationBuildAcceptance.accept`. When it finds a problem, it hands off to `_blocked` to make a consistent blocked result.
-
-*Call graph*: calls 1 internal fn (_blocked); called by 1 (accept).
-
-
-##### `ApplicationBuildAcceptance._proof`  (lines 883–905)
-
-```
-async def _proof(self, result: ApplicationBuilderResult, extension: ExtensionContext) -> ApplicationQaProof | ApplicationBuilderResult
-```
-
-**Purpose**: Loads and validates the product QA proof for the builder turn. The deployment cannot be accepted unless this proof exists and the worker did not report browser errors.
-
-**Data flow**: It receives the worker result and extension context. It looks up the QA proof in extension storage using the child turn id, validates it as `ApplicationQaProof`, and checks reported errors. It returns the proof if valid, or a blocked application result if proof is missing or browser errors were reported.
-
-**Call relations**: It is called by `ApplicationBuildAcceptance.accept` after basic result checks. It may call `_blocked` to stop acceptance early, or hand the validated proof back so deployment and source hashes can be compared.
-
-*Call graph*: calls 1 internal fn (_blocked); called by 1 (accept); 1 external calls (model_validate).
-
-
-##### `ApplicationBuildAcceptance._blocked`  (lines 907–920)
-
-```
-def _blocked(self, result: ApplicationBuilderResult, reason: str, browser_batches: int) -> ApplicationBuilderResult
-```
-
-**Purpose**: Creates a standardized blocked build result with the right source path, QA count, controls checked, observed errors, and blocker reason.
-
-**Data flow**: It receives the original result, a human-readable reason, and the number of browser QA batches completed. It copies relevant evidence and returns a new `ApplicationBuilderResult` with status `blocked`.
-
-**Call relations**: It is used throughout `ApplicationBuildAcceptance` whenever acceptance fails. This keeps all failure exits shaped the same way for the caller.
-
-*Call graph*: called by 3 (_initial_result, _proof, accept); 1 external calls (__init__).
-
-
-##### `EditApplicationSourceInput.json_text_edits_are_objects`  (lines 974–996)
-
-```
-def json_text_edits_are_objects(cls, value: object) -> object
-```
-
-**Purpose**: Accepts a few convenient edit formats and converts them into structured edit objects. This lets callers provide edits as JSON strings, search/replace patch text, or pairs of old and new strings.
-
-**Data flow**: It receives the raw `edits` input before normal validation. It walks each item, parses JSON strings when present, recognizes `<<<<<<< SEARCH` style replacement blocks, and converts even-length string lists into old/new pairs. It returns a tuple of normalized edit-like objects.
-
-**Call relations**: This runs automatically when `EditApplicationSourceInput` is validated before `edit_application_source` applies repairs. It makes the edit tool tolerant of common agent output formats while still ending in exact replacements.
-
-*Call graph*: 1 external calls (loads).
-
-
-##### `_validate_application_imports`  (lines 999–1010)
-
-```
-def _validate_application_imports(source: str) -> None
-```
-
-**Purpose**: Enforces the app source import rules. The app must import named items from `ufo/kit` and must not import anything else or export declarations.
-
-**Data flow**: It receives the full `app.tsx` source as text. It scans import and export statements, rejects missing kit imports, side-effect imports, non-kit modules, non-named imports, exports, and old `UfoAppKit` usage. It returns nothing if valid, or raises a clear repair message if invalid.
-
-**Call relations**: It is called by `_validate_application_source` as the first source-code gate. Source-writing and source-editing tools rely on it before compiling or publishing the source.
-
-*Call graph*: called by 1 (_validate_application_source).
-
-
-##### `_rendered_application_components`  (lines 1013–1040)
-
-```
-def _rendered_application_components(source: str) -> set[str]
-```
-
-**Purpose**: Finds which imported UFO kit UI components are actually rendered in JSX. It also proves that the app mounts with `mountApp` into the page root.
-
-**Data flow**: It receives source text. It checks for the required root mount, collects named imports from `ufo/kit`, strips comments and string literals, removes locally declared names, and compares JSX component tags to imported kit components. It returns the set of kit component exports that are actually rendered.
-
-**Call relations**: It is called by `_validate_application_source`. It uses `_local_source_bindings` to avoid mistaking local components for imported kit components, then passes its result into the designed-component check.
-
-*Call graph*: calls 1 internal fn (_local_source_bindings); called by 1 (_validate_application_source).
-
-
-##### `_validate_designed_components`  (lines 1043–1054)
-
-```
-def _validate_designed_components(rendered_kit_components: set[str], designed_kit_components: tuple[str, ...]) -> None
-```
-
-**Purpose**: Checks that the source directly renders the kit components promised by the accepted design. This keeps the final page from ignoring the visual contract.
-
-**Data flow**: It receives the set of rendered kit components from the source and the tuple of kit components named by the design. It finds any designed components missing from the source. It returns nothing if all are present, or raises an error naming what must be rendered.
-
-**Call relations**: It is called by `_validate_application_source` after source components are discovered. The design evidence comes from `_require_application_design`, which is used before writing or editing source.
-
-*Call graph*: called by 1 (_validate_application_source).
-
-
-##### `_validate_application_styling`  (lines 1057–1087)
-
-```
-def _validate_application_styling(source: str) -> None
-```
-
-**Purpose**: Enforces product styling rules for generated app pages. It blocks raw CSS values, reserved attributes, style tags, unsafe class patterns, and spacing or component choices that violate the design system.
-
-**Data flow**: It receives source text. It searches for forbidden patterns such as `<style>`, `data-slot`, raw color or size values in arbitrary Tailwind classes, disallowed gap sizes, and other product-specific mistakes. It returns nothing when styling is acceptable, or raises a repair-oriented error.
-
-**Call relations**: It is the final source-code gate inside `_validate_application_source`. Both full writes and edits must pass it before compilation and build output are accepted.
-
-*Call graph*: called by 1 (_validate_application_source).
-
-
-##### `_validate_application_source`  (lines 1090–1096)
-
-```
-def _validate_application_source(source: str, designed_kit_components: tuple[str, ...]=()) -> None
-```
-
-**Purpose**: Runs all source-code validation checks in the right order. It is the main local rulebook for `app.tsx` before the build system is allowed to compile it.
-
-**Data flow**: It receives the app source and, optionally, kit components required by the design. It validates imports, detects rendered kit components, checks that designed components are present, and enforces styling rules. It returns nothing if the source passes, or raises a specific error if it fails.
-
-**Call relations**: It is called by `write_application_source` and `edit_application_source`. Those tools use it before compiling and copying the candidate source into the real scaffold.
-
-*Call graph*: calls 4 internal fn (_rendered_application_components, _validate_application_imports, _validate_application_styling, _validate_designed_components); called by 2 (edit_application_source, write_application_source).
-
-
-##### `_parse_application_design`  (lines 1099–1127)
-
-```
-def _parse_application_design(source: str) -> tuple[ElementTree.Element, tuple[float, ...]]
-```
-
-**Purpose**: Parses the SVG design and checks the outer page contract. The design must be a safe SVG with the required 305-pixel width and a valid integer height.
-
-**Data flow**: It receives SVG text. It rejects XML entity declarations, parses the XML, checks the root is `svg`, reads the `viewBox`, width, and height, and verifies the exact required dimensions. It returns the SVG root element and parsed viewBox values.
-
-**Call relations**: It is called by `_validate_application_design`, which performs deeper checks on all SVG elements and regions after this basic parsing succeeds.
-
-*Call graph*: called by 1 (_validate_application_design); 3 external calls (isfinite, split, fromstring).
-
-
-##### `_visible_design_element`  (lines 1130–1156)
-
-```
-def _visible_design_element(element: ElementTree.Element, tag: str, attributes: dict[str, str]) -> bool
-```
-
-**Purpose**: Decides whether a specific SVG drawing element would visibly draw something. This helps reject empty designs that technically contain tags but no visible content.
-
-**Data flow**: It receives an SVG element, its simple tag name, and normalized attributes. It checks tag-specific visibility rules, such as nonzero radius for circles, nonempty path data for paths, and nonblank text for text elements. It returns `True` if the element appears visible, otherwise `False`.
-
-**Call relations**: It is called by `_validate_design_element` while walking the SVG tree. Its result contributes to the total visible drawing count used by `_validate_application_design`.
-
-*Call graph*: called by 1 (_validate_design_element); 1 external calls (itertext).
-
-
-##### `_validate_design_attributes`  (lines 1159–1166)
-
-```
-def _validate_design_attributes(element: ElementTree.Element) -> None
-```
-
-**Purpose**: Blocks active or external content inside the SVG design. A design should be a drawing, not a script, link, or remote fetch.
-
-**Data flow**: It receives one SVG element. It checks every attribute name and value for event handlers or URL schemes such as `javascript:`, `data:`, `http:`, or `https:`. It returns nothing if attributes are safe, or raises an error if unsafe content appears.
-
-**Call relations**: It is called by `_validate_design_element` for every element in the SVG. This makes the broader design validator safe before the file is stored or previewed.
-
-*Call graph*: called by 1 (_validate_design_element).
-
-
-##### `_validate_design_element`  (lines 1169–1222)
-
-```
-def _validate_design_element(element: ElementTree.Element, ids: set[str], regions: list[ElementTree.Element], kit_components: list[str]) -> bool
-```
-
-**Purpose**: Checks one SVG element against the design rules and records important markers. It rejects scripts, filters, masks, duplicate ids, bad region markers, and invalid kit component names.
-
-**Data flow**: It receives an SVG element plus shared collections for ids, regions, and kit components. It normalizes tag and attributes, checks forbidden effects and active content, records `data-app-region` groups and `data-kit-component` groups, and asks whether the element is visibly drawable. It returns a boolean saying whether this element counts as a visible drawing element.
-
-**Call relations**: It is called repeatedly by `_validate_application_design` while walking the SVG. It calls `_validate_design_attributes` and `_visible_design_element`, and fills the region and component lists that the final design validator checks.
-
-*Call graph*: calls 2 internal fn (_validate_design_attributes, _visible_design_element); called by 1 (_validate_application_design); 1 external calls (itertext).
-
-
-##### `_validate_application_design`  (lines 1225–1252)
-
-```
-def _validate_application_design(source: str) -> tuple[tuple[str, ...], tuple[str, ...], int]
-```
-
-**Purpose**: Runs the full SVG design validation. It proves that the design is a safe, visible, correctly sized page with unique named regions and at least one visual UFO kit component.
-
-**Data flow**: It receives SVG text. It parses the root and viewBox, walks every element, gathers region names and kit component names, checks drawing content exists, verifies region count and uniqueness, and rejects nested regions. It returns the region names, kit component names, and page height.
-
-**Call relations**: It is used before accepting or reusing any design by `write_application_design`, `accept_application_wireframe`, `design_ufo_application`, `build_ufo_application`, and `_require_application_design`. It is the shared design gate for both wireframes and builds.
-
-*Call graph*: calls 2 internal fn (_parse_application_design, _validate_design_element); called by 4 (_require_application_design, build_ufo_application, design_ufo_application, write_application_design).
-
-
-##### `_build_application_project`  (lines 1255–1269)
-
-```
-async def _build_application_project(ctx: ToolContext, project: str, runtime_root: str | None=None) -> None
-```
-
-**Purpose**: Builds the app project with the required page kit installed. This catches TypeScript and bundling errors before a source file can be accepted.
-
-**Data flow**: It receives a tool context, project path, and optionally a runtime root. It writes the project config, unpacks the page kit, runs `vite build`, and inspects the command result. It returns nothing on success, or raises an error with compiler output if the build fails.
-
-**Call relations**: It is called by `_compile_application_source` for isolated candidate checks, and by `write_application_source` and `edit_application_source` for the real scaffold build after the candidate passes.
-
-*Call graph*: called by 3 (_compile_application_source, edit_application_source, write_application_source); 1 external calls (unpack_page_kit).
-
-
-##### `_compile_application_source`  (lines 1272–1285)
-
-```
-async def _compile_application_source(ctx: ToolContext, task: ApplicationBuilderTask, source: str) -> None
-```
-
-**Purpose**: Compiles a proposed `app.tsx` in a temporary runtime project before touching the real scaffold. This is a dry run that protects the working app from broken candidates.
-
-**Data flow**: It receives the tool context, task, and source text. It creates a temporary project, copies the scaffold `index.html`, writes the candidate `app.tsx`, and calls `_build_application_project` there. It returns nothing if the candidate compiles, or raises an error if it does not.
-
-**Call relations**: It is called by `write_application_source` and `edit_application_source` before those tools write the source to the actual scaffold and run the final build.
-
-*Call graph*: calls 2 internal fn (_build_application_project, _runtime_root); called by 2 (edit_application_source, write_application_source).
-
-
-##### `_source_claim_path`  (lines 1288–1292)
-
-```
-async def _source_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Builds the runtime path for the file that proves this turn has claimed the right to create the initial source candidate. It uses a hash so the path is stable but does not expose raw path text directly.
-
-**Data flow**: It receives the tool context, task, and turn id. It hashes the task source path and combines it with the turn id inside the tool-output area. It returns the sandbox runtime path as a string.
-
-**Call relations**: It is used by `write_application_source` when claiming first-write ownership, and by `_require_application_source` when read or edit tools need to confirm that a candidate already exists.
-
-*Call graph*: called by 2 (_require_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_runtime_root`  (lines 1295–1296)
-
-```
-async def _runtime_root(ctx: ToolContext) -> str
-```
-
-**Purpose**: Finds the filesystem root used for runtime-owned tool output. Helper scripts need this root so their containment checks know what area they are allowed to touch.
-
-**Data flow**: It receives the tool context. It asks the sandbox for the runtime path of `tool-output`, then returns that path's parent directory as a string. It changes nothing.
-
-**Call relations**: Many tools and helpers call this before running small sandbox Python scripts, including source reads, claims, design acceptance, compile checks, and final build acceptance.
-
-*Call graph*: called by 9 (accept, _compile_application_source, _require_application_design, _require_application_source, build_ufo_application, edit_application_source, read_application_source, write_application_design, write_application_source); 1 external calls (PurePosixPath).
-
-
-##### `_design_path`  (lines 1299–1300)
-
-```
-def _design_path(task: ApplicationBuilderTask) -> str
-```
-
-**Purpose**: Returns the fixed design file path for a builder task. The design always lives beside `app.tsx` as `application-design.svg`.
-
-**Data flow**: It receives the task. It combines `task.scaffold_path` with `application-design.svg` and returns that string. It does not read or write files.
-
-**Call relations**: It is used wherever the design path must be consistent: design claiming, design requirement checks, wireframe acceptance, and writing a new design.
-
-*Call graph*: called by 4 (_design_claim_path, _require_application_design, accept_application_wireframe, write_application_design).
-
-
-##### `_design_claim_path`  (lines 1303–1307)
-
-```
-async def _design_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Builds the runtime path for the file that proves this turn has claimed the design. This prevents two different design writes from racing or silently replacing each other.
-
-**Data flow**: It receives the tool context, task, and turn id. It computes the fixed design path, hashes it, and creates a runtime claim path under tool output. It returns that path as a string.
-
-**Call relations**: It is used by `write_application_design` when sealing a design and by `_require_application_design` when source tools need proof that the design stage is complete.
-
-*Call graph*: calls 1 internal fn (_design_path); called by 2 (_require_application_design, write_application_design); 1 external calls (sha256).
-
-
-##### `application_design_acceptance_relative`  (lines 1310–1316)
-
-```
-def application_design_acceptance_relative(design_path: str, turn_id: UUID) -> str
-```
-
-**Purpose**: Returns the relative runtime path where an accepted SVG design is stored for one builder turn. This path is product-owned evidence, separate from the editable workspace file.
-
-**Data flow**: It receives a design path and turn id. It hashes the design path and formats a stable accepted SVG filename under tool output. It returns that relative path.
-
-**Call relations**: It is called by `write_application_design`, which uses the path while sealing the accepted design and later cleaning it up if something fails.
-
-*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
-
-
-##### `application_design_evidence_relative`  (lines 1319–1325)
-
-```
-def application_design_evidence_relative(design_path: str, turn_id: UUID) -> str
-```
-
-**Purpose**: Returns the relative runtime path where accepted design evidence is stored for one builder turn. The evidence records the design hash, kit components, and rendered regions.
-
-**Data flow**: It receives a design path and turn id. It hashes the design path and formats a stable accepted evidence JSON filename under tool output. It returns that relative path.
-
-**Call relations**: It is called by `write_application_design` so the design and its proof are stored side by side in predictable runtime-owned locations.
-
-*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
-
-
-##### `_source_candidate_path`  (lines 1328–1334)
-
-```
-async def _source_candidate_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Builds the runtime path for the current candidate `app.tsx`. The candidate is kept separately from the real scaffold until validation and compilation pass.
-
-**Data flow**: It receives the tool context, task, and turn id. It hashes the source path, combines it with the turn id, and returns a runtime path ending in `candidate.tsx`.
-
-**Call relations**: It is used by `write_application_source` to save the first candidate, by `read_application_source` to show repair excerpts, and by `edit_application_source` to read and update the candidate.
-
-*Call graph*: called by 3 (edit_application_source, read_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_render_application_design`  (lines 1337–1388)
-
-```
-async def _render_application_design(ctx: ToolContext, candidate_path: str, preview_path: str, names: tuple[str, ...], page_height: int) -> tuple[ApplicationAuditRegion, ...]
-```
-
-**Purpose**: Runs a browser-based audit of the SVG design and returns the visible named regions. This catches layout problems that plain XML parsing cannot see, such as content outside the viewBox or overlapping regions.
-
-**Data flow**: It receives the context, candidate SVG path, preview output path, expected region names, and page height. It writes an audit script, runs it with Node, interprets errors, validates the JSON output, checks the rendered region names and overlaps, and returns the rendered region objects.
-
-**Call relations**: It is called by `write_application_design` after static SVG validation. Its returned regions become part of the accepted design evidence and are also checked for size and fold-position rules.
-
-*Call graph*: called by 1 (write_application_design); 2 external calls (search, application_region_relation).
-
-
-##### `_source_acceptance_path`  (lines 1391–1397)
-
-```
-async def _source_acceptance_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: Builds the runtime path where the accepted source hash is written. This file is the receipt proving which exact `app.tsx` passed validation and build checks.
-
-**Data flow**: It receives the tool context, task, and turn id. It hashes the source path and returns a runtime path ending in `accepted`. It does not inspect the source itself.
-
-**Call relations**: It is written by `write_application_source` and `edit_application_source` after successful validation and build. Later, `ApplicationBuildAcceptance.accept` reads it to verify that the deployed site used that same source.
-
-*Call graph*: called by 3 (accept, edit_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_require_application_source`  (lines 1400–1409)
-
-```
-async def _require_application_source(ctx: ToolContext, task: ApplicationBuilderTask) -> None
-```
-
-**Purpose**: Ensures that an initial source candidate has already been claimed before repair tools run. This stops read and edit tools from operating before there is a source to repair.
-
-**Data flow**: It receives the context and task. It locates the source claim path, runs a contained script to confirm the claim file exists and is a regular file, and returns nothing if present. It raises a user-facing error if source writing has not happened yet.
-
-**Call relations**: It is called by `read_application_source` and `edit_application_source`. Those tools only proceed after this guard confirms that `write_application_source` has already created a candidate.
-
-*Call graph*: calls 2 internal fn (_runtime_root, _source_claim_path); called by 2 (edit_application_source, read_application_source).
-
-
-##### `_require_application_design`  (lines 1412–1433)
+##### `MemorySearchService.list_recent`  (lines 359–409)
 
 ```
-async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> tuple[str, ...]
+async def list_recent(self, subjects: frozenset[str], limit: int, kinds: frozenset[str] | None=None, cursor: ListingCursor | None=None) -> ListingPage[MemoryMatch]
 ```
 
-**Purpose**: Ensures that the design stage is complete before source code can be written or repaired. It also returns the kit components the source must directly render.
+**Purpose**: This returns a page of recent live memory items for given subjects, newest first. It is for browsing memory directly, not searching by meaning.
 
-**Data flow**: It receives the context and task. It checks for the design claim, reads the design SVG from the workspace, compares its hash to an accepted wireframe digest when one exists, validates the design, and returns the kit component names from the design evidence.
+**Data flow**: It receives readable subjects, a limit, optional item kinds, and an optional paging cursor. It builds a database query for non-retired, non-superseded memory items in the current workspace, applies the kind filter if present, fetches one page, and converts rows into `MemoryMatch` objects with stable references.
 
-**Call relations**: It is called by `write_application_source` and `edit_application_source` before source validation. The returned component list flows into `_validate_application_source` so the implementation matches the visual contract.
+**Call relations**: This is the browse side of `MemorySearchService`. It uses SQLAlchemy to build the database query, then uses the shared listing helpers `page_query` and `page_of` so memory browsing pages behave like other paged listings in the system.
 
-*Call graph*: calls 4 internal fn (_design_claim_path, _design_path, _runtime_root, _validate_application_design); called by 2 (edit_application_source, write_application_source); 1 external calls (sha256).
+*Call graph*: 3 external calls (select, page_of, page_query).
 
 
-##### `write_application_design`  (lines 1436–1590)
+##### `match_line`  (lines 412–419)
 
 ```
-async def write_application_design(ctx: ToolContext, args: WriteApplicationDesignInput) -> ToolResult
+def match_line(match: MemoryMatch) -> str
 ```
 
-**Purpose**: Writes and seals the SVG visual contract for the application before any source work begins. It validates the drawing, runs the browser audit, stores immutable accepted evidence, then copies the design into the scaffold.
+**Purpose**: This formats one memory search hit into a readable line for a tool result. It makes the result easy for an agent to inspect and, when available, gives a reference the agent can open later.
 
-**Data flow**: It receives the tool context and SVG content. It loads the task, checks any accepted digest, validates the SVG, writes a candidate file, renders and audits it, builds evidence JSON, claims the design, stores accepted design and evidence files, writes the workspace design, and returns JSON with the path, digest, size, height, and rendered regions. If a late failure happens, it runs cleanup so partial claims do not remain.
+**Data flow**: It receives a `MemoryMatch`. It builds a line with the match kind and text, and if there is an object reference, it appends that reference and the creation date if known. It returns the finished string.
 
-**Call relations**: It is a profile-only builder tool and is also called by `accept_application_wireframe`. It uses the design path helpers, `_validate_application_design`, `_render_application_design`, `_complete_application_design_cleanup`, and the acceptance/evidence path helpers.
+**Call relations**: The memory search tool handler calls this for every match before returning text to the agent. It does not call other project helpers; it is the final presentation step for search results.
 
-*Call graph*: calls 8 internal fn (_complete_application_design_cleanup, _design_claim_path, _design_path, _render_application_design, _runtime_root, _validate_application_design, application_design_acceptance_relative, application_design_evidence_relative); called by 1 (accept_application_wireframe); 7 external calls (__init__, __init__, __init__, sha256, dumps, application_design_region_fold_failure, application_design_region_size_failure).
+*Call graph*: called by 1 (memory_search_handler).
 
 
-##### `accept_application_wireframe`  (lines 1593–1604)
+##### `memory_search_handler`  (lines 422–442)
 
 ```
-async def accept_application_wireframe(ctx: ToolContext, _args: AcceptApplicationWireframeInput) -> ToolResult
+async def memory_search_handler(ctx: ToolContext, args: MemorySearchInput) -> ToolResult
 ```
 
-**Purpose**: Accepts a previously staged member-approved wireframe as the design for this build. It does not generate or change the SVG; it reuses the stored file and sends it through the normal design sealing path.
+**Purpose**: This is the actual handler behind the `memory_search` tool. It lets an agent ask for relevant memories and source snippets using focused search queries.
 
-**Data flow**: It receives the tool context and empty input. It loads the builder task, checks that the task has an accepted wireframe digest, reads `application-design.svg`, and calls `write_application_design` with that exact content. It returns whatever the design-writing tool returns.
+**Data flow**: It receives the tool context and validated search arguments. It checks that extension context is available, converts optional date strings to time bounds, builds a source reader for the caller, runs `MemorySearchService.search`, and returns either a no-results message or formatted result lines.
 
-**Call relations**: It is available only to the builder profile. It delegates the real validation and sealing to `write_application_design`, so accepted wireframes follow the same evidence rules as newly written designs.
+**Call relations**: The `manifest` function registers this as the handler for the `memory_search` tool. During a tool call, it uses `_date_bound`, asks the tool context for a source reader, creates a `MemorySearchService`, and formats each match with `match_line` before returning a `ToolResult`.
 
-*Call graph*: calls 2 internal fn (_design_path, write_application_design); 1 external calls (__init__).
+*Call graph*: calls 3 internal fn (source_reader, _date_bound, match_line); 3 external calls (__init__, __init__, __init__).
 
 
-##### `_complete_application_design_cleanup`  (lines 1607–1623)
+##### `memory_update_handler`  (lines 445–459)
 
 ```
-async def _complete_application_design_cleanup(ctx: ToolContext, program: str, *args: str) -> tuple[ExecResult | None, tuple[str, ...]]
+async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> ToolResult
 ```
 
-**Purpose**: Runs design cleanup even if the surrounding task is cancelled. This prevents stale claim or accepted-design files from being left behind after a failed design write.
+**Purpose**: This is the handler behind the `memory_update` tool. It records a new durable memory item so future turns can recall it.
 
-**Data flow**: It receives the context, a cleanup script, and script arguments. It starts the sandbox Python cleanup as an asyncio task, shields it from cancellation, records interruption messages, then returns the execution result and any cleanup failure notes.
+**Data flow**: It receives the tool context and a memory write request. It checks for extension context, chooses the current effective audience as the memory subject, builds a `MemoryWrite` containing the text, class, kind, confidence, and source reference, commits it to the memory store, and returns a short confirmation.
 
-**Call relations**: It is called by `write_application_design` inside the exception path. If design acceptance partly succeeded and then failed, this helper gives the file a chance to release its claim or accepted evidence.
+**Call relations**: The `manifest` function registers this as a side-effecting tool because it changes stored memory. It uses `store_for` to reach the memory store and `MemoryWrite` to describe the item being saved.
 
-*Call graph*: called by 1 (write_application_design); 2 external calls (create_task, shield).
+*Call graph*: 4 external calls (__init__, __init__, __init__, store_for).
 
 
-##### `read_application_source`  (lines 1626–1680)
+##### `record_correction_handler`  (lines 462–480)
 
 ```
-async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceInput) -> ToolResult
+async def record_correction_handler(ctx: ToolContext, args: RecordCorrectionInput) -> ToolResult
 ```
 
-**Purpose**: Shows small, useful excerpts from the current candidate `app.tsx` during repair. It avoids dumping the whole file and instead gives line windows around requested search terms plus the beginning and end.
+**Purpose**: This records a corrected version of an existing memory item. It does not edit the old item directly; it writes a new fact that names what it corrects.
 
-**Data flow**: It receives search terms. It verifies a source candidate exists, reads the candidate file, checks its size, counts matching lines for each term, builds compact line-numbered excerpts within a character budget, and returns the excerpts as tool text.
+**Data flow**: It receives the current speaker context and correction input: the old memory item's ID and the replacement statement. It writes a new fact under the speaker's effective audience, uses standard confidence and kind values, stores a source reference pointing to the corrected memory, and returns a confirmation.
 
-**Call relations**: It is a builder repair tool used after an edit mismatch or QA repair instruction. It calls `_require_application_source`, `_source_candidate_path`, and `_runtime_root` before formatting the source snippets for the agent.
+**Call relations**: The `manifest` function registers this as the portal-facing correction action. Later deduplication work can notice that the new item supersedes the old near-duplicate, but this handler's job is only to add the corrected row through `store_for` and `MemoryWrite`.
 
-*Call graph*: calls 3 internal fn (_require_application_source, _runtime_root, _source_candidate_path); 2 external calls (__init__, __init__).
+*Call graph*: 4 external calls (__init__, __init__, __init__, store_for).
 
 
-##### `edit_application_source`  (lines 1683–1732)
+##### `record_first_run_handler`  (lines 483–499)
 
 ```
-async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceInput) -> ToolResult
+async def record_first_run_handler(ctx: ToolContext, args: RecordFirstRunInput) -> ToolResult
 ```
 
-**Purpose**: Applies exact text replacements to the current candidate `app.tsx`, then revalidates and rebuilds the app. It is the controlled repair path after the initial full source write.
+**Purpose**: This records the setup fact created during a workspace's first-run flow, such as what tools the team uses. It makes that onboarding information available to later memory recall.
 
-**Data flow**: It receives one or more edits with exact `old_text` and `new_text`. It confirms source and design claims, reads the candidate, verifies each old text appears exactly once and edits do not overlap, applies replacements, checks size, writes the updated candidate, validates source rules, compiles in a temporary project, writes the real scaffold source, builds the real project, records the accepted source hash, and returns a JSON summary.
+**Data flow**: It receives the tool context and one body string. It writes that text as a standard fact under the current effective audience, tags it with the fixed first-run source reference, commits it to the memory store, and returns a confirmation.
 
-**Call relations**: It is called as a builder profile tool during repair. It uses `_require_application_source`, `_require_application_design`, `_source_candidate_path`, `_validate_application_source`, `_compile_application_source`, `_build_application_project`, and `_source_acceptance_path`.
+**Call relations**: The `manifest` function registers this as a special side-effecting action for first-run setup. Like other write handlers, it reaches storage through `store_for` and describes the row with `MemoryWrite`.
 
-*Call graph*: calls 8 internal fn (_build_application_project, _compile_application_source, _require_application_design, _require_application_source, _runtime_root, _source_acceptance_path, _source_candidate_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+*Call graph*: 4 external calls (__init__, __init__, __init__, store_for).
 
 
-##### `write_application_source`  (lines 1735–1779)
+##### `recall_hook`  (lines 502–584)
 
 ```
-async def write_application_source(ctx: ToolContext, args: WriteApplicationSourceInput) -> ToolResult
+async def recall_hook(ctx: HookContext) -> HookOutcome
 ```
 
-**Purpose**: Writes the first complete `app.tsx` candidate for the build. After this, further changes must go through exact edits rather than another full overwrite.
+**Purpose**: This hook automatically adds relevant memory to the model's context just before the model responds to a submitted prompt. It is best-effort: if recall is slow or fails, the user turn continues without memory instead of failing.
 
-**Data flow**: It receives complete source text. It confirms the design is accepted, claims first-write ownership, stores the candidate, validates imports/components/styling, compiles it in a temporary project, writes it to the real scaffold, builds the real project, records the accepted source hash, and returns a JSON summary with path and size. If validation fails, it keeps the candidate for repair and tells the agent to use read/edit tools.
+**Data flow**: It receives a hook context. If the event is not a user prompt, or if it is a speakerless internal root turn, it returns nothing. Otherwise it works out readable subjects, searches memory for the prompt text within a soft timeout, drops topic-only results from the injected text, trims long items and the total injected block to size limits, logs what happened, and returns an `InjectContext` containing the memory lines if any survived.
 
-**Call relations**: It is a builder profile tool. It calls `_require_application_design`, `_source_claim_path`, `_source_candidate_path`, `_validate_application_source`, `_compile_application_source`, `_build_application_project`, and `_source_acceptance_path`.
+**Call relations**: The `manifest` function registers this for `user_prompt_submit`. It calls `recall_subjects` to decide the memory scope, creates a `SourceReader`, uses `store_for(...).recall` to fetch matches, uses `asyncio.timeout` to keep recall from delaying the turn too much, and logs recall outcomes through the observability logger.
 
-*Call graph*: calls 8 internal fn (_build_application_project, _compile_application_source, _require_application_design, _runtime_root, _source_acceptance_path, _source_candidate_path, _source_claim_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+*Call graph*: 6 external calls (__init__, __init__, timeout, log, recall_subjects, store_for).
 
 
-##### `design_ufo_application`  (lines 1782–1840)
+##### `index_memory`  (lines 587–596)
 
 ```
-async def design_ufo_application(ctx: ToolContext, args: DesignUfoApplicationInput) -> ToolResult
+async def index_memory(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Runs the builder in wireframe-only mode and shares the resulting SVG with the member. It stores the exact accepted wireframe so a later build can be forced to match it.
+**Purpose**: This scheduled job indexes committed memory items so they can be searched by meaning. Indexing turns text into searchable chunks and embeddings, which are numeric representations used for similarity search.
 
-**Data flow**: It receives an application name, prompt, and optional revision. It ensures the scaffold exists, spawns the application builder subagent in `wireframe` phase, validates the worker output and SVG file, checks the digest, stores a preview and shared artifact, saves the wireframe content and digest in extension storage, and returns a ready or blocked wireframe result.
+**Data flow**: It receives an extension context. It verifies that both an index backend and an embedding backend are wired, builds a `MemoryIndexer` with those services, a transaction function, page state access, and a text chunker, then runs the indexer.
 
-**Call relations**: This is the main-facing wireframe delegation tool. It calls `_ensure_application_scaffold` and `_validate_application_design`, then relies on the builder profile to produce `application-design.svg` through `write_application_design`.
+**Call relations**: The `manifest` function registers this as the `memory_index` job. The job candidate query `_items_awaiting_index` decides which workspaces need it, and this function hands the actual work to `MemoryIndexer`.
 
-*Call graph*: calls 4 internal fn (share_artifact, store_preview, _ensure_application_scaffold, _validate_application_design); 8 external calls (__init__, __init__, __init__, __init__, __init__, spawn, sha256, PurePosixPath).
+*Call graph*: 2 external calls (__init__, __init__).
 
 
-##### `_ensure_application_scaffold`  (lines 1843–1851)
+##### `index_pages`  (lines 599–615)
 
 ```
-async def _ensure_application_scaffold(ctx: ToolContext) -> None
+async def index_pages(ctx: HookContext) -> HookOutcome
 ```
 
-**Purpose**: Creates the fixed app scaffold files if they are missing. This gives the builder a predictable `index.html`, placeholder `app.tsx`, and preview wrapper.
+**Purpose**: This page-change hook indexes synced source pages and mirrors their state for memory search. It lets memory search find useful snippets from documents, not just hand-written memory rows.
 
-**Data flow**: It receives the tool context. For each required scaffold file, it tries a tiny contained read; if the read fails, it writes the default content. It returns nothing after the scaffold is present.
+**Data flow**: It receives a hook context. If the payload is not a page-change batch, it ignores it. Otherwise it checks that index and embedding services exist, builds a `PageIndexer`, applies the delivered page changes, and returns no injected hook outcome.
 
-**Call relations**: It is called by `design_ufo_application` and `build_ufo_application` before spawning the builder. Those flows need the same project structure whether they are designing or building.
+**Call relations**: The `manifest` function registers this for `page_change` events. The core runner supplies batches and owns the cursor; this function uses `PageIndexer` and `TextChunker` to process each delivered batch.
 
-*Call graph*: called by 2 (build_ufo_application, design_ufo_application).
+*Call graph*: 2 external calls (__init__, __init__).
 
 
-##### `build_ufo_application`  (lines 1854–1941)
+##### `derive_facts`  (lines 618–629)
 
 ```
-async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInput) -> ToolResult
+async def derive_facts(ctx: HookContext) -> HookOutcome
 ```
 
-**Purpose**: Delegates one full application build to the controlled builder subagent and returns the accepted structured result. It also wires in any stored member-approved wireframe and runs final product acceptance.
+**Purpose**: This page-change hook turns changed source pages into durable fact memory items. It is the bridge from synced documents into the user's memory wiki.
 
-**Data flow**: It receives the tool context and empty input. It claims that this parent turn has delegated only once, records redeploy and audit-contract information, ensures the scaffold exists, loads any stored wireframe, writes it into the design path, spawns the builder subagent with the build task, converts missing or failed worker output into blocked results, and otherwise passes the worker result through `ApplicationBuildAcceptance.accept`. If a stored wireframe was successfully deployed, it deletes that stored wireframe.
+**Data flow**: It receives a hook context. If the payload is not a page-change batch, it does nothing. If no model is available, it raises an error so the cursor does not move past unprocessed pages. Otherwise it builds a `FactDeriver` from the memory store and model, applies the page changes, writes derived facts, and retires facts that were replaced.
 
-**Call relations**: This is the main build delegation tool. It calls `_ensure_application_scaffold`, `_runtime_root`, `_validate_application_design`, creates an `ApplicationBuilderTask`, spawns the `APPLICATION_BUILDER_PROFILE`, and then relies on `ApplicationBuildAcceptance` for the final gate.
+**Call relations**: The `manifest` function registers this as a second `page_change` consumer, separate from page indexing. It uses `store_for` to access memory storage and hands model-based extraction to `FactDeriver`.
 
-*Call graph*: calls 3 internal fn (_ensure_application_scaffold, _runtime_root, _validate_application_design); 9 external calls (__init__, __init__, __init__, __init__, __init__, spawn, sha256, format, format).
+*Call graph*: 2 external calls (__init__, store_for).
 
 
-##### `limit_application_builder_repair_reads`  (lines 1944–1979)
+##### `rebuild_page_facts_handler`  (lines 641–657)
 
 ```
-async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | None
+async def rebuild_page_facts_handler(ctx: ToolContext, args: RebuildPageFactsInput) -> ToolResult
 ```
 
-**Purpose**: Limits how many source-read calls the builder can make after product QA has asked for repairs. This nudges the agent to stop rereading and actually edit, test, and deploy.
+**Purpose**: This tool handler lets a workspace admin ask the system to derive facts from all synced pages again. It is for broad repair when page-derived memory reads badly.
 
-**Data flow**: It receives a hook context before tool use. It ignores unrelated turns and tools, checks whether a QA repair attempt exists, resets the read counter when an edit tool is used, increments the counter for read calls, and returns a denial once the limit is reached.
+**Data flow**: It receives the tool context and empty validated input. It checks extension context, verifies the speaker is an admin, deletes the stored cursor for fact derivation, and returns a message saying the rebuild has been queued. It does not immediately rewrite facts itself.
 
-**Call relations**: It is a pre-tool-use guard for the application builder profile. It watches `read_application_source` and `edit_application_source` calls and can deny reads with a repair instruction.
+**Call relations**: The `manifest` function registers this as the `rebuild_page_facts` tool. By deleting the derivation cursor, it causes the `derive_facts` page-change consumer to replay pages on later runner ticks.
 
-*Call graph*: 2 external calls (__init__, format).
+*Call graph*: calls 1 internal fn (speaker_is_admin); 2 external calls (__init__, __init__).
 
 
-##### `enforce_application_builder_phase`  (lines 1982–1997)
+##### `consolidate_memory`  (lines 660–668)
 
 ```
-async def enforce_application_builder_phase(ctx: HookContext) -> Deny | None
+async def consolidate_memory(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Keeps the builder in the right phase. In wireframe mode it may only write the SVG design, and when a member-approved design already exists it may not redesign.
+**Purpose**: This scheduled job condenses older related facts into higher-level semantic summaries. It keeps memory useful as facts pile up over time.
 
-**Data flow**: It receives a hook context before tool use. It ignores unrelated turns, loads the builder task, checks the phase and accepted design digest, and returns a denial when the requested tool is not allowed for that phase. Otherwise it returns nothing.
+**Data flow**: It receives an extension context, checks that the embedding backend exists, builds a `MemoryConsolidator` with embeddings, database access, workspace ID, and model, then runs it.
 
-**Call relations**: It protects the builder profile before tools run. It prevents wireframe-only delegations from writing source, running QA, or deploying, and prevents accepted wireframes from being overwritten by `write_application_design`.
+**Call relations**: The `manifest` function registers this as the `memory_consolidate` job. `_consolidatable_workspaces` selects workspaces with enough old live facts, and this function delegates the actual clustering and summary writing to `MemoryConsolidator`.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `is_application_creation_request`  (lines 2000–2004)
+##### `dedup_memory`  (lines 671–679)
 
 ```
-def is_application_creation_request(text: str) -> bool
+async def dedup_memory(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Detects member messages that look like requests to create an application, while excluding broader website or platform requests. This helps route the member to the right creation skill.
+**Purpose**: This scheduled job removes duplicate memory clutter by retiring older repeated rows toward the newest copy. It keeps the memory wiki from filling with the same fact many times.
 
-**Data flow**: It receives the member text. It checks one regular expression for app-creation language and another for excluded site or platform language. It returns `True` only when the text looks like a UFO application request.
+**Data flow**: It receives an extension context, checks that the embedding backend exists, builds a `MemoryDeduper` with embeddings, database access, workspace ID, and key-value store access, then runs it.
 
-**Call relations**: It is called by `enforce_application_creation_route`. That hook uses the boolean result to decide whether to force the main agent to load the application creation skill first.
-
-*Call graph*: called by 1 (enforce_application_creation_route).
-
-
-##### `enforce_application_creation_route`  (lines 2007–2030)
-
-```
-async def enforce_application_creation_route(ctx: HookContext) -> Deny | None
-```
-
-**Purpose**: Forces main-agent app-creation requests through the `create-application` skill before any other tool is used. This keeps application creation on the intended path.
-
-**Data flow**: It receives a hook context. It ignores non-main-agent turns, subagents, non-member turns, and messages that do not look like app-creation requests. For matching turns, it watches tool use: it allows the first `load_skill` only if it loads `create-application`, records that the route is satisfied, and denies other tools until that happens.
-
-**Call relations**: It calls `is_application_creation_request` as its classifier and returns `Deny` objects when routing is wrong. It runs before main-agent tool use, not inside the builder subagent itself.
-
-*Call graph*: calls 1 internal fn (is_application_creation_request); 1 external calls (__init__).
-
-
-##### `require_application_builder_qa`  (lines 2033–2046)
-
-```
-async def require_application_builder_qa(ctx: HookContext) -> Deny | None
-```
-
-**Purpose**: Blocks deployment unless product QA proof has already been stored for this builder turn. It is the deployment lock on the assembly line.
-
-**Data flow**: It receives a hook context. For builder turns, it looks up the QA proof in extension storage, validates it as `ApplicationQaProof`, and returns nothing if proof is present and valid. If no proof exists, it returns a denial telling the agent to run and pass product QA first.
-
-**Call relations**: It is a pre-deployment guard for the application builder profile. The final acceptance code later rechecks the same kind of proof, so deployment is protected both before the tool call and before homepage binding.
-
-*Call graph*: 2 external calls (__init__, model_validate).
-
-
-### `extensions/sites/ufo_ext_sites/tools.py`
-
-`orchestration` · `tool execution during build, preview, deploy, publish, QA, and homepage binding`
-
-This file is the control desk for website-related actions. Without it, an agent could still create files, but it would not have a safe, repeatable way to build them, start a server, prove the server is ready, make a permanent link, store static source files, create preview images, or bind a site as an agent homepage.
-
-The main idea is: paths named by the model are first forced into the workspace, then commands run inside the sandbox, which is the contained environment for the task. Server tools clean old logs and stop anything already using the chosen port before starting a new background process. They then probe the port until it answers, so callers get a working URL instead of a race.
-
-Deployment adds more. For static sites, the file tree is checked, size-limited, copied into the blob store, and recorded in a manifest. The served port is registered as a hosted site with a stable public URL. A preview image and share card are then generated. Publishing is similar, but keeps the app running from its own sandbox server instead of storing static source.
-
-The file also contains special quality-audit and deploy rules for the UFO application builder profile, plus homepage binding rules. Those rules matter because changing visibility or homepage ownership can expose content to new people, so the code requires the right member or speaker at the right time.
-
-#### Function details
-
-##### `StartServerInput.validate_port`  (lines 454–459)
-
-```
-def validate_port(self) -> 'StartServerInput'
-```
-
-**Purpose**: This validates the inputs for starting a server. It makes sure a provided command is not just blank text and that a provided port number is in the usable network port range.
-
-**Data flow**: It receives a filled-in StartServerInput object → checks the command and port fields → returns the same object if they are valid, or raises a validation error before any server is started.
-
-**Call relations**: This runs automatically when start_server input is parsed. It protects the later start_server flow from receiving an empty server command or an impossible port.
-
-
-##### `_json_result`  (lines 499–500)
-
-```
-def _json_result(payload: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: This wraps a plain Python dictionary as the standard tool response. It is the small adapter that turns internal results into JSON text the caller can read.
-
-**Data flow**: It takes a dictionary → converts it to a JSON string → places that string inside text content and then inside a ToolResult.
-
-**Call relations**: Most public tool handlers call this at the end, after they have built, served, deployed, audited, or bound something. It is the final packaging step before returning to the tool caller.
-
-*Call graph*: called by 7 (_redeploy_homepage, deploy_website, publish_website, qa_ufo_application, set_homepage, start_server, website); 3 external calls (__init__, __init__, dumps).
-
-
-##### `_free_log`  (lines 503–523)
-
-```
-async def _free_log(ctx: ToolContext, log_path: str) -> None
-```
-
-**Purpose**: This clears a chosen log-file name safely before a server writes to it. It exists to stop a malicious or accidental symbolic link from making the server overwrite some other file.
-
-**Data flow**: It receives the tool context and a log path → decides which safe root the log must live under → runs a guarded sandbox script that removes only that contained file name → returns nothing, or raises an error if the path is unsafe.
-
-**Call relations**: _serve calls this before launching any background server. It prepares the log slot so the later shell redirect can create a fresh file instead of following a planted link.
-
-*Call graph*: called by 1 (_serve); 1 external calls (PurePosixPath).
-
-
-##### `_stop_server`  (lines 526–531)
-
-```
-async def _stop_server(ctx: ToolContext, port: int) -> None
-```
-
-**Purpose**: This frees a network port inside the sandbox before a new server starts. It prevents an older process from keeping the port and making the new deploy appear to start when it did not.
-
-**Data flow**: It receives a port number → runs a sandbox Python script that finds listening processes on that port and terminates them → returns nothing if the port is cleared, or raises an error if cleanup fails.
-
-**Call relations**: _serve calls this as part of every server start. It happens before the new detached task is launched.
-
-*Call graph*: called by 1 (_serve).
-
-
-##### `_stop_server_task`  (lines 534–551)
-
-```
-async def _stop_server_task(ctx: ToolContext, command: str, base: str, pid: str) -> None
-```
-
-**Purpose**: This stops a specific background server task that was just launched but failed readiness checks or was interrupted. It cleans up the task instead of leaving a broken server running.
-
-**Data flow**: It receives the context, server command, task journal location, and process id → asks the sandbox to stop the matching task → waits for the task command to finish → returns nothing or raises if it cannot stop cleanly.
-
-**Call relations**: _serve calls this only on failure paths after a detached server was started. It is the emergency brake for a launch that did not become reachable.
-
-*Call graph*: called by 1 (_serve).
-
-
-##### `_reset_server_task`  (lines 554–572)
-
-```
-async def _reset_server_task(ctx: ToolContext, base: str) -> None
-```
-
-**Purpose**: This clears the saved task journal used for background server launches. It makes sure a new start really starts a new server instead of accidentally reconnecting to an old recorded task.
-
-**Data flow**: It receives a task journal base path → runs a sandbox script that stops any recorded process and removes journal files → returns nothing if the journal is empty afterward.
-
-**Call relations**: _serve calls this after freeing the port and before starting the new task. It keeps repeated deploys and retries from inheriting stale task state.
-
-*Call graph*: called by 1 (_serve).
-
-
-##### `_serve`  (lines 575–643)
-
-```
-async def _serve(ctx: ToolContext, command: str, project: str, port: int, log_path: str) -> dict[str, object]
-```
-
-**Purpose**: This is the shared engine for starting a web server in the sandbox and proving it is reachable. It handles log safety, port cleanup, background launch, readiness polling, and useful failure messages.
-
-**Data flow**: It receives a command, project directory, port, and log path → clears the log, frees the port, resets the task record, launches the command in the background, and repeatedly tries to connect to the port → returns the sandbox-local URL, port, and log path, or raises an error with log output if the server never becomes ready.
-
-**Call relations**: start_server, deploy_website, publish_website, and _redeploy_homepage all rely on this. It calls the lower-level cleanup helpers first, then hands back a proven running server to the hosting or preview steps.
-
-*Call graph*: calls 4 internal fn (_free_log, _reset_server_task, _stop_server, _stop_server_task); called by 4 (_redeploy_homepage, deploy_website, publish_website, start_server); 3 external calls (sha256, quote, shell_path).
-
-
-##### `_site_media_type`  (lines 646–648)
-
-```
-def _site_media_type(path: str) -> str
-```
-
-**Purpose**: This chooses the correct internet content type for a file based on its extension. That tells browsers whether a file is HTML, JavaScript, CSS, an image, and so on.
-
-**Data flow**: It receives a file path → looks at the part after the last dot → returns a media type string, adding a UTF-8 character set for text files.
-
-**Call relations**: _promote_source uses this while building the static-site manifest. The manifest later tells the hosting layer how to serve each stored file.
-
-*Call graph*: called by 1 (_promote_source).
-
-
-##### `_source_listing`  (lines 651–672)
-
-```
-async def _source_listing(ctx: ToolContext, project: str) -> dict[str, dict[str, object]]
-```
-
-**Purpose**: This inspects a static site directory inside the sandbox and records which files it contains, how large they are, and their SHA-256 hashes. A SHA-256 hash is a fingerprint of file contents.
-
-**Data flow**: It receives a project directory → runs a sandbox walker that skips folders like .git and node_modules, rejects oversized sites, and computes file sizes and hashes → returns a dictionary describing the files.
-
-**Call relations**: _served_directory calls this before deciding what to host. It supplies the file list that _promote_source later turns into a stored manifest.
-
-*Call graph*: called by 1 (_served_directory); 1 external calls (loads).
-
-
-##### `_promote_source`  (lines 675–716)
-
-```
-async def _promote_source(ctx: ToolContext, project: str, conversation_id: UUID, name: str, listing: dict[str, dict[str, object]]) -> str
-```
-
-**Purpose**: This copies a static site’s served files into the project’s blob store and creates the manifest that records them as the site’s source of record. The blob store is durable storage outside the running sandbox.
-
-**Data flow**: It receives the context, project directory, conversation id, site name, and file listing → builds storage keys under a new unique prefix, assigns media types, and uploads the files either by presigned upload links or direct streams → returns the manifest as JSON text.
-
-**Call relations**: deploy_website and _redeploy_homepage call this after they know which directory will be served. It uses _site_media_type for each file, then passes its manifest result into site registration or redeployment.
-
-*Call graph*: calls 1 internal fn (_site_media_type); called by 2 (_redeploy_homepage, deploy_website); 4 external calls (__init__, __init__, transfer, uuid4).
-
-
-##### `_illustrate`  (lines 719–741)
-
-```
-async def _illustrate(ctx: ToolContext, name: str, port: int, conversation_id: UUID) -> None
-```
-
-**Purpose**: This creates visual previews for a hosted site. It asks the preview service to take a screenshot and also builds a share card image for link previews.
-
-**Data flow**: It receives the context, site name, served port, and conversation id → opens the hosted site through the preview system → stores the preview image if one is produced → asks the share-card helper to draw a card → returns nothing.
-
-**Call relations**: deploy_website, publish_website, and _redeploy_homepage call this after the site has already been registered. That order matters because registration retires any previous site on the port before the screenshot is taken.
-
-*Call graph*: calls 1 internal fn (render_site_preview); called by 3 (_redeploy_homepage, deploy_website, publish_website); 2 external calls (__init__, draw_from_page).
-
-
-##### `_refuse_before_serving`  (lines 744–784)
-
-```
-async def _refuse_before_serving(ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None) -> tuple[str, HostedSite | None]
-```
-
-**Purpose**: This checks whether a deploy is allowed before it kills anything currently using the port. It protects an existing hosted site from being taken down by a deploy that would later be rejected.
-
-**Data flow**: It receives the requested site name, port, and optional visibility → confirms there is an acting member, checks whether a live speaker is needed for visibility changes, normalizes the site name, and asks the hosted-site store whether registration would be allowed → returns the normalized name and any site that would be displaced.
-
-**Call relations**: deploy_website and publish_website call this before starting the new server. _host repeats the important checks later when it actually writes the registration, but this early check avoids destructive work when refusal is already known.
-
-*Call graph*: called by 2 (deploy_website, publish_website); 5 external calls (__init__, __init__, authority_member_id, site_name, site_url).
-
-
-##### `_host`  (lines 787–831)
-
-```
-async def _host(ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None, manifest: str | None) -> dict[str, object]
-```
-
-**Purpose**: This registers a running sandbox port as a hosted site with a stable public link. It is the moment when a working server becomes a deliverable site.
-
-**Data flow**: It receives a raw site name, port, optional visibility, and optional source manifest → confirms ownership and speaker rules, normalizes the name, builds the public URL, writes the hosted-site row, and returns the site name, effective visibility, object name, and public URL.
-
-**Call relations**: deploy_website and publish_website call this after _serve has proved the server is running. _illustrate then uses the registered site to create previews.
-
-*Call graph*: called by 2 (deploy_website, publish_website); 7 external calls (__init__, __init__, authority_member_id, effective_visibility, site_object_name, site_name, site_url).
-
-
-##### `website`  (lines 834–843)
-
-```
-async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult
-```
-
-**Purpose**: This tool runs a build command for a website project in the sandbox and reports what files are present afterward. It is useful for turning source files into build output before serving or deploying.
-
-**Data flow**: It receives a build command and optional project path → scopes the path to the workspace, runs the command there, lists the resulting directory entries → returns JSON with the project path and file names.
-
-**Call relations**: This is a public tool handler. It does not host anything; it stops after building and reporting, using _json_result to return the response.
-
-*Call graph*: calls 1 internal fn (_json_result); 2 external calls (quote, workspace_path).
-
-
-##### `start_server`  (lines 846–866)
-
-```
-async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult
-```
-
-**Purpose**: This tool starts a temporary server in the sandbox and returns a sandbox-local URL once it is actually listening. It is for previews and debugging, not for creating a permanent hosted site.
-
-**Data flow**: It receives a project path, optional command, optional port, and optional log file → validates special UFO application-builder restrictions, chooses defaults, scopes paths safely, and calls _serve → returns JSON with the URL, port, log, and project path.
-
-**Call relations**: This is a public tool handler. It delegates the difficult server lifecycle work to _serve and then formats the result with _json_result.
-
-*Call graph*: calls 2 internal fn (_json_result, _serve); 1 external calls (workspace_path).
-
-
-##### `_application_audit_attempts`  (lines 869–877)
-
-```
-async def _application_audit_attempts(ctx: ToolContext) -> int
-```
-
-**Purpose**: This reads how many product-audit attempts have already been used for the current turn. It enforces the rule that the UFO application builder only gets a limited number of audit tries.
-
-**Data flow**: It receives the tool context → reads a stored counter keyed by the turn id → returns zero if missing, the stored integer if valid, or raises an error if the stored value is malformed.
-
-**Call relations**: _audit_builder_application calls this before running the browser audit. It decides whether another audit attempt is still allowed.
-
-*Call graph*: called by 1 (_audit_builder_application); 1 external calls (format).
-
-
-##### `_application_audit_feedback`  (lines 880–892)
-
-```
-async def _application_audit_feedback(ctx: ToolContext, issues: tuple[ApplicationAuditIssue, ...], attempts: int) -> ApplicationAuditFeedback
-```
-
-**Purpose**: This records a failed audit attempt and turns audit issues into structured feedback. It tells the builder what to fix and how many attempts remain.
-
-**Data flow**: It receives the context, a tuple of audit issues, and the previous attempt count → increments and stores the count → creates an ApplicationAuditFeedback object → returns that feedback.
-
-**Call relations**: _audit_builder_application calls this whenever the audit cannot run, cannot be read, is invalid, or finds product problems. qa_ufo_application then returns that feedback to the builder.
-
-*Call graph*: called by 1 (_audit_builder_application); 2 external calls (__init__, format).
-
-
-##### `_accepted_application_design`  (lines 895–930)
-
-```
-async def _accepted_application_design(ctx: ToolContext) -> tuple[AcceptedApplicationDesignEvidence, str, str]
-```
-
-**Purpose**: This loads the previously accepted application design and its evidence, then proves they match. It prevents auditing or deploying against a design file that has been changed after acceptance.
-
-**Data flow**: It receives the context → builds runtime paths for the accepted design and evidence files, reads both with size limits, parses the evidence JSON, hashes the design text, and compares the hash to the evidence → returns the evidence and both paths if valid.
-
-**Call relations**: _audit_builder_application calls this before running the browser audit. The audit script receives these paths so it can compare the built app to the accepted design.
-
-*Call graph*: called by 1 (_audit_builder_application); 4 external calls (model_validate_json, sha256, application_design_acceptance_relative, application_design_evidence_relative).
-
-
-##### `_audit_builder_application`  (lines 933–1046)
-
-```
-async def _audit_builder_application(ctx: ToolContext, project: str) -> ApplicationAuditReport | ApplicationAuditFeedback
-```
-
-**Purpose**: This runs the full browser-based product audit for the special UFO application builder. It checks whether the app behaves and looks like the accepted design and contract require.
-
-**Data flow**: It receives the context and project path → checks remaining attempts, prepares audit script and output paths, loads accepted design evidence, runs the Node audit script, reads and validates the report, compares it to the stored contract, and applies the audit rules → returns either a passing report or repair feedback.
-
-**Call relations**: qa_ufo_application calls this when the builder asks for product QA. It uses _application_audit_attempts, _accepted_application_design, and _application_audit_feedback to control attempts and produce clear outcomes.
-
-*Call graph*: calls 3 internal fn (_accepted_application_design, _application_audit_attempts, _application_audit_feedback); called by 1 (qa_ufo_application); 5 external calls (__init__, model_validate, model_validate_json, format, audit_application).
-
-
-##### `_application_source_sha256`  (lines 1049–1055)
-
-```
-async def _application_source_sha256(ctx: ToolContext) -> str
-```
-
-**Purpose**: This computes a fingerprint of the UFO application source file. It is used to prove that the source has not changed after QA passed.
-
-**Data flow**: It receives the context → reads the fixed application source file from the sandbox → hashes its text with SHA-256 → returns the hash string.
-
-**Call relations**: qa_ufo_application stores this hash after a successful audit. _require_current_application_qa compares the current hash to the stored proof before allowing deployment.
-
-*Call graph*: called by 2 (_require_current_application_qa, qa_ufo_application); 1 external calls (sha256).
-
-
-##### `_require_current_application_qa`  (lines 1058–1070)
-
-```
-async def _require_current_application_qa(ctx: ToolContext) -> ApplicationQaProof
-```
-
-**Purpose**: This blocks UFO application deployment unless the current source file has already passed product QA. It prevents a builder from passing QA, changing the app, and deploying the untested version.
-
-**Data flow**: It receives the context → reads stored QA proof for the turn, validates it, recomputes the current source hash, and compares the two → returns the proof if they match, or raises an error if proof is missing or stale.
-
-**Call relations**: deploy_website calls this when the active profile is the UFO application builder. It sits between building and deployment as a safety gate.
-
-*Call graph*: calls 1 internal fn (_application_source_sha256); called by 1 (deploy_website); 2 external calls (model_validate, format).
-
-
-##### `qa_ufo_application`  (lines 1073–1115)
-
-```
-async def qa_ufo_application(ctx: ToolContext, args: QaUfoApplicationInput) -> ToolResult
-```
-
-**Purpose**: This public tool runs product QA for the UFO application builder profile. It either returns bounded repair feedback or records proof that the current source passed.
-
-**Data flow**: It receives the context and empty QA input → confirms the caller is the right profile, checks and increments the QA call count, runs _audit_builder_application, and either returns feedback or stores a proof containing the source hash and audit batch count → returns JSON with the audit result summary.
-
-**Call relations**: This is a profile-only tool handler. It calls _audit_builder_application for the main audit work, _application_source_sha256 for deploy proof, and _json_result to return the result.
-
-*Call graph*: calls 3 internal fn (_application_source_sha256, _audit_builder_application, _json_result); 4 external calls (__init__, __init__, format, format).
-
-
-##### `deploy_ufo_application`  (lines 1118–1128)
-
-```
-async def deploy_ufo_application(ctx: ToolContext, args: DeployUfoApplicationInput) -> ToolResult
-```
-
-**Purpose**: This public profile-only tool deploys the fixed UFO application scaffold after the required QA flow. It is a narrow wrapper around the normal static deploy path.
-
-**Data flow**: It receives the context and an application site name → creates a DeployWebsiteInput pointing at the fixed scaffold with index.html as the entry point → calls deploy_website and returns its result.
-
-**Call relations**: This tool is available only to the UFO application builder profile. It reuses deploy_website so all normal hosting, source storage, preview, and permission rules still apply.
-
-*Call graph*: calls 1 internal fn (deploy_website); 1 external calls (__init__).
-
-
-##### `deploy_website`  (lines 1131–1162)
-
-```
-async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult
-```
-
-**Purpose**: This tool deploys a built static website folder to a permanent hosted link. Reusing the same site name updates the site behind the same link.
-
-**Data flow**: It receives a project path, site name, entry point, and optional visibility → scopes and checks the path, applies special application-builder QA rules, chooses the serving port, detects homepage redeploy cases, checks hosting permission, prepares the served directory, uploads source, starts a static file server, registers the site, creates previews, and returns JSON with server and hosted-link details.
-
-**Call relations**: This is the main static-site deploy handler. It coordinates _refuse_before_serving, _served_directory, _promote_source, _serve, _host, and _illustrate; deploy_ufo_application also calls it.
-
-*Call graph*: calls 11 internal fn (_agent_homepage, _host, _illustrate, _json_result, _promote_source, _redeploy_homepage, _refuse_before_serving, _require_current_application_qa, _serve, _served_directory (+1 more)); called by 1 (deploy_ufo_application); 4 external calls (serve_port, workspace_path, site_object_name, site_name).
-
-
-##### `_served_directory`  (lines 1165–1191)
-
-```
-async def _served_directory(ctx: ToolContext, project: str) -> tuple[str, dict[str, dict[str, object]]]
-```
-
-**Purpose**: This decides which directory should actually be hosted and returns its file listing. If the input is an editable UFO page source directory, it builds it first and hosts the generated dist folder instead.
-
-**Data flow**: It receives a project directory → lists its files; if it does not contain the special source file, returns that directory and listing; if it does, writes build config, unpacks the page kit, runs the build, and lists the dist output → returns the final served directory and listing.
-
-**Call relations**: deploy_website and _redeploy_homepage call this before uploading source and starting the server. It calls _source_listing and may call the page-kit unpacking helper for source-style projects.
-
-*Call graph*: calls 1 internal fn (_source_listing); called by 2 (_redeploy_homepage, deploy_website); 2 external calls (quote, unpack_page_kit).
-
-
-##### `_agent_homepage`  (lines 1194–1197)
-
-```
-async def _agent_homepage(ctx: ToolContext) -> HostedSite | None
-```
-
-**Purpose**: This finds the hosted site currently bound as the acting agent’s homepage, if there is one. It helps decide whether a deploy should update that homepage instead of creating a new site.
-
-**Data flow**: It receives the context → opens the hosted-site registry → asks for the homepage bound to the current turn’s agent id → returns a HostedSite or None.
-
-**Call relations**: deploy_website calls this early. If the requested deploy name points at a homepage from another conversation, deploy_website may route into _redeploy_homepage.
-
-*Call graph*: calls 1 internal fn (_sites_registry); called by 1 (deploy_website).
-
-
-##### `_sites_registry`  (lines 1200–1203)
-
-```
-def _sites_registry(ctx: ToolContext) -> HostedSites
-```
-
-**Purpose**: This creates the HostedSites store helper for the current workspace transaction. It is a small convenience function for reading and writing hosted-site records.
-
-**Data flow**: It receives the context → checks that extension context is present → builds a HostedSites object using the workspace id and transaction → returns that registry helper.
-
-**Call relations**: _agent_homepage, deploy_website, and _redeploy_homepage use this when they need to read or update hosted-site state.
-
-*Call graph*: called by 3 (_agent_homepage, _redeploy_homepage, deploy_website); 1 external calls (__init__).
-
-
-##### `_redeploy_homepage`  (lines 1206–1276)
-
-```
-async def _redeploy_homepage(ctx: ToolContext, args: DeployWebsiteInput, bound: HostedSite, scratch_port: int) -> ToolResult
-```
-
-**Purpose**: This updates an already-bound agent homepage in place from a new build, while keeping the same homepage link. It is used when a member edits an agent’s homepage from another conversation.
-
-**Data flow**: It receives deploy arguments, the currently bound site, and a scratch port → verifies that a live member request allows the homepage change, rejects explicit visibility changes, checks permissions, prepares and uploads the new source under the existing site identity, serves it on the scratch port, updates the existing site row, unregisters any displaced scratch-port site, refreshes previews, and returns JSON with the unchanged public link.
-
-**Call relations**: deploy_website calls this when it recognizes a deploy aimed at the acting agent’s bound homepage. It uses _served_directory, _promote_source, _serve, _sites_registry, _illustrate, and _json_result to perform the update.
-
-*Call graph*: calls 7 internal fn (agent_visibility, _illustrate, _json_result, _promote_source, _serve, _served_directory, _sites_registry); called by 1 (deploy_website); 5 external calls (authority_member_id, workspace_path, format, site_object_name, site_url).
-
-
-##### `publish_website`  (lines 1279–1296)
-
-```
-async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult
-```
-
-**Purpose**: This tool publishes a web app from the sandbox to a permanent hosted link. Unlike static deploy, it can run the app’s own server command and does not store the app source as the hosted source of record.
-
-**Data flow**: It receives project, dist, app name, optional visibility, optional install command, and optional run command → chooses the serving port, checks hosting permission, optionally installs dependencies, chooses whether to run a backend command or a static file server, starts the server, registers the port as a hosted site without a source manifest, creates previews, and returns JSON.
-
-**Call relations**: This is a public tool handler. It shares the same safety and hosting path as deploy_website through _refuse_before_serving, _serve, _host, _illustrate, and _json_result.
-
-*Call graph*: calls 5 internal fn (_host, _illustrate, _json_result, _refuse_before_serving, _serve); 3 external calls (quote, serve_port, workspace_path).
-
-
-##### `set_homepage`  (lines 1299–1357)
-
-```
-async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult
-```
-
-**Purpose**: This tool binds an existing hosted site as the homepage for the target agent. It is careful because binding changes who may open the page: homepage access follows the agent’s visibility, not the site’s own visibility.
-
-**Data flow**: It receives a site object name → loads the target agent, checks whether the caller may edit that agent, finds the hosted site by object name, confirms the acting member is the site creator, requires a live speaker unless the site was deployed in this same turn, writes the homepage pointer, and returns the homepage URL, visibility, and agent id.
-
-**Call relations**: This is a public side-effecting tool bound to an agent instance. It talks directly to the HostedSites registry, checks speaker/admin authority through the context, and uses _json_result for the final response.
-
-*Call graph*: calls 2 internal fn (speaker_is_admin, _json_result); 5 external calls (__init__, __init__, authority_member_id, site_object_name, site_url).
-
-
-### `extensions/sites/ufo_ext_sites/application_audit.py`
-
-`domain_logic` · `quality gate after browser measurement`
-
-This file is the application quality gate. A browser has already opened the staged application and collected facts such as text contrast, page width, clipped content, visible regions, console errors, and whether controls actually change the page. This file gives that raw evidence a strict shape using Pydantic models, which are data objects that validate their fields when created, and then applies fixed checks to it.
-
-The audit looks at four required views: light and dark colour schemes, each at desktop and narrow widths. It checks that those views exist, contain text, do not overflow sideways, do not clip or overlap content, and meet contrast rules. It also checks that the final application still matches the accepted design: named regions must exist, be large enough, stay visible when expected, and keep the same relative order on desktop. Finally, it verifies basic product behaviour: enough accessible controls, enough distinct interactions, no browser console errors, and any required facts from a contract are actually shown, including above the first screen on desktop.
-
-Without this file, the builder could produce an application that looks fine in one screenshot but fails in dark mode, on a narrow screen, with assistive technology, or after interaction. The main public result is an `ApplicationAuditVerdict`: either no issues, meaning the app passed, or a bounded list of repair messages the builder can act on.
-
-#### Function details
-
-##### `AcceptedApplicationDesignEvidence.regions_are_unique`  (lines 131–137)
-
-```
-def regions_are_unique(self) -> 'AcceptedApplicationDesignEvidence'
-```
-
-**Purpose**: This validation step makes sure the accepted design evidence does not contain duplicate region names or duplicate Kit component names. It protects later comparison code from guessing which duplicate item is the real one.
-
-**Data flow**: It reads the region names and Kit component names already stored in the design evidence object. If every name is unique, the object is accepted unchanged. If a duplicate is found, creation of the object fails with a clear error.
-
-**Call relations**: This runs automatically when `AcceptedApplicationDesignEvidence` is created. It prepares trusted design evidence for later audit work, so downstream checks can compare regions by name without ambiguity.
-
-
-##### `ApplicationAuditReport.views_are_unique`  (lines 202–206)
-
-```
-def views_are_unique(self) -> 'ApplicationAuditReport'
-```
-
-**Purpose**: This validation step makes sure an audit report has at most one measurement for each combination of colour scheme and viewport width. That matters because the audit expects one clear result for, for example, dark desktop or light narrow.
-
-**Data flow**: It reads the scheme and width from every measured view in the report. If no pair is repeated, the report is accepted unchanged. If the same scheme-and-width pair appears twice, report creation fails.
-
-**Call relations**: This runs automatically when an `ApplicationAuditReport` is created. Later, `audit_application` turns the views into a lookup table by scheme and width, and this validator prevents duplicate entries from silently overwriting one another.
-
-
-##### `ApplicationAuditVerdict.passed`  (lines 227–230)
-
-```
-def passed(self) -> bool
-```
-
-**Purpose**: This property answers the simple question: did the application pass every deterministic check? It is true only when the verdict contains no repair issues.
-
-**Data flow**: It reads the verdict's `issues` tuple. If the tuple is empty, it returns `True`; otherwise it returns `False`. It does not change the verdict.
-
-**Call relations**: Code that receives an `ApplicationAuditVerdict` can call this property instead of inspecting the issue list itself. It is the final yes-or-no summary after `audit_application` has built the verdict.
-
-
-##### `_needed_ratio`  (lines 277–282)
-
-```
-def _needed_ratio(item: ApplicationAuditText) -> float
-```
-
-**Purpose**: This helper decides the minimum contrast ratio required for one piece of rendered text. Contrast ratio is a number that describes how easy text is to distinguish from its background.
-
-**Data flow**: It takes one text measurement, looks at whether it belongs to a quieter Kit slot, whether it is large, and whether it is bold. It returns the required contrast floor: a relaxed floor for approved quiet text, a lower accessibility floor for large text, or the normal body-text floor.
-
-**Call relations**: `_contrast_failures` calls this for each measured text style. The returned threshold is then compared with the browser-measured contrast ratio to decide whether that text needs repair.
-
-*Call graph*: called by 1 (_contrast_failures).
-
-
-##### `_issue`  (lines 285–292)
-
-```
-def _issue(code: AuditIssueCode, message: str, terms: tuple[str, ...]=()) -> ApplicationAuditIssue
-```
-
-**Purpose**: This helper creates one audit issue while enforcing the audit's size limits. It keeps repair messages and search terms short enough to be safely returned to the builder.
-
-**Data flow**: It receives an issue code, a message, and optional terms. It trims the message to the maximum allowed length and keeps only the first allowed terms. It returns an `ApplicationAuditIssue` object.
-
-**Call relations**: `audit_application` calls this whenever it finds a problem, such as missing views, poor contrast, or failed interactions. The helper centralizes the formatting limits so each check does not have to repeat them.
-
-*Call graph*: called by 1 (audit_application); 1 external calls (__init__).
-
-
-##### `application_first_screen_scale`  (lines 295–305)
-
-```
-def application_first_screen_scale(page_height: int) -> float
-```
-
-**Purpose**: This function converts the fixed first-screen height of 844 pixels into a fraction of the measured page height. It lets region checks work correctly even when the full page is taller than the first screen.
-
-**Data flow**: It receives the full measured page height. It divides the fixed first-screen height by that page height and returns the resulting scale factor. It does not read or change any audit report directly.
-
-**Call relations**: `application_region_relation` and `application_design_region_size_failure` use this scale when comparing vertical sizes and gaps. It keeps pixel-based design rules consistent after regions have been stored as page fractions.
-
-*Call graph*: called by 2 (application_design_region_size_failure, application_region_relation).
-
-
-##### `application_region_relation`  (lines 308–328)
-
-```
-def application_region_relation(first: ApplicationAuditRegion, second: ApplicationAuditRegion, page_height: int=APPLICATION_DESIGN_FOLD) -> tuple[Literal['horizontal', 'vertical'], int] | None
-```
-
-**Purpose**: This function decides whether two visible regions are separated vertically or horizontally, and which one comes first. If they overlap too much to have a clear relationship, it returns no relation.
-
-**Data flow**: It receives two regions and the page height their positions were measured against. It adjusts the vertical near-touch allowance using `application_first_screen_scale`, then compares top, height, left, and width values. It returns a pair such as vertical-before or horizontal-after, or `None` if the regions overlap.
-
-**Call relations**: `application_design_fidelity` uses this twice: first to reject overlapping design regions, and later to check whether the application keeps the same ordering as the accepted design. It is the small geometric ruler behind the design-matching check.
-
-*Call graph*: calls 1 internal fn (application_first_screen_scale); called by 1 (application_design_fidelity).
-
-
-##### `application_design_region_size_failure`  (lines 331–349)
-
-```
-def application_design_region_size_failure(regions: tuple[ApplicationAuditRegion, ...], page_height: int=APPLICATION_DESIGN_FOLD) -> str | None
-```
-
-**Purpose**: This function finds the first design region that is too small to count as a meaningful screen section. It prevents tiny marks, decorative slivers, or accidental fragments from being treated as real design regions.
-
-**Data flow**: It receives a group of regions and the page height. It scales height and area thresholds to match the first screen, then checks each region's width, height, and area. It returns a human-readable failure message for the first too-small region, or `None` if all regions are large enough.
-
-**Call relations**: `application_design_fidelity` calls this before doing deeper design matching. If this function finds a size problem, the fidelity check stops early and reports that failure.
-
-*Call graph*: calls 1 internal fn (application_first_screen_scale); called by 1 (application_design_fidelity).
-
-
-##### `application_design_region_fold_failure`  (lines 352–374)
-
-```
-def application_design_region_fold_failure(regions: tuple[ApplicationAuditRegion, ...], page_height: int=APPLICATION_DESIGN_FOLD) -> str | None
-```
-
-**Purpose**: This function checks whether a design region crosses the first-screen boundary in a way the design rules reject. The “fold” is the bottom edge of the first visible screen before scrolling.
-
-**Data flow**: It receives regions and a page height. For each region, it converts the stored fractional top and height back into pixel rows, then sees whether the region paints meaningfully both above and below the fold beyond a small tolerance. It returns a message for the first crossing region, or `None` if no region crosses the boundary.
-
-**Call relations**: This function is a standalone design-rule helper in this file. It is not called by the listed audit flow here, but it expresses the same kind of deterministic region rule used by the design audit helpers.
-
-
-##### `application_design_fidelity`  (lines 377–460)
-
-```
-def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity
-```
-
-**Purpose**: This function scores how closely the application keeps the accepted design's named regions. It checks region count, names, size, overlap, visibility above the fold, and desktop ordering in both light and dark modes.
-
-**Data flow**: It receives the full audit report. It reads the accepted design regions, validates their basic shape, compares them with desktop application region measurements, and counts passed checks against total checks. It returns an `ApplicationDesignFidelity` object containing the score and any failure messages.
-
-**Call relations**: `audit_application` calls this as the design portion of the audit. Inside, it uses `application_design_region_size_failure` to catch unusably small regions and `application_region_relation` to compare design and application layout order.
-
-*Call graph*: calls 2 internal fn (application_design_region_size_failure, application_region_relation); called by 1 (audit_application); 1 external calls (__init__).
-
-
-##### `_contrast_failures`  (lines 463–478)
-
-```
-def _contrast_failures(views: tuple[ApplicationAuditView, ...]) -> list[str]
-```
-
-**Purpose**: This helper gathers all text contrast failures from the measured views. It turns low-level text measurements into clear sentences that explain what text needs better foreground or background colours.
-
-**Data flow**: It receives the measured views. For each text item, it asks `_needed_ratio` what contrast ratio is required, compares that with the measured ratio, and builds a failure message when the text falls short. It returns a list of those messages.
-
-**Call relations**: `audit_application` calls this after it has selected the required measured views. The returned messages become one contrast repair issue if any text is too hard to read.
-
-*Call graph*: calls 1 internal fn (_needed_ratio); called by 1 (audit_application).
-
-
-##### `audit_application`  (lines 481–604)
-
-```
-def audit_application(report: ApplicationAuditReport, contract: ApplicationAuditContract | None=None) -> ApplicationAuditVerdict
-```
-
-**Purpose**: This is the main audit function. It takes one browser report, optionally compares it with a contract of required facts, and returns a verdict saying either the application passed or what must be repaired.
-
-**Data flow**: It receives an `ApplicationAuditReport` and, optionally, an `ApplicationAuditContract`. It builds a lookup of measured views, checks for missing or empty views, contrast failures, overflow, clipping, overlaps, design mismatch, console errors, too few controls, too few successful interactions, missing required facts, and required facts that are not visible above the first desktop screen. Each discovered problem is converted into a bounded issue, and the function returns an `ApplicationAuditVerdict` containing at most the allowed number of issues.
-
-**Call relations**: This function is the point where all the smaller checks come together. It calls `_contrast_failures` for readability checks, `application_design_fidelity` for design matching, and `_issue` to package each repair item before constructing the final verdict.
-
-*Call graph*: calls 3 internal fn (_contrast_failures, _issue, application_design_fidelity); 1 external calls (__init__).
-
-
-### `extensions/sites/ufo_ext_sites/source.py`
-
-`io_transport` · `site source read, edit setup, and page build preparation`
-
-A hosted site’s source code is not kept as one big folder inside the running app. It is stored as separate blobs, named by a manifest, which is like a packing list. This file reads that packing list, pulls the named files into a sandbox, and later helps move batches of files by using either web upload/download links or a local development blob store.
-
-The important job is to make the sandbox copy trustworthy. Before downloading files, the code clears the target directory and “claims” each path through a containment guard. In plain terms, it checks that every file really stays inside the workspace and cannot sneak out through a dangerous path or a symbolic link, which is a shortcut file that can point somewhere else. Without this, a downloaded file name could overwrite something outside the intended site folder.
-
-For app pages, the file also packages a local SDK kit into a compressed archive. That kit is unpacked into the sandbox beside the page source. This means an old edited app page can still build using the current components shipped with this extension, instead of being frozen to whatever existed when the page was first created.
-
-A small generation stamp avoids repeated downloads. If the sandbox already has the source for the site’s current deploy generation, the file returns it as-is, which saves time and avoids disturbing edits in progress.
-
-#### Function details
-
-##### `_page_kit_archive`  (lines 101–113)
-
-```
-def _page_kit_archive() -> bytes
-```
-
-**Purpose**: This function packages the extension’s page SDK kit into one compressed tar archive. It exists to turn many small kit files into a single blob that can be written into the sandbox quickly.
-
-**Data flow**: It reads files from the local kit directory in this Python package, adds each regular file to an in-memory compressed archive, and returns the archive as bytes. The result is stored for reuse so the kit does not need to be rebuilt every time a site is read.
-
-**Call relations**: At module load time, this function prepares PAGE_KIT_ARCHIVE. Later, unpack_page_kit writes that prebuilt archive into the sandbox and unpacks it, so page builds receive the SDK kit with only one sandbox write plus one unpack step.
-
-*Call graph*: 2 external calls (BytesIO, open).
-
-
-##### `transfer`  (lines 120–130)
-
-```
-async def transfer(ctx: ToolContext, script: str, pairs: list[tuple[str, str]], total_bytes: int) -> None
-```
-
-**Purpose**: This function copies many files between the sandbox and blob storage using a small shell script. It batches the work so large source trees do not require one separate sandbox command per file.
-
-**Data flow**: It receives a sandbox tool context, a transfer script, a list of file-and-URL pairs, and the total number of bytes expected. It calculates a timeout based on size, sends the pairs to the sandbox in batches, and raises an error if any batch command fails. It returns nothing when all transfers succeed.
-
-**Call relations**: materialize_source calls this when the blob store can provide presigned download links, meaning temporary URLs the sandbox can fetch directly. transfer then hands the actual moving work to the sandbox shell, using the script supplied by its caller.
-
-*Call graph*: called by 1 (materialize_source).
-
-
-##### `materialize_source`  (lines 133–199)
-
-```
-async def materialize_source(ctx: ToolContext, site: HostedSite, object_name: str) -> tuple[str, list[str]]
-```
-
-**Purpose**: This function recreates a site’s stored source tree inside the current sandbox. Someone uses it when they need the latest deployed source available for editing, rebuilding, or redeploying.
-
-**Data flow**: It takes a tool context, a hosted site record, and the object name that should become the sandbox folder name. It reads and validates the site’s source manifest, chooses a destination under the workspace, checks a generation stamp to avoid unnecessary work, safely clears and claims the target paths, then downloads or streams each stored file into place. Finally, it writes the deploy generation stamp and returns the destination path plus the list of relative files that were materialized.
-
-**Call relations**: This is the main reader for stored site source. It uses SourceManifest.model_validate_json to understand the stored file list, workspace_path to choose safe workspace locations, shlex.quote when reading the stamp through the shell, and transfer when downloads can happen through presigned URLs. If the blob store is a local development-style store that does not support those URLs, it falls back to reading each blob through this process and writing it into the sandbox.
-
-*Call graph*: calls 1 internal fn (transfer); 3 external calls (model_validate_json, quote, workspace_path).
-
-
-##### `unpack_page_kit`  (lines 202–220)
-
-```
-async def unpack_page_kit(ctx: ToolContext, dest: str, runtime_root: str | None=None) -> None
-```
-
-**Purpose**: This function places the current page-building SDK kit into a sandbox project. It makes sure an app page builds against the extension’s current kit rather than an old copy captured when the page was first forked.
-
-**Data flow**: It receives a tool context, a destination directory, and optionally a runtime root used for containment checks. It writes the prebuilt SDK archive into the destination, runs a guarded Python unpacking program inside the sandbox, and deletes the archive as part of unpacking. If unpacking fails, it raises an error; otherwise, the destination gains an sdk folder containing the kit files.
-
-**Call relations**: This function is used by the page materialization/build preparation flow, although no direct caller is shown in the provided graph. It relies on the PAGE_KIT_ARCHIVE prepared by _page_kit_archive and hands the risky archive extraction step to a sandbox Python program that checks every path before writing it.
-
-
-### Sandbox ingress serving
-Sandbox ingress code creates signed browser routes, serves stored or live sandbox content, and reports unreachable sites for repair.
-
-### `core/src/ufo/harness/sandbox/ingress_serve.py`
-
-`entrypoint` · `startup and request handling`
-
-This file is the front door for hosted sandbox sites. Think of it like a hotel receptionist: the hostname tells it which room you are trying to visit, the cookie proves you were invited, and then it either gives you a stored copy of the room’s contents or connects you to the live room.
-
-A site is identified from its subdomain, which encodes a conversation and a port. A special view link first lands on a token path, where the server verifies the signed token and turns it into a short-lived host-only session cookie. After that, normal page, asset, API, and WebSocket requests are allowed only if that cookie matches the exact site.
-
-There are two serving paths. Stored sites are static files recorded in a manifest and streamed from blob storage, with careful cache rules and content security headers. Live sites are reached by dialing the sandbox carrier and streaming the request and response without buffering the whole body. WebSockets are relayed in both directions for live apps such as development servers.
-
-The file is also defensive. It strips dangerous headers, prevents sites from setting UFO-owned cookies, blocks cross-site WebSocket use, hides tokens from sandbox code, and replaces confusing upstream failures with clear user-facing pages.
-
-#### Function details
-
-##### `IngressServe.app`  (lines 368–400)
-
-```
-def app(self) -> FastAPI
-```
-
-**Purpose**: Builds the FastAPI web application and declares which URLs belong to ingress itself versus which should be forwarded to a hosted site. This is the routing map for HTTP and WebSocket traffic.
-
-**Data flow**: It takes the already configured IngressServe object → creates a FastAPI application → attaches routes for token-opening paths, ordinary proxy paths, and WebSocket paths → returns the ready application for the web server to run.
-
-**Call relations**: The process startup code calls this when handing the server to Uvicorn. The routes it installs lead later requests to _no_view_token, _open, _proxy, _no_socket_view, or _socket depending on the path and protocol.
-
-*Call graph*: 1 external calls (FastAPI).
-
-
-##### `IngressServe._no_view_token`  (lines 402–408)
-
-```
-async def _no_view_token(self, request: Request) -> Response
-```
-
-**Purpose**: Answers the special view-token path when no token was actually supplied. It prevents an empty or malformed view URL from being treated as a real site request.
-
-**Data flow**: It receives an HTTP request → checks whether the method is GET or HEAD → returns either a 405 method refusal or a 403 plain-text message saying the link is not valid.
-
-**Call relations**: IngressServe.app routes the bare view path here. This keeps token-opening separate from _open, so query-string tricks cannot smuggle in a token.
-
-*Call graph*: 1 external calls (Response).
-
-
-##### `IngressServe._open`  (lines 410–463)
-
-```
-async def _open(self, request: Request, view_path: str) -> Response
-```
-
-**Purpose**: Turns a signed one-time-style view link into a session cookie for the site’s own origin. This is how a browser becomes authorized to load the site and its assets.
-
-**Data flow**: It receives the request and the path after the view prefix → extracts the token and optional landing path → identifies the addressed site from the hostname → verifies the token, site match, expiry, and allowed framer → mints a short-lived session token → sets it as a secure site cookie → redirects the browser to the requested site path.
-
-**Call relations**: IngressServe.app sends token URLs here. It uses _site to identify the host and _framer_belongs when the token allows a sibling site to frame this one, then hands the browser back to normal site loading through _proxy.
-
-*Call graph*: calls 2 internal fn (_framer_belongs, _site); 9 external calls (replace, now, RedirectResponse, Response, mint_ingress_token, verify_ingress_token, cookie_secure, set_session_cookie, quote).
-
-
-##### `IngressServe._site`  (lines 465–476)
-
-```
-def _site(self, request: HTTPConnection) -> tuple[UUID, int] | None
-```
-
-**Purpose**: Reads the hostname and decides which site, if any, it names. It is the small parser that turns a signed subdomain label into a conversation ID and port.
-
-**Data flow**: It receives an HTTP or WebSocket connection → compares its host with the configured base host → parses the subdomain label if it fits → returns the site identity or None if the host is outside this ingress or invalid.
-
-**Call relations**: _open calls it before accepting a view token, and _authorized calls it before accepting normal HTTP or WebSocket traffic. That makes the hostname the source of truth for which site is being accessed.
-
-*Call graph*: called by 2 (_authorized, _open); 1 external calls (parse_site_label).
-
-
-##### `IngressServe._authorized`  (lines 478–500)
-
-```
-def _authorized(self, connection: HTTPConnection) -> IngressClaims | SiteRefusal
-```
-
-**Purpose**: Checks whether a request or WebSocket handshake is allowed to reach the site named by its host. It gives HTTP and WebSocket traffic the same front-door security check.
-
-**Data flow**: It receives a connection → uses _site to find the addressed site → reads the ingress session cookie → verifies the signed session token and expiry → compares the token’s site to the hostname’s site → returns valid claims or a SiteRefusal explaining why access is denied.
-
-**Call relations**: _proxy and _socket both call this before doing anything with stored files or live sandboxes. By sharing this function, both protocols use the same authorization rules.
-
-*Call graph*: calls 1 internal fn (_site); called by 2 (_proxy, _socket); 3 external calls (__init__, now, verify_ingress_token).
-
-
-##### `IngressServe._stored_manifest`  (lines 502–540)
-
-```
-async def _stored_manifest(self, claims: IngressClaims) -> dict[str, StoredFile] | None
-```
-
-**Purpose**: Finds out whether the authorized site is a stored static site and, if so, returns the list of files it contains. It also supports shipped application bundles that live in shared fleet storage.
-
-**Data flow**: It receives verified ingress claims → if they name a shipped bundle, delegates to _shipped_manifest → otherwise reads the hosted-site row for that workspace, conversation, and port → parses the stored JSON manifest → returns a path-to-file map, or None if the site should be dialed live instead.
-
-**Call relations**: _proxy calls it to decide between static serving and live proxying. _socket also calls it so static sites can refuse WebSockets instead of pretending to support them.
-
-*Call graph*: calls 1 internal fn (_shipped_manifest); called by 2 (_proxy, _socket); 4 external calls (__init__, loads, select, workspace_tx).
-
-
-##### `IngressServe._shipped_manifest`  (lines 542–574)
-
-```
-async def _shipped_manifest(self, shipped: ShippedClaim) -> dict[str, StoredFile] | None
-```
-
-**Purpose**: Builds or retrieves the file list for a deployed built-in app bundle. These files are shared deploy-wide rather than owned by one workspace’s sandbox.
-
-**Data flow**: It receives a shipped-app claim with a digest and slug → checks an in-memory cache → lists blob entries under the app digest if needed → converts each entry into a StoredFile with size, guessed media type, and digest → caches and returns the manifest, or returns None if the bundle is gone.
-
-**Call relations**: _stored_manifest calls this when claims point at shipped content. Later _serve_stored uses the returned file records to stream the actual bytes.
-
-*Call graph*: called by 1 (_stored_manifest); 3 external calls (__init__, __init__, guess_type).
-
-
-##### `IngressServe._dial_site`  (lines 576–606)
-
-```
-async def _dial_site(self, claims: IngressClaims) -> DialTarget | SiteRefusal
-```
-
-**Purpose**: Locates the live network address for a sandbox site that is not served from stored files. It turns a conversation and port into a dial target the proxy can contact.
-
-**Data flow**: It receives authorized claims → reads the stored sandbox handle for the conversation → chooses the right carrier, including older resume carriers when needed → builds a sandbox handle → asks the carrier to dial the requested port → returns a DialTarget or a SiteRefusal saying the site is gone.
-
-**Call relations**: _proxy calls it for live HTTP requests, and _socket calls it for live WebSocket handshakes. It uses _stored_handle to find the sandbox identity before talking to the carrier.
-
-*Call graph*: calls 1 internal fn (_stored_handle); called by 2 (_proxy, _socket); 6 external calls (__init__, __init__, warn, sandbox_handle_backend, sandbox_handle_id, ws).
-
-
-##### `IngressServe._proxy`  (lines 608–682)
-
-```
-async def _proxy(self, request: Request, path: str) -> Response
-```
-
-**Purpose**: Serves normal HTTP traffic for a hosted site. It is the main request handler for pages, assets, and API calls under a site hostname.
-
-**Data flow**: It receives a request and requested path → authorizes the session → checks whether the site has stored files → either streams a stored file, returns a shipped 404 when needed, or dials the live sandbox → forwards sanitized headers and body upstream → streams the upstream response back while rewriting cache, security, cookie, and framing headers.
-
-**Call relations**: IngressServe.app routes almost all HTTP site paths here. It coordinates _authorized, _stored_manifest, _serve_stored, _dial_site, _upstream_url, _upstream_headers, _body, _confined_cookie, _unframed_policy, _frame_ancestors, and _not_answering.
-
-*Call graph*: calls 11 internal fn (_authorized, _body, _confined_cookie, _dial_site, _frame_ancestors, _not_answering, _serve_stored, _stored_manifest, _unframed_policy, _upstream_headers (+1 more)); 8 external calls (stream, Response, StreamingResponse, Request, BackgroundTask, log_error, warn, ws).
-
-
-##### `IngressServe._not_answering`  (lines 684–711)
-
-```
-def _not_answering(self, request: HTTPConnection, claims: IngressClaims) -> Response
-```
-
-**Purpose**: Creates the user-facing response shown when a live sandbox site cannot be reached. For page loads, it shows a waiting page and asks the owning conversation to revive the site.
-
-**Data flow**: It receives the request and authorized claims → builds the same frame-ancestor policy the site would have used → checks whether this request is a document load → returns either a plain 503 message or an HTML waiting page with a background report task.
-
-**Call relations**: _proxy calls this when dialing or reading the upstream site fails, or when an upstream error status would be replaced by the edge. It uses _frame_ancestors so the fallback page can appear in the same frame as the real site.
-
-*Call graph*: calls 1 internal fn (_frame_ancestors); called by 1 (_proxy); 2 external calls (Response, BackgroundTask).
-
-
-##### `IngressServe._serve_stored`  (lines 713–779)
-
-```
-async def _serve_stored(self, request: Request, claims: IngressClaims, files: dict[str, StoredFile], path: str) -> Response
-```
-
-**Purpose**: Serves one file from a stored static site or shipped app bundle. It lets deployed site bytes be read directly from blob storage without starting or contacting the sandbox.
-
-**Data flow**: It receives a request, claims, a file manifest, and a path → allows only GET and HEAD → maps the path to a file or index.html → prepares cache, ETag, content-type, and frame headers → honors matching If-None-Match with 304 → streams the blob bytes from fleet or workspace storage, or returns 404 if the blob vanished.
-
-**Call relations**: _proxy calls this whenever _stored_manifest returns files. It uses _frame_ancestors for browser framing rules and _stored_body to stream after the first chunk has proved the blob exists.
-
-*Call graph*: calls 2 internal fn (_frame_ancestors, _stored_body); called by 1 (_proxy); 5 external calls (__init__, __init__, Response, StreamingResponse, ws).
-
-
-##### `IngressServe._stored_body`  (lines 781–787)
-
-```
-async def _stored_body(self, first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Streams a stored file after the first chunk has already been safely read. This avoids sending a successful response before discovering the blob is missing.
-
-**Data flow**: It receives the first bytes and an async iterator for the remaining bytes → yields the first chunk → yields each later chunk unchanged → produces a byte stream for the HTTP response.
-
-**Call relations**: _serve_stored calls this only after it has already read the first chunk. The resulting stream is passed into StreamingResponse so large files do not need to be loaded all at once.
-
-*Call graph*: called by 1 (_serve_stored).
-
-
-##### `IngressServe._framer_belongs`  (lines 789–824)
-
-```
-async def _framer_belongs(self, workspace_id: UUID, conversation_id: UUID, port: int) -> bool
-```
-
-**Purpose**: Checks whether a site named as an allowed framer belongs to the same workspace. This prevents a token from letting an unrelated site wrap another site in a frame.
-
-**Data flow**: It receives a workspace, conversation, and port → looks for a matching hosted-site row → if not found, checks provisioned shipped apps in that workspace → returns true only when the requested framer is a known site or shipped app for that workspace.
-
-**Call relations**: _open calls this while validating a view token that includes a sibling framer. If it returns false, _open rejects the link instead of setting a session cookie.
-
-*Call graph*: called by 1 (_open); 5 external calls (select, workspace_tx, serve_port, shipped_anchor, shipped_app_slug).
-
-
-##### `IngressServe._frame_ancestors`  (lines 826–834)
-
-```
-def _frame_ancestors(self, claims: IngressClaims) -> str
-```
-
-**Purpose**: Builds the browser security rule that says who may embed this site in a frame. This is important because all site labels share one parent domain, so sibling sites need explicit limits.
-
-**Data flow**: It receives ingress claims → starts with the configured app origin or 'none' → if the claims name an allowed framer, adds that exact sibling site origin → returns the source list for a Content-Security-Policy frame-ancestors directive.
-
-**Call relations**: _proxy, _serve_stored, and _not_answering call this when writing response headers. It uses site_label to render the sibling site origin in the same hostname format ingress serves.
-
-*Call graph*: called by 3 (_not_answering, _proxy, _serve_stored); 1 external calls (site_label).
-
-
-##### `IngressServe._upstream_url`  (lines 836–839)
-
-```
-def _upstream_url(self, scheme: str, host: str, path: str, query_string: bytes) -> str
-```
-
-**Purpose**: Builds the exact URL used to contact a live sandbox site. It preserves the requested path and query string while safely escaping the path.
-
-**Data flow**: It receives a scheme, host, path, and raw query string → quotes unsafe path characters but leaves normal URL path characters alone → appends the decoded query string if present → returns the upstream URL.
-
-**Call relations**: _proxy uses it for live HTTP forwarding, and _socket uses it for WebSocket forwarding. It is the bridge from public site URL to private sandbox address.
-
-*Call graph*: called by 2 (_proxy, _socket); 1 external calls (quote).
-
-
-##### `IngressServe._stored_handle`  (lines 841–851)
-
-```
-async def _stored_handle(self, workspace_id: UUID, conversation_id: UUID) -> str | None
-```
-
-**Purpose**: Reads the saved sandbox handle for a conversation. The handle tells the carrier which running or resumable sandbox container belongs to that conversation.
-
-**Data flow**: It receives a workspace ID and conversation ID → queries the conversation table inside a workspace transaction → returns the sandbox_handle value, or None if no matching conversation exists.
-
-**Call relations**: _dial_site calls this before asking a carrier to connect to a live port. Without a handle, _dial_site cannot safely know which sandbox to dial.
-
-*Call graph*: called by 1 (_dial_site); 2 external calls (select, workspace_tx).
-
-
-##### `IngressServe._upstream_headers`  (lines 853–887)
-
-```
-def _upstream_headers(self, request: HTTPConnection, dial_headers: Mapping[str, str]) -> list[tuple[str, str]]
-```
-
-**Purpose**: Creates the headers that a live sandbox server is allowed to see. It removes proxy-only, handshake-only, host, and UFO session cookie data, then adds carrier-supplied dial headers.
-
-**Data flow**: It receives the viewer connection and dial headers → walks through the viewer’s headers → drops unsafe or inappropriate names → removes the ingress session cookie from Cookie headers while keeping site-owned cookies → appends the dial headers → returns a clean list of headers for the upstream request or WebSocket.
-
-**Call relations**: _proxy and _socket call this before contacting live sandbox servers. It protects the ingress session token from agent-authored code and avoids inventing headers the viewer did not send.
-
-*Call graph*: called by 2 (_proxy, _socket).
-
-
-##### `IngressServe._unframed_policy`  (lines 889–901)
-
-```
-def _unframed_policy(self, policy: str) -> str
-```
-
-**Purpose**: Removes a site’s own frame-ancestors rule from a Content Security Policy while preserving the rest. This lets core decide framing rules without stripping the site’s other browser protections.
-
-**Data flow**: It receives one Content-Security-Policy header string → splits it into directives → filters out any frame-ancestors directive → joins the remaining directives → returns the rewritten policy, or an empty string if nothing remains.
-
-**Call relations**: _proxy calls this while copying live upstream response headers. It pairs with _frame_ancestors, which writes the authoritative framing rule.
-
-*Call graph*: called by 1 (_proxy).
-
-
-##### `IngressServe._confined_cookie`  (lines 903–930)
-
-```
-def _confined_cookie(self, header: str) -> str | None
-```
-
-**Purpose**: Rewrites or rejects a Set-Cookie header from a hosted site so the cookie cannot escape that exact site origin. It also blocks cookies in UFO’s reserved namespace.
-
-**Data flow**: It receives a raw Set-Cookie header → parses the cookie name → drops nameless cookies, malformed cookies, and names starting with the reserved UFO prefix → removes any Domain attribute → returns the confined header or None to suppress it.
-
-**Call relations**: _proxy calls this for every Set-Cookie header from a live upstream response. Accepted cookies are then appended to the response sent to the browser.
-
-*Call graph*: called by 1 (_proxy).
-
-
-##### `IngressServe._body`  (lines 932–942)
-
-```
-async def _body(self, upstream: httpx.Response) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Streams raw bytes from a live upstream HTTP response and guarantees the upstream connection is closed afterward. This prevents leaked pooled connections when a stream ends early or fails.
-
-**Data flow**: It receives an httpx upstream response → yields each raw response chunk as it arrives → always closes the upstream response in a finally step → produces an async byte stream for the browser response.
-
-**Call relations**: _proxy wraps this in a StreamingResponse for live HTTP traffic. It works alongside the response background close, covering both normal completion and mid-stream failure.
-
-*Call graph*: called by 1 (_proxy); 2 external calls (aclose, aiter_raw).
-
-
-##### `IngressServe._no_socket_view`  (lines 944–950)
-
-```
-async def _no_socket_view(self, websocket: WebSocket) -> None
-```
-
-**Purpose**: Rejects WebSocket attempts to the special token-opening path. That path is only for HTTP token exchange, not for sandbox code to receive credentials.
-
-**Data flow**: It receives a WebSocket handshake → creates a refusal saying the link is not valid → sends that refusal as an HTTP denial response instead of accepting the socket.
-
-**Call relations**: IngressServe.app routes WebSocket handshakes on the view path here. It delegates the actual denial response formatting to _refuse.
-
-*Call graph*: calls 1 internal fn (_refuse); 1 external calls (__init__).
-
-
-##### `IngressServe._socket`  (lines 952–1008)
-
-```
-async def _socket(self, websocket: WebSocket, path: str) -> None
-```
-
-**Purpose**: Relays a WebSocket between the browser and a live sandbox site. This supports site features that need two-way live communication, such as hot reload or push updates.
-
-**Data flow**: It receives a WebSocket and path → checks the Origin header is the same host → authorizes the session → refuses static or shipped sites → dials the live sandbox → opens an upstream WebSocket with safe headers and offered subprotocols → accepts the viewer socket only after upstream accepts → relays messages until one side closes or fails.
-
-**Call relations**: IngressServe.app routes catch-all WebSocket traffic here. It coordinates _same_origin, _authorized, _stored_manifest, _dial_site, _upstream_url, _upstream_headers, _refuse, _relay, and _end.
-
-*Call graph*: calls 9 internal fn (_authorized, _dial_site, _end, _refuse, _relay, _same_origin, _stored_manifest, _upstream_headers, _upstream_url); 6 external calls (__init__, accept, log_error, ws, connect, Subprotocol).
-
-
-##### `IngressServe._same_origin`  (lines 1010–1022)
-
-```
-def _same_origin(self, websocket: WebSocket) -> bool
-```
-
-**Purpose**: Checks that a WebSocket was opened by the same site host it is trying to reach. This closes a gap where browser CORS rules do not protect WebSocket handshakes.
-
-**Data flow**: It receives a WebSocket handshake → reads the Origin header → compares the origin hostname with the requested WebSocket hostname → returns true only when they match and the Origin is present.
-
-**Call relations**: _socket calls this before session authorization or dialing. If it fails, _socket refuses the handshake rather than creating a cross-site channel.
-
-*Call graph*: called by 1 (_socket); 1 external calls (urlsplit).
-
-
-##### `IngressServe._refuse`  (lines 1024–1037)
-
-```
-async def _refuse(self, websocket: WebSocket, refusal: SiteRefusal) -> None
-```
-
-**Purpose**: Turns a SiteRefusal into a WebSocket handshake denial response. This lets denied WebSocket attempts receive the same status and body an HTTP request would have received.
-
-**Data flow**: It receives a WebSocket and refusal object → builds a Response with the refusal’s message, status, media type, and no-store cache header → sends it as a denial response without accepting the socket.
-
-**Call relations**: _no_socket_view and _socket call this whenever a WebSocket must not be opened. It is the shared exit door for failed WebSocket handshakes.
-
-*Call graph*: called by 2 (_no_socket_view, _socket); 2 external calls (send_denial_response, Response).
-
-
-##### `IngressServe._relay`  (lines 1039–1056)
-
-```
-async def _relay(self, viewer: WebSocket, upstream: ClientConnection) -> None
-```
-
-**Purpose**: Runs the two halves of a WebSocket relay at the same time. When either side finishes, it stops the other side too.
-
-**Data flow**: It receives the viewer WebSocket and upstream connection → starts one task for viewer-to-site messages and one for site-to-viewer messages → waits until the first task completes → cancels the other task → raises any real failure from the completed side.
-
-**Call relations**: _socket calls this after both WebSockets are open. It delegates direction-specific message copying to _viewer_to_site and _site_to_viewer.
-
-*Call graph*: calls 2 internal fn (_site_to_viewer, _viewer_to_site); called by 1 (_socket); 3 external calls (create_task, gather, wait).
-
-
-##### `IngressServe._viewer_to_site`  (lines 1058–1067)
-
-```
-async def _viewer_to_site(self, viewer: WebSocket, upstream: ClientConnection) -> None
-```
-
-**Purpose**: Copies WebSocket messages from the browser to the site. It preserves whether each message is text or binary because that can matter to the site protocol.
-
-**Data flow**: It receives the viewer socket and upstream socket → repeatedly reads viewer messages → stops on viewer disconnect → sends text messages as text and byte messages as bytes to the upstream site.
-
-**Call relations**: _relay starts this as one of its two concurrent tasks. It is cancelled when the site-to-viewer direction finishes first.
-
-*Call graph*: called by 1 (_relay); 2 external calls (receive, send).
-
-
-##### `IngressServe._site_to_viewer`  (lines 1069–1082)
-
-```
-async def _site_to_viewer(self, upstream: ClientConnection, viewer: WebSocket) -> None
-```
-
-**Purpose**: Copies WebSocket messages from the site back to the browser and then closes the browser side with an appropriate close code. It avoids sending close codes that the WebSocket standard forbids on the wire.
-
-**Data flow**: It receives the upstream socket and viewer socket → reads each upstream message → sends strings as text and bytes as binary → when upstream closes, chooses a safe close code and reason → asks _end to close the viewer socket.
-
-**Call relations**: _relay starts this as the other concurrent task. It calls _end for the final close and may be cancelled if the viewer-to-site direction ends first.
-
-*Call graph*: calls 1 internal fn (_end); called by 1 (_relay); 3 external calls (suppress, send_bytes, send_text).
-
-
-##### `IngressServe._end`  (lines 1084–1094)
-
-```
-async def _end(self, viewer: WebSocket, code: int, reason: str) -> None
-```
-
-**Purpose**: Closes the viewer WebSocket without letting close-time errors hide the original problem. It treats an already-gone browser as a normal terminal state.
-
-**Data flow**: It receives a viewer socket, close code, and reason → attempts to close the socket → suppresses any exception raised because the connection is already gone → returns nothing.
-
-**Call relations**: _site_to_viewer calls it after the upstream socket closes, and _socket calls it after relay failures. It is the safe final cleanup step for WebSocket handling.
-
-*Call graph*: called by 2 (_site_to_viewer, _socket); 2 external calls (suppress, close).
-
-
-##### `ingress_base_host`  (lines 1097–1108)
-
-```
-def ingress_base_host(configured: str | None) -> str
-```
-
-**Purpose**: Extracts the wildcard base hostname that all served site subdomains must sit under. It refuses startup if that public ingress URL is missing or malformed.
-
-**Data flow**: It receives the configured ingress public URL or None → parses out the hostname → returns the hostname when present → raises a runtime error when no usable host exists.
-
-**Call relations**: run calls this while building IngressServe. The result is later used by _site to decide whether a request host belongs to this ingress.
-
-*Call graph*: called by 1 (run); 1 external calls (urlsplit).
-
-
-##### `ingress_frame_ancestor`  (lines 1111–1121)
-
-```
-def ingress_frame_ancestor(configured: str | None) -> str
-```
-
-**Purpose**: Builds the deploy-wide browser framing source for hosted sites from the main app’s public URL. If no app URL is configured, it returns a rule that allows no framing.
-
-**Data flow**: It receives the configured app public base URL or None → parses scheme, host, and optional port → returns an origin string such as https://example.com, or 'none' if the URL is not usable.
-
-**Call relations**: run calls this during startup and stores the result on IngressServe. Later _frame_ancestors uses it as the base framing permission on every served response.
-
-*Call graph*: called by 1 (run); 1 external calls (urlsplit).
-
-
-##### `upstream_client`  (lines 1124–1147)
-
-```
-def upstream_client() -> httpx.AsyncClient
-```
-
-**Purpose**: Creates the shared HTTP client used to contact live sandbox sites. It is deliberately configured not to remember or replay cookies between sites.
-
-**Data flow**: It creates timeout and connection-limit settings → creates a cookie jar whose policy accepts no domains → builds and returns an httpx AsyncClient using those limits and cookie rules.
-
-**Call relations**: run creates this once and passes it into IngressServe and SiteReporter. _proxy later uses the client to send live HTTP requests.
-
-*Call graph*: called by 1 (run); 4 external calls (CookieJar, DefaultCookiePolicy, AsyncClient, Limits).
-
-
-##### `run`  (lines 1150–1179)
-
-```
-def run() -> None
-```
-
-**Purpose**: Starts the ingress server process. It loads configuration, prepares dependencies, constructs IngressServe, and hands its app to Uvicorn.
-
-**Data flow**: It loads config → initializes observability and database access → verifies the database and ingress secret → loads extension manifests and selects sandbox carriers → creates the HTTP client, blob store, reporter, and IngressServe → logs startup → runs Uvicorn on the configured port with WebSocket size and compression settings.
-
-**Call relations**: This is the top-level entry function for the file. It calls ingress_base_host, ingress_frame_ancestor, upstream_client, and many setup helpers before the request-time routes in IngressServe.app become active.
-
-*Call graph*: calls 3 internal fn (ingress_base_host, ingress_frame_ancestor, upstream_client); 15 external calls (__init__, __init__, run, blob_store_for, load_config, init_db, verify_db_reachable, init_o11y, log, ingress_secret (+5 more)).
-
-
-### `core/src/ufo/harness/sandbox/ingress_host.py`
-
-`domain_logic` · `site provisioning and request handling`
-
-A hosted sandbox site needs its own web origin, meaning its own hostname, so that browser cookies, storage, and root-relative links stay separate from every other site. This file is the address-making tool for that. It takes a conversation identity and the port where that conversation’s sandbox should be served, packs them into bytes, signs them with a shared deploy secret, and encodes the result as a DNS-safe label.
-
-The signature is not the main permission check. It is more like a tamper-evident seal on an envelope: it proves the label was minted by this deployment, but later token and cookie checks still decide whether a visitor may enter. This matters because a guessed hostname should be rejected before the system even reads conversation data or contacts a sandbox.
-
-The file also makes sure there is exactly one spelling for each site label. Base32 encoding can leave unused bits, which could otherwise allow several different-looking labels to decode to the same bytes. Browsers would treat those as different origins, splitting cookies and storage. To prevent that, parsing decodes the label, re-encodes it, and rejects anything that is not the canonical lowercase spelling.
-
-Besides labels for conversation-backed sites, it includes helpers for shipped app pages: finding a stable app slug and creating a synthetic UUID anchor when no conversation row exists.
-
-#### Function details
-
-##### `serve_port`  (lines 57–63)
-
-```
-def serve_port(conversation_id: UUID) -> int
-```
-
-**Purpose**: Chooses the stable local port assigned to a conversation’s hosted sandbox site. This keeps the same conversation on the same port without needing to store a separate port number anywhere.
-
-**Data flow**: It receives a conversation UUID → turns the UUID’s large integer value into a number inside a fixed port range → returns a valid application port between the configured floor and span.
-
-**Call relations**: Other parts of the sandbox hosting flow can call this when they need to know where a conversation’s site should live. By deriving the port from the conversation ID, every caller gets the same answer without coordinating through storage.
-
-
-##### `shipped_app_slug`  (lines 66–74)
-
-```
-def shipped_app_slug(provisioned_by: str | None) -> str | None
-```
-
-**Purpose**: Extracts the stable page slug from a shipped app’s provision name. It uses the extension’s identity rather than a user-visible name, because visible names can change or gain suffixes after collisions.
-
-**Data flow**: It receives a provision name string, or nothing → if there is no name, it returns nothing → if the name exactly matches the expected pattern like `app_something`, it returns the `something` part → otherwise it returns nothing.
-
-**Call relations**: This is used when the system needs a dependable identifier for a shipped app page. It prepares the slug that can later be used to build stable origins or bundle paths.
-
-
-##### `shipped_anchor`  (lines 77–82)
-
-```
-def shipped_anchor(workspace_id: UUID, slug: str) -> UUID
-```
-
-**Purpose**: Creates a stable synthetic UUID for a shipped app page inside one workspace. This gives a shipped page its own browser cookies and storage even though it is not backed by a normal conversation row.
-
-**Data flow**: It receives a workspace UUID and an app slug → combines them with a fixed label into one namespace string → uses UUID version 5, which deterministically creates the same UUID from the same text → returns that UUID.
-
-**Call relations**: When a shipped app page needs an origin-like identity, this function supplies it. It calls the standard UUID generator for name-based UUIDs so the same workspace and slug always produce the same anchor.
-
-*Call graph*: 1 external calls (uuid5).
-
-
-##### `site_label`  (lines 85–90)
-
-```
-def site_label(conversation_id: UUID, port: int) -> str
-```
-
-**Purpose**: Builds the DNS label for one conversation’s sandbox port. Someone uses it when creating the hostname that a browser will visit for that hosted site.
-
-**Data flow**: It receives a conversation UUID and a port number → first rejects ports outside the normal addressable TCP port range → joins the conversation bytes and two port bytes into an address → signs that address → base32-encodes the address plus signature → returns a short lowercase DNS-safe label.
-
-**Call relations**: This is the minting side of the label flow. It relies on `_signature` to add the tamper-evident seal and `_encode` to turn raw bytes into a hostname-friendly string. Later, `parse_site_label` performs the reverse check when a request arrives.
-
-*Call graph*: calls 2 internal fn (_encode, _signature).
-
-
-##### `parse_site_label`  (lines 93–105)
-
-```
-def parse_site_label(label: str) -> tuple[UUID, int]
-```
-
-**Purpose**: Checks a DNS label and recovers the conversation UUID and port it names. It rejects labels that are malformed, not signed by this deployment, or not written in the one allowed canonical spelling.
-
-**Data flow**: It receives a label string from a hostname → base32-decodes it while accepting DNS-style case differences → re-encodes the bytes and compares that to the lowercase label to catch alternate spellings → splits the bytes into address and signature → recomputes the expected signature and compares it safely → returns the UUID and port if everything matches, or raises `SiteLabelError` if anything is wrong.
-
-**Call relations**: This is the checking side of the label flow, used before trusting a hostname as pointing at a sandbox site. It calls `_encode` to enforce canonical spelling, `_signature` to verify the seal, and standard library tools for base32 decoding, constant-time signature comparison, and UUID reconstruction.
-
-*Call graph*: calls 2 internal fn (_encode, _signature); 4 external calls (__init__, b32decode, compare_digest, UUID).
-
-
-##### `_encode`  (lines 108–109)
-
-```
-def _encode(raw: bytes) -> str
-```
-
-**Purpose**: Turns raw label bytes into the lowercase base32 text used inside DNS names. It is a small shared helper so label creation and label verification spell bytes the same way.
-
-**Data flow**: It receives bytes → base32-encodes them → removes padding characters that are not needed in the DNS label → lowercases the result → returns the final text.
-
-**Call relations**: Both `site_label` and `parse_site_label` call this. During creation it produces the label, and during parsing it proves the incoming label is the exact canonical spelling of the decoded bytes.
-
-*Call graph*: called by 2 (parse_site_label, site_label); 1 external calls (b32encode).
-
-
-##### `_signature`  (lines 112–114)
-
-```
-def _signature(address: bytes) -> bytes
-```
-
-**Purpose**: Creates the short cryptographic signature attached to a site address. The signature proves that the conversation-and-port bytes were produced with this deployment’s secret, not invented by a random caller.
-
-**Data flow**: It receives the raw address bytes → reads the ingress secret for this deployment → combines a fixed label with the address and hashes it using HMAC-SHA256, a standard keyed hash used to detect tampering → keeps only the first four bytes → returns those signature bytes.
-
-**Call relations**: This helper is used by `site_label` when minting a label and by `parse_site_label` when checking one. Because both sides call the same function, a label is accepted only if its embedded signature matches what this deployment would have produced.
-
-*Call graph*: called by 2 (parse_site_label, site_label); 2 external calls (new, ingress_secret).
-
-
-### `core/src/ufo/harness/sandbox/ingress_url.py`
-
-`io_transport` · `when creating browser access links for sandbox ports`
-
-A sandbox may run a web app on an internal port, but a user needs a normal browser link to open it. This file turns the project’s public ingress address into that link. Think of it like writing a temporary visitor badge: it says which workspace, which conversation, which port, and when access ends.
-
-The main function first checks whether a public ingress base URL exists. If not, there is no browser link to make. It then creates a signed ingress token, which is a tamper-resistant string containing the routing details and expiry time. If the sandbox content came from a shipped artifact, it can also include that artifact’s slug and digest so the receiving side knows exactly what was published.
-
-The file also supports a framing case, where one sandbox view is opened from inside another. The helper checks whether the referring page is on the same ingress domain and has a valid sandbox site label. If so, it records that parent sandbox as a framer claim. This lets later code understand the relationship without trusting arbitrary outside websites.
-
-Finally, the URL is assembled as a subdomain based on the conversation and port, followed by the ingress token and the requested entry path.
-
-#### Function details
-
-##### `mint_ingress_view_url`  (lines 17–50)
-
-```
-def mint_ingress_view_url(public_url: str | None, workspace_id: UUID, conversation_id: UUID, port: int, entry_path: str, *, framed_from: str | None=None, shipped_slug: str | None=None, shipped_digest:
-```
-
-**Purpose**: Creates the temporary public URL that a browser can use to open one sandbox port. It packages the workspace, conversation, port, expiry time, optional shipped-artifact details, and optional framing information into a signed token.
-
-**Data flow**: It receives a base public URL, workspace and conversation IDs, a sandbox port, and the path the user should open. If there is no base URL, it returns nothing. Otherwise it parses the base URL, builds optional shipped-artifact information, asks `_framer_claim` whether the page was opened from another trusted sandbox view, creates signed ingress claims, turns the conversation and port into a subdomain label, safely quotes the path, and returns the final browser URL string.
-
-**Call relations**: This is the file’s public workhorse. Code that needs to show or hand out a sandbox browser link calls it. During URL creation it delegates the parent-frame check to `_framer_claim`, uses ingress token code to mint the signed token, and uses ingress host code to create the subdomain label that routes the request to the right sandbox port.
-
-*Call graph*: calls 1 internal fn (_framer_claim); 7 external calls (__init__, __init__, now, site_label, mint_ingress_token, quote, urlsplit).
-
-
-##### `_framer_claim`  (lines 53–73)
-
-```
-def _framer_claim(base: SplitResult, framed_from: str | None) -> FramerClaim | None
-```
-
-**Purpose**: Figures out whether a sandbox view was opened from another trusted sandbox view, and if so records which conversation and port that parent view belongs to. This prevents the system from accepting framing information from unrelated or malicious websites.
-
-**Data flow**: It receives the parsed public ingress base URL and an optional `framed_from` URL. It parses the `framed_from` value, compares its scheme, port, and host against the trusted base domain, and rejects it if it does not look like a matching sandbox subdomain. If the subdomain label can be decoded into a conversation ID and port, it returns a `FramerClaim`; otherwise it returns nothing.
-
-**Call relations**: It is called only by `mint_ingress_view_url` while that function is building the signed ingress token. Its result is folded into the token claims, so later ingress code can know about a trusted parent sandbox frame without having to re-check the original referring URL.
-
-*Call graph*: called by 1 (mint_ingress_view_url); 3 external calls (__init__, parse_site_label, urlsplit).
-
-
-### `core/src/ufo/harness/sandbox/site_report.py`
-
-`io_transport` · `request handling when a hosted sandbox site fails to answer`
-
-A hosted site runs inside a sandbox, while the ingress is the front door that browser traffic reaches first. If the ingress sees that nothing is listening on the site’s port, it cannot fix the problem itself: it is a proxy, not the conversation engine. This file defines the small bridge between those two worlds.
-
-On the ingress side, `SiteReporter` creates a short-lived signed token saying, in effect, “for this workspace, this conversation, and this port, the site did not answer.” It posts that token to an internal endpoint on the serve process. If posting fails, it logs a warning and stops; the browser’s waiting page will reload and try again later.
-
-On the serve side, `SiteReports` exposes that internal endpoint. It verifies the signed token, finds the conversation’s agent, and asks that agent to investigate and restart the site. The report is not treated as a user action. It uses workspace authority instead, because the browser visitor may not be the person who built the page.
-
-A key detail is idempotency: repeated reloads should not create a flood of duplicate repair turns. The file groups reports into fixed time buckets, so many reloads during the same bucket become one agent invocation. Like a doorbell that only rings once every few minutes no matter how often it is pressed, this keeps the repair signal useful instead of noisy.
-
-#### Function details
-
-##### `SiteReporter.report`  (lines 74–105)
-
-```
-async def report(self, claims: IngressClaims) -> None
-```
-
-**Purpose**: This is the ingress-side sender. When the ingress has already decided that a conversation’s hosted site is down, this function creates a short-lived internal report and sends it to the serve process.
-
-**Data flow**: It receives ingress claims, which identify the workspace, conversation, port, and related access information. If reporting is disabled or the request is for a shipped site rather than a live conversation sandbox, it does nothing. Otherwise it copies the claims, sets a near-future expiry time, removes fields that should not travel on this report, signs them into a token, and posts that token to the internal report endpoint. Nothing is returned. If the HTTP request fails or serve rejects it, the function writes a warning and leaves the next page reload to try again.
-
-**Call relations**: This function is used by the ingress after it has served the member a waiting page because the site did not answer. It relies on the token-minting helper to make the report trustworthy, uses the current time to limit how long the report is valid, and uses warning logging when the hop to serve fails or is refused.
-
-*Call graph*: 4 external calls (replace, now, warn, mint_ingress_token).
-
-
-##### `SiteReports.router`  (lines 125–128)
-
-```
-def router(self) -> APIRouter
-```
-
-**Purpose**: This builds the small FastAPI router that serve mounts so it can receive site-down reports from the ingress. A router is a bundle of web routes, like a small address book for HTTP requests.
-
-**Data flow**: It creates a new router, attaches the internal site-report path as a POST endpoint, points that endpoint at `SiteReports._report`, and returns the router to whoever is assembling the web application.
-
-**Call relations**: This is the setup step for the serve-side half of the bridge. During application wiring, serve calls it to expose the endpoint that `SiteReporter.report` posts to later.
-
-*Call graph*: 1 external calls (APIRouter).
-
-
-##### `SiteReports._report`  (lines 130–154)
-
-```
-async def _report(self, authorization: Annotated[str, Header()]='') -> Response
-```
-
-**Purpose**: This is the serve-side receiver for a site-down report. It checks that the report is authentic, finds the right conversation agent, and asks that agent to repair the non-answering site.
-
-**Data flow**: It reads the HTTP `Authorization` header, removes the `Bearer` prefix, and verifies the signed ingress token using the current time and the special site-report token kind. If verification fails, it rejects the request with an unauthorized error. If the token is valid, it enters the named workspace, looks up the agent for the reported conversation, and returns 404 if that conversation is not present. If an agent exists, it builds a time-bucketed idempotency key so repeated reloads in the same period count as the same report, then invokes the agent with a plain message saying which port stopped answering. If the agent has been archived, it treats the report as harmless and returns success. In normal successful cases it returns an empty 204 response.
-
-**Call relations**: This function is called by FastAPI when the internal report endpoint receives a POST. It hands token checking to the ingress-token verifier, uses the workspace context while looking up and invoking the conversation’s agent, and gives the invocation workspace-level authority rather than acting as a particular member. The idempotency key it creates is what lets the broader turn-invocation system fold many identical reports into one repair turn.
-
-*Call graph*: 7 external calls (now, HTTPException, Response, verify_ingress_token, authority_from_member_id, conversation_agent_id, ws).
-
-
-### Conversation homepage bindings
-Conversation and workspace bindings expose owned sites in chat views and retire seeded homepages when the built-in chat homepage should take over.
-
-### `extensions/sites/ufo_ext_sites/conversation_slot.py`
-
-`orchestration` · `request handling`
-
-This file is the bridge between stored hosted sites and the conversation sidebar or slot that lists them. A “slot” here means a small named section of conversation data, like a shelf in the interface. Without this file, the system might still have hosted sites in storage, but the conversation view would not know how to count them or safely show their links.
-
-The main exported piece is `SITES_SLOT`, a `ConversationSlotProvider`. It gives the slot an id, label, icon, payload type, and two callback functions: one to summarize the slot and one to read its full contents.
-
-The careful part is authorization. The code does not simply return every site attached to the conversation. First, it looks at `ctx.visible_items`, which are the conversation objects the current viewer is allowed to see. It converts those object names into site names, then asks `HostedSites` for matching site rows. After that, it checks the returned rows against both the expected site name and its generation number. That generation check helps ensure the visible authorization object still matches the stored site version, like checking that a ticket is not only for the right event but also for the right date.
-
-Finally, it builds public URLs for the allowed sites, caps the result at `CONVERSATION_SITES_MAX`, and marks the payload as truncated if there were more sites than can be shown.
-
-#### Function details
-
-##### `_read`  (lines 13–46)
-
-```
-async def _read(ctx: ConversationSlotContext) -> SitesSlotPayload
-```
-
-**Purpose**: This function returns the actual list of sites that should appear in the conversation’s “Sites” slot. It is careful to include only sites backed by visible authorization objects, so a viewer does not see site links they are not allowed to see.
-
-**Data flow**: It receives a conversation slot context, which includes the conversation id, visible conversation items, workspace/store information, transaction, and public base URL. It turns visible item names into expected site names, reads matching rows from `HostedSites`, filters out any row whose authorization object or generation does not match, then turns the remaining rows into `ConversationSite` entries with public URLs. It returns a `SitesSlotPayload` containing at most the configured maximum number of sites, plus a flag saying whether extra authorized sites were left out.
-
-**Call relations**: When the `SITES_SLOT` provider needs full content for the slot, it uses this function as its reader. Inside that flow, `_read` asks `site_name_from_object` to interpret visible authorization objects, uses `HostedSites` to fetch stored site records, checks names with `site_object_name`, builds display links with `site_url`, wraps each allowed row as a `ConversationSite`, and returns everything inside a `SitesSlotPayload`.
-
-*Call graph*: 6 external calls (__init__, __init__, __init__, site_name_from_object, site_object_name, site_url).
-
-
-##### `_summarize`  (lines 49–51)
-
-```
-async def _summarize(ctx: ConversationSlotContext) -> int | None
-```
-
-**Purpose**: This function gives a quick count for the Sites slot without reading full site details. It is used when the interface only needs to know whether there are sites to mention, and roughly how many can be shown.
-
-**Data flow**: It receives the conversation slot context and looks only at `ctx.visible_items`. It counts them up to `CONVERSATION_SITES_MAX`; if the count is zero, it returns `None` so the slot can appear empty or absent, otherwise it returns the count.
-
-**Call relations**: The `SITES_SLOT` provider uses this function as its summary callback. Unlike `_read`, it does not contact storage or build URLs; it simply gives the slot system a lightweight number before or instead of loading the full site list.
-
-
-### `extensions/sites/ufo_ext_sites/main_homepage.py`
-
-`domain_logic` · `background scheduled cleanup`
-
-This file exists because the chat app has its own built-in homepage, but older workspace setup may have attached a separate hosted page to the workspace's main agent. If that old attachment stays in place, the system finds it first and shows it instead of the chat screen. Think of it like removing an old forwarding sign from a front door so visitors reach the actual lobby again.
-
-The cleanup runs as a recurring sweep, not as a database migration, because not every workspace is ready at migration time. Some workspaces become owned by the chat app later, during normal provisioning or rolling deploys. The sweep looks for workspaces where the main agent has already been claimed by the chat app, still has a hosted homepage bound to it, and has not already been marked as cleaned up.
-
-When it finds one, it releases the binding between the main agent and the hosted page. It does not delete the page. Instead, the page goes back to using its own visibility setting, but capped so it does not become visible to more people than it was before. Finally, the file records a marker saying this workspace has been released. That marker matters because users may later choose their own homepage; the sweep should not undo a real user choice after the one-time cleanup is finished.
-
-#### Function details
-
-##### `_the_chat_main_agent`  (lines 67–75)
-
-```
-def _the_chat_main_agent() -> sa.ColumnElement[bool]
-```
-
-**Purpose**: This builds the database test for the exact agent this cleanup cares about: the workspace's main agent after it has been taken over by the chat app. It prevents the sweep from touching an agent too early, before the chat app is actually in charge.
-
-**Data flow**: It takes no outside input. It reads the predefined database columns for the agent table and produces a combined condition: the agent must be marked as main, must have been provisioned by the chat extension, and must have the chat app's declared name.
-
-**Call relations**: The candidate search uses this condition to find only relevant workspaces. The release step uses the same condition again before changing anything, so the sweep and the actual cleanup agree on what counts as the chat main agent.
-
-*Call graph*: called by 2 (release_main_homepage, with_a_bound_main_homepage); 1 external calls (and_).
-
-
-##### `unreleased_main_homepage_workspaces`  (lines 78–97)
-
-```
-def unreleased_main_homepage_workspaces(extension: str) -> WorkspaceCandidates
-```
-
-**Purpose**: This declares which workspaces should be offered to the scheduled cleanup job. A workspace qualifies when it still has a hosted homepage bound to the chat-owned main agent and has not yet been marked as released.
-
-**Data flow**: It receives the extension name used for the marker record. Inside, it defines a database query that finds matching workspace IDs, then wraps that query in the job system's workspace-candidate format. The result is not the cleanup itself, but a way for the job runner to know which workspaces need attention.
-
-**Call relations**: The job framework calls this when it needs candidates for the sweep. It hands the framework a query-building helper, and the framework turns those workspace IDs into per-workspace job runs.
-
-*Call graph*: 1 external calls (owner_candidates).
-
-
-##### `unreleased_main_homepage_workspaces.with_a_bound_main_homepage`  (lines 84–95)
-
-```
-def with_a_bound_main_homepage() -> sa.Select[tuple[UUID]]
-```
-
-**Purpose**: This builds the actual database query for workspaces that still need the one-time homepage release. It looks for a bound hosted page on the chat-owned main agent and excludes workspaces that already have the release marker.
-
-**Data flow**: It reads from the hosted-site table, the agent table, and the extension store table. It joins hosted pages to their homepage agent, checks that the agent is the chat main agent, checks that no release marker exists for that workspace, and outputs workspace IDs grouped so each workspace appears once.
-
-**Call relations**: This helper is passed to the workspace-candidate machinery by `unreleased_main_homepage_workspaces`. It relies on `_the_chat_main_agent` so that the candidate list uses the same definition of 'chat main agent' as the cleanup function itself.
-
-*Call graph*: calls 1 internal fn (_the_chat_main_agent); 4 external calls (exists, literal, select, join).
-
-
-##### `released_visibility`  (lines 100–104)
-
-```
-def released_visibility(site: str, agent: str) -> Visibility
-```
-
-**Purpose**: This decides how visible a hosted page should be after it is no longer bound to the main agent. It chooses the more restrictive of the page's own stored visibility and the agent's visibility, so the cleanup does not accidentally expose the page to more people.
-
-**Data flow**: It receives two visibility values: one from the hosted page and one from the agent. It converts each into an ordered level, compares them, and returns the narrower level. The output is the safe visibility to write back when releasing the homepage binding.
-
-**Call relations**: The release step calls this only when it has found a bound homepage to release. Its result is handed to the hosted-site store so the page resumes normal visibility without becoming broader than before.
-
-*Call graph*: called by 1 (release_main_homepage); 1 external calls (visibility_level).
-
-
-##### `release_main_homepage`  (lines 107–130)
-
-```
-async def release_main_homepage(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This is the scheduled job's per-workspace cleanup action. It finds the workspace's chat-owned main agent, releases any hosted homepage bound to it, and writes a marker so the release is not repeated later.
-
-**Data flow**: It receives an extension context, which gives access to the current workspace, database transactions, and the extension's small key-value store. First it looks up the chat-owned main agent in this workspace. If there is none, it stops. If there is one, it asks the hosted-site store whether that agent has a bound homepage. When a bound page exists, it releases the binding using a safe visibility value. Finally, it writes a release marker containing the main agent ID.
-
-**Call relations**: The job runner calls this for each workspace selected by the candidate query. It uses `_the_chat_main_agent` to verify the target agent, `HostedSites` to read and change homepage bindings, and `released_visibility` to avoid widening access. If the process crashes after releasing but before writing the marker, the next run can safely come back: the page is already unbound, and the marker can then be written.
-
-*Call graph*: calls 3 internal fn (transaction, _the_chat_main_agent, released_visibility); 2 external calls (__init__, select).
-
-
-### Sharing surfaces and previews
-Public hosted-site surfaces enforce visibility, frame share links safely, and generate preview imagery for unfurls and social cards.
-
-### `extensions/sites/ufo_ext_sites/share_card.py`
-
-`domain_logic` · `site deploy or share-card backfill`
-
-When a public hosted site is shared in Slack, Twitter, or another app, those apps often show a large “link card” image. Without this file, every hosted site would fall back to a generic brand image, so different sites would look the same when shared. This module creates a custom card for each site: a dark branded panel on the left, and the site’s own front page on the right.
-
-The work happens inside the site’s sandbox, which is the isolated environment where the site already runs. That matters because the sandbox has access to the local site URL and to Chrome or Chromium, the browser used to take screenshots. First, the file asks the browser to photograph the site at the exact size needed for the card. Then it writes a small HTML page that lays out the left brand panel and places the screenshot on the right. A second browser pass renders that HTML page into an image. Finally, Pillow, an image library, converts the result into a progressive JPEG and computes a digest, a fingerprint used to name or verify the image.
-
-The code is deliberately cautious. A share card is decorative, not required for the site to work. If the browser is missing, the screenshot is blank, the image is too large, or storage fails, the error is logged and the site keeps whatever card it already had.
-
-#### Function details
-
-##### `card_page`  (lines 486–511)
-
-```
-def card_page(name: str, drawn: str) -> str
-```
-
-**Purpose**: Builds the HTML page that will become the final share card. It includes the UFO brand panel, the site name, the embedded font and logo, and a placeholder where the site screenshot will later be inserted.
-
-**Data flow**: It receives the site name and instructions for how the screenshot should be sized. It reads the local font and logo files, encodes the font so it can be placed directly inside the page, escapes the site name so user text cannot break the HTML, and returns one complete HTML string with a screenshot placeholder still inside it.
-
-**Call relations**: This is used by `_compose` when it is ready to draw the final card. While building that page, it asks `_lockup` for the logo markup and uses standard encoding and escaping helpers so the browser can safely render the result.
-
-*Call graph*: calls 1 internal fn (_lockup); called by 1 (_compose); 2 external calls (b64encode, escape).
-
-
-##### `_lockup`  (lines 514–518)
-
-```
-def _lockup() -> str
-```
-
-**Purpose**: Extracts the SVG logo markup used in the left brand panel. It removes the document wrapper before the logo is placed inside another HTML page.
-
-**Data flow**: It reads the bundled UFO logo file from disk. It finds the start of the `<svg>` markup and returns only that part, so the logo can be embedded directly into the share-card page.
-
-**Call relations**: It is a small helper called by `card_page`. The larger card-building flow does not call it directly; it only needs the finished HTML page that `card_page` produces.
-
-*Call graph*: called by 1 (card_page).
-
-
-##### `shot_command`  (lines 521–541)
-
-```
-def shot_command(*, url: str, width: int, height: int, scale: int, shot: str, root: str) -> str
-```
-
-**Purpose**: Creates the shell command that will run Chromium inside the sandbox and take a screenshot. It packages the browser driver script, target URL, image size, scale, and output path into one command string.
-
-**Data flow**: It receives the URL to photograph, the desired width and height, the device scale factor, the screenshot output path, and the sandbox root. It quotes paths and URLs so the shell reads them safely, inserts the embedded Python browser driver, and returns a command ready to run in the sandbox.
-
-**Call relations**: `_shoot` calls this when it needs a browser screenshot. This function does not take the picture itself; it prepares the exact command that the sandbox will execute.
-
-*Call graph*: called by 1 (_shoot); 2 external calls (quote, shell_path).
-
-
-##### `draw_from_page`  (lines 544–562)
-
-```
-async def draw_from_page(ctx: ToolContext, sites: HostedSites, conversation_id: UUID, name: str, port: int) -> None
-```
-
-**Purpose**: Creates a new share card from the site’s currently running front page. This is the normal path during a fresh deploy, when the live local site can be photographed directly.
-
-**Data flow**: It receives the tool context, the hosted-sites store, the conversation ID, the site name, and the local port where the site is running. It chooses a runtime path for the screenshot, asks `_shoot` to photograph `http://127.0.0.1:<port>`, and, if that succeeds, passes the screenshot to `_compose` to build and store the final card.
-
-**Call relations**: This is one of the public entry points for this module’s work. It first relies on `_shoot` to capture the site and then hands the successful screenshot to `_compose`, which finishes the card and records it on the site.
-
-*Call graph*: calls 2 internal fn (_compose, _shoot).
-
-
-##### `draw_from_stored_shot`  (lines 565–580)
-
-```
-async def draw_from_stored_shot(ctx: ToolContext, sites: HostedSites, conversation_id: UUID, name: str, blob_key: str) -> None
-```
-
-**Purpose**: Creates a share card for an older site that already has a stored page preview but no share card yet. It lets existing deployments gain cards without needing to re-run the original page capture.
-
-**Data flow**: It receives the tool context, hosted-sites store, conversation ID, site name, and blob key for an existing preview image. It downloads that preview from blob storage, writes it into the sandbox, and then asks `_compose` to turn it into a share card. If the write fails, it logs the failure and stops.
-
-**Call relations**: This is the backfill path beside `draw_from_page`. Instead of calling `_shoot` for the first screenshot, it restores an already stored screenshot and then uses the same `_compose` function as the normal flow.
-
-*Call graph*: calls 2 internal fn (_compose, _undrawn).
-
-
-##### `_shoot`  (lines 583–612)
-
-```
-async def _shoot(ctx: ToolContext, name: str, shot: str, *, url: str, width: int, height: int, scale: int) -> bool
-```
-
-**Purpose**: Takes one browser screenshot and reports whether it succeeded. It is used both for photographing the site itself and for rendering the finished card page.
-
-**Data flow**: It receives the sandbox context, site name, output path, target URL, size, and scale. It first empties the output file so a stale screenshot cannot be mistaken for a new one. Then it builds a browser command with `shot_command`, runs it in the sandbox with a timeout, and returns `True` only if the command exits successfully. On failure, it logs the problem and returns `False`.
-
-**Call relations**: `draw_from_page` calls `_shoot` to capture the live site. `_compose` calls it again to capture the HTML page that represents the finished card. When anything goes wrong, `_shoot` delegates to `_undrawn` so the failure is recorded without stopping site hosting.
-
-*Call graph*: calls 2 internal fn (_undrawn, shot_command); called by 2 (_compose, draw_from_page).
-
-
-##### `_compose`  (lines 615–665)
-
-```
-async def _compose(ctx: ToolContext, sites: HostedSites, conversation_id: UUID, name: str, shot: str, drawn: str) -> None
-```
-
-**Purpose**: Turns an existing screenshot into the final stored share card and updates the site record. This is the central assembly step: build the card page, render it, encode it, store it, and save its reference.
-
-**Data flow**: It receives the sandbox context, hosted-sites store, conversation ID, site name, path to the screenshot, and rules for how that screenshot should be drawn. It writes the card HTML from `card_page`, replaces the screenshot placeholder with a data URI, asks `_shoot` to render the card page to PNG, converts that PNG into a JPEG, stores the JPEG as a preview artifact, and finally writes the blob key and digest onto the hosted site row. If any step fails, it logs the issue and leaves the previous card unchanged.
-
-**Call relations**: Both `draw_from_page` and `draw_from_stored_shot` feed screenshots into `_compose`. Inside the flow, `_compose` uses `card_page` to create the layout, `_shoot` to render it with the browser, `ToolContext.store_preview` to save the finished image, and `HostedSites.set_share_card` to attach the stored card to the site.
-
-*Call graph*: calls 5 internal fn (store_preview, _shoot, _undrawn, card_page, set_share_card); called by 2 (draw_from_page, draw_from_stored_shot).
-
-
-##### `_undrawn`  (lines 668–669)
-
-```
-def _undrawn(name: str, detail: object) -> None
-```
-
-**Purpose**: Logs that a share card could not be drawn. It keeps failures visible to operators while allowing the site itself to keep working.
-
-**Data flow**: It receives the site name and a detail object describing what went wrong. It turns the detail into text, trims it to a safe length, and writes a structured log event named `site_card.undrawn`.
-
-**Call relations**: This is the shared failure-reporting helper for `draw_from_stored_shot`, `_shoot`, and `_compose`. Those functions call it whenever they decide to abandon card generation instead of raising an error to the user-facing site flow.
-
-*Call graph*: called by 3 (_compose, _shoot, draw_from_stored_shot); 1 external calls (log).
-
-
-### `extensions/sites/ufo_ext_sites/surface.py`
-
-`io_transport` · `request handling`
-
-A hosted site link is treated like an address, not like a password. The link contains a signed token that says which workspace, conversation, and site name it points to. On every visit, this file checks that token, finds the site, identifies the browser from the `ufo_session` cookie when needed, and applies the site's visibility rule: public, workspace-only, or private. If the site is an agent homepage, the agent's own visibility rules take over instead.
-
-The actual site files are not served here. This page is more like a secure picture frame: it creates an iframe that points at the site's own ingress origin, so the site's code runs away from the main portal and its cookies. For portal-only app pages, it redirects the viewer into the portal when needed, because those pages need the portal's bridge to work.
-
-The file also protects privacy in link previews. Public sites may expose their name and a generated share card image. Non-public sites use generic UFO preview text and artwork, so a chat crawler with no session does not learn private names. The one anonymous image route rechecks that the site is still public before serving the card.
-
-Finally, creators can post a form to change visibility. That form uses a CSRF token, a signed value tied to the viewer's session, so another website cannot silently change a creator's site settings.
-
-#### Function details
-
-##### `site_token`  (lines 174–183)
-
-```
-def site_token(workspace_id: UUID, conversation_id: UUID, name: str) -> str
-```
-
-**Purpose**: Creates the permanent signed token that names one hosted site. Someone uses it when they need a stable link to a site without putting database access or login state into the URL.
-
-**Data flow**: It receives a workspace id, conversation id, and site name → packages those values as signed token claims for the sites surface → returns the token string that can be placed in a URL.
-
-**Call relations**: When `site_url` builds a complete public link, it asks `site_token` for the address part of that link. The actual signing work is handed to the shared surface-token helper.
-
-*Call graph*: called by 1 (site_url); 1 external calls (mint_surface_token).
-
-
-##### `site_url`  (lines 186–196)
-
-```
-def site_url(public_base_url: str | None, workspace_id: UUID, conversation_id: UUID, name: str) -> str
-```
-
-**Purpose**: Builds the full browser URL for a hosted site. It refuses to invent a link if the deployment has no public base URL, because such a link could not actually be opened.
-
-**Data flow**: It receives the deployment's public base URL plus the site identity → checks that the base URL exists → creates a site token → returns a URL under the hosted-site frame path, or raises a clear configuration error if hosting is not configured.
-
-**Call relations**: This is the producer of ordinary hosted-site links. It relies on `site_token` for the signed address and raises `SiteHostingUnconfigured` when the surrounding deployment cannot host public links.
-
-*Call graph*: calls 1 internal fn (site_token); 1 external calls (__init__).
-
-
-##### `shipped_homepage_url`  (lines 208–223)
-
-```
-def shipped_homepage_url(public_base_url: str | None, workspace_id: UUID, slug: str, digest: str) -> str | None
-```
-
-**Purpose**: Builds a stable URL for a deploy-wide shipped app bundle that is meant to open inside the portal. Unlike a normal site URL, it points to an app slug and bundle digest rather than a hosted-site row.
-
-**Data flow**: It receives a public base URL, workspace id, app slug, and digest → if the base URL is missing, it returns nothing → otherwise signs those claims into a token marked as a portal embed → returns the frame URL containing that token.
-
-**Call relations**: This is used by code that publishes shipped app pages. Later, `shipped_address` and `frame` understand this token shape and route it through the shipped-app path instead of looking for a hosted site.
-
-*Call graph*: 1 external calls (mint_surface_token).
-
-
-##### `shipped_address`  (lines 226–240)
-
-```
-def shipped_address(token: str) -> ShippedAddress | None
-```
-
-**Purpose**: Reads and validates a shipped-app token. It answers only when the token has the special portal-embed shape for a shipped bundle.
-
-**Data flow**: It receives a token string → verifies the signature and checks the expected claims → converts the workspace id text into a UUID → returns a `ShippedAddress`, or returns `None` if anything is missing, malformed, or not a shipped token.
-
-**Call relations**: `resolve_workspace` uses this when a token is not a normal site token, so the request can still be assigned to the right workspace. `frame` uses it to decide whether to send the visit into `_shipped_frame` instead of normal site loading.
-
-*Call graph*: called by 2 (frame, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
-
-
-##### `site_card_url`  (lines 243–252)
-
-```
-def site_card_url(public_base_url: str | None, token: str, digest: str) -> str | None
-```
-
-**Purpose**: Builds the public URL for a site's share-card image. This URL is safe to put in Open Graph tags because the image route will still recheck that the site is public.
-
-**Data flow**: It receives a public base URL, the site token, and the card digest → returns no URL if the deployment has no public base URL → otherwise returns an image URL containing the token and digest.
-
-**Call relations**: `frame` calls this only for sites that are currently public and have a card hash. The returned URL points back to this same file's `share_card` route.
-
-*Call graph*: called by 1 (frame).
-
-
-##### `site_address`  (lines 255–274)
-
-```
-def site_address(token: str) -> SiteAddress | None
-```
-
-**Purpose**: Reads and validates a normal hosted-site token. It turns the signed URL token back into the site identity the rest of the file can use.
-
-**Data flow**: It receives a token string → verifies that it belongs to the sites surface and has valid workspace, conversation, and name claims → notes whether it was marked as a portal embed → returns a `SiteAddress`, or `None` if the token is invalid.
-
-**Call relations**: `resolve_workspace`, `frame`, `_resolve`, and `homepage_embed_url` all depend on this as the first proof that a request names a real kind of site address. Shipped-app tokens are deliberately not accepted here.
-
-*Call graph*: called by 4 (_resolve, frame, homepage_embed_url, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
-
-
-##### `homepage_embed_url`  (lines 277–292)
-
-```
-def homepage_embed_url(url: str) -> str
-```
-
-**Purpose**: Converts a normal hosted-site URL into the signed version used when the portal embeds an agent homepage. It keeps the same site address but marks the token as a portal embed.
-
-**Data flow**: It receives a hosted-site URL → splits out the final token → validates that the URL really points at the hosted-site frame → signs a new token with the same site claims plus the portal-embed marker → returns the replacement URL.
-
-**Call relations**: It calls `site_address` to avoid rewriting arbitrary URLs. The resulting URL is later recognized by `frame`, which allows homepage content to redirect into ingress only when the request truly came through the portal iframe.
-
-*Call graph*: calls 1 internal fn (site_address); 1 external calls (mint_surface_token).
-
-
-##### `resolve_workspace`  (lines 295–305)
-
-```
-async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
-```
-
-**Purpose**: Finds which workspace a surface request belongs to before reading any site row. This matters because public visitors may have no login cookie, so the workspace must come from the signed URL itself.
-
-**Data flow**: It reads the token from the request path → tries to decode it first as a normal site address and then as a shipped-app address → returns the workspace id if either succeeds, returns a 404 response if the token is invalid, or returns nothing when appropriate.
-
-**Call relations**: The surface framework calls this before running route handlers. It uses `site_address`, `shipped_address`, and `_not_found` so bad tokens look like missing sites rather than authorization clues.
-
-*Call graph*: calls 3 internal fn (_not_found, shipped_address, site_address).
-
-
-##### `frame`  (lines 308–384)
-
-```
-async def frame(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: This is the main GET handler for opening a hosted site link. It checks the token, checks the site or shipped app, applies visibility rules, and either returns a safe frame page or redirects the viewer where the app must run.
-
-**Data flow**: It reads the token and optional deep path from the request → handles shipped-app tokens separately → resolves the site row → builds privacy-safe share tags → identifies the viewer from the session cookie → applies homepage, public, workspace, private, creator, and admin rules → creates an ingress URL for the actual site bytes → returns HTML, a redirect, a sign-in prompt, an unconfigured-hosting page, or the same 404 used for unknown sites.
-
-**Call relations**: This is the central route handler. It delegates shipped bundles to `_shipped_frame`, site lookup to `_sites`, viewer identity to `_viewer`, admin checks to `_viewer_is_admin`, portal redirection to `_into_the_portal`, iframe HTML to `_frame_page`, and small request details to `_is_portal_iframe_request` and `_framed_from`.
-
-*Call graph*: calls 18 internal fn (ingress_url, list_agents, _frame_page, _framed_from, _into_the_portal, _is_portal_iframe_request, _not_found, _page, _session_digest, _share_tags (+8 more)); 3 external calls (HTMLResponse, RedirectResponse, mint_surface_token).
-
-
-##### `_shipped_frame`  (lines 387–426)
-
-```
-async def _shipped_frame(ctx: SurfaceContext, request: Request, shipped: ShippedAddress) -> Response
-```
-
-**Purpose**: Opens a deploy-wide shipped app bundle using the same surface frame path. These bundles are public code, but they still need to run inside the correct portal or ingress context.
-
-**Data flow**: It receives the surface context, request, and decoded shipped address → creates generic share tags → if the request is not already a portal iframe, finds the matching agent and redirects to that agent's portal page → if it is framed, builds an ingress URL for the shipped bundle using the slug and digest → returns a redirect to ingress, a no-portal/no-site 404, or an unconfigured page.
-
-**Call relations**: `frame` calls this when `shipped_address` recognizes the token. It uses `_into_the_portal` for cold visits, `_is_portal_iframe_request` and `_framed_from` to preserve frame context, and `ctx.ingress_url` to mint the actual temporary app address.
-
-*Call graph*: calls 8 internal fn (ingress_url, list_agents, _framed_from, _into_the_portal, _is_portal_iframe_request, _not_found, _share_tags, _unconfigured_page); called by 1 (frame); 5 external calls (HTMLResponse, RedirectResponse, serve_port, shipped_anchor, shipped_app_slug).
-
-
-##### `_is_portal_iframe_request`  (lines 429–430)
-
-```
-def _is_portal_iframe_request(request: Request) -> bool
-```
-
-**Purpose**: Detects whether the browser request looks like it came from an iframe. It does this by checking the standard fetch-destination header.
-
-**Data flow**: It reads the request headers → compares `sec-fetch-dest` to `iframe` → returns `True` for iframe loads and `False` otherwise.
-
-**Call relations**: `frame`, `_shipped_frame`, and `_framed_from` use this small check to decide whether to redirect a viewer into the portal or proceed with an embedded ingress load.
-
-*Call graph*: called by 3 (_framed_from, _shipped_frame, frame).
-
-
-##### `_framed_from`  (lines 433–436)
-
-```
-def _framed_from(request: Request) -> str | None
-```
-
-**Purpose**: Returns the referring page only when the current request is an iframe load. That lets ingress know what page framed it without trusting referrers from ordinary top-level visits.
-
-**Data flow**: It receives the request → first asks `_is_portal_iframe_request` whether this is an iframe request → returns the `referer` header for iframe loads, otherwise returns `None`.
-
-**Call relations**: `frame` and `_shipped_frame` pass this value into `ctx.ingress_url`, so the temporary ingress address can record where the frame came from.
-
-*Call graph*: calls 1 internal fn (_is_portal_iframe_request); called by 2 (_shipped_frame, frame).
-
-
-##### `_into_the_portal`  (lines 439–452)
-
-```
-def _into_the_portal(ctx: SurfaceContext, agent_id: UUID, share: str) -> Response
-```
-
-**Purpose**: Sends a viewer to an agent's page inside the member portal. This is needed because some app pages only work when the portal opens a bridge to them.
-
-**Data flow**: It receives the context, agent id, and share tags → asks the context for the portal URL for that agent → returns a redirect if the portal exists → otherwise returns a simple HTML page explaining that no portal is installed.
-
-**Call relations**: `frame` uses this for agent homepages opened outside the required portal iframe. `_shipped_frame` uses it for shipped app links opened cold. It relies on `_page` for the fallback HTML.
-
-*Call graph*: calls 2 internal fn (home_url, _page); called by 2 (_shipped_frame, frame); 2 external calls (HTMLResponse, RedirectResponse).
-
-
-##### `_unconfigured_page`  (lines 455–463)
-
-```
-def _unconfigured_page(title: str, share: str) -> str
-```
-
-**Purpose**: Builds the small HTML page shown when this deployment has no ingress/public hosting configured for the site content. It says plainly that the site cannot be embedded here.
-
-**Data flow**: It receives a title and share tags → escapes the title so it is safe for HTML → combines frame styling with a short unconfigured-hosting message → returns the page HTML string.
-
-**Call relations**: `frame` and `_shipped_frame` call this when they cannot mint an ingress URL. It uses `_page` as the shared HTML wrapper.
-
-*Call graph*: calls 1 internal fn (_page); called by 2 (_shipped_frame, frame); 1 external calls (escape).
-
-
-##### `share_card`  (lines 466–505)
-
-```
-async def share_card(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Serves a public site's generated preview image to anonymous crawlers and chat unfurlers. It refuses everything that is not still public, so old image URLs stop working soon after visibility changes.
-
-**Data flow**: It resolves the site from the token in the URL → checks that the site exists, is not homepage-bound, is public, has a stored card, and that the URL digest matches the row's current card hash → reads the image bytes from blob storage → returns the JPEG response with cache headers, or returns the generic 404 body.
-
-**Call relations**: The image URL is produced by `site_card_url` and placed into head tags by `frame`. `share_card` uses `_resolve` for row lookup and `_not_found` for every refusal, so the route does not reveal which private sites exist.
-
-*Call graph*: calls 2 internal fn (_not_found, _resolve); 1 external calls (Response).
-
-
-##### `set_visibility`  (lines 508–529)
-
-```
-async def set_visibility(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Processes the creator's form submission to change a site's visibility. It only lets the original creator do this, and it protects the form with a CSRF token tied to the current session.
-
-**Data flow**: It resolves the site → identifies the viewer → rejects missing viewers, non-creators, homepage-bound sites, bad CSRF tokens, and invalid visibility values → writes the new visibility to the hosted-sites store → redirects back to the site's frame page.
-
-**Call relations**: This is the POST route paired with the selector rendered by `_frame_page` and `_selector`. It uses `_resolve`, `_viewer`, `_csrf_holds`, `_sites`, and shared HTTP response classes to either save the change or explain the refusal.
-
-*Call graph*: calls 5 internal fn (_csrf_holds, _not_found, _resolve, _sites, _viewer); 4 external calls (PlainTextResponse, RedirectResponse, form, visibility_level).
-
-
-##### `_resolve`  (lines 532–536)
-
-```
-async def _resolve(ctx: SurfaceContext, request: Request) -> HostedSite | None
-```
-
-**Purpose**: Looks up the hosted-site row named by the request token. It is a small shared helper for routes that need a site but do not run the full frame flow.
-
-**Data flow**: It reads the token from the request path → decodes it with `site_address` → if valid, opens the hosted-sites store for the current workspace and reads the row by conversation and name → returns the site or `None`.
-
-**Call relations**: `share_card` and `set_visibility` both call this before applying their own rules. It uses `_sites` to create the store object.
-
-*Call graph*: calls 2 internal fn (_sites, site_address); called by 2 (set_visibility, share_card).
-
-
-##### `_sites`  (lines 539–540)
-
-```
-def _sites(ctx: SurfaceContext) -> HostedSites
-```
-
-**Purpose**: Creates the hosted-sites store object for the current workspace. This gives the rest of the file one short way to read and write site rows.
-
-**Data flow**: It receives the surface context → takes the workspace id and transaction provider from it → returns a `HostedSites` store bound to that workspace.
-
-**Call relations**: `frame`, `_resolve`, and `set_visibility` use this helper whenever they need to read a site row or update visibility.
-
-*Call graph*: called by 3 (_resolve, frame, set_visibility); 1 external calls (__init__).
-
-
-##### `_viewer_is_admin`  (lines 543–548)
-
-```
-async def _viewer_is_admin(ctx: SurfaceContext, viewer: UUID | None) -> bool
-```
-
-**Purpose**: Checks whether the current viewer is an active workspace admin. Admins are allowed to view private sites and private agent homepages even when they are not the creator or owner.
-
-**Data flow**: It receives the context and a possible viewer id → immediately returns `False` if there is no viewer → reads the current seat snapshot inside a transaction → returns `True` only if the viewer is listed as seated and admin.
-
-**Call relations**: `frame` calls this when private visibility rules need an admin exception. It reads membership information through the seats subsystem.
-
-*Call graph*: calls 1 internal fn (transaction); called by 1 (frame); 1 external calls (__init__).
-
-
-##### `_viewer`  (lines 551–564)
-
-```
-async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None
-```
-
-**Purpose**: Identifies the workspace member represented by the `ufo_session` cookie. If the cookie is missing, invalid, or belongs to someone without workspace access, it returns no viewer.
-
-**Data flow**: It reads the session cookie → verifies the bearer token for this workspace and gets an email → finds or creates the linked member for that email → checks that the member still has access → returns the member id or `None`.
-
-**Call relations**: `frame` uses this to decide whether a visitor may see non-public content. `set_visibility` uses it to prove the form submitter is the creator.
-
-*Call graph*: calls 3 internal fn (link_member, linked_member, member_has_access); called by 2 (frame, set_visibility); 1 external calls (verify_token).
-
-
-##### `_csrf_holds`  (lines 567–569)
-
-```
-def _csrf_holds(request: Request, submitted: str) -> bool
-```
-
-**Purpose**: Checks that a submitted visibility form token belongs to this browser session. This prevents another website from tricking a signed-in creator's browser into changing a site.
-
-**Data flow**: It receives the request and submitted token → verifies the token signature → compares the token's stored session digest with the digest of the current request's session cookie → returns `True` only when they match.
-
-**Call relations**: `set_visibility` calls this before accepting a visibility change. It relies on `_session_digest` for the session fingerprint and the shared surface-token verifier for signature checking.
-
-*Call graph*: calls 1 internal fn (_session_digest); called by 1 (set_visibility); 1 external calls (verify_surface_token).
-
-
-##### `_session_digest`  (lines 572–576)
-
-```
-def _session_digest(request: Request) -> str
-```
-
-**Purpose**: Creates a one-way fingerprint of the current session cookie for CSRF protection. A one-way hash lets the form token be tied to the session without storing the raw cookie value inside it.
-
-**Data flow**: It reads the `ufo_session` cookie from the request, or an empty string if missing → hashes it with SHA-256 → returns the hexadecimal digest text.
-
-**Call relations**: `frame` uses this when minting a creator's CSRF token for the visibility form. `_csrf_holds` uses it later to check the submitted token against the current session.
-
-*Call graph*: called by 2 (_csrf_holds, frame); 1 external calls (sha256).
-
-
-##### `_not_found`  (lines 579–580)
-
-```
-def _not_found() -> Response
-```
-
-**Purpose**: Returns the standard 404 response body for missing, invalid, or unauthorized site access. Using the same response makes it harder to use the frame as a way to discover private sites.
-
-**Data flow**: It takes no input → creates a plain-text response with the shared not-found body and 404 status → returns that response.
-
-**Call relations**: `resolve_workspace`, `frame`, `_shipped_frame`, `share_card`, and `set_visibility` all use this for refusals that should look the same as an unknown site.
-
-*Call graph*: called by 5 (_shipped_frame, frame, resolve_workspace, set_visibility, share_card); 1 external calls (PlainTextResponse).
-
-
-##### `_page`  (lines 583–588)
-
-```
-def _page(title: str, style: str, body: str, share: str) -> str
-```
-
-**Purpose**: Builds the common HTML shell used by this surface. It keeps all small pages consistent: document header, viewport, title, share tags, style, and body.
-
-**Data flow**: It receives a title, CSS style text, body HTML, and share-tag HTML → concatenates them into a complete minimal HTML document string → returns that string.
-
-**Call relations**: `frame`, `_frame_page`, `_into_the_portal`, and `_unconfigured_page` use this instead of repeating the same document wrapper.
-
-*Call graph*: called by 4 (_frame_page, _into_the_portal, _unconfigured_page, frame).
-
-
-##### `_share_tags`  (lines 591–625)
-
-```
-def _share_tags(name: str | None, canonical: str | None, card: str | None) -> str
-```
-
-**Purpose**: Builds the Open Graph and Twitter preview tags that chat apps and social sites read when a link is pasted. It only names the actual site when the caller has decided that the site is public.
-
-**Data flow**: It receives an optional site name, optional canonical URL, and optional card image URL → escapes values for safe HTML → chooses a site-specific or generic title and image → returns the meta-tag HTML string.
-
-**Call relations**: `frame` calls this for normal site pages after deciding whether the site is public enough to publish its name and card. `_shipped_frame` calls it with generic values for shipped app pages.
-
-*Call graph*: called by 2 (_shipped_frame, frame); 1 external calls (escape).
-
-
-##### `_frame_page`  (lines 628–667)
-
-```
-def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str, share: str) -> str
-```
-
-**Purpose**: Builds the visible hosted-site frame page. It shows the site name, either a creator visibility selector or a viewer badge, and the iframe that loads the real site content.
-
-**Data flow**: It receives the site row, optional ingress URL, frame path, optional CSRF token, and share tags → creates the visibility control or badge → creates the sandboxed iframe when an ingress URL exists, otherwise an unconfigured-hosting message → wraps everything in `_page` → returns the HTML string.
-
-**Call relations**: `frame` calls this after all viewing rules have passed. It delegates the creator's form to `_selector`, uses `_page` for the document shell, and escapes site values before putting them into HTML.
-
-*Call graph*: calls 2 internal fn (_page, _selector); called by 1 (frame); 1 external calls (escape).
-
-
-##### `_selector`  (lines 670–680)
-
-```
-def _selector(current: Visibility, frame_path: str, csrf: str) -> str
-```
-
-**Purpose**: Builds the small form that lets a site creator choose private, workspace, or public visibility. It includes the CSRF token needed for `set_visibility` to trust the submission.
-
-**Data flow**: It receives the current visibility, the canonical frame path, and CSRF token → creates option elements with the current level selected → builds a POST form pointing at the visibility route → returns the form HTML string.
-
-**Call relations**: `_frame_page` calls this only when the viewer is the creator and has a CSRF token. The form it returns posts back to `set_visibility`.
-
-*Call graph*: called by 1 (_frame_page); 1 external calls (escape).
-
-
-### `core/src/ufo/runtime/media/site_previewer.py`
-
-`domain_logic` · `preview generation`
-
-This file exists so the system can show a visual snapshot of a web site that is running inside a sandbox. Think of it like sending a photographer to a temporary web address: the photographer opens the page, takes one screenshot, and gives back either a saved image or a clear failure.
-
-The main class, SitePreviewer, knows three things: where to store the image, where the preview service lives, and how to reach the sandbox from the outside. Its render method first checks that the requested file name and image size are sensible. It then creates a public viewing URL for the sandbox port using the current workspace and conversation. If there is no usable URL, it gives up quietly.
-
-Next it chooses how the preview service should return the image. If storage is backed by S3, it gives the service a temporary upload link, so the service can write the PNG directly to storage. Otherwise, it asks the service to return the PNG bytes in the HTTP response, then this code uploads them itself.
-
-The file is careful about trust. It limits response size, checks HTTP errors, verifies PNG content when receiving bytes inline, and confirms the returned dimensions match the requested dimensions. If anything goes wrong, it logs a short diagnostic message and returns None instead of crashing the larger workflow.
-
-#### Function details
-
-##### `SitePreviewer.render`  (lines 47–124)
-
-```
-async def render(self, conversation_id: UUID, port: int, name: str, width: int, height: int) -> StoredPreview | None
-```
-
-**Purpose**: This function creates one screenshot preview of a hosted sandbox site and stores it as an artifact. A caller gives it the conversation, port, output name, and target dimensions; it returns a StoredPreview when the image is successfully saved, or None when the preview cannot be drawn.
-
-**Data flow**: It starts with a conversation ID, sandbox port, image name, width, and height. It checks that the name is just a filename and that the dimensions are within allowed bounds. It then builds a public URL for the sandbox page, creates a unique storage key, and sends a render request to the preview service. If S3 storage is available, the preview service uploads directly to a temporary upload URL and returns JSON metadata; this function validates that metadata and returns the stored blob key and size. If direct upload is not available, the service returns PNG bytes; this function checks the content type, PNG signature, dimensions, uploads the bytes to blob storage, and then returns the stored blob key and size. Network errors, bad service responses, oversized responses, and validation failures are logged and become a None result.
-
-**Call relations**: This is the file's main working step: other preview-generation code would call it when a sandbox page needs a thumbnail or artifact image. Inside the flow it asks ws_current for the current workspace, mint_ingress_view_url to make the sandbox reachable, json.dumps to package the preview request, httpx.Timeout and httpx.AsyncClient to call the external preview service, StoredPreview to describe the saved result, and log to record why a preview was not created.
-
-*Call graph*: 9 external calls (__init__, AsyncClient, Timeout, dumps, PurePosixPath, log, mint_ingress_view_url, ws_current, uuid4).
-
-
-### Hosted site registry
-The shared site registry records ownership, serving targets, access rights, and mutation permissions for all hosted site links.
-
-### `extensions/sites/ufo_ext_sites/store.py`
-
-`domain_logic` · `site deploy, site lookup, visibility changes, homepage binding, and share-card/preview updates`
-
-A hosted site here is like a numbered mailbox for a web page: the public link uses a stable name, while the actual contents may come from a sandbox port or from files saved in blob storage. This file defines the database row for that mailbox and the rules for changing it safely. Every lookup is scoped to one workspace, because the database connection can see the whole database and must not accidentally cross tenant boundaries.
-
-The main class, HostedSites, is a workspace-specific store. It can register a new deploy, update stored source, attach preview images and share cards, list sites, change visibility, bind a site as an agent homepage, and unregister a site. It also enforces important ownership rules. Only the creator can change who may view a site. Taking over a port can remove another existing site, so the code refuses that unless the same member is allowed to unhost it.
-
-The file also validates site names and static-source manifests. A source manifest is a map of safe relative paths to stored file details; suspicious paths such as absolute paths or directory escapes are rejected. In short, this file is both the site address book and the gatekeeper that keeps links, ownership, visibility, previews, and stored source in sync.
-
-#### Function details
-
-##### `SourceManifest._rooted`  (lines 96–99)
-
-```
-def _rooted(cls, root: str) -> str
-```
-
-**Purpose**: Checks that a stored-source manifest uses an allowed blob-storage prefix. This prevents a site from claiming files outside the expected site or app storage areas.
-
-**Data flow**: It receives the manifest root string → checks that it starts with either "sites/" or "apps/" and ends with a slash → returns the same root if it is valid, or raises an error if it is not.
-
-**Call relations**: This is called automatically by Pydantic, the data validation library, when a SourceManifest is built or parsed. It runs before the manifest is trusted by code that serves static site files.
-
-
-##### `SourceManifest._pathed`  (lines 103–118)
-
-```
-def _pathed(cls, files: dict[str, SiteFile]) -> dict[str, SiteFile]
-```
-
-**Purpose**: Checks that every file path in a stored-source manifest is a plain path inside the site. This blocks paths that could escape the site folder, such as paths with leading slashes or hidden directory jumps.
-
-**Data flow**: It receives the manifest's file map → examines each path for unsafe characters, backslashes, absolute-path form, or path traversal → asks contained_relative to confirm the path stays under the site-source anchor → returns the original file map if every path is safe, or raises an error if any path is unsafe.
-
-**Call relations**: Pydantic calls this while validating SourceManifest. It hands each candidate path to ufo.sdk.sandbox.contained_relative, which is the shared safety check for keeping paths inside an allowed directory.
-
-*Call graph*: 1 external calls (contained_relative).
-
-
-##### `site_name`  (lines 149–157)
-
-```
-def site_name(raw: str) -> str
-```
-
-**Purpose**: Turns a user-supplied site name into the safe, short slug stored in the registry and used in links. It gives the system one consistent naming rule for chat objects and permanent site URLs.
-
-**Data flow**: It receives raw text → lowercases it, replaces runs of non-letter-or-number characters with hyphens, trims extra hyphens, and limits the length → returns the cleaned name, or raises InvalidSiteName if nothing usable remains.
-
-**Call relations**: Callers use this before writing a site row or minting its link. If the cleanup leaves no letters or digits, it raises InvalidSiteName so the deploying tool can tell the user or agent that the name cannot identify a site.
+**Call relations**: The `manifest` function registers this as the `memory_dedup` job. `_dedupable_workspaces` picks workspaces with likely duplicate groups, and this function gives the work to `MemoryDeduper`.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `default_visibility`  (lines 160–168)
+##### `write_memory_sections`  (lines 682–687)
 
 ```
-def default_visibility(audience: Audience) -> Visibility
+async def write_memory_sections(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Chooses the starting visibility for a newly created site based on the conversation audience. It is deliberately cautious for direct messages and external rooms, so private or externally shared conversations do not accidentally publish to the whole workspace.
+**Purpose**: This scheduled job writes or refreshes section paragraphs for the memory wiki. A section paragraph summarizes the facts under one subject-and-kind band.
 
-**Data flow**: It receives an Audience value → parses it into a simpler audience form → checks whether it represents a single member or a foreign/external audience → returns "private" for those cases, otherwise returns "workspace".
+**Data flow**: It receives an extension context, builds a `SectionWriter` with database access, workspace ID, and model, then runs it. The writer reads live facts and writes section-level prose where needed.
 
-**Call relations**: HostedSites.register calls this only when inserting a brand-new site and no explicit visibility was supplied. It relies on parse_audience and audience_member from the audience SDK to understand what kind of conversation produced the site.
+**Call relations**: The `manifest` function registers this as the `memory_section` job. `_summarizable_workspaces` decides where section writing may be useful, and this function delegates the model-written paragraph work to `SectionWriter`.
 
-*Call graph*: called by 1 (register); 2 external calls (audience_member, parse_audience).
-
-
-##### `visibility_level`  (lines 171–179)
-
-```
-def visibility_level(value: str) -> Visibility
-```
-
-**Purpose**: Accepts only the three visibility values the site registry understands: private, workspace, or public. This keeps database values and submitted values from drifting into unsupported states.
-
-**Data flow**: It receives a string → compares it with the allowed visibility words → returns the same value as a typed visibility value, or raises an error for anything else.
-
-**Call relations**: _site calls this when turning a database row into a HostedSite object. That means bad stored visibility data is caught at the boundary where rows become application objects.
-
-*Call graph*: called by 1 (_site).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `HostedSites.register`  (lines 213–306)
+##### `write_memory_overview`  (lines 690–695)
 
 ```
-async def register(self, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, audience: Audience, may_unhost: bool, *, manifest: str | None) -> HostedSi
+async def write_memory_overview(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Records that a deploy now owns a site name and port, or updates the existing record for that name. It also protects against accidentally taking over another member's site or changing someone else's visibility choice.
+**Purpose**: This scheduled job writes the opening overview paragraph for a memory page. It gives readers a short top-level summary before they inspect individual rows.
 
-**Data flow**: It receives the conversation, safe site name, port, creator, optional visibility, audience, unhost permission, and optional source manifest → opens a database transaction → checks refusal rules → deletes any same-conversation site displaced from the port → updates the existing named row or inserts a new one → stamps a new deploy generation so viewers know the page changed → reads back and returns the registered HostedSite.
+**Data flow**: It receives an extension context, builds an `OverviewWriter` with database access, workspace ID, and model, then runs it. The writer reads suitable shared facts and creates or updates the overview text.
 
-**Call relations**: Deploy code calls this after a site has been served or static source has been promoted. Inside the transaction it delegates safety checks to _refuse, reads rows through _read, uses default_visibility for new sites without explicit visibility, and uses SQLAlchemy update, insert, delete, and case expressions to make the database change atomically.
+**Call relations**: The `manifest` function registers this as the `memory_overview` job. `_overviewable_workspaces` selects workspaces needing overview work, and this function hands off to `OverviewWriter`.
 
-*Call graph*: calls 3 internal fn (_read, _refuse, default_visibility); 6 external calls (case, delete, insert, update, time_ns, uuid4).
-
-
-##### `HostedSites.redeploy`  (lines 308–335)
-
-```
-async def redeploy(self, conversation_id: UUID, name: str, manifest: str) -> HostedSite | None
-```
-
-**Purpose**: Replaces the stored source manifest for an existing site without changing its name, port, owner, or visibility. This lets a link keep pointing to the same site while its saved static files are updated.
-
-**Data flow**: It receives the target conversation, site name, and new manifest string → opens a transaction → updates the source_manifest, updated time, and deploy_generation for that row → reads the row back → returns the updated HostedSite, or None if the site no longer exists.
-
-**Call relations**: This is used when an existing hosted site should receive new stored static source in place. It uses the same strictly increasing deploy-generation pattern as register, then calls _read to return the current row.
-
-*Call graph*: calls 1 internal fn (_read); 3 external calls (case, update, time_ns).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `HostedSites.homepage`  (lines 337–349)
+##### `write_member_profiles`  (lines 698–703)
 
 ```
-async def homepage(self, agent_id: UUID) -> HostedSite | None
+async def write_member_profiles(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Finds the site currently bound as a particular agent's homepage. The registry expects at most one such site per agent.
+**Purpose**: This scheduled job writes profile information for workspace members, such as role and current focus, based on shared facts. It keeps the people view aligned with memory.
 
-**Data flow**: It receives an agent ID → opens a transaction → selects the workspace row whose homepage_agent_id matches → returns None if there is no match, or converts the row into a HostedSite.
+**Data flow**: It receives an extension context, builds a `ProfileWriter` with database access, workspace ID, and model, then runs it. The writer reads facts and roster information and updates stored member profiles.
 
-**Call relations**: Homepage lookup code calls this when it needs to resolve an agent's homepage. It builds the shared column selection with _columns and converts the result with _site.
+**Call relations**: The `manifest` function registers this as the `memory_people` job. `_peopled_workspaces` selects candidate workspaces, and this function delegates the profile-writing pass to `ProfileWriter`.
 
-*Call graph*: calls 2 internal fn (_columns, _site).
-
-
-##### `HostedSites.set_preview`  (lines 351–371)
-
-```
-async def set_preview(self, conversation_id: UUID, name: str, preview: StoredPreview) -> None
-```
-
-**Purpose**: Stores the preview image captured for a site after deploy. This allows the site listing or frame to show a snapshot without delaying the main registration step.
-
-**Data flow**: It receives the conversation, site name, and StoredPreview containing a blob key and byte size → opens a transaction → updates the matching row's preview fields and updated time → returns nothing.
-
-**Call relations**: Deploy-preview code calls this after a page render succeeds. It writes directly with SQLAlchemy update; if the site was removed or renamed while the preview was being made, the update simply matches no row.
-
-*Call graph*: 1 external calls (update).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `HostedSites.set_share_card`  (lines 373–397)
+##### `curate_memory_pages`  (lines 706–711)
 
 ```
-async def set_share_card(self, conversation_id: UUID, name: str, blob_key: str, digest: str) -> None
+async def curate_memory_pages(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Stores the generated share-card image and its digest for a site. The digest lets public share-card URLs change when the card changes, avoiding stale crawler caches.
+**Purpose**: This scheduled job performs a whole-page curation pass over memory facts. It uses the deploy model to read a subject's full page and retire rows that repeat one another.
 
-**Data flow**: It receives the conversation, site name, blob key, and digest → opens a transaction → writes the share-card blob key, hash, and updated time onto the matching row → returns nothing.
+**Data flow**: It receives an extension context, builds a `PagePass` with database access, workspace ID, and model, then runs it. The pass reads enough facts under a subject and decides which rows should remain active.
 
-**Call relations**: extensions/sites/ufo_ext_sites/share_card._compose calls this after composing a card. Like set_preview, it writes with SQLAlchemy update and harmlessly does nothing if the row disappeared before the card was ready.
+**Call relations**: The `manifest` function registers this as the `memory_page_pass` job and marks that job as needing the deploy model. `_curatable_workspaces` selects workspaces with pages large enough to justify this whole-page read.
 
-*Call graph*: called by 1 (_compose); 1 external calls (update).
-
-
-##### `HostedSites.read`  (lines 399–401)
-
-```
-async def read(self, conversation_id: UUID, name: str) -> HostedSite | None
-```
-
-**Purpose**: Looks up one site by conversation and name inside this workspace. It is the simple public read path for code that already knows exactly which site it wants.
-
-**Data flow**: It receives a conversation ID and site name → opens a transaction → asks _read to fetch and convert the row → returns a HostedSite or None.
-
-**Call relations**: Other parts of the site system call this for direct resolution. It is a small wrapper around _read that supplies the transaction boundary.
-
-*Call graph*: calls 1 internal fn (_read).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `HostedSites.all`  (lines 403–413)
+##### `_items_awaiting_index`  (lines 714–719)
 
 ```
-async def all(self) -> tuple[HostedSite, ...]
+def _items_awaiting_index() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Returns every hosted site in the current workspace, ordered from oldest to newest. Higher-level code can then apply its own object or permission filters.
+**Purpose**: This builds the database query that finds workspaces with memory items that still need embeddings. It prevents the index job from running where there is no indexing backlog.
 
-**Data flow**: It opens a transaction → selects all rows scoped to this workspace → orders them by creation time and name → converts each row into a HostedSite → returns them as a tuple.
+**Data flow**: It creates a SQL query selecting distinct workspace IDs from memory items whose embedding digest is missing. It returns the query object, not the rows themselves.
 
-**Call relations**: Workspace listing code uses this when it needs the full site set. It reuses _columns for the select list and _site for row conversion.
+**Call relations**: The `manifest` function wraps this query with `owner_candidates` for the `memory_index` job. The job scheduler uses it to decide which workspace owners should receive indexing work.
 
-*Call graph*: calls 2 internal fn (_columns, _site).
-
-
-##### `HostedSites.conversation`  (lines 415–432)
-
-```
-async def conversation(self, conversation_id: UUID, names: tuple[str, ...], limit: int) -> tuple[HostedSite, ...]
-```
-
-**Purpose**: Returns selected hosted sites that belong to one conversation. It is useful when a caller wants a bounded list of known site names for that conversation.
-
-**Data flow**: It receives a conversation ID, a tuple of names, and a limit → opens a transaction → selects matching rows in the workspace and conversation whose names are in the requested set → orders and limits them → converts rows into HostedSite objects → returns a tuple.
-
-**Call relations**: Conversation-level listing code calls this for targeted site retrieval. It uses _columns to build the query shape and _site to turn database rows into application objects.
-
-*Call graph*: calls 2 internal fn (_columns, _site).
+*Call graph*: 1 external calls (select).
 
 
-##### `HostedSites.visible_conversation`  (lines 434–464)
+##### `_consolidatable_workspaces`  (lines 722–739)
 
 ```
-async def visible_conversation(self, conversation_id: UUID, member_id: UUID, limit: int, *, admin: bool, homepage_agents: frozenset[UUID]) -> tuple[HostedSite, ...]
+def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Returns the sites in a conversation that a specific member is allowed to open. It combines ownership, visibility level, homepage binding, and admin status into one database query.
+**Purpose**: This builds the query that finds workspaces with enough old facts to consolidate. It avoids spending model and embedding work on workspaces where consolidation cannot yet produce a useful cluster.
 
-**Data flow**: It receives a conversation ID, member ID, limit, admin flag, and set of homepage agent IDs visible to the member → builds a permission condition unless the member is an admin → selects matching rows in the workspace and conversation → orders and limits them → converts rows into HostedSite objects → returns a tuple.
+**Data flow**: It computes an age cutoff from the current UTC time, then returns a SQL query for workspaces with at least the required number of live, non-page-derived facts older than that cutoff. Superseded and retired rows are excluded.
 
-**Call relations**: UI or frame code uses this when showing a member the sites they may access. It uses SQLAlchemy's or_ to express the non-admin gate, _columns to select fields, and _site to convert rows.
+**Call relations**: The `manifest` function uses this as the candidate selector for the `memory_consolidate` job. It relies on the same minimum age and count rules used by the consolidator.
 
-*Call graph*: calls 2 internal fn (_columns, _site); 1 external calls (or_).
-
-
-##### `HostedSites.set_visibility`  (lines 466–481)
-
-```
-async def set_visibility(self, conversation_id: UUID, name: str, visibility: Visibility) -> HostedSite | None
-```
-
-**Purpose**: Changes a site's own visibility level and returns the updated site if it still exists. It also changes the site's generation token so old permission grants tied to the prior setting do not silently remain valid.
-
-**Data flow**: It receives a conversation, site name, and new visibility → opens a transaction → updates the row's visibility, generation, and updated time → reads the row back → returns the updated HostedSite or None.
-
-**Call relations**: Visibility-changing flows call this after they have decided the actor may make the change. It writes with SQLAlchemy update, creates a fresh UUID generation, and uses _read to return the new state.
-
-*Call graph*: calls 1 internal fn (_read); 2 external calls (update, uuid4).
+*Call graph*: 2 external calls (now, select).
 
 
-##### `HostedSites.set_homepage`  (lines 483–509)
+##### `_dedupable_workspaces`  (lines 742–763)
 
 ```
-async def set_homepage(self, agent_id: UUID, conversation_id: UUID, name: str) -> HostedSite | None
+def _dedupable_workspaces() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Binds a named site as an agent's homepage while clearing any previous homepage binding for that agent. This keeps the rule that an agent has at most one homepage site.
+**Purpose**: This builds the query that finds workspaces with likely duplicate memory rows. It keeps the deduplication job focused on places where it can actually retire repeats.
 
-**Data flow**: It receives an agent ID, conversation ID, and site name → opens a transaction → clears homepage_agent_id from any existing row for that agent → sets homepage_agent_id on the named row → reads the named row back → returns the bound HostedSite or None if it was not found.
+**Data flow**: It computes an age cutoff from the current UTC time, then returns a SQL query for workspaces that have enough old live tool-written rows sharing the same subject and item class. It excludes section paragraphs, page-derived rows, superseded rows, and retired rows.
 
-**Call relations**: Homepage-setting code calls this when an agent's homepage should point at a site. It performs both database updates in one transaction, then delegates to _read for the returned row.
+**Call relations**: The `manifest` function uses this as the candidate selector for the `memory_dedup` job. The query mirrors the deduper's own minimum-copy and minimum-age rules.
 
-*Call graph*: calls 1 internal fn (_read); 1 external calls (update).
-
-
-##### `HostedSites.release_homepage`  (lines 511–535)
-
-```
-async def release_homepage(self, conversation_id: UUID, name: str, visibility: Visibility) -> None
-```
-
-**Purpose**: Removes a site's homepage binding and restores the site's own visibility level. This matters because while a site is bound as a homepage, access follows the agent's visibility rather than the site's stored visibility.
-
-**Data flow**: It receives a conversation, site name, and visibility to resume → opens a transaction → clears homepage_agent_id, writes the supplied visibility, changes the generation token, and updates the timestamp → returns nothing.
-
-**Call relations**: Homepage-unbinding code calls this when a site should stop acting as an agent homepage. It uses SQLAlchemy update and uuid4 so permission checks can tell that the access generation changed.
-
-*Call graph*: 2 external calls (update, uuid4).
+*Call graph*: 2 external calls (now, select).
 
 
-##### `HostedSites.unregister`  (lines 537–548)
+##### `_class_count`  (lines 766–770)
 
 ```
-async def unregister(self, conversation_id: UUID, name: str) -> None
+def _class_count(item_class: ItemClass) -> sa.Function[int]
 ```
 
-**Purpose**: Removes a site registration so its permanent link no longer resolves. The underlying sandbox process may still exist, but the registry stops advertising that port as this named site.
+**Purpose**: This helper builds a SQL count for rows of one memory item class inside a grouped query. It lets candidate queries ask questions like 'how many facts' and 'how many section paragraphs' in the same group.
 
-**Data flow**: It receives a conversation ID and site name → opens a transaction → deletes the matching workspace-scoped row → returns nothing.
+**Data flow**: It receives an item class and returns a SQL expression that counts only rows whose class matches it. It does not run the query itself.
 
-**Call relations**: Unhost or cleanup flows call this when a site should be removed from the registry. It uses SQLAlchemy delete to remove only the row for the current workspace, conversation, and name.
+**Call relations**: _summarizable_workspaces and _overviewable_workspaces call this while building their grouped candidate queries. It uses SQLAlchemy's conditional expression helper to make class-specific counts.
+
+*Call graph*: called by 2 (_overviewable_workspaces, _summarizable_workspaces); 1 external calls (case).
+
+
+##### `_summarizable_workspaces`  (lines 773–796)
+
+```
+def _summarizable_workspaces() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: This builds the query that finds workspaces where section paragraphs may need writing or removal. It catches both pages with enough facts to summarize and pages where an old section paragraph is still standing after facts dropped below the threshold.
+
+**Data flow**: It returns a SQL query over live, non-retired fact and section rows, grouped by workspace, subject, and memory kind. A workspace is selected if any group has enough facts for a section or already has a section paragraph.
+
+**Call relations**: The `manifest` function uses this as the candidate selector for the `memory_section` job. It calls `_class_count` to count facts and section paragraphs separately inside each group.
+
+*Call graph*: calls 1 internal fn (_class_count); 2 external calls (or_, select).
+
+
+##### `_overviewable_workspaces`  (lines 799–821)
+
+```
+def _overviewable_workspaces() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: This builds the query that finds workspaces where the memory page overview may need writing or removal. It focuses only on the shared workspace subject, because the overview describes the shared page.
+
+**Data flow**: It returns a SQL query over live shared facts and overview rows. A workspace is selected if it has enough shared facts for an overview or already has an overview paragraph that may need refreshing or clearing.
+
+**Call relations**: The `manifest` function uses this as the candidate selector for the `memory_overview` job. It calls `_class_count` to separately count facts and overview rows.
+
+*Call graph*: calls 1 internal fn (_class_count); 2 external calls (or_, select).
+
+
+##### `_peopled_workspaces`  (lines 824–838)
+
+```
+def _peopled_workspaces() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: This builds the query that finds workspaces where member profile writing could have useful material. It selects workspaces that have at least one live shared fact.
+
+**Data flow**: It returns a SQL query selecting distinct workspace IDs from live shared fact rows. Superseded and retired facts are ignored.
+
+**Call relations**: The `manifest` function uses this as the candidate selector for the `memory_people` job. The profile writer later does the richer work of reading facts and roster details.
+
+*Call graph*: 1 external calls (select).
+
+
+##### `_curatable_workspaces`  (lines 841–857)
+
+```
+def _curatable_workspaces() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: This builds the query that finds workspaces with memory pages large enough for a whole-page curation pass. It avoids running an expensive model read on tiny pages.
+
+**Data flow**: It returns a SQL query over live facts, grouped by workspace and subject. A workspace is selected if any subject page has at least the required number of fact rows.
+
+**Call relations**: The `manifest` function uses this as the candidate selector for the `memory_page_pass` job. The selected workspaces are later processed by `curate_memory_pages` through `PagePass`.
+
+*Call graph*: 1 external calls (select).
+
+
+##### `manifest`  (lines 860–1019)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This declares the whole memory extension to the host system. It tells the system what tools, objects, hooks, jobs, search provider, and user-interface surface this extension offers.
+
+**Data flow**: It creates and returns a `Manifest` object. Inside that object it names the extension version, defines tool entries and their handlers, exposes memory and profile object types, registers hooks for prompt submission and page changes, registers scheduled jobs with candidate selectors, declares the memory search provider, and exposes the memory surface routes.
+
+**Call relations**: This is the file's main registration point. At startup the host reads it so it can call handlers such as `memory_search_handler`, `recall_hook`, `index_pages`, and the scheduled job functions at the right time. It constructs the framework objects such as `ToolDef`, `HookSpec`, `JobSpec`, `MemorySearchProviderSpec`, `SurfaceSpec`, and finally `Manifest`.
+
+*Call graph*: 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, owner_candidates).
+
+
+### `extensions/memory/ufo_ext_memory/condenser.py`
+
+`domain_logic` · `page-change consumption and periodic background maintenance`
+
+The memory system stores many small rows of information, but raw rows are not enough for people or search to use well. This file is the “editorial desk” for that memory. It reads changed source pages, asks a language model to extract durable facts, and writes those facts into the memory store. Later background jobs clean up and reshape that store: they merge old related facts into a broader summary, collapse near-duplicate user or tool-written rows onto the newest copy, rewrite the short paragraph at the top of each wiki section, write the workspace overview, and produce a People profile for each roster member.
+
+It also has a stricter page-wide pass. That pass shows a model a whole subject page at once and lets it retire rows that repeat other rows. It only retires; it does not write new prose, so there is a clear owner for each kind of text.
+
+A recurring theme is safety. Model calls happen before database write transactions, so the database is not held open while waiting. Payloads are bounded so one huge workspace cannot create an unbounded model request. Old rows are usually marked as superseded or retired rather than deleted, like filing an old draft behind the current one. The result is memory that stays current, readable, and less repetitive.
+
+#### Function details
+
+##### `section_headings`  (lines 176–182)
+
+```
+def section_headings(subject: str) -> dict[MemoryKind, str]
+```
+
+**Purpose**: Chooses the section titles for a memory page. Shared workspace pages use team-facing headings, while personal member pages use headings addressed to that member.
+
+**Data flow**: It receives a subject string, checks whether that subject is the shared workspace subject, and returns the matching dictionary of memory kinds to human-readable headings.
+
+**Call relations**: SectionWriter uses it when deciding which bands can have section paragraphs and when telling the model what heading a paragraph will sit under. PagePass uses it to build the whole page that the curation model reads.
+
+*Call graph*: called by 3 (_page, _sections, _summarize); 1 external calls (subject_shared).
+
+
+##### `live_page_link`  (lines 244–257)
+
+```
+def live_page_link() -> ColumnElement[bool]
+```
+
+**Purpose**: Builds the database condition that says a page-derived memory row still matches the current version of its source page. This keeps summaries and curation from using facts that came from an old page revision.
+
+**Data flow**: It reads no rows itself. It returns a SQL condition joining memory rows to page mirror rows by page id, workspace, subject, and revision.
+
+**Call relations**: member_servable uses this condition for general live-memory reads. PagePass uses it directly because it only curates facts still backed by the current synced page.
+
+*Call graph*: called by 2 (_page, member_servable); 1 external calls (and_).
+
+
+##### `member_servable`  (lines 260–272)
+
+```
+def member_servable() -> ColumnElement[bool]
+```
+
+**Purpose**: Builds the database condition for rows a member is allowed to see. Tool-written rows are always eligible; page-derived rows are eligible only if their source page is still live at the same revision.
+
+**Data flow**: It combines two possibilities into one SQL condition: rows with no source page, or rows whose source page still matches through live_page_link.
+
+**Call relations**: SectionWriter, OverviewWriter, and ProfileWriter use this condition before summarizing facts, so their prose describes the same rows a member could actually read.
+
+*Call graph*: calls 1 internal fn (live_page_link); called by 4 (_facts, _facts, _facts, _sections); 2 external calls (or_, select).
+
+
+##### `ExtractedFact.within_row_budget`  (lines 312–313)
+
+```
+def within_row_budget(cls, body: str) -> str
+```
+
+**Purpose**: Ensures a fact extracted by the model is not too long for a memory row. It trims at a word boundary so the stored text does not end in the middle of a word.
+
+**Data flow**: It receives the proposed fact body, clips it to the memory row character budget, and returns the safe version.
+
+**Call relations**: This validator runs when ExtractedFact is created from model output inside FactDeriver._extract. It protects the store from oversized model-produced text.
+
+*Call graph*: 1 external calls (clip_to_word).
+
+
+##### `FactDeriver.apply`  (lines 349–364)
+
+```
+async def apply(self, changes: tuple[PageChange, ...]) -> None
+```
+
+**Purpose**: Consumes a batch of changed source pages and turns eligible pages into stored memory facts. It also retires old facts for deleted pages or machine-status streams that should no longer contribute memory.
+
+**Data flow**: It receives page changes, asks the store which pages are currently live, filters out tombstones, tiny pages, and ignored streams, then sends eligible pages in bounded groups for derivation. For pages that get replacement facts, it asks the store to supersede the old facts for that page.
+
+**Call relations**: This is the public entry for the page-change consumer. It hands each eligible batch to FactDeriver._derive and uses the returned kept fact ids to retire only the facts that were truly replaced.
+
+*Call graph*: calls 1 internal fn (_derive); 1 external calls (batched).
+
+
+##### `FactDeriver._derive`  (lines 366–405)
+
+```
+async def _derive(self, pages: tuple[PageChange, ...]) -> dict[UUID, frozenset[UUID]]
+```
+
+**Purpose**: Derives and commits facts for one bounded group of pages, but only if each page is still at the revision being processed. This prevents facts from being written from stale page content.
+
+**Data flow**: It receives page changes, rechecks their live page state, asks _extract for model-produced facts, validates that each page is still current just before writing, commits each fact as a MemoryWrite, and returns the stored row ids grouped by page id.
+
+**Call relations**: FactDeriver.apply calls it for each page batch. It calls FactDeriver._extract for the model work and then hands safe facts to MemoryStore.commit.
+
+*Call graph*: calls 1 internal fn (_extract); called by 1 (apply); 1 external calls (__init__).
+
+
+##### `FactDeriver._extract`  (lines 407–484)
+
+```
+async def _extract(self, pages: tuple[PageChange, ...]) -> tuple[ExtractedFact, ...]
+```
+
+**Purpose**: Asks the configured language model to read a small group of source pages and record concrete facts. It validates the model’s tool-call output and removes near-restatements within the same page.
+
+**Data flow**: It turns pages into a compact JSON payload, sends a forced tool request to the model, reads the returned facts list, validates each entry as ExtractedFact, drops invalid entries, and returns the surviving facts.
+
+**Call relations**: FactDeriver._derive calls this before any database write. It uses _restates to collapse duplicate fact phrasings from the same model reply.
+
+*Call graph*: calls 1 internal fn (_restates); called by 1 (_derive); 4 external calls (__init__, __init__, __init__, dumps).
+
+
+##### `_content_words`  (lines 487–488)
+
+```
+def _content_words(body: str) -> frozenset[str]
+```
+
+**Purpose**: Extracts the meaningful words from a sentence-like body of text. Common filler words such as “the” and “and” are removed so comparisons focus on substance.
+
+**Data flow**: It receives text, lowercases and splits it on non-word characters, removes empty pieces and filler words, and returns a set of content words.
+
+**Call relations**: _restates calls this for both pieces of text it compares. It is a small helper for duplicate detection during fact extraction.
+
+*Call graph*: called by 1 (_restates); 1 external calls (split).
+
+
+##### `_restates`  (lines 491–503)
+
+```
+def _restates(kept: str, candidate: str) -> bool
+```
+
+**Purpose**: Decides whether two extracted fact bodies are really the same claim with different wording. It protects the memory store from getting multiple rows for the same fact from one model response.
+
+**Data flow**: It receives two text bodies, converts each to content words, checks whether the shorter one has enough meaningful words, then measures how much of it is covered by the other.
+
+**Call relations**: FactDeriver._extract calls it while building the final list of extracted facts. If one fact restates another, the longer version is kept.
+
+*Call graph*: calls 1 internal fn (_content_words); called by 1 (_extract).
+
+
+##### `cosine`  (lines 506–514)
+
+```
+def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float
+```
+
+**Purpose**: Measures how close two embedding vectors are. An embedding is a list of numbers representing text meaning, and cosine similarity compares their direction rather than their size.
+
+**Data flow**: It receives two numeric vectors, computes their dot product and magnitudes, and returns a similarity score. If either vector has no magnitude, it returns zero.
+
+**Call relations**: MemoryConsolidator._clusters and MemoryDeduper._clusters use it to decide whether facts or copies are similar enough to group together.
+
+*Call graph*: called by 2 (_clusters, _clusters); 2 external calls (sqrt, sumprod).
+
+
+##### `MemoryConsolidator.run`  (lines 544–553)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the periodic job that turns clusters of old, related tool-written facts into one semantic summary. If no model is configured, it does nothing.
+
+**Data flow**: It reads aged candidate facts, groups them by subject, embeds each group, clusters similar facts in a worker thread, and asks _consolidate to replace each large enough cluster with a summary.
+
+**Call relations**: This is the consolidator’s top-level flow. It coordinates _aged_facts, _buckets, _embed, _clusters, and _consolidate.
+
+*Call graph*: calls 4 internal fn (_aged_facts, _buckets, _consolidate, _embed); 1 external calls (to_thread).
+
+
+##### `MemoryConsolidator._aged_facts`  (lines 555–586)
+
+```
+async def _aged_facts(self) -> tuple[_AgedFact, ...]
+```
+
+**Purpose**: Finds old live facts that are eligible for consolidation. It only reads tool-written facts, not facts derived from synced pages.
+
+**Data flow**: It computes an age cutoff, queries memory_item for unsuperseded, unretired facts in the workspace older than that cutoff, and returns them as _AgedFact records.
+
+**Call relations**: MemoryConsolidator.run calls it at the start of a consolidation pass. The returned facts become the raw material for bucketing, embedding, and summarizing.
+
+*Call graph*: called by 1 (run); 3 external calls (__init__, now, select).
+
+
+##### `MemoryConsolidator._buckets`  (lines 588–597)
+
+```
+def _buckets(self, facts: tuple[_AgedFact, ...]) -> tuple[tuple[str, tuple[_AgedFact, ...]], ...]
+```
+
+**Purpose**: Groups aged facts by subject so facts about different people or pages are not merged together. It also limits each bucket to a bounded number of newest facts.
+
+**Data flow**: It receives aged facts, collects them under their subject, sorts each group by recency, trims each group to the maximum bucket size, and returns ordered subject buckets.
+
+**Call relations**: MemoryConsolidator.run calls it after reading candidates. Each bucket is then embedded and clustered separately.
+
+*Call graph*: called by 1 (run).
+
+
+##### `MemoryConsolidator._embed`  (lines 599–603)
+
+```
+async def _embed(self, facts: tuple[_AgedFact, ...]) -> dict[UUID, tuple[float, ...]]
+```
+
+**Purpose**: Turns fact text into embeddings so related facts can be compared mathematically. This lets the job group by meaning, not just exact wording.
+
+**Data flow**: It receives aged facts, sends clipped fact bodies to the embedding client, and returns a mapping from fact id to embedding vector.
+
+**Call relations**: MemoryConsolidator.run calls it before clustering. MemoryConsolidator._clusters then reads the returned vectors.
+
+*Call graph*: called by 1 (run).
+
+
+##### `MemoryConsolidator._clusters`  (lines 605–626)
+
+```
+def _clusters(self, facts: tuple[_AgedFact, ...], embeddings: dict[UUID, tuple[float, ...]]) -> tuple[tuple[_AgedFact, ...], ...]
+```
+
+**Purpose**: Clusters related facts using embedding similarity. It walks newest-first and attaches each fact to the first similar cluster head.
+
+**Data flow**: It receives facts and their embeddings, compares each fact’s vector to existing cluster heads using cosine, and returns groups of related facts.
+
+**Call relations**: MemoryConsolidator.run runs this in a worker thread so CPU-heavy comparison work does not block the async event loop. Clusters large enough are passed to _consolidate.
+
+*Call graph*: calls 1 internal fn (cosine).
+
+
+##### `MemoryConsolidator._consolidate`  (lines 628–692)
+
+```
+async def _consolidate(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> None
+```
+
+**Purpose**: Replaces one cluster of related facts with a single semantic summary. It carefully checks that the original facts have not changed before stamping them as superseded.
+
+**Data flow**: It receives a cluster, asks _summarize for a paragraph, creates a new semantic memory row, locks and verifies the donor facts, then updates those facts to point at the new summary.
+
+**Call relations**: MemoryConsolidator.run calls it for each cluster that passes the size threshold. It calls _summarize before opening the write transaction.
+
+*Call graph*: calls 1 internal fn (_summarize); called by 1 (run); 4 external calls (insert, select, update, uuid4).
+
+
+##### `MemoryConsolidator._summarize`  (lines 694–704)
+
+```
+async def _summarize(self, model: ModelAccess, cluster: tuple[_AgedFact, ...]) -> str
+```
+
+**Purpose**: Asks the model to write one concise summary from a cluster of related facts. The result is clipped to the same paragraph budget used by overview-style text.
+
+**Data flow**: It receives a model and fact cluster, sends clipped fact bodies as JSON, gets a text completion, trims it through _to_overview_budget, and returns the final summary string.
+
+**Call relations**: MemoryConsolidator._consolidate calls it before writing the semantic summary row.
+
+*Call graph*: calls 2 internal fn (complete, _to_overview_budget); called by 1 (_consolidate); 3 external calls (__init__, __init__, dumps).
+
+
+##### `_to_overview_budget`  (lines 707–719)
+
+```
+def _to_overview_budget(summary: str) -> str
+```
+
+**Purpose**: Cuts a model-written paragraph down to the allowed size while keeping whole sentences when possible. This keeps summaries readable and predictable.
+
+**Data flow**: It receives a summary string, keeps sentences until the word, sentence, or character budget would be exceeded, and returns the kept text. If even the first sentence is too long, it clips by word.
+
+**Call relations**: MemoryConsolidator._summarize, SectionWriter._summarize, and OverviewWriter._write all use it to enforce the shared paragraph budget.
+
+*Call graph*: called by 3 (_summarize, _write, _summarize); 1 external calls (clip_to_word).
+
+
+##### `_recency`  (lines 722–723)
+
+```
+def _recency(fact: _AgedFact) -> tuple[datetime, UUID]
+```
+
+**Purpose**: Provides a stable sort key for facts by creation time and id. It makes newest-first ordering deterministic.
+
+**Data flow**: It receives an aged fact and returns a pair containing its creation time and id.
+
+**Call relations**: MemoryConsolidator’s bucketing and clustering logic uses it when sorting facts by recency.
+
+
+##### `_Group.key`  (lines 743–744)
+
+```
+def key(self) -> tuple[str, str]
+```
+
+**Purpose**: Returns the identity used to walk deduplication groups in order. A group is identified by subject and item class.
+
+**Data flow**: It reads the group’s subject and item_class fields and returns them as a tuple.
+
+**Call relations**: MemoryDeduper.run uses this key to advance its cursor through duplicate groups.
+
+
+##### `_Group.fingerprint`  (lines 747–748)
+
+```
+def fingerprint(self) -> list[JsonValue]
+```
+
+**Purpose**: Returns a compact marker showing whether a deduplication group has changed since the last sweep. It is based on the live copy count and latest update time.
+
+**Data flow**: It reads the group’s copies and latest timestamp and returns them as JSON-friendly values.
+
+**Call relations**: MemoryDeduper.run compares this fingerprint with one stored in the scoped key-value store. If it matches, the expensive embedding pass is skipped.
+
+
+##### `MemoryDeduper.run`  (lines 792–804)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs one step of the periodic deduplication sweep. It chooses one eligible group, skips it if unchanged, or collapses near-duplicate rows inside it.
+
+**Data flow**: It reads candidate groups, restores the last cursor, chooses the next group, stores the new cursor, checks the group fingerprint, and if needed runs _dedup_group and records the completed fingerprint.
+
+**Call relations**: This is the deduper’s top-level flow. It calls _groups, _cursor, and _dedup_group, while using the scoped store to remember progress between ticks.
+
+*Call graph*: calls 3 internal fn (_cursor, _dedup_group, _groups).
+
+
+##### `MemoryDeduper._cursor`  (lines 806–818)
+
+```
+def _cursor(self, stored: JsonValue | None) -> tuple[str, ...]
+```
+
+**Purpose**: Reads and validates the stored cursor for the deduplication walk. It treats malformed cursor data as an error instead of silently restarting.
+
+**Data flow**: It receives a stored JSON value, returns an empty tuple if absent, returns a subject/item_class tuple if valid, or raises if the value has the wrong shape.
+
+**Call relations**: MemoryDeduper.run calls it before choosing the next group to sweep.
+
+*Call graph*: called by 1 (run).
+
+
+##### `MemoryDeduper._groups`  (lines 820–846)
+
+```
+async def _groups(self) -> tuple[_Group, ...]
+```
+
+**Purpose**: Finds groups of live tool-written rows that have enough copies to be worth checking for duplicates. Section paragraphs are excluded because they are different bands, not duplicate statements.
+
+**Data flow**: It queries memory_item for unsuperseded, unretired, old-enough tool-written rows grouped by subject and item class, counts them, records the latest update time, and returns _Group objects.
+
+**Call relations**: MemoryDeduper.run calls it to decide what work exists and to get each group’s fingerprint.
+
+*Call graph*: called by 1 (run); 3 external calls (__init__, now, select).
+
+
+##### `MemoryDeduper._dedup_group`  (lines 848–853)
+
+```
+async def _dedup_group(self, group: _Group) -> None
+```
+
+**Purpose**: Deduplicates one selected group of live rows. It embeds the rows, clusters near-duplicates, and collapses each duplicate cluster onto its newest row.
+
+**Data flow**: It receives a group, reads its live copies, creates embeddings for their bodies, clusters them in a worker thread, and calls _collapse for clusters with enough members.
+
+**Call relations**: MemoryDeduper.run calls it when a group’s fingerprint says it has changed. It coordinates _live_copies, _embed, _clusters, and _collapse.
+
+*Call graph*: calls 3 internal fn (_collapse, _embed, _live_copies); called by 1 (run); 1 external calls (to_thread).
+
+
+##### `MemoryDeduper._live_copies`  (lines 855–870)
+
+```
+async def _live_copies(self, group: _Group) -> tuple[_LiveCopy, ...]
+```
+
+**Purpose**: Reads the actual live rows in a duplicate group, newest first. The first row in any duplicate cluster will be the one kept.
+
+**Data flow**: It receives a group, queries rows matching _live_group, orders by creation time and id descending, limits the result, and returns _LiveCopy records.
+
+**Call relations**: MemoryDeduper._dedup_group calls it before embedding and clustering the group.
+
+*Call graph*: calls 1 internal fn (_live_group); called by 1 (_dedup_group); 2 external calls (__init__, select).
+
+
+##### `MemoryDeduper._embed`  (lines 872–879)
+
+```
+async def _embed(self, copies: tuple[_LiveCopy, ...]) -> dict[UUID, tuple[float, ...]]
+```
+
+**Purpose**: Creates embeddings for the rows in a deduplication group. It batches requests so a very large group does not become one oversized embedding call.
+
+**Data flow**: It receives live copies, splits them into batches, sends clipped bodies to the embedding client, and returns a mapping from row id to vector.
+
+**Call relations**: MemoryDeduper._dedup_group calls it before running similarity clustering.
+
+*Call graph*: called by 1 (_dedup_group); 1 external calls (batched).
+
+
+##### `MemoryDeduper._clusters`  (lines 881–910)
+
+```
+def _clusters(self, copies: tuple[_LiveCopy, ...], embeddings: dict[UUID, tuple[float, ...]]) -> tuple[tuple[_LiveCopy, ...], ...]
+```
+
+**Purpose**: Groups near-duplicate rows by embedding similarity. It is tuned for restatements, not merely related facts.
+
+**Data flow**: It receives copies and embeddings, walks the copies newest-first, compares each to existing cluster heads with cosine, and returns duplicate clusters.
+
+**Call relations**: MemoryDeduper._dedup_group runs it in a worker thread. Clusters with enough copies are then passed to _collapse.
+
+*Call graph*: calls 1 internal fn (cosine).
+
+
+##### `MemoryDeduper._collapse`  (lines 912–940)
+
+```
+async def _collapse(self, group: _Group, cluster: tuple[_LiveCopy, ...]) -> None
+```
+
+**Purpose**: Marks every duplicate row in a cluster as superseded by the newest row. It locks and verifies the rows first so it does not point rows at a head that changed meanwhile.
+
+**Data flow**: It receives a group and duplicate cluster, treats the first copy as the head, locks all still-live matching rows, compares their bodies to the expected snapshot, and updates donor rows to superseded_by the head id.
+
+**Call relations**: MemoryDeduper._dedup_group calls it after clustering. It uses _live_group to make the read and update use the same eligibility rules.
+
+*Call graph*: calls 1 internal fn (_live_group); called by 1 (_dedup_group); 2 external calls (select, update).
+
+
+##### `MemoryDeduper._live_group`  (lines 942–951)
+
+```
+def _live_group(self, group: _Group) -> tuple[ColumnElement[bool], ...]
+```
+
+**Purpose**: Builds the shared database conditions for rows that count as live members of a deduplication group. This keeps reads and updates aligned.
+
+**Data flow**: It receives a group and returns SQL conditions for workspace, subject, item class, tool-written origin, not superseded, not retired, and old enough.
+
+**Call relations**: MemoryDeduper._live_copies and MemoryDeduper._collapse both use it so they operate on the same definition of a live duplicate candidate.
+
+*Call graph*: called by 2 (_collapse, _live_copies); 1 external calls (now).
+
+
+##### `_rewrite_in_place`  (lines 972–1022)
+
+```
+async def _rewrite_in_place(connection: AsyncConnection, workspace_id: UUID, standing: _Standing, paragraph: str, confidence: int) -> None
+```
+
+**Purpose**: Writes one new standing paragraph and supersedes the previous live paragraph at the same place. It enforces the rule that a section or overview has only one current paragraph.
+
+**Data flow**: It receives a database connection, workspace id, standing location, paragraph text, and confidence. It locks existing live paragraphs for that location, inserts the new paragraph, and updates the old ones to point to it.
+
+**Call relations**: SectionWriter.run and OverviewWriter.run call it after the model has produced new prose. It centralizes the replacement logic so both writers behave the same way.
+
+*Call graph*: called by 2 (run, run); 5 external calls (execute, insert, select, update, uuid4).
+
+
+##### `_retire_standing`  (lines 1025–1053)
+
+```
+async def _retire_standing(connection: AsyncConnection, workspace_id: UUID, standing: _Standing) -> None
+```
+
+**Purpose**: Retires a standing paragraph when its page or section no longer has enough facts to deserve one. This prevents old prose from lingering above rows that no longer support it.
+
+**Data flow**: It receives a connection, workspace id, and standing location, then updates the live paragraph there with retired_at and clears embedding fields so it leaves search indexes too.
+
+**Call relations**: SectionWriter.run calls it for sections that fell below the floor. OverviewWriter.run calls it when the shared page lacks enough facts for an overview.
+
+*Call graph*: called by 2 (run, run); 2 external calls (execute, update).
+
+
+##### `SectionWriter.run`  (lines 1079–1102)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the periodic job that rewrites section-opening paragraphs for every subject and memory kind with enough live facts. It also retires paragraphs for sections that no longer qualify.
+
+**Data flow**: It checks for a model, reads sections that deserve paragraphs, reads paragraphs currently standing, retires stale ones, then for each eligible section reads facts, asks the model for a summary, and rewrites the paragraph in place.
+
+**Call relations**: This is the top-level flow for section prose. It calls _sections, _standing, _facts, _summarize, _retire_standing, and _rewrite_in_place.
+
+*Call graph*: calls 6 internal fn (_facts, _sections, _standing, _summarize, _retire_standing, _rewrite_in_place).
+
+
+##### `SectionWriter._sections`  (lines 1104–1137)
+
+```
+async def _sections(self) -> tuple[_Standing, ...]
+```
+
+**Purpose**: Finds the subject/kind bands that currently have enough live facts to deserve a section paragraph. It also rejects memory kinds that have no heading on that subject’s page.
+
+**Data flow**: It queries live servable fact rows, groups them by subject and memory kind, filters to groups above the minimum count, checks that each kind has a heading, and returns _Standing locations.
+
+**Call relations**: SectionWriter.run calls it to know what should be written. It uses member_servable and section_headings so paragraph eligibility matches what readers see.
+
+*Call graph*: calls 2 internal fn (member_servable, section_headings); called by 1 (run); 2 external calls (__init__, select).
+
+
+##### `SectionWriter._standing`  (lines 1139–1157)
+
+```
+async def _standing(self) -> tuple[_Standing, ...]
+```
+
+**Purpose**: Finds section paragraphs that are currently live, whether or not their underlying facts still qualify. This lets the job retire paragraphs that should no longer stand.
+
+**Data flow**: It queries live unsuperseded SECTION rows for the workspace, groups by subject and memory kind, and returns their _Standing locations.
+
+**Call relations**: SectionWriter.run compares this result to _sections. Anything standing but no longer eligible is sent to _retire_standing.
+
+*Call graph*: called by 1 (run); 2 external calls (__init__, select).
+
+
+##### `SectionWriter._facts`  (lines 1159–1180)
+
+```
+async def _facts(self, section: _Standing) -> tuple[_SectionFact, ...]
+```
+
+**Purpose**: Reads the live facts that will be summarized for one section band. It uses newest facts first and applies a size limit.
+
+**Data flow**: It receives a section location, queries servable live FACT rows matching that subject and memory kind, orders newest first, and returns body/confidence pairs.
+
+**Call relations**: SectionWriter.run calls it for each eligible section before asking _summarize to write the paragraph.
+
+*Call graph*: calls 1 internal fn (member_servable); called by 1 (run); 2 external calls (__init__, select).
+
+
+##### `SectionWriter._summarize`  (lines 1182–1201)
+
+```
+async def _summarize(self, model: ModelAccess, section: _Standing, facts: tuple[_SectionFact, ...]) -> str
+```
+
+**Purpose**: Asks the model to write one short paragraph for a specific section. The section heading is included so the model writes prose suited to where it will appear.
+
+**Data flow**: It receives a model, section location, and facts, builds a JSON payload with the heading and clipped fact bodies, sends a completion request, and trims the result to the paragraph budget.
+
+**Call relations**: SectionWriter.run calls it before opening the write transaction. It uses section_headings and _to_overview_budget.
+
+*Call graph*: calls 3 internal fn (complete, _to_overview_budget, section_headings); called by 1 (run); 3 external calls (__init__, __init__, dumps).
+
+
+##### `OverviewWriter.run`  (lines 1225–1246)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the periodic job that writes the workspace-wide opening overview paragraph. If there are too few shared facts, it retires the overview instead.
+
+**Data flow**: It checks for a model, reads shared facts, retires the standing overview if the fact count is below the minimum, otherwise reads the workspace domain, asks the model for an overview, and rewrites the overview in place.
+
+**Call relations**: This is the top-level flow for the workspace overview. It calls _facts, _write, _retire_standing, and _rewrite_in_place.
+
+*Call graph*: calls 4 internal fn (_facts, _write, _retire_standing, _rewrite_in_place); 2 external calls (__init__, workspace_domain).
+
+
+##### `OverviewWriter._facts`  (lines 1248–1269)
+
+```
+async def _facts(self) -> tuple[_SectionFact, ...]
+```
+
+**Purpose**: Reads the live shared workspace facts used to write the overview. It pulls across all memory kinds because the overview sits above the whole page.
+
+**Data flow**: It queries servable live shared FACT rows in the workspace, orders newest first, limits the number, and returns body/confidence pairs.
+
+**Call relations**: OverviewWriter.run calls it before deciding whether to retire or rewrite the overview.
+
+*Call graph*: calls 1 internal fn (member_servable); called by 1 (run); 2 external calls (__init__, select).
+
+
+##### `OverviewWriter._write`  (lines 1271–1291)
+
+```
+async def _write(self, model: ModelAccess, domain: str | None, facts: tuple[_SectionFact, ...]) -> str
+```
+
+**Purpose**: Asks the model to write the workspace overview paragraph. The workspace domain is included when available so the model can name the company context.
+
+**Data flow**: It receives a model, optional domain, and facts, sends a bounded JSON payload to the model, trims the returned text with _to_overview_budget, and returns the paragraph.
+
+**Call relations**: OverviewWriter.run calls it after reading enough facts and before replacing the standing overview.
+
+*Call graph*: calls 2 internal fn (complete, _to_overview_budget); called by 1 (run); 3 external calls (__init__, __init__, dumps).
+
+
+##### `WrittenProfile.within_role_budget`  (lines 1328–1329)
+
+```
+def within_role_budget(cls, role: str) -> str
+```
+
+**Purpose**: Keeps a model-written person role short enough to be a phrase, not a paragraph. It trims cleanly at a word boundary.
+
+**Data flow**: It receives the role text, clips it to the profile role character budget, and returns the clipped role.
+
+**Call relations**: This validator runs when ProfileWriter._write validates model output as WrittenProfile.
+
+*Call graph*: 1 external calls (clip_to_word).
+
+
+##### `WrittenProfile.within_row_budget`  (lines 1333–1334)
+
+```
+def within_row_budget(cls, focus: str) -> str
+```
+
+**Purpose**: Keeps a model-written focus sentence within the normal memory body size. It prevents oversized profile text from entering the profile table.
+
+**Data flow**: It receives the focus text, clips it to the memory body budget at a word boundary, and returns the safe text.
+
+**Call relations**: This validator runs during WrittenProfile validation inside ProfileWriter._write.
+
+*Call graph*: 1 external calls (clip_to_word).
+
+
+##### `ProfileWriter.run`  (lines 1372–1387)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the periodic People pass that writes each roster member’s role and current focus. If no model or no roster is available, it does nothing.
+
+**Data flow**: It reads the roster, reads shared facts, asks the model to write profiles, matches returned names to roster members, and stores only matched entries.
+
+**Call relations**: This is the top-level profile flow. It calls _roster, _facts, _write, and _store.
+
+*Call graph*: calls 4 internal fn (_facts, _roster, _store, _write).
+
+
+##### `ProfileWriter._roster`  (lines 1389–1408)
+
+```
+async def _roster(self) -> tuple[_Rostered, ...]
+```
+
+**Purpose**: Reads the workspace roster in the same way the seating system understands it. It records each member’s email and standing, such as admin/member and seated/unseated.
+
+**Data flow**: It opens a transaction, asks Seats for a snapshot, takes up to the roster limit, and returns _Rostered records.
+
+**Call relations**: ProfileWriter.run calls it before asking the model to write people entries. The returned names are later used to match model output back to member ids.
+
+*Call graph*: called by 1 (run); 2 external calls (__init__, __init__).
+
+
+##### `ProfileWriter._facts`  (lines 1410–1427)
+
+```
+async def _facts(self) -> tuple[str, ...]
+```
+
+**Purpose**: Reads shared workspace facts that everyone on the roster could already see. This avoids using a person’s private page to write a public profile about them.
+
+**Data flow**: It queries servable live shared FACT rows, orders newest first, limits the result, and returns only their bodies.
+
+**Call relations**: ProfileWriter.run calls it before ProfileWriter._write builds the model prompt.
+
+*Call graph*: calls 1 internal fn (member_servable); called by 1 (run); 1 external calls (select).
+
+
+##### `ProfileWriter._write`  (lines 1429–1477)
+
+```
+async def _write(self, model: ModelAccess, roster: tuple[_Rostered, ...], facts: tuple[str, ...]) -> tuple[WrittenProfile, ...]
+```
+
+**Purpose**: Asks the model to produce People entries as a forced tool call. Each returned entry is validated on its own so one bad profile does not discard the rest.
+
+**Data flow**: It receives the roster and facts, builds a JSON payload, sends a tool-based model request, extracts the people list from the returned tool input, validates each entry as WrittenProfile, and returns the valid profiles.
+
+**Call relations**: ProfileWriter.run calls it after reading roster and facts. Its output is matched to roster member ids before _store writes anything.
+
+*Call graph*: calls 1 internal fn (turn); called by 1 (run); 4 external calls (__init__, __init__, __init__, dumps).
+
+
+##### `ProfileWriter._store`  (lines 1479–1508)
+
+```
+async def _store(self, entries: tuple[tuple[UUID, WrittenProfile], ...]) -> None
+```
+
+**Purpose**: Writes profile entries into the memory_profile table, replacing the previous entry for each member. It uses an upsert, meaning insert if missing or update if already present.
+
+**Data flow**: It receives member/profile pairs, creates one timestamp, and for each pair inserts or updates role, focus, and written_at under the workspace/member key.
+
+**Call relations**: ProfileWriter.run calls it only for model entries that matched known roster members.
+
+*Call graph*: called by 1 (run); 3 external calls (now, insert, insert).
+
+
+##### `admitted_curation`  (lines 1562–1597)
+
+```
+def admitted_curation(bands: tuple[tuple[int, ...], ...], retire: tuple[RetiredRow, ...]) -> AdmittedCuration
+```
+
+**Purpose**: Decides which page-curation retirements are safe to apply. It rejects retirements that do not name a surviving duplicate and refuses the whole page if too much of one band would be removed.
+
+**Data flow**: It receives the row indexes sent for each band and the model’s proposed retirements, drops ids not on the page, checks each duplicate_of target survives, enforces the per-band retirement limit, and returns admitted indexes or a refusal reason.
+
+**Call relations**: PagePass._retiring calls it before converting model row indexes into real database row ids.
+
+*Call graph*: called by 1 (_retiring); 1 external calls (__init__).
+
+
+##### `PagePass.run`  (lines 1645–1658)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the periodic whole-page curation pass. For each subject with enough rows, it asks the model which page-derived rows are redundant and retires the admitted ones.
+
+**Data flow**: It checks for a model, reads eligible subjects, builds each subject page, asks _curate for model judgments, filters them through _retiring, and applies retirements in one transaction per subject.
+
+**Call relations**: This is the top-level page curation flow. It coordinates _subjects, _page, _curate, _retiring, and _apply.
+
+*Call graph*: calls 5 internal fn (_apply, _curate, _page, _retiring, _subjects).
+
+
+##### `PagePass._subjects`  (lines 1660–1676)
+
+```
+async def _subjects(self) -> tuple[str, ...]
+```
+
+**Purpose**: Finds subjects with enough live facts to be worth whole-page curation. Thin pages are skipped because a person can already read them at a glance.
+
+**Data flow**: It queries live unsuperseded, unretired FACT rows grouped by subject, keeps groups above the minimum row count, orders them, and returns subject strings.
+
+**Call relations**: PagePass.run calls it to decide which pages to inspect.
+
+*Call graph*: called by 1 (run); 1 external calls (select).
+
+
+##### `PagePass._page`  (lines 1678–1724)
+
+```
+async def _page(self, subject: str) -> tuple[_Band, ...]
+```
+
+**Purpose**: Builds the model-readable version of one subject’s page. It includes each section heading, the standing section summary, and current page-derived fact rows.
+
+**Data flow**: It receives a subject, loops through that subject’s section headings, queries live page-linked fact rows for each memory kind, assigns compact numeric indexes, reads the current section paragraph, and returns bands.
+
+**Call relations**: PagePass.run calls it before _curate. It uses live_page_link so it only curates rows still backed by the current source page.
+
+*Call graph*: calls 2 internal fn (live_page_link, section_headings); called by 1 (run); 3 external calls (__init__, __init__, select).
+
+
+##### `PagePass._curate`  (lines 1726–1775)
+
+```
+async def _curate(self, model: ModelAccess, bands: tuple[_Band, ...]) -> CuratedPage
+```
+
+**Purpose**: Asks the model to identify rows that make the whole page read worse because they repeat other rows. The model returns row indexes, not database ids, to keep the prompt compact.
+
+**Data flow**: It receives page bands, builds a bounded JSON payload of section summaries and clipped rows, sends a forced tool request, validates each proposed retirement as RetiredRow, and returns a CuratedPage.
+
+**Call relations**: PagePass.run calls it after building a page. Its proposed retirements are not trusted directly; PagePass._retiring screens them first.
+
+*Call graph*: calls 1 internal fn (turn); called by 1 (run); 5 external calls (__init__, __init__, __init__, __init__, dumps).
+
+
+##### `PagePass._retiring`  (lines 1777–1788)
+
+```
+def _retiring(self, subject: str, bands: tuple[_Band, ...], retire: tuple[RetiredRow, ...]) -> frozenset[UUID]
+```
+
+**Purpose**: Converts model-proposed row indexes into real memory row ids, but only after safety checks. If the curation is too aggressive, it logs a warning and retires nothing for that subject.
+
+**Data flow**: It receives a subject, page bands, and proposed retirements, asks admitted_curation what is allowed, logs any refusal, and returns the database ids corresponding to admitted row indexes.
+
+**Call relations**: PagePass.run calls it between _curate and _apply. It is the safety gate before destructive retirement.
+
+*Call graph*: calls 1 internal fn (admitted_curation); called by 1 (run); 1 external calls (warn).
+
+
+##### `PagePass._apply`  (lines 1790–1806)
+
+```
+async def _apply(self, retiring: frozenset[UUID]) -> None
+```
+
+**Purpose**: Marks admitted page rows as retired and clears their embedding fields so search stops serving them. It does not delete the rows.
+
+**Data flow**: It receives memory row ids, opens a transaction, and updates matching live rows in the workspace with retired_at, cleared embedding fields, and updated_at.
+
+**Call relations**: PagePass.run calls it after _retiring returns non-empty ids. This is the only write step in the page pass.
+
+*Call graph*: called by 1 (run); 1 external calls (update).
+
+
+### `extensions/memory/ufo_ext_memory/store.py`
+
+`domain_logic` · `request handling and background indexing`
+
+This file solves a practical problem: the system needs to remember useful statements, but it must not show stale, duplicate, private, or no-longer-valid memories. It stores each memory in a database table, links page-derived memories back to the source pages they came from, and uses a separate index so memories can be found by both exact words and meaning.
+
+A write is deliberately simple. `MemoryStore.commit` saves one memory row and marks it as needing indexing. It does not split text into chunks or create embeddings, which are numeric representations of meaning. That work is done later by `MemoryIndexer`, like a mailroom that sorts letters after they are dropped in the box.
+
+Recall combines several signals. It searches the index by words, searches by embedding similarity, also checks very new unindexed rows, blends those results, then reads the real database rows back through permission and freshness checks. It applies time decay for facts, removes near-duplicates, and prevents one kind of memory from crowding out all others.
+
+The file also mirrors source pages into the index through `PageIndexer`, and removes or rechecks indexed chunks when pages change. This matters because the index can otherwise keep returning facts from old page revisions even after the source has moved on.
+
+#### Function details
+
+##### `recall_subjects`  (lines 176–177)
+
+```
+def recall_subjects(audience: Audience) -> frozenset[str]
+```
+
+**Purpose**: Turns an audience description into the set of memory subjects that audience is allowed to recall. A subject is the visibility label used to decide which memories belong in a reader’s view.
+
+**Data flow**: It receives an `Audience` object → asks the shared audience helper to expand it into subjects → returns those subjects as a frozen set.
+
+**Call relations**: Recall setup uses this as the small bridge from audience rules into the memory store’s subject filtering. It hands off the real interpretation to the shared audience code.
+
+*Call graph*: 1 external calls (audience_subjects).
+
+
+##### `clip_to_word`  (lines 180–189)
+
+```
+def clip_to_word(text: str, limit: int) -> str
+```
+
+**Purpose**: Shortens text to a character limit without cutting through the middle of a word. It adds an ellipsis inside the limit so the reader can tell the text was shortened.
+
+**Data flow**: It receives text and a maximum length → if the text already fits, it returns it unchanged → otherwise it keeps as much as possible, backs up to the last space when it can, trims dangling punctuation, and returns the shortened text with `…`.
+
+**Call relations**: Callers use this before creating a `MemoryWrite` if they want to trim over-long model output. The write model itself rejects bodies that exceed the storage limit rather than silently cutting them.
+
+
+##### `_granted_link`  (lines 192–200)
+
+```
+def _granted_link(source_ids: frozenset[UUID]) -> ColumnElement[bool]
+```
+
+**Purpose**: Builds the database permission check for page-derived memories. A memory learned from a source page is readable if the reader has access to at least one source link that produced it.
+
+**Data flow**: It receives a set of readable source IDs → creates a database `EXISTS` condition tied to the current memory row → the condition is later used inside larger reads to keep unauthorized rows out.
+
+**Call relations**: `MemoryStore._untail_leg` uses it when searching newly written but unindexed memories, and `MemoryStore._enrich` uses it when reading indexed candidates back. It is the common fence that stops source-derived memories from leaking across source permissions.
+
+*Call graph*: called by 2 (_enrich, _untail_leg); 1 external calls (exists).
+
+
+##### `inventory`  (lines 240–309)
+
+```
+async def inventory(transaction: Transaction, workspace_id: UUID) -> tuple[MemoryInventoryItem, ...]
+```
+
+**Purpose**: Returns a bounded, operator-facing list of stored memories in a workspace. It is for inspection, not for recall, so it includes details like indexing status, source links, age, and decay weight.
+
+**Data flow**: It receives a transaction opener and workspace ID → reads the newest memory rows and their source links from the database → computes age, half-life, and decay using one shared current time → returns `MemoryInventoryItem` objects.
+
+**Call relations**: This is separate from user recall. It calls the date and decay helpers so the operator view reports the same freshness math that recall later uses for ranking.
+
+*Call graph*: calls 3 internal fn (_aware, decay_multiplier, half_life_days); 3 external calls (__init__, now, select).
+
+
+##### `_aware`  (lines 312–313)
+
+```
+def _aware(when: datetime) -> datetime
+```
+
+**Purpose**: Makes sure a datetime has a timezone. If a stored time is missing timezone information, it treats it as UTC.
+
+**Data flow**: It receives a datetime → checks whether it already has timezone information → returns it unchanged or returns a UTC-marked version.
+
+**Call relations**: Inventory, recall enrichment, source search, and decay calculation call this before doing time math. This avoids subtle bugs where timezone-naive and timezone-aware dates cannot be safely compared.
+
+*Call graph*: called by 4 (_enrich, search_sources, decay_multiplier, inventory); 1 external calls (replace).
+
+
+##### `MemoryWrite.body_is_within_budget`  (lines 340–346)
+
+```
+def body_is_within_budget(self) -> Self
+```
+
+**Purpose**: Validates that a memory body is not too long to store as a single memory. Long documents belong as pages, not one oversized memory row.
+
+**Data flow**: It reads the `body` length on the `MemoryWrite` being validated → if it exceeds the configured limit, validation fails with an error → otherwise the write object is accepted unchanged.
+
+**Call relations**: This runs automatically when a caller constructs a `MemoryWrite`. It protects `MemoryStore.commit` from receiving bodies that break the memory store’s size promise.
+
+
+##### `MemoryWrite.page_origin_is_complete`  (lines 349–357)
+
+```
+def page_origin_is_complete(self) -> Self
+```
+
+**Purpose**: Validates that page-derived memories name their origin completely. If a memory says it came from a page, it must include page ID, page revision, and source ID together.
+
+**Data flow**: It checks the three origin fields on the `MemoryWrite` → if some are present but not all, validation fails → if none or all are present, the write object is accepted.
+
+**Call relations**: This runs before `MemoryStore.commit`. It ensures later permission checks, page freshness checks, and source-link records have enough information to work correctly.
+
+
+##### `_fuse`  (lines 387–410)
+
+```
+def _fuse(legs: tuple[tuple[Hit, ...], ...], cosine_leg: tuple[Hit, ...]) -> dict[str, tuple[float, float, str]]
+```
+
+**Purpose**: Combines several ranked search-result lists into one best score per owning row. This lets the system blend word matches and meaning matches without letting duplicate chunks from the same memory dominate.
+
+**Data flow**: It receives one or more result lists plus the vector-result list → calculates reciprocal-rank fusion, meaning high-ranked hits in each list contribute more → keeps the best chunk per owner and the owner’s best cosine similarity → returns a mapping from owner ID to fused score, cosine score, and snippet text.
+
+**Call relations**: `fuse_hits` and `fuse_recall` both use this shared core. It does the mechanical merge so those public helpers can apply their different ranking rules for source-page search versus memory recall.
+
+*Call graph*: called by 2 (fuse_hits, fuse_recall); 1 external calls (from_iterable).
+
+
+##### `fuse_hits`  (lines 413–426)
+
+```
+def fuse_hits(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]
+```
+
+**Purpose**: Ranks source-page search hits by combining word-search and meaning-search results. It also avoids returning random nearest-neighbor results when no words matched at all.
+
+**Data flow**: It receives lexical hits, vector hits, and a limit → fuses them with `_fuse` → if there were no lexical matches, drops weak vector-only matches below a similarity floor → sorts by fused rank and returns `Fused` results up to the limit.
+
+**Call relations**: `MemoryStore.search_sources` calls this after asking the index for page hits. It produces the ordered page candidates that are then checked against the live page mirror and reader permissions.
+
+*Call graph*: calls 1 internal fn (_fuse); called by 1 (search_sources); 1 external calls (__init__).
+
+
+##### `fuse_recall`  (lines 429–457)
+
+```
+def fuse_recall(lexical: tuple[Hit, ...], vector: tuple[Hit, ...], tail: tuple[Hit, ...], limit: int) -> tuple[Fused, ...]
+```
+
+**Purpose**: Ranks memory recall candidates by blending rank-based search with raw semantic closeness. It also includes a special tail of very new memories that have not been indexed yet.
+
+**Data flow**: It receives lexical hits, vector hits, unindexed-tail hits, and a limit → fuses all legs with `_fuse` → normalizes the rank score, blends it with cosine similarity, applies a floor only when the query had no word matches, then returns top `Fused` results.
+
+**Call relations**: `MemoryStore.recall` calls this after gathering all recall legs. Its output is not served directly; `_enrich` must still read real database rows and apply permissions, freshness, and lifecycle filters.
+
+*Call graph*: calls 1 internal fn (_fuse); called by 1 (recall); 1 external calls (__init__).
+
+
+##### `half_life_days`  (lines 475–481)
+
+```
+def half_life_days(item_class: str, memory_kind: str) -> float | None
+```
+
+**Purpose**: Returns how quickly a fact should fade in recall ranking. Only fact-class memories decay over time; other memory classes keep their relevance score unchanged.
+
+**Data flow**: It receives an item class and memory kind → if the item is not a fact, returns `None` → otherwise returns the configured half-life for that kind, falling back to the fact default.
+
+**Call relations**: `decay_multiplier` uses this for recall scoring, and `inventory` uses it to show operators the same decay setting. It centralizes the half-life rule so the display and ranking agree.
+
+*Call graph*: called by 2 (decay_multiplier, inventory).
+
+
+##### `decay_multiplier`  (lines 484–496)
+
+```
+def decay_multiplier(item_class: str, memory_kind: str, confidence: int, as_of: datetime | None, now: datetime) -> float
+```
+
+**Purpose**: Calculates the freshness multiplier for a memory’s recall score. For facts, older and lower-confidence memories count less; non-facts stay at full strength.
+
+**Data flow**: It receives item class, kind, confidence, source date, and current time → finds the half-life → if no decay applies, returns `1.0` → otherwise computes age in days and returns the confidence-scaled decay factor.
+
+**Call relations**: `decay_factor` wraps this for recalled items, and `inventory` calls it for operator display. It also uses `_aware` so stored dates are safe for time arithmetic.
+
+*Call graph*: calls 2 internal fn (_aware, half_life_days); called by 2 (decay_factor, inventory).
+
+
+##### `decay_factor`  (lines 499–502)
+
+```
+def decay_factor(item: Recalled, now: datetime) -> float
+```
+
+**Purpose**: Calculates the decay multiplier for one recalled memory item. It is a convenience wrapper around the shared decay formula.
+
+**Data flow**: It receives a `Recalled` item and a current time → chooses the item’s `as_of` date when available, otherwise its creation time → passes those values into `decay_multiplier` → returns the multiplier.
+
+**Call relations**: `MemoryStore._shortlist` calls this while reranking recall candidates. That keeps the main recall flow readable while still using the central decay logic.
+
+*Call graph*: calls 1 internal fn (decay_multiplier); called by 1 (_shortlist).
+
+
+##### `_body_shingles`  (lines 510–512)
+
+```
+def _body_shingles(body: str) -> frozenset[str]
+```
+
+**Purpose**: Turns a memory body into small three-word fingerprints used for duplicate detection. These fingerprints make it cheap to compare whether two memories say nearly the same thing.
+
+**Data flow**: It receives text → lowercases it, splits it into words, and groups neighboring words into three-word phrases → returns a frozen set of those phrases.
+
+**Call relations**: `drop_near_duplicates` calls this for each candidate it considers. It is the low-level text preparation step for the recall duplicate guard.
+
+*Call graph*: called by 1 (drop_near_duplicates); 1 external calls (split).
+
+
+##### `drop_near_duplicates`  (lines 515–541)
+
+```
+def drop_near_duplicates(items: tuple[Recalled, ...], keep: int) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Removes near-copy memories from the recall list so limited context slots are not wasted repeating the same fact. It keeps the highest-ranked version and skips later ones that overlap too much.
+
+**Data flow**: It receives ranked recalled items and a maximum number to keep → walks them in order → computes word-shingle overlap against already kept items → appends only sufficiently different items → returns the kept tuple.
+
+**Call relations**: `MemoryStore._shortlist` calls this after applying decay. It protects recall output until slower cleanup jobs can permanently merge or retire duplicate memories.
+
+*Call graph*: calls 1 internal fn (_body_shingles); called by 1 (_shortlist).
+
+
+##### `enforce_type_diversity`  (lines 544–562)
+
+```
+def enforce_type_diversity(rows: tuple[Recalled, ...], limit: int) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Prevents one memory class from filling the entire recall result. For example, many facts should not crowd out all episodic or semantic pointers when there is room for variety.
+
+**Data flow**: It receives ranked recalled rows and a limit → admits only a capped number per item class on the first pass → stores overflow rows → backfills from overflow if there are still open slots → returns at most the requested limit.
+
+**Call relations**: `MemoryStore._shortlist` calls this after duplicate removal. It is the final shaping step before recall results are returned to the caller.
+
+*Call graph*: called by 1 (_shortlist).
+
+
+##### `as_topic_pointer`  (lines 565–575)
+
+```
+def as_topic_pointer(item: Recalled, index: int) -> Recalled
+```
+
+**Purpose**: Rewrites episodic memory hits into topic pointers instead of injecting their full body. Episodic memories are treated as breadcrumbs for browsing, not as verbatim context.
+
+**Data flow**: It receives a recalled item and its index in the result list → if it is not episodic, returns it unchanged → if it is episodic, returns a copied item with a short pointer body and `recall_mode` set to `topic`.
+
+**Call relations**: `MemoryStore.recall` applies this to the final shortlist. It changes presentation without changing the stored memory row.
+
+*Call graph*: called by 1 (recall); 1 external calls (replace).
+
+
+##### `MemoryStore.commit`  (lines 602–728)
+
+```
+async def commit(self, write: MemoryWrite) -> UUID
+```
+
+**Purpose**: Writes one memory into the durable store and returns its stable ID. It intentionally leaves indexing for the background indexer, so writes stay fast and predictable.
+
+**Data flow**: It receives a validated `MemoryWrite` → creates a content-based UUID from workspace, subject, class, and body → inserts or updates the memory row → records or updates a source-page link when present → returns the memory ID.
+
+**Call relations**: Callers that extract facts from pages use the returned ID to tell `supersede_page_facts` which facts the page still supports. Later, `MemoryIndexer` sees the row because its embedding digest is empty and turns it into searchable chunks.
+
+*Call graph*: 3 external calls (case, or_, uuid5).
+
+
+##### `MemoryStore.supersede_page_facts`  (lines 730–851)
+
+```
+async def supersede_page_facts(self, page_id: UUID, kept: frozenset[UUID] | None) -> None
+```
+
+**Purpose**: Removes a page’s support for facts it no longer produced. If no other page still supports a fact, the fact row and its index chunks are removed.
+
+**Data flow**: It receives a page ID and either the set of kept memory IDs or `None` for a gone page → deletes stale source links → for each affected memory, either deletes it, repoints it to a surviving source link, or leaves it alone → deletes index chunks for fully deleted memories.
+
+**Call relations**: The fact-derivation flow calls this after committing the facts a page currently supports. It coordinates with `commit`, which adds links, and with the index backend, which must stop serving rows that have no surviving source.
+
+*Call graph*: 4 external calls (__init__, delete, select, update).
+
+
+##### `MemoryStore.recall`  (lines 853–892)
+
+```
+async def recall(self, query: str, subjects: frozenset[str], limit: int, start: datetime | None=None, end: datetime | None=None, *, source_reader: SourceReader) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Finds the best memories for a query, subject list, time window, and reader permissions. It is the main read path used when the system wants remembered context.
+
+**Data flow**: It receives the query, allowed subjects, limit, optional dates, and a source reader → obtains readable source IDs → asks the index for lexical and vector legs → scans the unindexed tail → fuses candidates → enriches them from the database with permissions and freshness checks → shortlists them in a worker thread → returns final recalled items.
+
+**Call relations**: This orchestrates `_source_ids`, `_legs`, `_untail_leg`, `fuse_recall`, `_enrich`, `_shortlist`, and `as_topic_pointer`. It is the central story for memory retrieval.
+
+*Call graph*: calls 6 internal fn (_enrich, _legs, _source_ids, _untail_leg, as_topic_pointer, fuse_recall); 2 external calls (to_thread, now).
+
+
+##### `MemoryStore._shortlist`  (lines 894–909)
+
+```
+def _shortlist(self, enriched: tuple[Recalled, ...], limit: int, now: datetime) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Narrows an enriched candidate pool down to the final recall slots. It applies freshness decay, duplicate removal, and type diversity.
+
+**Data flow**: It receives recalled candidates, a limit, and current time → multiplies each score by its decay factor → sorts by the new score → drops near-duplicates → enforces class diversity → returns the final shortlist.
+
+**Call relations**: `MemoryStore.recall` runs this in a worker thread because it is CPU work with no awaits. It calls the decay, duplicate, and diversity helpers in the final ranking stage.
+
+*Call graph*: calls 3 internal fn (decay_factor, drop_near_duplicates, enforce_type_diversity); 1 external calls (replace).
+
+
+##### `MemoryStore.search_sources`  (lines 911–977)
+
+```
+async def search_sources(self, query: str, subjects: frozenset[str], limit: int, start: datetime | None=None, end: datetime | None=None, *, source_reader: SourceReader) -> tuple[SourceMatch, ...]
+```
+
+**Purpose**: Searches synced source pages, not stored memory facts. It returns matching snippets from page chunks while checking that the page is still current and readable.
+
+**Data flow**: It receives query, subjects, limit, optional date bounds, and a source reader → gets lexical and vector page hits → fuses them → reads matching mirror rows from `mem_page` → verifies live readable page state → returns `SourceMatch` results.
+
+**Call relations**: This shares `_legs` and the fusion style with recall, but it reads page mirror data and calls `_readable_states` instead of memory enrichment. It protects against stale page chunks by comparing the mirror to current page state.
+
+*Call graph*: calls 4 internal fn (_legs, _readable_states, _aware, fuse_hits); 3 external calls (__init__, select, UUID).
+
+
+##### `MemoryStore._source_ids`  (lines 979–985)
+
+```
+async def _source_ids(self, source_reader: SourceReader) -> frozenset[UUID]
+```
+
+**Purpose**: Gets the set of source IDs the current reader may access. Source permissions are needed before serving page-derived memories.
+
+**Data flow**: It receives a `SourceReader` → if no source-grant function is wired, raises an error → otherwise asks that function for readable source IDs and returns them.
+
+**Call relations**: `MemoryStore.recall` calls this before any source-derived memory can be returned. It is the permission authority entry point for memory reads.
+
+*Call graph*: called by 1 (recall).
+
+
+##### `MemoryStore._legs`  (lines 987–999)
+
+```
+async def _legs(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[tuple[Hit, ...], tuple[Hit, ...]]
+```
+
+**Purpose**: Runs the two main index searches for a query: word-based search and vector-based meaning search. Vector search is skipped if the query cannot be embedded.
+
+**Data flow**: It receives query text, subjects, owner kind, and limit → embeds the query → asks the index for lexical hits → asks for vector hits only when an embedding exists → returns both hit tuples.
+
+**Call relations**: Both `MemoryStore.recall` and `MemoryStore.search_sources` use this. It delegates query embedding to `_embed_query` and leaves result blending to `fuse_recall` or `fuse_hits`.
+
+*Call graph*: calls 1 internal fn (_embed_query); called by 2 (recall, search_sources).
+
+
+##### `MemoryStore._untail_leg`  (lines 1001–1057)
+
+```
+async def _untail_leg(self, query: str, subjects: frozenset[str], limit: int, source_ids: frozenset[UUID]) -> tuple[Hit, ...]
+```
+
+**Purpose**: Searches very new memory rows that have not yet been indexed. This makes freshly committed memories recallable before the background indexer runs.
+
+**Data flow**: It receives query, subjects, limit, and readable source IDs → splits the query into terms → reads newest unindexed, live, permitted memory rows from the database → counts query-term matches in each body → returns synthetic `Hit` objects sorted by match count.
+
+**Call relations**: `MemoryStore.recall` adds this as a third search leg before calling `fuse_recall`. It uses `_granted_link` so unindexed source-derived rows are still permission-checked.
+
+*Call graph*: calls 1 internal fn (_granted_link); called by 1 (recall); 4 external calls (__init__, split, or_, select).
+
+
+##### `MemoryStore._embed_query`  (lines 1059–1067)
+
+```
+async def _embed_query(self, query: str) -> tuple[float, ...]
+```
+
+**Purpose**: Turns a recall or source-search query into an embedding vector. If embedding fails, it logs a warning and lets the rest of search continue with word matching only.
+
+**Data flow**: It receives query text → returns an empty tuple for blank text → otherwise calls the embedding backend → returns the first vector, or an empty tuple if none is produced or an error occurs.
+
+**Call relations**: `MemoryStore._legs` calls this before vector search. Its failure-tolerant behavior keeps recall from breaking completely when the embedding service is unavailable.
+
+*Call graph*: called by 1 (_legs).
+
+
+##### `MemoryStore._enrich`  (lines 1069–1149)
+
+```
+async def _enrich(self, fused: tuple[Fused, ...], subjects: frozenset[str], source_ids: frozenset[UUID], start: datetime | None, end: datetime | None) -> tuple[Recalled, ...]
+```
+
+**Purpose**: Turns fused memory hit IDs into full recalled memory objects, while applying the real database fences. It removes candidates that are superseded, retired, unauthorized, outside the time window, or bound to an old page revision.
+
+**Data flow**: It receives fused hits, allowed subjects, readable source IDs, and optional dates → reads matching live rows from the database under permission conditions → checks current page states for page-derived rows → returns `Recalled` objects in fused order.
+
+**Call relations**: `MemoryStore.recall` calls this after search fusion. It is the safety gate between the broad index candidate window and memories actually shown to a reader.
+
+*Call graph*: calls 2 internal fn (_aware, _granted_link); called by 1 (recall); 4 external calls (__init__, or_, select, UUID).
+
+
+##### `MemoryStore._readable_states`  (lines 1151–1158)
+
+```
+async def _readable_states(self, page_ids: tuple[UUID, ...], source_reader: SourceReader) -> dict[UUID, PageState]
+```
+
+**Purpose**: Fetches current page states only for pages the reader may access. This is used to verify source-page search results before showing them.
+
+**Data flow**: It receives page IDs and a source reader → returns an empty dictionary if there are no pages → raises if no readable-page authority is wired → otherwise returns the readable current page states.
+
+**Call relations**: `MemoryStore.search_sources` calls this after finding candidate page IDs. It provides the final permission and freshness check for source-page snippets.
+
+*Call graph*: called by 1 (search_sources).
+
+
+##### `store_for`  (lines 1161–1174)
+
+```
+def store_for(ext: ExtensionContext) -> MemoryStore
+```
+
+**Purpose**: Builds a `MemoryStore` from the extension context. It fails early if the required index or embedding backends are missing.
+
+**Data flow**: It receives an `ExtensionContext` → checks that index and embed clients exist → copies the scoped transaction opener, workspace ID, page-state readers, and permission readers into a new `MemoryStore` → returns it.
+
+**Call relations**: Other extension code uses this as the construction point for memory operations. It keeps `MemoryStore` wired to the correct workspace and backend services.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `MemoryIndexer.run`  (lines 1198–1200)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Processes one batch of memory rows that need indexing. It is the public tick for the background memory-index job.
+
+**Data flow**: It claims due memory items → loops through them one by one → asks `_index_item` to publish, withdraw, or settle each item.
+
+**Call relations**: The background scheduler calls this. It connects batch claiming with per-item indexing while leaving the details to `_claim_due` and `_index_item`.
+
+*Call graph*: calls 2 internal fn (_claim_due, _index_item).
+
+
+##### `MemoryIndexer._claim_due`  (lines 1202–1238)
+
+```
+async def _claim_due(self) -> tuple[MemoryItem, ...]
+```
+
+**Purpose**: Atomically claims memory rows whose embedding work is due. The claim prevents overlapping indexer runs from embedding the same row at the same time.
+
+**Data flow**: It computes a lease cutoff time → selects rows with no digest and no active claim, limited to the batch size → locks them when the database supports skip-locked behavior → stamps their claim time → returns them as `MemoryItem` objects.
+
+**Call relations**: `MemoryIndexer.run` calls this at the start of each tick. The claimed rows are then handed to `_index_item`, and `_settle` later clears the claim when a row reaches a terminal state.
+
+*Call graph*: called by 1 (run); 5 external calls (now, timedelta, or_, select, update).
+
+
+##### `MemoryIndexer._index_item`  (lines 1240–1277)
+
+```
+async def _index_item(self, item: MemoryItem) -> None
+```
+
+**Purpose**: Decides what to do with one claimed memory: publish it to the index, withdraw its chunks, or leave it for a later run if its page binding changed.
+
+**Data flow**: It receives a claimed `MemoryItem` → checks whether it is retired or not publishable → deletes chunks and settles if it should be withheld → otherwise creates chunks and embeddings if the index lacks them → rereads the row binding → verifies it is still publishable and unchanged → settles the row when safe.
+
+**Call relations**: `MemoryIndexer.run` calls this for each claimed row. It uses `_publishable` to guard page-derived memories, `chunk_embed_upsert` to write index chunks, and `_settle` to mark successful decisions.
+
+*Call graph*: calls 2 internal fn (_publishable, _settle); called by 1 (run); 3 external calls (__init__, select, chunk_embed_upsert).
+
+
+##### `MemoryIndexer._publishable`  (lines 1279–1288)
+
+```
+async def _publishable(self, subject: str, page_id: UUID | None, revision: int | None) -> bool
+```
+
+**Purpose**: Checks whether a memory is allowed to appear in the search index. Tool-written memories are always publishable; page-derived memories are publishable only if their source page still has the same subject and revision.
+
+**Data flow**: It receives subject, page ID, and revision → returns true immediately for non-page memories → otherwise reads current page state → returns true only when the page exists and exactly matches subject and revision.
+
+**Call relations**: `MemoryIndexer._index_item` calls this before and after index writes. This double-check stops stale page-derived memories from occupying recall candidate slots.
+
+*Call graph*: called by 1 (_index_item).
+
+
+##### `MemoryIndexer._settle`  (lines 1290–1314)
+
+```
+async def _settle(self, item: MemoryItem) -> None
+```
+
+**Purpose**: Marks a claimed memory row as no longer due for indexing. It writes a digest of the body and clears the claim, but only if the row still matches what this run claimed.
+
+**Data flow**: It receives a `MemoryItem` → computes a SHA-256 digest of the body → updates the row’s `embedding_digest`, clears `embedding_claimed_at`, and updates the timestamp under strict matching conditions → returns nothing.
+
+**Call relations**: `MemoryIndexer._index_item` calls this after publishing or intentionally withholding a row. The guarded update prevents an old indexing decision from settling a row that has since been rebound or changed.
+
+*Call graph*: called by 1 (_index_item); 2 external calls (sha256, update).
+
+
+##### `PageIndexer.apply`  (lines 1337–1339)
+
+```
+async def apply(self, changes: tuple[PageChange, ...]) -> None
+```
+
+**Purpose**: Applies a delivered batch of source-page changes to the memory extension’s page index. It is the public entry point for page-change indexing work.
+
+**Data flow**: It receives a tuple of page changes → processes each change in order by calling `_apply` → returns when all changes have been attempted.
+
+**Call relations**: The core page-change runner calls this with batches it owns. This method keeps batching simple and delegates all per-page rules to `_apply`.
+
+*Call graph*: calls 1 internal fn (_apply).
+
+
+##### `PageIndexer._apply`  (lines 1341–1399)
+
+```
+async def _apply(self, change: PageChange) -> None
+```
+
+**Purpose**: Updates the page search index and page mirror for one source-page change. It deletes stale page chunks, indexes current page bodies, and records the current page revision in `mem_page`.
+
+**Data flow**: It receives one `PageChange` → reads current page state → marks facts from left-behind revisions as due for rechecking → if the change is a tombstone or stale, deletes page chunks and mirror row → otherwise chunks and embeds the page body → verifies the page did not change during embedding → upserts the `mem_page` mirror row.
+
+**Call relations**: `PageIndexer.apply` calls this for each change. It uses `_unsettle_left_behind_facts` to wake the memory indexer for old facts, and `chunk_embed_upsert` to publish current page chunks.
+
+*Call graph*: calls 1 internal fn (_unsettle_left_behind_facts); called by 1 (apply); 5 external calls (__init__, delete, insert, update, chunk_embed_upsert).
+
+
+##### `PageIndexer._unsettle_left_behind_facts`  (lines 1401–1429)
+
+```
+async def _unsettle_left_behind_facts(self, page_id: UUID, state: PageState | None) -> None
+```
+
+**Purpose**: Marks page-derived memories from old page revisions as needing index review again. This lets the memory indexer remove chunks for facts whose source page has moved on.
+
+**Data flow**: It receives a page ID and the page’s current state, if any → builds a condition for memories from that page that no longer match the live subject and revision, or all memories if the page is gone → clears their embedding digest and claim fields → returns nothing.
+
+**Call relations**: `PageIndexer._apply` calls this before handling each page change. It does not retire memory rows itself; instead, it asks `MemoryIndexer` to revisit whether their chunks should remain searchable.
+
+*Call graph*: called by 1 (_apply); 2 external calls (or_, update).
+
+
+### `extensions/memory/ufo_ext_memory/events.py`
+
+`data_model` · `cross-cutting`
+
+The memory extension likely reports what it is doing by emitting structured events: small, named records that other parts of the system can log, display, or inspect. This file is the label maker for one of those events. It defines the event name used when the extension recalls memories before producing a response, plus two guardrails that keep event data from becoming too large or messy.
+
+The constant `MEMORY_RECALL_EVENT` is the exact event name: `memory.pre_response_recall`. Using a shared constant matters because event names must match exactly. If different files typed this string by hand, a small spelling difference could make listeners miss the event.
+
+`MAX_RECALLED_MEMORY_IDS` limits how many recalled memory identifiers should be included in the event. This is like showing only the first few receipt numbers instead of printing an entire archive. `MAX_RECALL_ERROR_CLASS_CHARS` limits how much of an error class name is recorded, so unusual or very long error text does not bloat the event.
+
+There are no functions here. The file exists as a tiny shared contract: everyone agrees on the event name and the maximum amount of supporting detail to include.
+
+
+### Consent-gated enrichment
+Handles enrichment consent, provider selection or replay, normalized profile records, and database state for lookup retries and results.
+
+### `extensions/enrichment/ufo_ext_enrichment/manifest.py`
+
+`orchestration` · `startup, user action, scheduled job, object reads, prompt submission`
+
+This file solves a privacy-sensitive onboarding problem: the system wants a useful first guess about who a workspace member works for, but it must not send anyone’s information to an outside data provider unless that member agreed. The agreement happens through the confirm_website action. That action only records the member’s answer and clears any old profile; it does not immediately call the provider. A scheduled job later finds consenting members who still need profiles and looks them up in small batches.
+
+The file also protects against bad guesses. Common personal email domains like gmail.com and yahoo.com are treated as mail providers, not companies, so they are not used as company websites. If the provider fails or asks the system to slow down, the job pauses the workspace instead of retrying every minute.
+
+Once profiles exist, the read-only enrichment_profile object lets the portal or tools list and inspect them. Attempts to write or delete those rows are refused because the only write path is confirming or clearing a website. Finally, on each user prompt, the inject hook may add a short, clearly walled-off summary of the company and speaker. “Walled” means the text is marked as third-party, unverified data, so the assistant should treat the member’s own words as more trustworthy.
+
+#### Function details
+
+##### `website_host`  (lines 162–172)
+
+```
+def website_host(raw: str) -> str | None
+```
+
+**Purpose**: Turns a member-entered website into a clean host name, such as turning “https://www.example.com/path” into “example.com”. It returns nothing for an empty answer and rejects text that does not look like a real website.
+
+**Data flow**: It receives raw text from the website field → trims spaces, lowercases it, parses it like a URL, removes a leading “www.”, and checks that the host contains a dot → returns the cleaned host, returns null for an empty field, or raises an error for invalid website text.
+
+**Call relations**: Enrichment.confirm_website calls this first when a member submits the confirm website action, so the rest of the flow stores a normalized domain rather than whatever text the member typed.
+
+*Call graph*: called by 1 (confirm_website); 1 external calls (urlsplit).
+
+
+##### `Enrichment.confirm_website`  (lines 182–203)
+
+```
+async def confirm_website(self, ctx: ToolContext, args: ConfirmWebsiteInput) -> ToolResult
+```
+
+**Purpose**: Records whether the speaking member agreed to be looked up and what website they confirmed. It deliberately does not perform the lookup itself; it leaves that work for the scheduled job.
+
+**Data flow**: It receives the tool context and the website answer → requires an extension context and a speaking seated member, cleans the website, checks the member exists, records consent and the website unless it is a known free mail domain, deletes any older stored profile for that member → returns a short message saying either that the profile will be built soon or that nothing was looked up.
+
+**Call relations**: This is the action registered by manifest when a provider exists. It uses website_host to clean the input, uses Profiles and Consents storage to record the decision, and relies on Enrichment.tick to later build the profile.
+
+*Call graph*: calls 2 internal fn (_require_ext, website_host); 5 external calls (__init__, __init__, __init__, __init__, __init__).
+
+
+##### `Enrichment.tick`  (lines 205–224)
+
+```
+async def tick(self, ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Runs the scheduled enrichment work for a workspace. It finds consenting members who do not yet have a profile and looks them up one by one.
+
+**Data flow**: It receives an extension context for a workspace → reads a small batch of due members, looks up each member, writes each resulting profile, and clears any previous pause when work succeeds → if the provider reports an enrichment error, it records a backoff pause, logs a warning, and stops for now.
+
+**Call relations**: The job declared by manifest calls this on a schedule. It delegates the actual provider calls to Enrichment._lookup and uses Backoff so a failing provider does not get hammered every minute.
+
+*Call graph*: calls 2 internal fn (transaction, _lookup); 3 external calls (__init__, __init__, warn).
+
+
+##### `Enrichment._lookup`  (lines 226–233)
+
+```
+async def _lookup(self, email: str, website: str | None) -> Profile
+```
+
+**Purpose**: Asks the provider for information about a person and, when appropriate, their company. It chooses the company lookup domain from the confirmed website or the email domain, while avoiding common personal email providers.
+
+**Data flow**: It receives an email address and optional confirmed website → asks the provider for the person by email, chooses a company domain, skips company lookup if that domain is a free mail service, otherwise asks the provider for the company → passes the pieces into Enrichment._profile and returns the completed profile object.
+
+**Call relations**: Enrichment.tick calls this for each due member. After it has gathered provider data, it hands the raw person and company results to Enrichment._profile to package them consistently.
+
+*Call graph*: calls 1 internal fn (_profile); called by 1 (tick).
+
+
+##### `Enrichment._profile`  (lines 235–249)
+
+```
+def _profile(self, email: str, website: str | None, person: Person | None, company: Company | None) -> Profile
+```
+
+**Purpose**: Builds the stored profile record from the lookup results. It marks whether anything matched and stamps the result with the current time and provider source.
+
+**Data flow**: It receives the member email, confirmed website, optional person data, and optional company data → chooses status “matched” if either person or company was found, otherwise “no_match” → returns a Profile containing the input data, source name, and fetch time.
+
+**Call relations**: Enrichment._lookup calls this after provider queries finish. The returned Profile is then written by Enrichment.tick and later read by object views and prompt injection.
+
+*Call graph*: called by 1 (_lookup); 2 external calls (__init__, now).
+
+
+##### `inject`  (lines 252–274)
+
+```
+async def inject(ctx: HookContext) -> HookOutcome
+```
+
+**Purpose**: Adds a short unverified enrichment summary to a user prompt when useful profile data exists. This gives the assistant starting context, while clearly marking it as third-party data.
+
+**Data flow**: It receives a hook context for a prompt submission → if there is no turn, it returns nothing; otherwise it reads the speaker’s profile and recent workspace rows, chooses company information and speaker person information, formats short lines, wraps them in a safety wall with the source label → returns an InjectContext or nothing if there is no useful data.
+
+**Call relations**: manifest registers this as a best-effort user_prompt_submit hook, so it runs around prompt submission time. It calls _company_lines and _member_lines to format the readable text and wall to mark the text as untrusted outside information.
+
+*Call graph*: calls 2 internal fn (_company_lines, _member_lines); 3 external calls (__init__, __init__, wall).
+
+
+##### `_company_lines`  (lines 277–285)
+
+```
+def _company_lines(company: Company | None) -> list[str]
+```
+
+**Purpose**: Creates a compact human-readable company line for prompt injection. It includes the company name and, when known, details like industry, size, or location.
+
+**Data flow**: It receives optional company data → if there is no useful company name, it returns an empty list; otherwise it clips long parts and joins the details → returns a one-item list such as “company: Example — Software, 50-100, London”.
+
+**Call relations**: inject calls this while building the short context block for the assistant. It uses _clip so long provider values do not flood the prompt.
+
+*Call graph*: calls 1 internal fn (_clip); called by 1 (inject).
+
+
+##### `_member_lines`  (lines 288–292)
+
+```
+def _member_lines(person: Person | None) -> list[str]
+```
+
+**Purpose**: Creates a compact human-readable member line for prompt injection. It focuses on the speaker’s name and job title when either is known.
+
+**Data flow**: It receives optional person data → if there is no name or title, it returns an empty list; otherwise it clips the known parts and joins them → returns a one-item list such as “member: Ada Lovelace — Founder”.
+
+**Call relations**: inject calls this beside _company_lines so the assistant can see both organization context and speaker context. It also uses _clip to keep the injected text short.
+
+*Call graph*: calls 1 internal fn (_clip); called by 1 (inject).
+
+
+##### `_clip`  (lines 295–297)
+
+```
+def _clip(value: str, limit: int) -> str
+```
+
+**Purpose**: Shortens a piece of text to a safe display length and makes it one line. This prevents long or messy provider values from taking over summaries or prompt injections.
+
+**Data flow**: It receives a string and a character limit → collapses repeated whitespace into normal spaces, checks the length, and if needed cuts the text and adds an ellipsis → returns the cleaned, possibly shortened string.
+
+**Call relations**: _company_lines, _member_lines, and summary all call this before showing provider-derived text to users or prompts.
+
+*Call graph*: called by 3 (_company_lines, _member_lines, summary).
+
+
+##### `summary`  (lines 300–312)
+
+```
+def summary(profile: Profile) -> str
+```
+
+**Purpose**: Builds the one-line summary shown for a profile row. It tries to say the most useful known thing, such as a title at a company, and falls back to “No match” when nothing useful was found.
+
+**Data flow**: It receives a Profile → looks for the person’s job title, the company name, the person’s full name, and the company industry → combines the best available pieces into a readable line and clips it to the summary limit → returns that summary string.
+
+**Call relations**: _row calls this whenever a stored profile is turned into an object row for listing or detail display.
+
+*Call graph*: calls 1 internal fn (_clip); called by 1 (_row).
+
+
+##### `_row`  (lines 315–338)
+
+```
+def _row(profile: Profile) -> ObjectRow
+```
+
+**Purpose**: Converts a stored Profile into the object-row shape used by the portal and object API. It lays out the profile’s fields in a flat, listable form.
+
+**Data flow**: It receives a Profile → extracts person fields, company fields, source, status, email, and website into a dictionary, builds a row name from the email, and adds the summary from summary → returns an ObjectRow.
+
+**Call relations**: ProfileObjects._page calls this for lists, and ProfileObjects._entry calls it for a single detail view. It is the bridge from enrichment storage data to the generic object display system.
+
+*Call graph*: calls 1 internal fn (summary); called by 2 (_entry, _page); 1 external calls (__init__).
+
+
+##### `_require_ext`  (lines 341–344)
+
+```
+def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
+```
+
+**Purpose**: Checks that an extension context is present before code tries to read or write workspace data. Without that context, the code would not know which workspace or transaction to use.
+
+**Data flow**: It receives an optional extension context → if it is present, returns it unchanged; if it is missing, raises a runtime error explaining the dispatch problem.
+
+**Call relations**: The action and object methods call this at their boundaries. It acts like a guard at the door before Enrichment.confirm_website, ProfileObjects.list, get, member_page, and member_detail access storage.
+
+*Call graph*: called by 5 (confirm_website, get, list, member_detail, member_page).
+
+
+##### `ProfileObjects.list`  (lines 353–356)
+
+```
+async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
+```
+
+**Purpose**: Lists enrichment profile rows for callers allowed to read shared workspace data. If the caller does not have that shared read permission, it returns an empty page.
+
+**Data flow**: It receives a tool context and list query → checks whether the shared subject is readable, requires the extension context, and either returns an empty object page or asks _page to build the real page → returns an ObjectPage.
+
+**Call relations**: The PROFILE_OBJECT store uses this for normal collection listing. When access is allowed, it delegates the actual storage read and row conversion to ProfileObjects._page.
+
+*Call graph*: calls 2 internal fn (_page, _require_ext); 1 external calls (object_page).
+
+
+##### `ProfileObjects.member_page`  (lines 358–374)
+
+```
+async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
+```
+
+**Purpose**: Lists enrichment profiles through the member-object path, but only from the main agent. This prevents the same workspace-wide rows from appearing once for every agent lane.
+
+**Data flow**: It receives an optional extension context, member information, admin flag, and list query → requires the extension context, checks whether the current object agent is the main one, returns an empty page if not, otherwise builds the page through _page → returns an ObjectPage.
+
+**Call relations**: The broader member object system calls this when it fans out over agents. It uses agent_is_main and object_agent_id to narrow the result, then delegates to ProfileObjects._page for the actual rows.
+
+*Call graph*: calls 2 internal fn (_page, _require_ext); 3 external calls (object_agent_id, object_page, agent_is_main).
+
+
+##### `ProfileObjects.get`  (lines 376–380)
+
+```
+async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[Profile] | None
+```
+
+**Purpose**: Fetches one enrichment profile by its row name, which is the member’s email address, for callers allowed to read shared workspace data.
+
+**Data flow**: It receives a tool context and row name → checks shared read permission, requires the extension context, looks up the entry by email through _entry → returns the object detail or null if not allowed or not found.
+
+**Call relations**: The PROFILE_OBJECT store uses this for normal single-row reads. It hands the storage and formatting work to ProfileObjects._entry.
+
+*Call graph*: calls 2 internal fn (_entry, _require_ext).
+
+
+##### `ProfileObjects.member_detail`  (lines 382–397)
+
+```
+async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[Profile] | None
+```
+
+**Purpose**: Fetches one enrichment profile through the member-object path, but only from the main agent. Like member_page, this avoids duplicate workspace-wide rows.
+
+**Data flow**: It receives an optional extension context, row name, member information, and admin flag → requires the extension context, checks whether the current object agent is the main one, returns null if not, otherwise asks _entry for the row → returns a MemberObject or null.
+
+**Call relations**: The member object system calls this for single-row detail reads. It uses the same main-agent narrowing as ProfileObjects.member_page, then delegates to ProfileObjects._entry.
+
+*Call graph*: calls 2 internal fn (_entry, _require_ext); 2 external calls (object_agent_id, agent_is_main).
+
+
+##### `ProfileObjects.status`  (lines 399–406)
+
+```
+async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
+```
+
+**Purpose**: Reports no separate write status for enrichment profiles. Since these rows are read-only through the object API, there is no apply/delete progress to report.
+
+**Data flow**: It receives a context, row name, and optional expected generation → ignores them → returns null.
+
+**Call relations**: The object API may ask the store for mutation status. This implementation simply says there is no status because confirm_website and the scheduled job are the only write path.
+
+
+##### `ProfileObjects.apply`  (lines 408–417)
+
+```
+async def apply(self, ctx: ToolContext, name: str, spec: Profile, old: Profile | None, *, expected_generation: UUID | None) -> None
+```
+
+**Purpose**: Refuses attempts to create or update enrichment profiles directly. This protects the rule that profiles come only from confirmed consent and the enrichment job.
+
+**Data flow**: It receives the requested row name, new profile spec, old profile, and optional generation check → does not store anything → raises VerbNotSupported with an explanation of the correct write path.
+
+**Call relations**: The object system calls this if someone tries to apply a profile change. Instead of passing work elsewhere, it stops the request and points users toward confirm_website.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ProfileObjects.delete`  (lines 419–426)
+
+```
+async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
+```
+
+**Purpose**: Refuses attempts to delete enrichment profiles directly through the object API. Clearing a member’s website through confirm_website is the supported way to withdraw lookup consent and remove stored data.
+
+**Data flow**: It receives the context, row name, and optional generation check → does not delete anything through this path → raises VerbNotSupported with the shared write-refusal message.
+
+**Call relations**: The object system calls this if someone tries to delete a row. It deliberately blocks the operation so all writes remain tied to the consent action.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ProfileObjects._page`  (lines 428–431)
+
+```
+async def _page(self, ext: ExtensionContext, query: ObjectListQuery) -> ObjectPage
+```
+
+**Purpose**: Reads stored profiles and turns them into a paged object-list response. It is the common helper behind the two list paths.
+
+**Data flow**: It receives an extension context and list query → opens a transaction, reads up to the list limit of stored profiles, converts each profile with _row, and applies the query paging helper → returns an ObjectPage.
+
+**Call relations**: ProfileObjects.list and ProfileObjects.member_page call this after their access checks. It centralizes the storage read and row formatting so both list paths behave the same.
+
+*Call graph*: calls 2 internal fn (transaction, _row); called by 2 (list, member_page); 2 external calls (__init__, object_page).
+
+
+##### `ProfileObjects._entry`  (lines 433–445)
+
+```
+async def _entry(self, ext: ExtensionContext, name: str) -> MemberObject[Profile] | None
+```
+
+**Purpose**: Reads one stored profile by email and turns it into the detailed object shape. It includes both the list row and the full profile data.
+
+**Data flow**: It receives an extension context and profile name → opens a transaction, looks up the stored profile by email, returns null if absent, otherwise converts it to a row and wraps the full Profile with created and updated timestamps → returns a MemberObject.
+
+**Call relations**: ProfileObjects.get and ProfileObjects.member_detail call this after access and main-agent checks. It uses _row so the detail view and list view show the same row fields.
+
+*Call graph*: calls 2 internal fn (transaction, _row); called by 2 (get, member_detail); 3 external calls (__init__, __init__, __init__).
+
+
+##### `manifest`  (lines 468–510)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Builds the extension declaration that the host system loads at startup. It always exposes the read-only profile object and prompt hook, and only exposes the consent action and scheduled lookup job when a provider is configured.
+
+**Data flow**: It reads provider configuration from the environment → if no provider is available, creates a manifest with no lookup tool and no scheduled job; if a provider is available, creates an Enrichment instance, registers the confirm_website tool, and registers the enrichment job → returns the complete Manifest.
+
+**Call relations**: The extension loader calls this to discover what the extension offers. It wires Enrichment.confirm_website into a tool, Enrichment.tick into a scheduled job, PROFILE_OBJECT into object reads, and inject into the prompt-submission hook.
+
+*Call graph*: 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, owner_candidates, provider_from_env).
+
+
+### `extensions/enrichment/ufo_ext_enrichment/providers.py`
+
+`io_transport` · `startup and enrichment lookup time`
+
+This file answers a simple question: when the enrichment extension sees an email address or company website, how does it learn who or what is behind it? In normal mode it calls People Data Labs, an outside data service. In recorded mode it reads saved response bodies from a JSON file, so tests or safe deployments can replay known answers without sending anything over the network.
+
+At startup, provider_from_env reads environment variables to choose the mode. If live People Data Labs is selected but no API key is available, it returns no provider, meaning the extension can still start but will not enrich anyone. If recordings are enabled with the live provider, the file acts like a read-through notebook: look there first, and if the answer is missing, call the service and write the raw response back for next time.
+
+The file also protects callers from messy outside data. People Data Labs may return a match, a clean “not found,” a rate limit, bad JSON, or an unexpected shape. This module turns those cases into clear project-level results: Person, Company, None, RateLimited, or EnrichmentError. The parsing functions are shared by live and recorded providers, so replayed data is interpreted exactly like fresh data.
+
+#### Function details
+
+##### `RateLimited.__init__`  (lines 80–82)
+
+```
+def __init__(self, message: str, retry_after: float | None=None) -> None
+```
+
+**Purpose**: Creates a special error for the case where People Data Labs says too many requests have been made. It can carry a suggested waiting time, so the caller knows when trying again may be reasonable.
+
+**Data flow**: It receives a message and an optional retry delay in seconds. It stores the message as the error text and saves the delay on the error object. The result is an exception that can be raised and caught by higher-level code.
+
+**Call relations**: PdlProvider._get creates this error when the outside service returns a rate-limit response. That lets the lookup flow stop cleanly instead of treating the situation like a permanent failure.
+
+*Call graph*: called by 1 (_get).
+
+
+##### `Provider.source`  (lines 87–87)
+
+```
+def source(self) -> ProfileSource
+```
+
+**Purpose**: Defines that every provider must be able to say where its data came from. This is a contract rather than working code.
+
+**Data flow**: There is no real data processing here. Any concrete provider must return a source label, such as live People Data Labs or recorded replay, so saved profiles can remember their origin.
+
+**Call relations**: RecordedProvider.source and PdlProvider.source provide the actual answers. Other code can depend on the Provider shape without caring which provider was chosen at startup.
+
+
+##### `Provider.person`  (lines 89–89)
+
+```
+async def person(self, email: str) -> Person | None
+```
+
+**Purpose**: Defines that every provider must know how to look up a person from an email address. This is part of the shared provider contract.
+
+**Data flow**: A caller supplies an email address. A real provider must turn that into either a Person record or None if it has no match.
+
+**Call relations**: RecordedProvider.person and PdlProvider.person implement this behavior in different ways. The rest of the extension can call person on any Provider without knowing whether it is using the network or a recordings file.
+
+
+##### `Provider.company`  (lines 91–91)
+
+```
+async def company(self, website: str) -> Company | None
+```
+
+**Purpose**: Defines that every provider must know how to look up a company from a website. This is part of the shared provider contract.
+
+**Data flow**: A caller supplies a website. A real provider must return a Company record or None if no company is known.
+
+**Call relations**: RecordedProvider.company and PdlProvider.company implement this behavior. This keeps the rest of the enrichment system independent from the provider choice.
+
+
+##### `person_from_body`  (lines 137–148)
+
+```
+def person_from_body(body: object) -> Person | None
+```
+
+**Purpose**: Turns a raw People Data Labs person response into the project’s Person object. It also recognizes the provider’s normal “not found” response and turns that into None.
+
+**Data flow**: It receives an unknown raw response body, usually parsed from JSON. First it checks whether the body says “not found.” If not, it validates that the body has the expected person match shape, copies the useful fields, and returns a Person. If the shape is wrong, it raises EnrichmentError.
+
+**Call relations**: Both PdlProvider.person and RecordedProvider.person call this after they obtain a raw body. Because both routes share this parser, a recorded response and a live response are read in the same way.
+
+*Call graph*: calls 1 internal fn (_is_not_found); called by 2 (person, person); 2 external calls (__init__, __init__).
+
+
+##### `company_from_body`  (lines 151–163)
+
+```
+def company_from_body(body: object) -> Company | None
+```
+
+**Purpose**: Turns a raw People Data Labs company response into the project’s Company object. It treats a normal “not found” response as None.
+
+**Data flow**: It receives a raw response body. It first checks for “not found,” then validates the expected company fields. If a nested location is present, it turns that into a Location object before building and returning the Company. Badly shaped data becomes an EnrichmentError.
+
+**Call relations**: Both PdlProvider.company and RecordedProvider.company call this after getting a body. This shared path keeps live and replayed company lookups consistent.
+
+*Call graph*: calls 1 internal fn (_is_not_found); called by 2 (company, company); 3 external calls (__init__, __init__, __init__).
+
+
+##### `_is_not_found`  (lines 166–167)
+
+```
+def _is_not_found(body: object) -> bool
+```
+
+**Purpose**: Checks whether a raw response body is People Data Labs’ standard “not found” answer. It is a small helper that keeps person and company parsing from duplicating the same check.
+
+**Data flow**: It receives any object. If that object is a dictionary with a status value of 404, it returns true; otherwise it returns false.
+
+**Call relations**: person_from_body and company_from_body call this before validating a response. It helps them return None for a clean miss instead of raising an error.
+
+*Call graph*: called by 2 (company_from_body, person_from_body).
+
+
+##### `Recordings.body`  (lines 180–182)
+
+```
+async def body(self, key: str) -> object | None
+```
+
+**Purpose**: Looks up one saved raw response body from the recordings file. This lets the system replay a previous provider answer without making a network call.
+
+**Data flow**: It receives a key such as a person email key or company website key. It reads the recordings file in a background thread so the async program is not blocked, then returns the saved body for that key or None if the key is absent.
+
+**Call relations**: RecordedProvider uses this as its whole data source. PdlProvider._body also uses it first when recordings are configured, like checking a notebook before calling someone.
+
+*Call graph*: 1 external calls (to_thread).
+
+
+##### `Recordings.append`  (lines 184–186)
+
+```
+async def append(self, key: str, body: object) -> None
+```
+
+**Purpose**: Adds or replaces one saved raw response in the recordings file. This is how live lookups can be captured for later replay.
+
+**Data flow**: It receives a key and a raw response body. It takes a lock, which is a guard that stops two writes happening at once, then writes the update in a background thread. The file ends up containing the new body under that key.
+
+**Call relations**: PdlProvider._body calls this after a successful live fetch when recordings are enabled. The lock makes the recording step safer when multiple lookups happen near the same time.
+
+*Call graph*: 1 external calls (to_thread).
+
+
+##### `Recordings._read`  (lines 188–194)
+
+```
+def _read(self) -> dict[str, object]
+```
+
+**Purpose**: Reads the whole recordings JSON file into memory. It is the low-level file reader behind lookup and append operations.
+
+**Data flow**: It checks whether the file exists. If not, it returns an empty dictionary. If it exists, it parses the JSON text and confirms the top-level value is an object mapping keys to bodies. If the file has the wrong shape, it raises EnrichmentError.
+
+**Call relations**: Recordings.body calls this indirectly through a thread, and Recordings._append calls it before writing an updated file. It is the single place that defines what a valid recordings file looks like.
+
+*Call graph*: called by 1 (_append); 2 external calls (__init__, loads).
+
+
+##### `Recordings._append`  (lines 196–201)
+
+```
+def _append(self, key: str, body: object) -> None
+```
+
+**Purpose**: Rewrites the recordings file with one additional saved response. It writes through a temporary file first, so readers do not see a half-written JSON file.
+
+**Data flow**: It reads the current recordings, sets the given key to the new body, writes the full updated dictionary to a temporary file, and then replaces the real file with that temporary file. The visible file changes from the old complete version to the new complete version.
+
+**Call relations**: Recordings.append calls this while holding the write lock. PdlProvider._body reaches it through append after a live People Data Labs response should be captured.
+
+*Call graph*: calls 1 internal fn (_read); 2 external calls (dumps, getpid).
+
+
+##### `RecordedProvider.source`  (lines 213–214)
+
+```
+def source(self) -> ProfileSource
+```
+
+**Purpose**: Reports that this provider’s data comes from recorded responses. This label can be stored with enriched profiles so their origin is clear.
+
+**Data flow**: It takes no input beyond the provider object and returns the fixed source value “recorded.” It does not change anything.
+
+**Call relations**: This fulfills the Provider.source contract for RecordedProvider. Code using a Provider can ask for the source without knowing it is a replay provider.
+
+
+##### `RecordedProvider.person`  (lines 216–218)
+
+```
+async def person(self, email: str) -> Person | None
+```
+
+**Purpose**: Looks up a person using only the recordings file. No network request is made.
+
+**Data flow**: It receives an email address, builds the matching recording key, and asks Recordings for the saved body. If no body is saved, it returns None. If a body is present, it passes that body to person_from_body and returns the parsed Person or None.
+
+**Call relations**: This is called when startup selected recorded mode and the enrichment flow asks for a person. It hands parsing to person_from_body so recorded answers match live-answer behavior.
+
+*Call graph*: calls 1 internal fn (person_from_body).
+
+
+##### `RecordedProvider.company`  (lines 220–222)
+
+```
+async def company(self, website: str) -> Company | None
+```
+
+**Purpose**: Looks up a company using only the recordings file. It is the company-side replay path.
+
+**Data flow**: It receives a website, builds the matching recording key, and reads the saved body from Recordings. Missing saved data becomes None. Present saved data is passed to company_from_body, which returns a Company or None.
+
+**Call relations**: This is called when recorded mode is active and the enrichment flow asks for a company. It delegates the interpretation of the raw body to company_from_body.
+
+*Call graph*: calls 1 internal fn (company_from_body).
+
+
+##### `PdlProvider.source`  (lines 236–237)
+
+```
+def source(self) -> ProfileSource
+```
+
+**Purpose**: Reports that this provider’s data comes from People Data Labs. This helps later code or stored records know the origin of the enrichment.
+
+**Data flow**: It takes no input beyond the provider object and returns the fixed source value “pdl.” It does not change anything.
+
+**Call relations**: This fulfills the Provider.source contract for the live provider. Other enrichment code can treat it the same way it treats RecordedProvider.source.
+
+
+##### `PdlProvider.person`  (lines 239–247)
+
+```
+async def person(self, email: str) -> Person | None
+```
+
+**Purpose**: Looks up a person by email through People Data Labs, optionally using recordings as a cache. It also refuses email addresses that are too long for a valid lookup.
+
+**Data flow**: It receives an email address. If the email is over the allowed length, it raises EnrichmentError. Otherwise it asks _body for the raw People Data Labs person response, including only the fields this project needs. It then turns that raw body into a Person or None with person_from_body.
+
+**Call relations**: The enrichment flow calls this when the live provider is active. It uses PdlProvider._body to either replay or fetch the response, then hands parsing to person_from_body.
+
+*Call graph*: calls 2 internal fn (_body, person_from_body); 1 external calls (__init__).
+
+
+##### `PdlProvider.company`  (lines 249–257)
+
+```
+async def company(self, website: str) -> Company | None
+```
+
+**Purpose**: Looks up a company by website through People Data Labs, optionally using recordings as a cache. It also refuses website strings that are too long.
+
+**Data flow**: It receives a website. If the website exceeds the allowed length, it raises EnrichmentError. Otherwise it asks _body for the raw company response, requesting only useful company fields, then converts that body into a Company or None with company_from_body.
+
+**Call relations**: The enrichment flow calls this when the live provider is active. It relies on PdlProvider._body for the retrieve-or-replay step and on company_from_body for safe parsing.
+
+*Call graph*: calls 2 internal fn (_body, company_from_body); 1 external calls (__init__).
+
+
+##### `PdlProvider._body`  (lines 259–267)
+
+```
+async def _body(self, key: str, path: str, params: dict[str, str]) -> object
+```
+
+**Purpose**: Gets the raw response body for a lookup, choosing between a recording and a live network request. It is the provider’s read-through cache logic.
+
+**Data flow**: It receives a recording key, an API path, and request parameters. If recordings are configured and the key already exists, it returns the saved body. Otherwise it calls _get to fetch from People Data Labs. After a successful fetch, it appends the raw body to recordings if recording is enabled, then returns the body.
+
+**Call relations**: PdlProvider.person and PdlProvider.company call this before parsing results. It calls PdlProvider._get only when there is no usable recorded body.
+
+*Call graph*: calls 1 internal fn (_get); called by 2 (company, person).
+
+
+##### `PdlProvider._get`  (lines 269–298)
+
+```
+async def _get(self, path: str, params: dict[str, str]) -> object
+```
+
+**Purpose**: Performs the actual HTTP request to People Data Labs and turns transport-level outcomes into clear enrichment outcomes. HTTP means the web request protocol used to talk to the outside service.
+
+**Data flow**: It reads the deploy API key, receives an API path and query parameters, and sends a GET request with the key in a header. A 200 or 404 response is parsed as JSON and returned. A 429 response becomes RateLimited, including any usable retry delay. Network errors, invalid JSON, missing keys, and other status codes become EnrichmentError.
+
+**Call relations**: PdlProvider._body calls this when it cannot satisfy a lookup from recordings. It uses _retry_after to understand rate-limit timing and creates RateLimited when the service asks the caller to slow down.
+
+*Call graph*: calls 2 internal fn (__init__, _retry_after); called by 1 (_body); 3 external calls (__init__, AsyncClient, deploy_env).
+
+
+##### `_retry_after`  (lines 301–310)
+
+```
+def _retry_after(header: str | None) -> float | None
+```
+
+**Purpose**: Reads a Retry-After header and extracts a positive number of seconds if one is present. A Retry-After header is a server hint saying how long to wait before trying again.
+
+**Data flow**: It receives the header text or None. If there is no header, if the value is not a number, or if the number is not positive, it returns None. Otherwise it returns the number of seconds as a float.
+
+**Call relations**: PdlProvider._get calls this when People Data Labs returns a rate-limit response. The result is placed on the RateLimited error so scheduling code can make a better retry decision.
+
+*Call graph*: called by 1 (_get).
+
+
+##### `provider_from_env`  (lines 313–348)
+
+```
+def provider_from_env() -> Provider | None
+```
+
+**Purpose**: Chooses and builds the enrichment provider based on environment variables. This is the startup switchboard for live mode, recorded replay mode, or no provider.
+
+**Data flow**: It reads the provider mode, recordings file name, and deploy API key. In live mode, it returns None if no API key is available, a plain PdlProvider if no recordings file is named, or a PdlProvider connected to Recordings if a safe recordings path is given. In recorded mode, it requires an existing recordings file and returns RecordedProvider. Unknown modes or unsafe/missing files raise RuntimeError.
+
+**Call relations**: This is called during setup so the rest of the extension can receive one Provider-like object or None. It constructs PdlProvider, RecordedProvider, and Recordings as needed, and uses warnings to make important startup choices visible.
+
+*Call graph*: 6 external calls (__init__, __init__, __init__, Path, deploy_env, warn).
+
+
+### `extensions/enrichment/ufo_ext_enrichment/store.py`
+
+`io_transport` · `background enrichment job and profile/consent request handling`
+
+This file is like the filing cabinet for the enrichment feature. Enrichment means looking up extra person or company details for a seated member, but only after that member has agreed. The file defines three database tables: one for saved enrichment profiles, one for consent decisions, and one for temporary waiting periods after an outside provider says “try later.”
+
+It also defines the shapes of the saved data. Person, Company, Location, and Profile describe what the system expects to store and read back. These shapes are strict, so unexpected fields are rejected instead of silently becoming part of the saved profile.
+
+The main helper classes are Profiles, Consents, and Backoff. Profiles finds members who are ready to enrich, saves profile results, reads saved profiles, and deletes them when needed. Consents records whether a member agreed to enrichment and what website they confirmed. Backoff prevents the job from hammering the provider after a refusal; it waits longer after repeated failures, up to one hour.
+
+A key rule runs through the file: no consent row with granted set to true means no enrichment. A member who never answered and a member who declined are both skipped. That keeps the enrichment job tied to an explicit yes.
+
+#### Function details
+
+##### `due_workspaces`  (lines 161–176)
+
+```
+def due_workspaces() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: Builds a database query that finds workspaces with at least one member ready for enrichment. A workspace is ready only if it has a seated member who granted consent, has no saved profile yet, and is not currently paused by backoff.
+
+**Data flow**: It reads the member, consent, profile, and backoff tables in the form of a SQL query. It filters out members without consent, members already enriched, and workspaces whose retry time is still in the future. It returns a selectable query that produces workspace IDs, rather than running the query itself.
+
+**Call relations**: This is the broad first pass for the enrichment job: it asks “which workspaces should we even look at?” It uses _has_profile as a shared test for whether a member already has an enrichment row, and uses the current time to ignore workspaces still waiting after a provider refusal.
+
+*Call graph*: calls 1 internal fn (_has_profile); 3 external calls (now, exists, select).
+
+
+##### `_has_profile`  (lines 179–180)
+
+```
+def _has_profile() -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Creates a small reusable database condition that answers: “does this member already have an enrichment profile?” It keeps the “already enriched” test consistent wherever it is needed.
+
+**Data flow**: It refers to the current member row being considered and checks whether an enrichment_profile row exists for that member ID. It returns a SQL condition, not a true-or-false answer yet; the database evaluates it later when a larger query runs.
+
+**Call relations**: due_workspaces uses it while choosing candidate workspaces, and Profiles.due uses it while choosing candidate members inside one workspace. It is a shared building block that prevents both flows from scheduling duplicate enrichment work.
+
+*Call graph*: called by 2 (due, due_workspaces); 1 external calls (exists).
+
+
+##### `Profiles.due`  (lines 190–212)
+
+```
+async def due(self, limit: int) -> tuple[SeatedMember, ...]
+```
+
+**Purpose**: Finds the next seated members in one workspace who are allowed to be enriched and do not yet have a profile. It is what the enrichment worker uses when it is ready to process actual members, not just workspaces.
+
+**Data flow**: It takes a maximum count as input and reads the member and consent tables for this workspace. It keeps only seated members with granted consent and no profile row, orders them by creation time, and returns SeatedMember objects containing member ID, email, and the confirmed website.
+
+**Call relations**: After a higher-level job has picked a workspace, this method narrows the work down to specific members. It reuses _has_profile so it follows the same “do not enrich twice” rule as due_workspaces, then wraps each database row in SeatedMember for the caller.
+
+*Call graph*: calls 1 internal fn (_has_profile); 2 external calls (__init__, select).
+
+
+##### `Profiles.seated`  (lines 214–224)
+
+```
+async def seated(self, member_id: UUID) -> SeatedMember | None
+```
+
+**Purpose**: Checks whether a particular member belongs to this workspace and is seated. It gives callers a safe way to confirm that a member is eligible to be treated as an active member before doing profile work.
+
+**Data flow**: It receives a member ID and reads the member table for this workspace. If it finds a seated member, it returns a SeatedMember with the ID and email. If not, it returns nothing.
+
+**Call relations**: Code with a Profiles store can call this before acting on a single member. It uses a simple database select and creates a SeatedMember only when the member passes the workspace and seated checks.
+
+*Call graph*: 2 external calls (__init__, select).
+
+
+##### `Profiles.write`  (lines 226–249)
+
+```
+async def write(self, member_id: UUID, profile: Profile) -> None
+```
+
+**Purpose**: Saves an enrichment profile for a member, either by updating an existing row or inserting a new one. This makes repeated writes safe: the caller does not need to know whether the row already exists.
+
+**Data flow**: It receives a member ID and a Profile object. It turns the profile into plain database values, including converting person and company objects into JSON-friendly dictionaries. It first tries to update the existing row for this workspace and member; if no row was updated, it inserts a new row.
+
+**Call relations**: This is the point where enrichment results become durable database records. It uses SQL update first and SQL insert second, so callers can simply say “store this profile” without doing their own existence check.
+
+*Call graph*: 2 external calls (insert, update).
+
+
+##### `Profiles.forget`  (lines 251–257)
+
+```
+async def forget(self, member_id: UUID) -> None
+```
+
+**Purpose**: Deletes a saved enrichment profile for one member in this workspace. This is useful when profile data must be removed or recalculated from scratch.
+
+**Data flow**: It receives a member ID and issues a database delete against the enrichment_profile table for this workspace and member. It does not return a value; the database row is gone if it existed.
+
+**Call relations**: Code with a Profiles store calls this when a profile should no longer be kept. It hands the actual removal to the database through a delete statement.
 
 *Call graph*: 1 external calls (delete).
 
 
-##### `HostedSites.refuse_or_pass`  (lines 550–570)
+##### `Profiles.rows`  (lines 259–268)
 
 ```
-async def refuse_or_pass(self, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, may_unhost: bool) -> HostedSite | None
+async def rows(self, limit: int) -> tuple[StoredProfile, ...]
 ```
 
-**Purpose**: Runs the same safety checks as register but does not write anything. It lets deploy code discover whether a registration would be refused before it performs an action that might stop an existing server.
+**Purpose**: Reads a batch of saved enrichment profiles for one workspace. It is useful for displaying, exporting, or processing existing profile records in a stable order.
 
-**Data flow**: It receives the proposed registration details → opens a transaction → delegates to _refuse → returns the site that would be displaced, or None, or raises the same error register would raise.
+**Data flow**: It receives a limit, reads profile rows for this workspace, orders them by fetch time and member ID, and caps the result size. Each database row is passed through _stored, which turns raw database values back into typed profile objects. It returns a tuple of StoredProfile items.
 
-**Call relations**: Deploy orchestration calls this as a preflight check. It shares _refuse with register so the dry run and the real write enforce the same ownership and unhost rules.
+**Call relations**: This method is a bulk reader. It relies on _stored to perform the conversion from database row to application object, so callers get clean StoredProfile values instead of raw SQL rows.
 
-*Call graph*: calls 1 internal fn (_refuse).
-
-
-##### `HostedSites._refuse`  (lines 572–601)
-
-```
-async def _refuse(self, connection: AsyncConnection, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, may_unhost: bool) -> HostedSite | None
-```
-
-**Purpose**: Centralizes the rules that can block a site registration. It prevents non-creators from changing visibility and prevents a deploy from unhosting another member's site or unhosting without a live member request.
-
-**Data flow**: It receives an open database connection plus the proposed site details → reads the existing same-name site → checks whether a visibility change is allowed → looks for a different site already using the target port → checks whether that displacement is allowed → returns the displaced HostedSite if one exists, or None, or raises a refusal error.
-
-**Call relations**: HostedSites.register calls this inside the real transaction before writing. HostedSites.refuse_or_pass calls it for a no-write preflight. It uses _read to inspect the named site, _on_port to find port conflicts, and raises NotTheSiteCreator or UnhostNeedsASpeaker when the rules fail.
-
-*Call graph*: calls 2 internal fn (_on_port, _read); called by 2 (refuse_or_pass, register); 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
 
 
-##### `HostedSites._on_port`  (lines 603–618)
+##### `Profiles.one`  (lines 270–279)
 
 ```
-async def _on_port(self, connection: AsyncConnection, conversation_id: UUID, port: int, name: str) -> HostedSite | None
+async def one(self, member_id: UUID) -> StoredProfile | None
 ```
 
-**Purpose**: Finds whether another site in the same conversation is already registered on the requested port. That matters because one port can only serve one origin, so reusing it may effectively unhost the older site.
+**Purpose**: Reads the saved enrichment profile for one member in this workspace. It is the focused version of Profiles.rows for a single member lookup.
 
-**Data flow**: It receives an open connection, conversation ID, port, and the current site name to exclude → queries for a different name in the same workspace and conversation with that port → returns the matching HostedSite or None.
+**Data flow**: It receives a member ID and queries the enrichment_profile table for that exact workspace and member. If no row exists, it returns nothing. If a row exists, it sends the row through _stored and returns a StoredProfile.
 
-**Call relations**: _refuse calls this while checking a proposed registration. It builds its select list with _columns, executes through the async database connection, and converts a found row with _site.
+**Call relations**: Code that needs one member’s saved enrichment calls this method. Like the other profile readers, it delegates row-to-object conversion to _stored so the rest of the system sees the same shape every time.
 
-*Call graph*: calls 2 internal fn (_columns, _site); called by 1 (_refuse); 1 external calls (execute).
-
-
-##### `HostedSites._read`  (lines 620–632)
-
-```
-async def _read(self, connection: AsyncConnection, conversation_id: UUID, name: str) -> HostedSite | None
-```
-
-**Purpose**: Fetches one exact site row and turns it into the in-code HostedSite form. It is the shared internal lookup used after writes and by public read methods.
-
-**Data flow**: It receives an open connection, conversation ID, and site name → queries the current workspace for that exact row → returns None if absent, or a HostedSite if present.
-
-**Call relations**: register, redeploy, read, set_visibility, set_homepage, and _refuse all call this whenever they need the current row. It uses _columns to keep the selected fields consistent and _site to perform conversion.
-
-*Call graph*: calls 2 internal fn (_columns, _site); called by 6 (_refuse, read, redeploy, register, set_homepage, set_visibility); 1 external calls (execute).
+*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
 
 
-##### `HostedSites._columns`  (lines 634–651)
+##### `Profiles.by_email`  (lines 281–290)
 
 ```
-def _columns(self) -> sa.Select
+async def by_email(self, email: str) -> StoredProfile | None
 ```
 
-**Purpose**: Builds the standard database select statement for hosted-site rows. Keeping this in one place ensures every reader asks for the same fields needed to build a HostedSite.
+**Purpose**: Finds a saved enrichment profile by email address within one workspace. It compares email in a case-insensitive way, so “A@EXAMPLE.com” and “a@example.com” match.
 
-**Data flow**: It takes no outside data beyond the table definition → creates a SQL select containing all HostedSite fields except the workspace key → returns that unfinished select so callers can add filters and ordering.
+**Data flow**: It receives an email string, trims outside spaces, lowercases it, and compares it to lowercased saved email values in the database. If it finds a row, it converts it with _stored and returns a StoredProfile. If not, it returns nothing.
 
-**Call relations**: Read-style methods such as homepage, all, conversation, visible_conversation, _read, and _on_port call this before adding their own where clauses. It uses SQLAlchemy select to describe the query.
+**Call relations**: This supports flows that know an email address rather than a member ID. It uses the same _stored conversion path as Profiles.rows and Profiles.one, keeping returned profile data consistent.
 
-*Call graph*: called by 6 (_on_port, _read, all, conversation, homepage, visible_conversation); 1 external calls (select).
-
-
-##### `_aware`  (lines 654–657)
-
-```
-def _aware(moment: datetime) -> datetime
-```
-
-**Purpose**: Makes sure a timestamp has timezone information. This avoids comparing a timezone-less database timestamp with timezone-aware timestamps elsewhere and guessing the wrong meaning.
-
-**Data flow**: It receives a datetime → if it already has timezone information, returns it unchanged → otherwise marks it as UTC → returns the timezone-aware datetime.
-
-**Call relations**: _site calls this for created_at and updated_at when converting database rows. It compensates for databases such as SQLite that may return timezone-less datetime objects.
-
-*Call graph*: called by 1 (_site); 1 external calls (replace).
+*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
 
 
-##### `_site`  (lines 660–677)
+##### `Consents.record`  (lines 301–316)
 
 ```
-def _site(row: sa.Row) -> HostedSite
+async def record(self, member_id: UUID, *, granted: bool, website: str | None=None) -> None
 ```
 
-**Purpose**: Turns a raw database row into a HostedSite data object with validated visibility and safe timestamps. This is the boundary where stored database values become normal application data.
+**Purpose**: Records a member’s answer about whether they allow enrichment, along with the website they confirmed if one was provided. It treats “no row” as not granted, so this method is the place where an explicit answer is written down.
 
-**Data flow**: It receives a SQLAlchemy row → copies each site field into a HostedSite → validates the visibility string with visibility_level → normalizes created_at and updated_at with _aware → returns the completed HostedSite.
+**Data flow**: It receives a member ID, a granted-or-not value, and an optional website. It adds the current time as the decision time. It first updates any existing consent row for this workspace and member; if none exists, it inserts a new row.
 
-**Call relations**: All row-reading paths call this, including _read, _on_port, homepage, all, conversation, and visible_conversation. It relies on visibility_level for the visibility column and _aware for timestamp cleanup before constructing HostedSite.
+**Call relations**: Consent-gathering code calls this after a member answers. The enrichment selection logic later reads these rows, especially Profiles.due and due_workspaces, to decide who may be looked up.
 
-*Call graph*: calls 2 internal fn (_aware, visibility_level); called by 6 (_on_port, _read, all, conversation, homepage, visible_conversation); 1 external calls (__init__).
+*Call graph*: 3 external calls (now, insert, update).
+
+
+##### `Backoff.pause`  (lines 328–354)
+
+```
+async def pause(self, retry_after: float | None) -> float
+```
+
+**Purpose**: Pauses enrichment attempts for this workspace after the provider refuses or asks the system to wait. It either follows the provider’s requested delay or increases the delay after repeated failures, up to one hour.
+
+**Data flow**: It receives an optional retry delay in seconds. It reads the current number of failed attempts for this workspace, calculates the next wait time, stores the new attempt count and retry-after timestamp, and returns the number of seconds chosen.
+
+**Call relations**: When an enrichment attempt cannot continue because the provider pushed back, higher-level job code calls this to mark the workspace as temporarily paused. due_workspaces later sees the backoff row and skips that workspace until the retry time has passed.
+
+*Call graph*: 5 external calls (now, timedelta, insert, select, update).
+
+
+##### `Backoff.clear`  (lines 356–361)
+
+```
+async def clear(self) -> None
+```
+
+**Purpose**: Removes the pause record for this workspace. This lets the workspace return to normal after enrichment succeeds or the pause is no longer needed.
+
+**Data flow**: It reads no extra inputs beyond the store’s workspace ID. It deletes the matching row from the enrichment_backoff table and returns nothing.
+
+**Call relations**: A successful enrichment tick can call this to reset the workspace after previous provider refusals. Once cleared, due_workspaces will no longer skip the workspace because of backoff.
+
+*Call graph*: 1 external calls (delete).
+
+
+##### `agent_is_main`  (lines 364–375)
+
+```
+async def agent_is_main(connection: AsyncConnection, workspace_id: UUID, agent_id: UUID) -> bool
+```
+
+**Purpose**: Checks whether a given agent is the main agent for a workspace. This helps mirror the core member page rule that only the main agent should see or act in certain portal contexts.
+
+**Data flow**: It receives a database connection, workspace ID, and agent ID. It reads the agent table for that exact pair and returns true if the stored is_main value is true; missing rows or false values become false.
+
+**Call relations**: Code that needs to decide whether an agent has the main-agent role calls this helper. It performs one database select and returns a plain yes-or-no answer.
+
+*Call graph*: 2 external calls (execute, select).
+
+
+##### `_stored`  (lines 378–392)
+
+```
+def _stored(row: sa.Row) -> StoredProfile
+```
+
+**Purpose**: Turns a raw database profile row into the application’s StoredProfile shape. It is the translator between database storage and the typed objects used by the rest of the enrichment code.
+
+**Data flow**: It receives a database row containing member ID and profile columns. It validates person and company JSON back into Person and Company objects when present, fixes a missing timezone on fetched_at by treating it as UTC, and returns a StoredProfile containing the member ID and Profile.
+
+**Call relations**: Profiles.rows, Profiles.one, and Profiles.by_email all call this after reading from the database. That means every profile read path gets the same validation, timezone cleanup, and object shape before handing data to callers.
+
+*Call graph*: called by 3 (by_email, one, rows); 2 external calls (__init__, __init__).
+
+
+### Index implementations
+Provides local and external search backends for storing chunks, embeddings, keyword indexes, and vector-search results.
+
+### `extensions/index_default/ufo_ext_index_default.py`
+
+`domain_logic` · `cross-cutting: active during indexing, re-indexing, deletion, and search`
+
+This file is the project’s default memory search engine. The rest of the system talks in neutral objects like Chunk, Hit, and IndexScope, while this file translates those objects into the database-specific tools that actually store and find text. Without it, a deployment with no custom index backend would have nowhere to put searchable chunks, and recall by keywords or embeddings would not work.
+
+The main class, DefaultIndex, is given a transaction opener. Each operation opens a database transaction, checks whether the connection is Postgres or SQLite, and then uses the right storage and search method. Postgres uses its built-in full-text search plus pgvector, a database extension for comparing numeric vectors. SQLite uses FTS5, its full-text search table, and does vector comparison in Python by scanning rows and computing cosine similarity.
+
+A useful analogy is a bilingual librarian: callers ask the same questions either way, but the librarian speaks Postgres in one building and SQLite in another. The file also keeps the search tables tidy. It can add or update chunks, delete all chunks for one owner, check whether an owner already has chunks, and prune old chunks after re-chunking so stale pieces do not remain searchable.
+
+#### Function details
+
+##### `pgvector_literal`  (lines 35–36)
+
+```
+def pgvector_literal(vector: tuple[float, ...]) -> str
+```
+
+**Purpose**: Turns a Python tuple of numbers into the bracketed text format that Postgres pgvector expects. This lets vector data be passed safely into SQL statements for storage or search.
+
+**Data flow**: It receives a tuple of floating-point numbers. It converts each value to a plain float representation, joins them with commas, wraps the result in square brackets, and returns that string.
+
+**Call relations**: When DefaultIndex writes chunks or runs vector search on Postgres, it asks this helper to translate the embedding into pgvector’s text form before handing it to the database.
+
+*Call graph*: called by 2 (upsert, vector).
+
+
+##### `cosine`  (lines 39–47)
+
+```
+def cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float
+```
+
+**Purpose**: Measures how similar two vectors are using cosine similarity, where higher means the directions are more alike. SQLite uses this because it does not have the same vector search support as Postgres here.
+
+**Data flow**: It receives two equal-length tuples of numbers. It calculates the length of each vector, returns 0 if either length is zero, otherwise divides their dot product by the two lengths and returns the similarity score.
+
+**Call relations**: DefaultIndex.vector uses this only on the SQLite path, after reading stored embeddings from the database. It relies on math.sqrt to compute vector lengths.
+
+*Call graph*: called by 1 (vector); 1 external calls (sqrt).
+
+
+##### `pack_embedding`  (lines 50–51)
+
+```
+def pack_embedding(vector: tuple[float, ...]) -> bytes
+```
+
+**Purpose**: Packs an embedding, which is a tuple of floating-point numbers, into raw bytes for SQLite storage. SQLite stores the vector as a blob because it does not have the same native vector column type used by Postgres.
+
+**Data flow**: It receives a tuple of floats. It writes those floats into a compact little-endian binary format and returns the resulting bytes.
+
+**Call relations**: DefaultIndex.upsert calls this when saving chunks into SQLite, so the embedding can be stored in the chunk table.
+
+*Call graph*: called by 1 (upsert); 1 external calls (pack).
+
+
+##### `unpack_embedding`  (lines 54–55)
+
+```
+def unpack_embedding(blob: bytes) -> tuple[float, ...]
+```
+
+**Purpose**: Reverses pack_embedding by turning stored SQLite bytes back into a tuple of floats. This makes saved embeddings usable again for similarity comparison.
+
+**Data flow**: It receives a byte blob from SQLite. It treats every four bytes as one floating-point number, unpacks the whole blob, and returns the tuple of numbers.
+
+**Call relations**: DefaultIndex.vector calls this on SQLite rows before passing the recovered vector to cosine for scoring.
+
+*Call graph*: called by 1 (vector); 1 external calls (unpack).
+
+
+##### `_hit`  (lines 58–67)
+
+```
+def _hit(row: sa.RowMapping, score: float) -> Hit
+```
+
+**Purpose**: Builds a Hit object, the standard search result shape used by the rest of the system. It keeps database row details from leaking outward.
+
+**Data flow**: It receives a database row and a score. It copies the chunk identity, owner, subject, order, text, and score into a Hit object, then returns that Hit.
+
+**Call relations**: Both lexical and vector search use this as the final packaging step, so callers receive the same kind of result no matter which database or search method produced it.
+
+*Call graph*: called by 2 (lexical, vector); 1 external calls (__init__).
+
+
+##### `DefaultIndex.upsert`  (lines 177–214)
+
+```
+async def upsert(self, chunks: tuple[Chunk, ...]) -> None
+```
+
+**Purpose**: Adds new chunks to the index or updates existing chunks with the same identity. This is how searchable memory is refreshed when content is created or reprocessed.
+
+**Data flow**: It receives a tuple of Chunk objects. If the tuple is empty, it does nothing. Otherwise it opens a transaction, detects the database type, writes each chunk’s text and metadata, converts embeddings into the right database format, and for SQLite also refreshes the full-text search row.
+
+**Call relations**: Indexing code calls this when it has chunks ready to store. On Postgres it uses pgvector_literal for embeddings; on SQLite it uses pack_embedding and updates the companion full-text table so later word search can find the text.
+
+*Call graph*: calls 2 internal fn (pack_embedding, pgvector_literal).
+
+
+##### `DefaultIndex.delete`  (lines 216–223)
+
+```
+async def delete(self, scope: IndexScope) -> None
+```
+
+**Purpose**: Deletes every indexed chunk belonging to one owner, such as one document or memory item. This prevents removed content from still appearing in search results.
+
+**Data flow**: It receives an IndexScope containing the owner kind and owner id. It opens a transaction, deletes matching rows directly on Postgres, and on SQLite first removes matching full-text rows and then removes the main chunk rows.
+
+**Call relations**: Callers use this for explicit removal. DefaultIndex.prune also uses it as the simpler path when there are no chunks to keep.
+
+*Call graph*: called by 1 (prune).
+
+
+##### `DefaultIndex.has_chunks`  (lines 225–228)
+
+```
+async def has_chunks(self, scope: IndexScope) -> bool
+```
+
+**Purpose**: Checks whether a particular owner already has any chunks in the index. This helps the rest of the system decide whether indexing work is needed.
+
+**Data flow**: It receives an IndexScope with owner details. It opens a transaction, asks the chunk table for one matching row, and returns true if a row exists or false if none exists.
+
+**Call relations**: This is a small lookup method used by higher-level indexing flow when it needs a yes-or-no answer about existing indexed content.
+
+
+##### `DefaultIndex.prune`  (lines 230–244)
+
+```
+async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
+```
+
+**Purpose**: Removes old chunks for an owner while keeping a known set of current chunk digests. This matters after content is split into chunks again, because old leftover chunks should not stay searchable.
+
+**Data flow**: It receives an IndexScope and a set of chunk digests to keep. If the keep set is empty, it deletes the whole scope. Otherwise it opens a transaction and deletes only rows for that owner whose digest is not in the keep set, including SQLite’s full-text rows when needed.
+
+**Call relations**: Re-indexing code calls this after it knows which chunks are still valid. When there is nothing to preserve, it hands off to DefaultIndex.delete instead of repeating the full-delete logic.
+
+*Call graph*: calls 1 internal fn (delete).
+
+
+##### `DefaultIndex.lexical`  (lines 246–282)
+
+```
+async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Searches chunks by words in the query, returning text chunks that share terms with the user’s text. This is the keyword-search side of the index.
+
+**Data flow**: It receives a query string, allowed subjects, an owner kind, and a maximum result count. If there are no subjects or no usable query terms, it returns no results. Otherwise it opens a transaction, runs the database’s full-text search, ranks matching rows, converts each row into a Hit, and returns the hits as a tuple.
+
+**Call relations**: Search or recall code calls this when it wants word-based evidence. It uses _hit at the end so Postgres and SQLite search rows become the project’s normal Hit objects.
+
+*Call graph*: calls 1 internal fn (_hit).
+
+
+##### `DefaultIndex.vector`  (lines 284–317)
+
+```
+async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: Searches chunks by embedding similarity, meaning it finds text whose stored numeric meaning-vector is close to the query vector. This is the semantic-search side of the index.
+
+**Data flow**: It receives a query embedding, allowed subjects, an owner kind, and a result limit. If the embedding or subjects are empty, it returns no results. On Postgres it sends the vector to the database and lets SQL rank rows. On SQLite it reads candidate rows, unpacks their stored embeddings, scores them in Python with cosine similarity, sorts them, and returns the best hits.
+
+**Call relations**: Search or recall code calls this when meaning-based matching is needed. It uses pgvector_literal on Postgres, and on SQLite uses unpack_embedding followed by cosine; both paths finish by using _hit to return normal Hit objects.
+
+*Call graph*: calls 4 internal fn (_hit, cosine, pgvector_literal, unpack_embedding).
+
+
+##### `manifest`  (lines 320–330)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Declares this extension to the host system and registers the index backend under the name "default". This is how the wider application discovers and creates DefaultIndex.
+
+**Data flow**: It creates a Manifest containing this extension’s name and version, plus an IndexBackendSpec. That spec says the backend is named "default" and provides a factory that builds DefaultIndex using the transaction opener supplied by the host context.
+
+**Call relations**: The extension loading system calls this during setup. The manifest it returns lets core code choose this backend when no other memory index backend is configured.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### `extensions/turbopuffer/ufo_ext_turbopuffer.py`
+
+`io_transport` · `request handling and background indexing`
+
+This file is the bridge between UFO’s memory system and Turbopuffer’s HTTP API. UFO works with small pieces of text called chunks. Each chunk has text, ownership information, and often an embedding, which is a list of numbers that represents the meaning of the text. Turbopuffer stores those chunks in a workspace-specific namespace, like a separate labeled drawer for one workspace’s search data.
+
+The file solves two search needs. First, it supports vector search, which finds chunks with similar meaning using embeddings. Second, it supports lexical search using BM25, a keyword-ranking method that scores documents by how well their words match the query. The code also keeps searches scoped, so a query only looks at the right owner kind and subject set instead of the whole namespace.
+
+For writing data, it converts UFO chunks into Turbopuffer’s column-style request format and uploads them in batches. For cleanup, it can delete all chunks for a scope, or prune only chunks that no longer belong after re-chunking. For reading, it turns Turbopuffer rows back into UFO Hit objects.
+
+A notable detail is HTTP client handling. The index may be used from different event loops, so it keeps one HTTP client per loop. That avoids sharing network connection pools across loops, which can break asynchronous Python programs.
+
+#### Function details
+
+##### `turbopuffer_id`  (lines 49–55)
+
+```
+def turbopuffer_id(chunk_digest: str) -> str
+```
+
+**Purpose**: This turns UFO’s chunk digest into a document id that Turbopuffer can store safely. Standard SHA-256 digests are shortened with URL-safe base64 so they stay well under Turbopuffer’s id length limit.
+
+**Data flow**: It receives a chunk digest string. If the string looks like a SHA-256 digest, it decodes the hex bytes and re-encodes them as shorter URL-safe base64 without padding; otherwise it leaves the id unchanged. The result is the id sent to Turbopuffer.
+
+**Call relations**: When chunks are uploaded, upsert_body calls this so every chunk has the right Turbopuffer id. delete and prune also call it before sending delete requests, so they remove the same ids that were written earlier.
+
+*Call graph*: called by 3 (delete, prune, upsert_body); 1 external calls (urlsafe_b64encode).
+
+
+##### `chunk_digest_from_id`  (lines 58–67)
+
+```
+def chunk_digest_from_id(chunk_id: str) -> str
+```
+
+**Purpose**: This reverses Turbopuffer’s shortened document id back into UFO’s normal chunk digest form. It makes sure search results and exported chunks use the same digest format the rest of UFO expects.
+
+**Data flow**: It receives an id from Turbopuffer. If it has the expected shortened base64 length and can be decoded, it turns it back into a sha256-prefixed hex digest; otherwise it returns the id as-is. The output is a UFO-style chunk digest.
+
+**Call relations**: hit_from_row uses this when turning search rows into Hit objects. _scope_chunks uses it when listing chunks during delete or prune, so cleanup logic compares and reports normal UFO digests.
+
+*Call graph*: called by 2 (_scope_chunks, hit_from_row); 1 external calls (urlsafe_b64decode).
+
+
+##### `upsert_body`  (lines 70–86)
+
+```
+def upsert_body(chunks: tuple[Chunk, ...]) -> dict[str, Any]
+```
+
+**Purpose**: This builds the request body used to upload a batch of chunks to Turbopuffer. It arranges chunk data in the column-based shape Turbopuffer expects.
+
+**Data flow**: It receives a tuple of Chunk objects. It pulls out ids, embeddings, owner information, subjects, order numbers, and text into parallel lists, and adds index settings such as cosine distance and full-text search on the text field. It returns a JSON-ready dictionary for the HTTP request.
+
+**Call relations**: TurbopufferIndex.upsert calls this for each upload batch. Inside, it calls turbopuffer_id so the ids in the upload request match the ids used later for deletion.
+
+*Call graph*: calls 1 internal fn (turbopuffer_id); called by 1 (upsert).
+
+
+##### `bm25_query`  (lines 89–105)
+
+```
+def bm25_query(text: str) -> str
+```
+
+**Purpose**: This cleans and shortens a text query before sending it to Turbopuffer’s BM25 keyword search. It prevents meaningless or too-long text from producing bad or rejected searches.
+
+**Data flow**: It receives raw query text. It keeps only tokens that contain a useful run of letters or digits, then checks the byte length against Turbopuffer’s full-text query limit. If needed, it clips the query without keeping a partial final term. It returns the cleaned query string, or an empty string if there is nothing useful to search for.
+
+**Call relations**: TurbopufferIndex.lexical calls this before making a keyword search. If this returns an empty string, lexical search stops early instead of asking Turbopuffer to rank everything on punctuation or one-letter fragments.
+
+*Call graph*: called by 1 (lexical).
+
+
+##### `query_filters`  (lines 108–112)
+
+```
+def query_filters(owner_kind: str, subjects: frozenset[str]) -> list[Any]
+```
+
+**Purpose**: This builds the filter used for normal searches. It limits results to one owner kind and to the allowed recall subjects.
+
+**Data flow**: It receives an owner kind and a set of subjects. It sorts the subjects and returns a Turbopuffer filter expression saying: owner_kind must match, and subject must be in this set.
+
+**Call relations**: TurbopufferIndex._query calls this whenever lexical or vector search runs. It supplies the scoping rules that keep searches from crossing into unrelated stored chunks.
+
+*Call graph*: called by 1 (_query).
+
+
+##### `scope_filters`  (lines 115–122)
+
+```
+def scope_filters(scope: IndexScope, after_id: str | None) -> list[Any]
+```
+
+**Purpose**: This builds the filter used when looking through all chunks for one stored owner. It can also continue after a previous id, which supports page-by-page listing.
+
+**Data flow**: It receives an IndexScope, which identifies an owner kind and owner id, plus an optional last-seen id. It returns a Turbopuffer filter requiring that owner kind and owner id, and optionally requiring ids greater than the last-seen id.
+
+**Call relations**: TurbopufferIndex.has_chunks uses this to check whether a scope has at least one stored chunk. TurbopufferIndex._scope_chunks uses it repeatedly while paging through a scope for delete and prune.
+
+*Call graph*: called by 2 (_scope_chunks, has_chunks).
+
+
+##### `hit_from_row`  (lines 125–134)
+
+```
+def hit_from_row(row: dict[str, Any], score: float) -> Hit
+```
+
+**Purpose**: This converts one Turbopuffer result row into UFO’s Hit object. A Hit is the standard shape the rest of UFO uses for search results.
+
+**Data flow**: It receives a row dictionary from Turbopuffer and a score chosen by the caller. It reads the id, owner fields, subject, ordinal, and text, converts the id back into a chunk digest, and returns a Hit containing all of that information.
+
+**Call relations**: TurbopufferIndex.lexical and TurbopufferIndex.vector call this after they receive rows from _query. It calls chunk_digest_from_id so returned hits match UFO’s normal digest format.
+
+*Call graph*: calls 1 internal fn (chunk_digest_from_id); called by 2 (lexical, vector); 1 external calls (__init__).
+
+
+##### `vector_score`  (lines 137–143)
+
+```
+def vector_score(row: dict[str, Any], position: int, total: int) -> float
+```
+
+**Purpose**: This turns Turbopuffer’s vector-search result information into a score where higher means better. That gives UFO a consistent way to compare vector hits.
+
+**Data flow**: It receives a result row, that row’s position in the result list, and the total number of rows. If Turbopuffer included a cosine distance, it converts that into similarity by calculating 1 minus the distance. If not, it falls back to a descending rank score based on position. It returns the numeric score.
+
+**Call relations**: TurbopufferIndex.vector calls this for each row returned by _query. The score is then passed to hit_from_row when building the final Hit objects.
+
+*Call graph*: called by 1 (vector).
+
+
+##### `TurbopufferIndex._api`  (lines 160–181)
+
+```
+def _api(self) -> httpx.AsyncClient
+```
+
+**Purpose**: This provides the HTTP client used to talk to Turbopuffer. It keeps a separate client for each asynchronous event loop, which avoids reusing network connections in a loop they do not belong to.
+
+**Data flow**: It reads the currently running event loop and the instance’s client registry. It removes entries for closed loops, then either returns the existing client for this loop or creates a new httpx asynchronous client with Turbopuffer’s base URL and timeout. It updates the registry when it creates a new client.
+
+**Call relations**: All methods that send HTTP requests call this: upsert, delete, prune, has_chunks, _query, and _scope_chunks. It is the shared doorway through which this backend reaches Turbopuffer.
+
+*Call graph*: called by 6 (_query, _scope_chunks, delete, has_chunks, prune, upsert); 2 external calls (get_running_loop, AsyncClient).
+
+
+##### `TurbopufferIndex.upsert`  (lines 183–194)
+
+```
+async def upsert(self, chunks: tuple[Chunk, ...]) -> None
+```
+
+**Purpose**: This uploads chunks into Turbopuffer, replacing or adding documents for those chunk ids. It is used when UFO has new or updated memory chunks to index.
+
+**Data flow**: It receives a tuple of Chunk objects. It ignores chunks without embeddings, gets an authorization header, splits the rest into batches, builds each request body, and posts each batch to the workspace namespace. It returns nothing, but it changes the remote Turbopuffer namespace by writing documents.
+
+**Call relations**: This is one of the main public index operations. It calls _auth for the Bearer token, _api for the HTTP client, _path for the namespace URL, and upsert_body to shape each batch.
+
+*Call graph*: calls 4 internal fn (_api, _auth, _path, upsert_body).
+
+
+##### `TurbopufferIndex.delete`  (lines 196–204)
+
+```
+async def delete(self, scope: IndexScope) -> None
+```
+
+**Purpose**: This removes all indexed chunks that belong to a given scope. It is used when an owner’s indexed memory should be fully cleared.
+
+**Data flow**: It receives an IndexScope. It gets authorization, lists all chunks in that scope, converts their digests to Turbopuffer ids, and sends delete requests in batches. It returns nothing, but it removes matching remote documents.
+
+**Call relations**: This public index operation calls _scope_chunks to find what exists, turbopuffer_id to convert ids, and then _api, _path, and _auth to send the delete requests.
+
+*Call graph*: calls 5 internal fn (_api, _auth, _path, _scope_chunks, turbopuffer_id).
+
+
+##### `TurbopufferIndex.prune`  (lines 206–216)
+
+```
+async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
+```
+
+**Purpose**: This removes old chunks in a scope while keeping a specified set of current chunk digests. It is useful after re-chunking, when some old pieces may no longer exist and should not be left behind.
+
+**Data flow**: It receives an IndexScope and a keep set of chunk digests. It lists all chunks in the scope, selects only those not in the keep set, converts them to Turbopuffer ids, and sends batched delete requests. It returns nothing, but it removes stale remote documents.
+
+**Call relations**: Like delete, this public cleanup operation uses _scope_chunks to enumerate existing chunks. It then calls turbopuffer_id, _api, _path, and _auth to delete only the unwanted ids.
+
+*Call graph*: calls 5 internal fn (_api, _auth, _path, _scope_chunks, turbopuffer_id).
+
+
+##### `TurbopufferIndex.has_chunks`  (lines 218–226)
+
+```
+async def has_chunks(self, scope: IndexScope) -> bool
+```
+
+**Purpose**: This checks whether a scope has any chunks stored in Turbopuffer. It is a quick existence test rather than a full export.
+
+**Data flow**: It receives an IndexScope. It builds a query asking for just one id in that scope, sends it to Turbopuffer, and reads whether any rows came back. If the namespace does not exist, it returns false. The output is a boolean answer.
+
+**Call relations**: This public check uses scope_filters to describe the scope, then calls _api, _path, and _auth to make the HTTP query.
+
+*Call graph*: calls 4 internal fn (_api, _auth, _path, scope_filters).
+
+
+##### `TurbopufferIndex.lexical`  (lines 228–237)
+
+```
+async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: This searches stored chunks by keyword text using BM25 ranking. It returns chunks whose words best match the query, within the requested owner kind and subjects.
+
+**Data flow**: It receives query text, allowed subjects, an owner kind, and a limit. It cleans the query, stops early if there is no useful text or no subjects, asks _query to rank by BM25 on the text field, and converts rows into Hit objects with rank-based scores. It returns a tuple of hits.
+
+**Call relations**: This is the public keyword-search path. It calls bm25_query before searching, delegates the HTTP query to _query, and uses hit_from_row to translate Turbopuffer rows into UFO search results.
+
+*Call graph*: calls 3 internal fn (_query, bm25_query, hit_from_row).
+
+
+##### `TurbopufferIndex.vector`  (lines 239–248)
+
+```
+async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: This searches stored chunks by meaning using an embedding. It returns chunks with nearby vectors, which usually means similar content.
+
+**Data flow**: It receives an embedding, allowed subjects, an owner kind, and a limit. If the embedding or subject set is empty, it returns no hits. Otherwise it asks _query to rank by approximate nearest-neighbor vector search, scores each row, drops non-positive scores, and returns Hit objects.
+
+**Call relations**: This is the public semantic-search path. It calls _query to contact Turbopuffer, vector_score to turn result distance or rank into a score, and hit_from_row to produce UFO Hit objects.
+
+*Call graph*: calls 3 internal fn (_query, hit_from_row, vector_score).
+
+
+##### `TurbopufferIndex._query`  (lines 250–265)
+
+```
+async def _query(self, rank_by: list[Any], owner_kind: str, subjects: frozenset[str], limit: int) -> list[dict[str, Any]]
+```
+
+**Purpose**: This sends a scoped search query to Turbopuffer and returns the raw rows. It is the shared helper behind both keyword and vector search.
+
+**Data flow**: It receives a ranking instruction, an owner kind, a subject set, and a limit. It builds a request with ranking, result count, requested attributes, and filters, then posts it to the namespace query endpoint. If the namespace is missing, it returns an empty list; otherwise it raises on HTTP errors and returns the response rows.
+
+**Call relations**: TurbopufferIndex.lexical and TurbopufferIndex.vector both call this. It uses query_filters for scoping, _auth for credentials, _path for the namespace route, and _api for the HTTP client.
+
+*Call graph*: calls 4 internal fn (_api, _auth, _path, query_filters); called by 2 (lexical, vector).
+
+
+##### `TurbopufferIndex._scope_chunks`  (lines 267–295)
+
+```
+async def _scope_chunks(self, scope: IndexScope, headers: dict[str, str]) -> list[Chunk]
+```
+
+**Purpose**: This lists all chunks stored for one scope, page by page. It is mainly used before deleting, because Turbopuffer deletion needs the document ids.
+
+**Data flow**: It receives an IndexScope and already-built authorization headers. It repeatedly queries Turbopuffer for chunks ordered by id, asking for one page at a time. It converts each row into a Chunk with normal UFO digest format, advances using the last id, and stops when there are no more full pages or when the namespace is missing. It returns the collected chunks.
+
+**Call relations**: TurbopufferIndex.delete and TurbopufferIndex.prune call this before deciding what to remove. It uses scope_filters to describe each page, _api and _path to make the request, and chunk_digest_from_id when rebuilding Chunk objects.
+
+*Call graph*: calls 4 internal fn (_api, _path, chunk_digest_from_id, scope_filters); called by 2 (delete, prune); 1 external calls (__init__).
+
+
+##### `TurbopufferIndex._auth`  (lines 297–299)
+
+```
+async def _auth(self) -> dict[str, str]
+```
+
+**Purpose**: This builds the authorization header needed for Turbopuffer API requests. It reads the API key from UFO’s credential system at the moment it is needed.
+
+**Data flow**: It reads the turbopuffer_api_key credential through the instance’s CredentialAccess object. It wraps that key in an HTTP Authorization header using the Bearer-token format. It returns the header dictionary.
+
+**Call relations**: All request-sending public methods use this directly or indirectly: upsert, delete, prune, has_chunks, and _query. It keeps the API key out of the HTTP client itself, so one index instance can serve the workspace safely.
+
+*Call graph*: called by 5 (_query, delete, has_chunks, prune, upsert).
+
+
+##### `TurbopufferIndex._path`  (lines 301–302)
+
+```
+def _path(self, suffix: str='') -> str
+```
+
+**Purpose**: This builds the Turbopuffer namespace path for the current workspace. It ensures all requests go to the workspace’s own namespace.
+
+**Data flow**: It receives an optional suffix such as /query. It reads the workspace id from the credential context, prefixes it with the UFO namespace prefix, appends the suffix, and returns the URL path string.
+
+**Call relations**: Every method that talks to Turbopuffer calls this when forming its endpoint: upsert, delete, prune, has_chunks, _query, and _scope_chunks.
+
+*Call graph*: called by 6 (_query, _scope_chunks, delete, has_chunks, prune, upsert).
+
+
+##### `manifest`  (lines 305–322)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This describes the extension to UFO so it can be discovered and registered. It tells UFO the extension name, version, required credential, and how to create the Turbopuffer index backend.
+
+**Data flow**: It takes no input. It constructs a Manifest containing one credential slot for the Turbopuffer API key and one index backend specification named turbopuffer. The factory in that specification creates a TurbopufferIndex using the runtime credential context. It returns the Manifest.
+
+**Call relations**: The extension system calls this when loading available extensions. The returned manifest is how the rest of UFO learns that memory.index_backend can be set to turbopuffer.
+
+*Call graph*: 3 external calls (__init__, __init__, __init__).
+
+
+### Runtime contracts and embeddings
+Defines the shared runtime interfaces for indexing and memory search, plus the OpenAI embedding transport used to vectorize text.
+
+### `core/src/ufo/runtime/indexing.py`
+
+`domain_logic` · `cross-cutting indexing and retrieval`
+
+This file solves a common retrieval problem: large pieces of text are hard to search well as one block, so they need to be cut into sensible smaller pieces, converted into numeric search fingerprints, and written to an index. Think of it like preparing a book for a library catalog: the file decides how to split the pages into useful cards, while another system decides where to store the cards.
+
+It defines simple value objects such as `Chunk`, `Hit`, and `IndexScope`. A `Chunk` is one searchable piece of text. A `Hit` is a search result. An `IndexScope` names the owner whose indexed chunks should be changed or removed.
+
+It also defines two interfaces, called protocols: `IndexBackend` is the storage/search side, and `EmbedClient` is the service that turns text into embedding vectors, which are lists of numbers that capture meaning for similarity search.
+
+The main workflow is `chunk_embed_upsert`. It takes one text body, splits it with `TextChunker`, asks the embedder for vectors, writes the chunks to the index, then prunes old chunks that no longer match the current text. That last step matters because edited text should not leave stale search results behind.
+
+`TextChunker` tries to split text naturally: paragraphs first, then lines, sentences, punctuation, and finally whitespace. It adds a little overlap between chunks so meaning is not lost at the cut point, and it caps chunk size by characters as a safety limit.
+
+#### Function details
+
+##### `IndexBackend.upsert`  (lines 68–68)
+
+```
+async def upsert(self, chunks: tuple[Chunk, ...]) -> None
+```
+
+**Purpose**: This is the index storage operation for adding or replacing chunks. An implementation uses it when the system has fresh searchable text that should be written into the index.
+
+**Data flow**: It receives a group of `Chunk` objects, usually already carrying embedding vectors. The backend stores them, replacing existing rows or records with the same chunk identity. It returns nothing, but the index is changed so later searches can find those chunks.
+
+**Call relations**: `chunk_embed_upsert` calls this after text has been split and embedded. The protocol does not say how storage works; an extension supplies the real database, search engine, or other index behavior.
+
+*Call graph*: called by 1 (chunk_embed_upsert).
+
+
+##### `IndexBackend.delete`  (lines 70–70)
+
+```
+async def delete(self, scope: IndexScope) -> None
+```
+
+**Purpose**: This is the index storage operation for removing all chunks that belong to one owner. It is used when a whole indexed item should disappear from search.
+
+**Data flow**: It receives an `IndexScope`, which names the owner kind and owner id to remove. The backend deletes all indexed chunks in that scope. It returns nothing, but those chunks should no longer appear in search results.
+
+**Call relations**: `extensions/skill_create/ufo_ext_skill_create/manifest._index_card` calls this when it needs to clear indexed content for a card. The actual deletion is provided by the extension that implements `IndexBackend`.
+
+*Call graph*: called by 1 (_index_card).
+
+
+##### `IndexBackend.prune`  (lines 72–72)
+
+```
+async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None
+```
+
+**Purpose**: This removes old chunks for one owner except for a given set that should be kept. It prevents edited text from leaving behind outdated search results.
+
+**Data flow**: It receives an `IndexScope` naming the owner and a set of chunk digests to keep. The backend compares what is currently stored with that keep-set and deletes anything outside it. It returns nothing, but the stored index becomes aligned with the current text.
+
+**Call relations**: `chunk_embed_upsert` calls this after writing the current chunks. That makes the update safe for edits: new or unchanged chunks stay, while chunks from older versions are removed.
+
+*Call graph*: called by 1 (chunk_embed_upsert).
+
+
+##### `IndexBackend.has_chunks`  (lines 74–74)
+
+```
+async def has_chunks(self, scope: IndexScope) -> bool
+```
+
+**Purpose**: This asks whether an owner already has indexed chunks. It is a lightweight check a backend can provide before deciding whether indexing work is needed.
+
+**Data flow**: It receives an `IndexScope` that names the owner to check. The backend looks in its storage for matching chunks. It returns `True` if any exist and `False` if none do.
+
+**Call relations**: No caller is shown in the provided graph, but it is part of the backend contract so other indexing flows can cheaply ask whether content has already been indexed.
+
+
+##### `IndexBackend.lexical`  (lines 76–78)
+
+```
+async def lexical(self, query: str, subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: This searches the index using ordinary text matching, such as matching words from a query. It is useful when exact terms or close wording matter.
+
+**Data flow**: It receives a query string, a set of allowed subjects, an owner kind to search within, and a maximum number of results. The backend searches stored chunk text and returns matching `Hit` objects with scores.
+
+**Call relations**: No caller is shown in the provided graph, but this is one half of the retrieval contract. An extension implements it so the core can ask for text-based matches without knowing the database details.
+
+
+##### `IndexBackend.vector`  (lines 80–82)
+
+```
+async def vector(self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int) -> tuple[Hit, ...]
+```
+
+**Purpose**: This searches the index using an embedding vector, which is a numeric representation of meaning. It is useful for finding text that is semantically similar even when it uses different words.
+
+**Data flow**: It receives an embedding vector, allowed subjects, an owner kind, and a result limit. The backend compares that vector with stored chunk embeddings and returns the best matching `Hit` objects.
+
+**Call relations**: `core/src/ufo/runtime/queue._shadow_skill_selection` calls this during skill selection to find relevant indexed content by meaning. The backend implementation performs the actual vector search.
+
+*Call graph*: called by 1 (_shadow_skill_selection).
+
+
+##### `EmbedClient.embed`  (lines 86–86)
+
+```
+async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
+```
+
+**Purpose**: This turns text strings into embedding vectors, which are lists of numbers used for meaning-based search. It hides the details of the embedding provider from the rest of the runtime.
+
+**Data flow**: It receives a tuple of text strings. The embedder converts each string into one vector and returns the vectors in the same order. It does not store anything by itself.
+
+**Call relations**: `chunk_embed_upsert` calls this before writing chunks to the index, and `core/src/ufo/runtime/queue._shadow_skill_selection` calls it when it needs a query vector for semantic search. The real embedding service is supplied by an implementation of this protocol.
+
+*Call graph*: called by 2 (chunk_embed_upsert, _shadow_skill_selection).
+
+
+##### `chunk_embed_upsert`  (lines 89–114)
+
+```
+async def chunk_embed_upsert(index: IndexBackend, embed: EmbedClient, chunker: 'TextChunker', owner_kind: str, owner_id: str, subject: str, body: str) -> None
+```
+
+**Purpose**: This is the shared indexing workflow for one body of text. It splits the text, embeds each piece, writes the pieces to the index, and removes old pieces that no longer belong.
+
+**Data flow**: It receives an index backend, an embedding client, a chunker, owner information, a subject, and the text body. First it asks the chunker for `Chunk` objects. If there are chunks, it sends their text to the embedder, attaches each returned vector to its matching chunk, and upserts them into the index. Finally it builds an `IndexScope` for the owner and prunes every stored chunk whose digest is not in the current set. It returns nothing, but the index ends up matching the latest body.
+
+**Call relations**: This function sits between text preparation and index storage. It calls `EmbedClient.embed` to get vectors, `IndexBackend.upsert` to write the current chunks, and `IndexBackend.prune` to clean up old chunks. It also creates an `IndexScope` and uses `dataclasses.replace` to attach embeddings without mutating the original frozen chunk objects.
+
+*Call graph*: calls 3 internal fn (embed, prune, upsert); 2 external calls (__init__, replace).
+
+
+##### `TextChunker.chunk`  (lines 123–134)
+
+```
+def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]
+```
+
+**Purpose**: This turns one text body into ordered searchable chunks with stable identities. Callers use it before embedding and indexing text.
+
+**Data flow**: It receives raw text plus owner kind, owner id, and subject. It asks `_slices` to split the text into pieces, then numbers each piece, creates a digest for each one with `_digest`, and returns a tuple of `Chunk` objects. The chunks do not yet have embeddings.
+
+**Call relations**: `chunk_embed_upsert` uses this as the first step in indexing. Internally it relies on `_slices` for the actual splitting and `_digest` for each chunk identity, then constructs `Chunk` value objects.
+
+*Call graph*: calls 2 internal fn (_digest, _slices); 1 external calls (__init__).
+
+
+##### `TextChunker._slices`  (lines 136–144)
+
+```
+def _slices(self, text: str) -> list[str]
+```
+
+**Purpose**: This decides how to split raw text into final text pieces. It keeps chunks near the target size, adds context overlap, and enforces a maximum character length.
+
+**Data flow**: It receives raw text. If the text is blank, it returns no pieces. If it is already short enough by word count, it only trims and character-caps it. Otherwise it recursively splits the text, merges small neighboring pieces, adds overlap between chunks, caps each piece by character length, and returns a list of final strings.
+
+**Call relations**: `TextChunker.chunk` calls this to get the pieces that become `Chunk` objects. It coordinates `_count_words`, `_recursive_split`, `_greedy_merge`, `_apply_overlap`, and `_cap_by_chars` as the main chunk-making pipeline.
+
+*Call graph*: calls 5 internal fn (_apply_overlap, _cap_by_chars, _count_words, _greedy_merge, _recursive_split); called by 1 (chunk).
+
+
+##### `TextChunker._count_words`  (lines 147–153)
+
+```
+def _count_words(text: str) -> int
+```
+
+**Purpose**: This estimates how long a text is in word-like units. It includes special handling for Chinese, Japanese, and Korean text, where spaces are not always used between words.
+
+**Data flow**: It receives text and first counts non-whitespace characters. If there is no real content, it returns zero. If enough of the text is CJK characters, it counts non-whitespace characters instead of space-separated words. Otherwise it counts runs of non-whitespace text. The result is an integer length estimate.
+
+**Call relations**: `_slices` uses this to decide whether text is already small enough. `_recursive_split` uses it to decide whether a piece needs further splitting, and `_greedy_merge` uses it to decide whether combined pieces are still a reasonable size.
+
+*Call graph*: called by 3 (_greedy_merge, _recursive_split, _slices); 1 external calls (sub).
+
+
+##### `TextChunker._cap_by_chars`  (lines 155–167)
+
+```
+def _cap_by_chars(self, text: str) -> list[str]
+```
+
+**Purpose**: This is a safety cutter that ensures no chunk is longer than the maximum character limit. It protects downstream systems from very large chunks even if word-based splitting missed something.
+
+**Data flow**: It receives one text string. If it is within the character limit, it returns it as a one-item list, unless it is empty. If it is too long, it slices it into overlapping character windows, trims each slice, and returns the non-empty pieces.
+
+**Call relations**: `_slices` calls this both for short text and after the main splitting pipeline. It is the final guardrail before chunk text is returned.
+
+*Call graph*: called by 1 (_slices).
+
+
+##### `TextChunker._recursive_split`  (lines 169–181)
+
+```
+def _recursive_split(self, text: str, level: int) -> list[str]
+```
+
+**Purpose**: This breaks large text into smaller pieces by trying natural boundaries from broad to narrow. It prefers paragraph breaks before falling back to rougher cuts.
+
+**Data flow**: It receives text and a delimiter level. At each level, it tries to split using the delimiters for that level, such as blank lines, lines, sentence endings, or punctuation. If splitting does not help, it moves to the next level. If a resulting piece is still too large, it recursively splits that piece more finely. If no delimiters remain, it falls back to whitespace splitting.
+
+**Call relations**: `_slices` calls this for text that is too large. It calls `_split_at_delimiters` to cut at known separators, `_count_words` to test piece size, and `_split_on_whitespace` as the last-resort splitter.
+
+*Call graph*: calls 3 internal fn (_count_words, _split_at_delimiters, _split_on_whitespace); called by 1 (_slices).
+
+
+##### `TextChunker._split_at_delimiters`  (lines 184–197)
+
+```
+def _split_at_delimiters(text: str, delimiters: tuple[str, ...]) -> list[str]
+```
+
+**Purpose**: This cuts text at the earliest occurrence of any delimiter in a given group. It keeps the delimiter attached to the piece so punctuation and spacing are not unnecessarily lost.
+
+**Data flow**: It receives text and a tuple of delimiter strings. It repeatedly finds the earliest delimiter that appears in the remaining text, cuts through that delimiter, and continues with the rest. When no delimiter remains, it adds the leftover text. It returns only pieces that contain non-whitespace content.
+
+**Call relations**: `_recursive_split` calls this while trying each delimiter level. It is the low-level cutting tool used before deciding whether the pieces are small enough.
+
+*Call graph*: called by 1 (_recursive_split).
+
+
+##### `TextChunker._split_on_whitespace`  (lines 199–215)
+
+```
+def _split_on_whitespace(self, text: str) -> list[str]
+```
+
+**Purpose**: This is the fallback splitter when natural punctuation or paragraph boundaries are not enough. It cuts text by runs of non-whitespace text, roughly word by word.
+
+**Data flow**: It receives text and looks for word-like runs. If there are normal words, it groups them into chunks of about the target word count and returns joined strings. If there are no normal words, or one extremely long run, it cuts the raw text into fixed-size pieces instead. Blank pieces are skipped.
+
+**Call relations**: `_recursive_split` calls this only after delimiter-based splitting has run out of options. It is the last resort that guarantees very hard-to-split text can still be chunked.
+
+*Call graph*: called by 1 (_recursive_split).
+
+
+##### `TextChunker._greedy_merge`  (lines 217–231)
+
+```
+def _greedy_merge(self, pieces: list[str]) -> list[str]
+```
+
+**Purpose**: This joins neighboring small pieces so the final chunks are not too tiny. It makes the chunks more useful for search by giving each one enough context.
+
+**Data flow**: It receives a list of split pieces. Starting with the first piece, it tries to append the next piece if the combined text stays within a loose size limit of about one and a half times the target word count. If adding a piece would be too much, it saves the current chunk and starts a new one. It returns the merged list.
+
+**Call relations**: `_slices` calls this after `_recursive_split`. It uses `_count_words` and `math.ceil` to test the combined size before deciding whether to merge or start a new chunk.
+
+*Call graph*: calls 1 internal fn (_count_words); called by 1 (_slices); 1 external calls (ceil).
+
+
+##### `TextChunker._apply_overlap`  (lines 233–239)
+
+```
+def _apply_overlap(self, chunks: list[str]) -> list[str]
+```
+
+**Purpose**: This adds a little text from the end of one chunk to the start of the next. The overlap helps searches preserve meaning that crosses a chunk boundary.
+
+**Data flow**: It receives a list of chunks. If there is only one chunk or overlap is disabled, it returns the chunks unchanged. Otherwise it keeps the first chunk as-is, then prefixes each later chunk with trailing context taken from the previous chunk. It returns the adjusted list.
+
+**Call relations**: `_slices` calls this after merging. It walks neighboring chunk pairs with `itertools.pairwise` and asks `_trailing_context` what text should be copied forward.
+
+*Call graph*: calls 1 internal fn (_trailing_context); called by 1 (_slices); 1 external calls (pairwise).
+
+
+##### `TextChunker._trailing_context`  (lines 241–251)
+
+```
+def _trailing_context(self, text: str) -> str
+```
+
+**Purpose**: This chooses the overlap text to carry from one chunk into the next. It tries to include useful recent context without starting awkwardly in the middle of a sentence when it can avoid it.
+
+**Data flow**: It receives one chunk of text and finds its word-like runs. If the chunk is not longer than the overlap size, it returns an empty string because duplicating nearly everything would not help. Otherwise it takes the last overlap-sized group of words. If there is a sentence boundary early enough in that trailing text, it drops the earlier sentence fragment and returns the cleaner remainder. If not, it returns the trailing words as-is.
+
+**Call relations**: `_apply_overlap` calls this for each previous chunk when building overlapped chunks. It is the small helper that decides exactly what context gets copied forward.
+
+*Call graph*: called by 1 (_apply_overlap).
+
+
+##### `TextChunker._digest`  (lines 254–256)
+
+```
+def _digest(owner_kind: str, owner_id: str, subject: str, ordinal: int, text: str) -> str
+```
+
+**Purpose**: This creates a stable identity string for a chunk. The digest lets the index recognize the same chunk again during repeated indexing runs.
+
+**Data flow**: It receives owner kind, owner id, subject, ordinal number, and chunk text. It joins those fields with a separator, hashes the result with SHA-256, and returns a string starting with `sha256:`. The same inputs produce the same digest; changed text or metadata produces a different one.
+
+**Call relations**: `TextChunker.chunk` calls this once for each text piece. Those digests are later used by `chunk_embed_upsert` when pruning, so unchanged chunks can be kept and outdated chunks can be removed.
+
+*Call graph*: called by 1 (chunk); 1 external calls (sha256).
+
+
+### `core/src/ufo/runtime/memory.py`
+
+`data_model` · `cross-cutting during memory search and browsing`
+
+This file is a small contract between two sides of the system. One side wants to recall useful past information. The other side knows how to search or browse stored memory items. Without this contract, every caller would need to know the details of each memory extension, which would make the system harder to extend and easier to break.
+
+The central data item is `MemoryMatch`, which represents one search result in a provider-neutral way. It includes the kind of memory, the text snippet to show, and optionally a durable object reference, creation time, and subject. In plain terms, it is the card handed back from a memory search: “here is what matched, when it was created, and where to open the full thing if possible.”
+
+`MemorySearchProvider` is a protocol, meaning a formal promise about methods an object must provide. A real memory extension implements this promise. It can search by query text, list recent readable items, and report which kinds of items can be listed.
+
+`MemorySearch` is a thin wrapper around one chosen provider. It does not search by itself. It forwards requests to the provider. This gives the runtime one stable object to pass around while still allowing different memory backends underneath.
+
+#### Function details
+
+##### `MemorySearchProvider.search`  (lines 37–43)
+
+```
+async def search(self, queries: tuple[str, ...], reader: SourceReader, start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
+```
+
+**Purpose**: This is the promised search operation that every memory provider must offer. A caller uses it to ask, “given these query phrases and this reader’s access rights, what memory items match?”
+
+**Data flow**: The function receives one or more query strings, a `SourceReader` that represents what the caller is allowed to read, and optional start and end times. A concrete provider uses those inputs to find matching memory items and returns them as a tuple of `MemoryMatch` results. Because this is only a protocol method, this file defines the shape of the operation but not the actual search work.
+
+**Call relations**: Higher-level code talks to a provider through this method when it needs recall. In this file, `MemorySearch.search` is the direct wrapper that calls this provider method and returns whatever results the provider supplies.
+
+
+##### `MemorySearchProvider.list_recent`  (lines 45–51)
+
+```
+async def list_recent(self, subjects: frozenset[str], limit: int, kinds: frozenset[str] | None=None, cursor: ListingCursor | None=None) -> ListingPage[MemoryMatch]
+```
+
+**Purpose**: This is the promised browsing operation for recent memory items. It lets a caller list readable memory entries in recency order, optionally narrowed to certain kinds of items.
+
+**Data flow**: The function receives a set of subjects that may be read, a maximum number of results, an optional set of memory kinds to include, and an optional cursor that marks where the previous page ended. A concrete provider uses those inputs to return a `ListingPage` of `MemoryMatch` items. The cursor style is like using a bookmark rather than a page number, which avoids skipping or repeating items if new memories arrive while someone is browsing.
+
+**Call relations**: Code that wants to browse recent memory goes through this provider method. In this file, `MemorySearch.list_recent` simply forwards the same request to the selected provider and hands the returned page back to the caller.
+
+
+##### `MemorySearchProvider.listable_kinds`  (lines 53–53)
+
+```
+def listable_kinds(self) -> tuple[str, ...]
+```
+
+**Purpose**: This is the promised way for a provider to say which categories of memory items can be browsed. A user interface or caller can use this to offer valid filters.
+
+**Data flow**: The function takes no extra input. A concrete provider returns a tuple of kind names, such as the provider’s own item classes. Since this is a protocol method, the exact list comes from the provider implementation elsewhere.
+
+**Call relations**: Consumers ask this before or during browsing so they know which filters make sense. In this file, `MemorySearch.listable_kinds` forwards the request to the underlying provider.
+
+
+##### `MemorySearch.search`  (lines 62–69)
+
+```
+async def search(self, reader: SourceReader, queries: tuple[str, ...], start: datetime | None=None, end: datetime | None=None) -> tuple[MemoryMatch, ...]
+```
+
+**Purpose**: This method gives callers a stable way to search memory without talking to the provider directly. It is a pass-through doorway to the selected memory provider.
+
+**Data flow**: The method receives a `SourceReader`, query strings, and optional time bounds. It sends those same values to `self.provider.search`, waits for the provider’s answer, and returns the tuple of `MemoryMatch` results unchanged. It does not alter the query or decorate the results.
+
+**Call relations**: A caller uses `MemorySearch` as the runtime-facing object. When search is requested, this method hands the work to `MemorySearchProvider.search`, letting the actual provider decide how to find matches.
+
+
+##### `MemorySearch.list_recent`  (lines 71–78)
+
+```
+async def list_recent(self, subjects: frozenset[str], limit: int, kinds: frozenset[str] | None=None, cursor: ListingCursor | None=None) -> ListingPage[MemoryMatch]
+```
+
+**Purpose**: This method lets callers browse recent memory through the runtime’s chosen provider. It keeps the public access point simple while leaving the storage-specific work to the provider.
+
+**Data flow**: The method receives readable subjects, a result limit, optional kind filters, and an optional listing cursor. It passes those values directly to `self.provider.list_recent`, waits for the provider to produce a page, and returns that `ListingPage` unchanged.
+
+**Call relations**: A caller that wants recent memory items calls this wrapper. The wrapper delegates to `MemorySearchProvider.list_recent`, which is where the real provider-specific listing happens.
+
+
+##### `MemorySearch.listable_kinds`  (lines 80–81)
+
+```
+def listable_kinds(self) -> tuple[str, ...]
+```
+
+**Purpose**: This method exposes the selected provider’s list of browsable memory categories. It is useful when a caller needs to build a filter menu or validate a requested kind.
+
+**Data flow**: The method takes no extra input. It asks `self.provider.listable_kinds` for the provider’s supported kinds and returns that tuple directly. Nothing is stored or changed.
+
+**Call relations**: Runtime consumers call this on `MemorySearch` instead of reaching into the provider. The method immediately hands the request to `MemorySearchProvider.listable_kinds` and returns the provider’s answer.
+
+
+### `extensions/embed_openai/ufo_ext_embed_openai.py`
+
+`io_transport` · `startup and background embedding/indexing work`
+
+This extension gives the system a ready-made embedding backend: a component that converts pieces of text into lists of numbers, called vectors, so the system can later compare meanings rather than just exact words. It uses OpenAI’s `text-embedding-3-large` model and registers itself under the backend name `default`, so it can be chosen when no other embedding backend is configured.
+
+The file has two main jobs. First, it describes the extension to the host system through `manifest`, including the API key it needs and the factory function used to build the client. Second, it defines `OpenAIEmbedClient`, which performs the actual embedding call.
+
+A notable design choice is that the OpenAI API key is not read when the program starts. It is read each time embedding is requested. This means a local development server can start without a key, but if someone actually tries to embed text without one, the failure is immediate and clear.
+
+Before sending text to OpenAI, `plan_embed_batches` acts like a careful packer filling boxes: it trims any single text item that is too long, then groups items into batches that stay under item-count and character-count limits. This keeps provider requests bounded and predictable.
+
+#### Function details
+
+##### `plan_embed_batches`  (lines 33–49)
+
+```
+def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]
+```
+
+**Purpose**: This function prepares text for the embedding provider by making sure each request stays within safe size limits. It clips very long text items and groups the remaining text into batches that are small enough to send.
+
+**Data flow**: It receives a tuple of text strings. For each string, it cuts it down to the maximum allowed length, then adds it to the current batch unless that batch would become too large by item count or total characters. It returns a tuple of batches, where each batch is a tuple of clipped text strings ready to send to OpenAI.
+
+**Call relations**: This is used by `OpenAIEmbedClient.embed` right before making provider calls. In the bigger flow, it is the safety step between raw text from the system and network requests to OpenAI, preventing one embedding call from carrying an oversized payload.
+
+*Call graph*: called by 1 (embed).
+
+
+##### `OpenAIEmbedClient.embed`  (lines 63–75)
+
+```
+async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
+```
+
+**Purpose**: This method turns one or more text strings into embedding vectors using OpenAI. A vector is a list of numbers that represents the meaning of the text in a form useful for search, ranking, or memory lookup.
+
+**Data flow**: It receives a tuple of text strings. It reads the deploy API key from the environment, and if no key is available, it raises a clear error instead of failing silently. It creates an asynchronous OpenAI client, asks `plan_embed_batches` to split the input into safe-sized batches, sends each batch to OpenAI, sorts the returned rows back into the provider’s stated order, converts the embeddings to plain tuples of floats, and returns all vectors as one tuple.
+
+**Call relations**: When the embedding system needs vectors, it calls this method on the client produced by `build`. During its work, it calls `deploy_env` to find the API key, creates an `openai.AsyncOpenAI` client for the network request, and relies on `plan_embed_batches` so each provider call is properly bounded.
+
+*Call graph*: calls 1 internal fn (plan_embed_batches); 2 external calls (AsyncOpenAI, deploy_env).
+
+
+##### `build`  (lines 78–83)
+
+```
+def build(ctx: ExtensionContext) -> EmbedClient
+```
+
+**Purpose**: This function builds the embedding client that the host system will use for this extension. It deliberately does not require an API key at construction time, so the system can start even if embedding is not yet usable.
+
+**Data flow**: It receives an extension context, which represents the workspace or runtime scope, but this implementation does not need to read anything from it. It creates and returns an `OpenAIEmbedClient` with the default model setting. No network call happens here.
+
+**Call relations**: The extension registration points to this function as the factory for the default embedding backend. Later, when embedding is actually requested, the returned `OpenAIEmbedClient` performs the API-key lookup and OpenAI call.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `manifest`  (lines 86–92)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This function tells the host system what this extension is: its name, version, required deploy key, and the embedding backend it provides. Without it, the system would not know how to discover or register this OpenAI embedding backend.
+
+**Data flow**: It takes no input. It constructs an `EmbedBackendSpec` naming this backend as `default` and pointing to `build` as the way to create it. It then wraps that in a `Manifest` containing the extension name, version, and API key requirement, and returns that manifest to the extension loader.
+
+**Call relations**: This is the file’s registration point. It hands the host system a manifest, and inside that manifest the embedding backend specification connects the name `default` to the `build` function that creates the actual client.
+
+*Call graph*: 2 external calls (__init__, __init__).

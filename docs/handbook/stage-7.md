@@ -1,331 +1,417 @@
-# Per-turn host environment assembly  `stage-7`
+# Conversation admission, scheduling, and cancellation  `stage-7`
 
-This stage runs just before each model turn. Its job is to set the table: decide exactly what the model may read, what tools it may use, which helper agents it may start, and what files are placed in its working sandbox. The host package marks this as the system’s “outside world” layer, where prompts, tools, skills, extensions, and files are gathered.
+This stage is the traffic controller for conversation work. It sits behind the scenes during the main work loop, whenever a person sends a message, a timer wakes up, a monitor notices something, a paused task resumes, or a running reply is cancelled. Its job is to decide what becomes queued work and when it may run.
 
-The main builder, `assemble.py`, acts like a careful dispatcher. It combines the system prompt, selected skills, seeded files, model choice, extension context, and tool access into one complete turn environment. It also enforces safety rules: environment documents may narrow or reshape what was already allowed, but cannot quietly grant extra power.
+The admission code is the front door. It checks whether a new turn, meaning one unit of conversation work, can start now, must wait, should join an already-running turn, or should be refused for policy or billing reasons. The dispatch code is the handoff point. When a turn finishes, pauses, fails, or is cancelled, it starts the next waiting turn only if the conversation is free.
 
-Two supporting areas feed this builder. Prompt and skill resolution prepares the instructions, reusable skill cards, model catalog, and reproducible environment documents. Spawn-target preparation builds the menu of allowed child agents or pipeline steps. Together, these parts make each turn predictable, traceable, and limited to the powers chosen for that moment.
+The audience and visibility pieces act like privacy guards. They decide who may see or join each turn, and when the agent should stay quiet in a busy shared room. The durable queue and stop pieces save waits and cancellations safely, notify listeners, and can start a follow-up. The site report file turns a broken hosted page into a controlled message so the agent can repair it.
 
 ## Sub-stages
 
-- [Prompt, skill, and environment-document resolution](stage-7.1.md) `stage-7.1` — 8 files
-- [Spawn-target and subagent availability preparation](stage-7.2.md) `stage-7.2` — 6 files
+- [Audience, visibility, and participation decisions](stage-7.1.md) `stage-7.1` — 4 files
+- [Durable queues, waits, and stop requests](stage-7.2.md) `stage-7.2` — 1 files
 
 ## Files in this stage
 
-### Host Environment Assembly
-Defines the host environment layer and assembles the complete per-turn prompt, tool, skill, file, and permission context for the model.
+### Admission and Dispatch
+Converts external failures and incoming wake-ups into admitted, deferred, merged, refused, or dispatched conversation turns.
 
-### `core/src/ufo/host/__init__.py`
+### `core/src/ufo/harness/sandbox/site_report.py`
 
-`other` · `cross-cutting`
+`orchestration` · `request handling`
 
-This is a package marker file. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package. Here, it contains only a short documentation string, but that sentence is useful: it defines the meaning of the `ufo.host` area of the codebase.
+A hosted site can fail in a place that cannot fix it directly. The ingress process is like a front desk: it notices that nobody is answering on a site port, but it does not run the conversation engine. This file builds the small, secure handoff from that front desk to the service that can talk to the agent.
 
-The host layer is described as “what an agent turn sees.” In plain terms, when an agent takes a step, it needs access to its working environment: available tools, optional extensions, reusable skills, and prompt text that guides behavior. This package is the named home for that environment-facing code.
+The ingress side, `SiteReporter`, creates a short-lived signed token. The token is both proof and message: it says which workspace, conversation, and port were involved, and it is signed with the deploy secret so the receiver can trust it. It then posts that token to an internal endpoint. If the post fails, it logs a warning and stops, because the user’s waiting page will reload and try again soon.
 
-There is no executable logic in this file, so nothing is calculated, loaded, or changed here. Its job is more like a label on a toolbox drawer: it does not operate the tools itself, but it tells future readers and importers what kind of tools belong inside. Without this file, depending on the Python setup, imports from this folder could be less clear or less reliable, and the package would lack this small but helpful piece of documentation.
+The service side, `SiteReports`, exposes that internal endpoint. It checks the token, finds the agent for the conversation, and invokes the conversation with a clear instruction: the hosted site on this port did not answer, find out why, restart it, and verify it works.
 
-
-### `core/src/ufo/host/assemble.py`
-
-`orchestration` · `per-turn environment assembly`
-
-Think of this file as packing a carefully checked toolbox and instruction folder before an AI worker starts a job. The host has discovered extensions, credentials, workspace facts, object actions, skills, subagents, and optional environment documents. `HostEnvironment` combines those pieces into an `AssembledTurn`, which is what the runtime gives to the model for one turn.
-
-The key rule is that a turn-specific environment document can reduce or reshape access, but not expand the platform's grants. It may rewrite prompt text, hide tools, change tool descriptions, add sandbox command tools, edit deploy-provided skills, or seed files. But if it refers to a scoped tool that was not already offered, the turn fails loudly instead of guessing. This matters because tool descriptions and prompts influence what the model believes it can do, while tool definitions carry the real authorization and execution context.
-
-The file also treats normal agents and subagents differently. Main agents get workspace facts and object-kind guidance; subagents get their profile prompt, preload skills, and their own grant set. Spawned turns get extra finish instructions when needed. The helper functions below do the small but important checks: exact text edits, safe schema description changes, spawn payload hints, and conversion of a document-defined `run` command into a real callable tool.
+One important detail is the time bucket used in the idempotency key. The waiting page may reload many times, but reports in the same bucket count as the same turn. That prevents a broken site from flooding the agent with duplicate repair requests.
 
 #### Function details
 
-##### `HostEnvironment.assemble`  (lines 120–226)
+##### `SiteReporter.report`  (lines 74–105)
 
 ```
-async def assemble(self, request: AssembleRequest) -> AssembledTurn
+async def report(self, claims: IngressClaims) -> None
 ```
 
-**Purpose**: Builds everything the model is allowed to see and call for a single turn. It combines discovered extension contributions, the agent or subagent profile, workspace facts, skills, spawn targets, hooks, and optional environment-document overrides into one `AssembledTurn`.
+**Purpose**: This is the ingress side of the site-down report. When the ingress sees that a hosted site is not answering, this function sends a short, signed report to the main service so the conversation’s agent can be told.
 
-**Data flow**: It receives an `AssembleRequest` containing the turn, agent, profile, audience, requested skills, subagent information, and optional environment document name. It reads environment documents and seeded files from the blob store, asks extension loaders for tools, hooks, workspace facts, and member skills, chooses the allowed tools and actions, renders the prompt, applies document edits, adjusts the spawn tool, and returns an `AssembledTurn` containing the final prompt, tool registry, hooks, skills, files, cards, and visibility information.
+**Data flow**: It receives ingress claims, which include facts such as the workspace, conversation, and port. If there is no service address configured, or the request is for a shipped site rather than a live conversation sandbox, it does nothing. Otherwise it stamps the claims with a short expiry time, removes fields that should not travel in this report, signs them into a token, and posts that token to the internal report endpoint. Nothing is returned. If the network call fails, or the service refuses the report, it writes a warning for operators.
 
-**Call relations**: This is the central story for the file. It calls `HostEnvironment.tools`, `HostEnvironment.hooks`, and `HostEnvironment.member_skills` to collect platform contributions; uses `_object_kind_index`, `_skills_with_document`, `_with_spawn_payload`, and `_applied_document` to shape what survives; and calls `_document_blob` whenever it must load a pinned environment document or its files.
+**Call relations**: This function is called from the ingress flow after a site fails to answer. It uses the current time to make the report expire soon, uses `replace` to make a safe copy of the claims, and hands the claims to `mint_ingress_token` so the receiver can trust them. If posting the report raises an HTTP error or gets an unexpected response, it calls `warn` instead of retrying, because the browser’s waiting page will reload and create another chance to report.
 
-*Call graph*: calls 8 internal fn (_document_blob, hooks, member_skills, tools, _applied_document, _object_kind_index, _skills_with_document, _with_spawn_payload); 22 external calls (__init__, __init__, __init__, span, load_environment_document, load_environment_file, turn_workspace_facts, spawn_catalog_skill, spawn_targets, render_object_kinds (+12 more)).
-
-
-##### `HostEnvironment.tools`  (lines 228–242)
-
-```
-def tools(self, *, audience: Audience, member_context_authority: ExecutionAuthority) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]
-```
-
-**Purpose**: Collects the tools available for a turn from installed manifests and runtime services. A tool here means a callable action the model may ask the system to run, with its authorization context already attached.
-
-**Data flow**: It receives the audience and the execution authority to use for member-context tools. It passes manifests, credentials, indexing services, embedding services, URL settings, artifact settings, and blob access into the extension loader. It returns the raw tool definitions, per-tool extension context, and registered object verbs.
-
-**Call relations**: `HostEnvironment.assemble` calls this early so it can later filter the full tool offer down to what the agent or subagent is actually granted. This function delegates the discovery work to `turn_tools` rather than building tools itself.
-
-*Call graph*: called by 1 (assemble); 1 external calls (turn_tools).
+*Call graph*: 4 external calls (replace, now, warn, mint_ingress_token).
 
 
-##### `HostEnvironment.hooks`  (lines 244–253)
+##### `SiteReports.router`  (lines 125–128)
 
 ```
-def hooks(self, *, audience: Audience) -> HookChain
+def router(self) -> APIRouter
 ```
 
-**Purpose**: Collects turn hooks from extensions. Hooks are callbacks that can run at defined moments around a turn, like a checklist that extensions can add to.
+**Purpose**: This builds the small FastAPI router, meaning the web-route object, that receives site-down reports. The main service mounts this router so ingress has a fixed internal URL to post to.
 
-**Data flow**: It receives the audience for the turn and reads host-level services such as credentials, index, embedding client, tailer, and public URL. It passes them to the extension loader and gets back a `HookChain`, which is an ordered set of callbacks.
+**Data flow**: It takes no request data. It creates a new router, attaches the internal site-report path to the `_report` function for POST requests, and returns the router so the application can include it.
 
-**Call relations**: `HostEnvironment.assemble` calls this while preparing the turn and stores the returned hook chain in the assembled result. The actual hook collection is delegated to `turn_hooks`.
+**Call relations**: This is used during service setup, when the web application is being assembled. It creates a FastAPI `APIRouter` and connects the public-facing route machinery to this file’s private `_report` method, so later HTTP POSTs are delivered to the report verifier and turn invoker.
 
-*Call graph*: called by 1 (assemble); 1 external calls (turn_hooks).
-
-
-##### `HostEnvironment.member_skills`  (lines 255–264)
-
-```
-async def member_skills(self, *, agent_name: str) -> tuple[tuple[SkillCard, ...], SkillMaterializer]
-```
-
-**Purpose**: Loads skills authored or made visible for a specific agent member. These are extra pieces of reusable know-how that can be shown or materialized for the model.
-
-**Data flow**: It receives an agent name, reads the host's manifests and runtime services, and asks the extension loader for member skill cards and a materializer. It returns the visible cards plus a function-like materializer that can later load the actual skill content.
-
-**Call relations**: `HostEnvironment.assemble` calls this only when the agent is allowed to use workspace skills. The returned cards and materializer are folded into the broader skill registry for the turn.
-
-*Call graph*: called by 1 (assemble); 1 external calls (turn_member_skills).
+*Call graph*: 1 external calls (APIRouter).
 
 
-##### `HostEnvironment.environment_model`  (lines 266–270)
+##### `SiteReports._report`  (lines 130–154)
 
 ```
-async def environment_model(self, environment: str, profile: str | None) -> str | None
+async def _report(self, authorization: Annotated[str, Header()]='') -> Response
 ```
 
-**Purpose**: Looks up whether an environment document requests a specific model for the main agent or a named subagent profile. It returns only the model choice, not the rest of the environment.
+**Purpose**: This is the service-side endpoint that receives a site-down report. It verifies the signed token, finds the right conversation agent, and asks that agent to repair the stopped site.
 
-**Data flow**: It receives the environment document identifier and an optional profile name. It loads the document from the blob store, selects either the main block or the named profile block, and returns that block's model field, or `None` if no such model is named.
+**Data flow**: It starts with the HTTP `Authorization` header. It strips the `Bearer` prefix, verifies the token against the expected report kind and current time, and rejects bad tokens with a 401 unauthorized error. For a valid token, it enters the matching workspace, looks up the agent for the conversation, and returns 404 if there is no such conversation. If an agent exists, it builds a time-bucketed idempotency key, sends the repair instruction to the workspace’s turn invoker, and returns an empty 204 response. If the agent has been archived, it still returns 204 because there is nothing useful to repair.
 
-**Call relations**: This is a focused lookup used outside the full assembly path when the runtime needs to resolve model choice. It uses `_document_blob` for storage access and `load_environment_document` for parsing.
+**Call relations**: FastAPI calls this function when ingress posts to the internal report route made by `SiteReports.router`. It uses `verify_ingress_token` as the gatekeeper, `ws` to run inside the right workspace, and `conversation_agent_id` to find who should receive the message. It then uses `authority_from_member_id(None)` to mark the report as a system/workspace action rather than a member’s personal action, and hands the final repair request to the `TurnInvoker` returned by `invoker_for`.
 
-*Call graph*: calls 1 internal fn (_document_blob); 1 external calls (load_environment_document).
-
-
-##### `HostEnvironment.clis`  (lines 272–273)
-
-```
-def clis(self) -> dict[str, CliCredential]
-```
-
-**Purpose**: Returns command-line connector credentials advertised by manifests. These are credentials meant to be used by connector command-line tools.
-
-**Data flow**: It reads the host's manifests and passes them to the connector loader. The result is a dictionary of command-line credential descriptions keyed by name.
-
-**Call relations**: This is a simple access point for other host setup code. It does not participate in `assemble`; it delegates directly to `connector_clis`.
-
-*Call graph*: 1 external calls (connector_clis).
+*Call graph*: 7 external calls (now, HTTPException, Response, verify_ingress_token, authority_from_member_id, conversation_agent_id, ws).
 
 
-##### `HostEnvironment.slots`  (lines 275–276)
+### `core/src/ufo/runtime/surfaces/admission.py`
 
-```
-def slots(self) -> tuple[CredentialSlot, ...]
-```
+`domain_logic` · `request handling and background admission`
 
-**Purpose**: Returns credential slots declared by extensions. A credential slot is a named place where a secret or token can be injected when an extension runs.
+A "turn" is one unit of agent work in a conversation, like one ticket in a help-desk queue. This file makes sure every ticket is created the same safe way. Without it, different entry points could accidentally skip spending limits, seat checks, duplicate-message protection, or the rule that a conversation stays bound to its original agent.
 
-**Data flow**: It reads the host's manifests, asks the extension loader for injectable slots, and returns them as a tuple.
+The main class, Admission, works under a database lock on the conversation. That lock is important because it lets the code assign the next turn number safely, one at a time. It first checks whether the message is a repeat using an idempotency key, which is a caller-provided label meaning "this is the same delivery as before." If it is a repeat, the caller is pointed back to the already-created turn or queued arrival instead of creating duplicate work.
 
-**Call relations**: This gives surrounding host code a way to discover what credentials extensions need. It delegates to `injecting_slots` and is separate from per-turn assembly.
+If another turn is already live in the conversation, many incoming messages are not given their own turn. They are written to an inbound-message queue for the live turn to absorb at its next boundary. If folding is not safe, for example because the authority differs, the new turn waits until the live one ends.
 
-*Call graph*: 1 external calls (injecting_slots).
+The file also enforces business gates: archived agents, missing member seats, unresolved speakers, and spending or balance limits. Durable surfaces get writeback rows so replies can be delivered later. Finally, queued turns are handed to DBOS, the background workflow queue, for execution.
 
+#### Function details
 
-##### `HostEnvironment._document_blob`  (lines 278–281)
+##### `_refused`  (lines 154–165)
 
 ```
-def _document_blob(self) -> WorkspaceBlobStore
+def _refused(holds_work_already_done: bool, message: str) -> tuple[TurnStatus, TerminalFrame | None]
 ```
 
-**Purpose**: Provides the blob store used to load environment documents and files, and fails clearly if this host was not given one. A blob store is storage for named pieces of content, like documents or file bodies.
+**Purpose**: Decides what a refusal means for a turn. If the turn already represents paid or completed work, it parks the turn instead of cancelling it; otherwise it creates a cancelled final answer explaining why the work was refused.
 
-**Data flow**: It reads `self.blob`. If a blob store exists, it returns it. If not, it raises a runtime error explaining that environment documents cannot be loaded.
+**Data flow**: It receives a yes-or-no flag saying whether the turn contains work already done, plus a human-readable refusal message. It turns that into either a parked status with no final message, or a cancelled status with a terminal frame that carries the explanation.
 
-**Call relations**: `HostEnvironment.assemble` and `HostEnvironment.environment_model` call this before loading environment documents. It is the guard that prevents later code from failing in a vague way.
+**Call relations**: Admission._create_turn uses this when billing or spending says a new turn cannot run. Admission._authority_refusal also uses it when an archived app or missing seat should stop the turn without losing already-paid work.
 
-*Call graph*: called by 2 (assemble, environment_model).
-
-
-##### `_object_kind_index`  (lines 284–301)
-
-```
-def _object_kind_index(verbs: ObjectVerbs, granted_actions: frozenset[str]) -> tuple[tuple[str, str, tuple[str, ...]], ...]
-```
-
-**Purpose**: Builds the prompt-friendly list of workspace object kinds and the actions this turn is allowed to use on them. This helps the model understand not only what kinds of objects exist, but which actions are actually granted.
-
-**Data flow**: It receives all registered object verbs and the set of action IDs granted to this turn. It walks through object kinds in name order, keeps only actions whose canonical ID is granted, formats each action with whether it applies to an instance or a collection, and returns a tuple ready for prompt rendering.
-
-**Call relations**: `HostEnvironment.assemble` calls this for main-agent turns after it knows the granted actions. The result is passed into prompt rendering so the model sees object guidance that matches its real permissions.
-
-*Call graph*: called by 1 (assemble).
+*Call graph*: called by 2 (_authority_refusal, _create_turn); 1 external calls (__init__).
 
 
-##### `_skills_with_document`  (lines 304–333)
+##### `Admission.admit_member`  (lines 176–221)
 
 ```
-def _skills_with_document(skills: SkillRegistry, document: EnvironmentDocument | None) -> SkillRegistry
+async def admit_member(self, workspace_id: UUID, conversation_id: UUID, body: str, speaker_member_id: UUID | None, idempotency_key: str | None=None, context: TurnContext | None=None, intent: ToolInten
 ```
 
-**Purpose**: Applies skill changes from an environment document to the deploy-provided skill registry. It can replace a skill's `SKILL.md`, edit it by exact text replacement, or add a new document-provided skill, while refusing to override member-authored skills.
+**Purpose**: Admits a message spoken by a real member through a surface, such as a chat or app UI. It validates the member-facing envelope, sends the message through the shared admission path, and notifies the live hub when the message folded into an existing turn or created a visible comment.
 
-**Data flow**: It receives the current `SkillRegistry` and an optional environment document. If there are no document skill changes, it returns the original registry. Otherwise it copies skills by name, applies full replacement text or exact edits, parses the resulting skill content, removes changed skills from the bundled-image set, and returns a new registry.
+**Data flow**: It receives workspace and conversation IDs, the message body, the speaker member ID, optional duplicate-protection key, context, intent, comment, and runtime settings. It checks that prepared intents match their body and that comments are valid, builds member authority from the speaker, calls Admission._admit, then publishes arrival or comment events to the hub when needed. It returns an Admitted object describing the turn and any arrival or comment IDs.
 
-**Call relations**: `HostEnvironment.assemble` calls this before rendering prompts for both main agents and subagents. It uses `_edited` for safe text replacement, `parse_skill_content` to turn files into a skill object, and `replace` to produce an updated immutable-style registry.
+**Call relations**: Surfaces call this as the safe way to admit member messages. Admission.redispatch also calls it when an old pending member message needs another chance. Internally it relies on Admission._admit for the real admission decision, then sends side-channel updates through the hub for clients already watching the turn.
 
-*Call graph*: calls 1 internal fn (_edited); called by 1 (assemble); 2 external calls (replace, parse_skill_content).
-
-
-##### `_applied_document`  (lines 336–392)
-
-```
-def _applied_document(prompt: RenderedPrompt, tools: ToolRegistry, scoped: EnvironmentOverrides | None, global_tools: dict[str, ToolOverride]) -> tuple[RenderedPrompt, ToolRegistry, bool]
-```
-
-**Purpose**: Applies prompt and tool overrides from an environment document to one assembled target, such as the main agent or a subagent profile. It is the main enforcement point for the rule that scoped overrides cannot name tools the turn was not offered.
-
-**Data flow**: It receives the rendered prompt, current tool registry, scoped overrides for the target, and top-level tool overrides. It builds a tool map by name, rejects unknown scoped tool names unless they define a new sandbox `run` command, merges global and scoped overrides, removes disabled tools, rewrites descriptions or parameter descriptions, creates document-defined run tools, applies prompt replacement or edits, and returns the new prompt, new tool registry, and a flag saying whether the prompt was fully replaced.
-
-**Call relations**: `HostEnvironment.assemble` calls this after the normal prompt and tool offer are built. This function hands prompt changes to `_applied_prompt`, parameter-description changes to `_described_model`, and command-tool creation to `_run_tool`.
-
-*Call graph*: calls 3 internal fn (_applied_prompt, _described_model, _run_tool); called by 1 (assemble); 2 external calls (__init__, replace).
+*Call graph*: calls 1 internal fn (_admit); called by 1 (redispatch); 5 external calls (__init__, __init__, model_dump_json, span, authority_from_member_id).
 
 
-##### `_applied_prompt`  (lines 395–398)
+##### `Admission.redispatch`  (lines 223–272)
 
 ```
-def _applied_prompt(content: str, override: PromptOverride) -> RenderedPrompt
+async def redispatch(self, workspace_id: UUID, conversation_id: UUID) -> tuple[UUID, UUID] | None
 ```
 
-**Purpose**: Turns a prompt override into a new rendered prompt. The override can either replace the entire prompt or edit selected text inside the existing prompt.
+**Purpose**: Gives the oldest unconsumed member message in a conversation another chance to start or join work. This is used when a message was left waiting because its target turn was cancelled or did not consume it.
 
-**Data flow**: It receives the existing prompt text and a `PromptOverride`. If the override has full replacement text, it wraps that text as a rendered prompt. Otherwise it applies exact text edits with `_edited` and wraps the edited result.
+**Data flow**: It reads the database for the oldest pending inbound message from a member. If the row has no idempotency key, it stamps one so the retry cannot create duplicate work. It then calls admit_member with the stored body, speaker, key, and context. It returns the new turn ID and arrival ID only when this retry opened a run; otherwise it returns None.
 
-**Call relations**: `_applied_document` calls this when the selected environment block contains prompt changes. It uses `_edited` for the careful "match exactly once" behavior and `rendered_prompt` to return the standard prompt object.
+**Call relations**: This function is a recovery path around Admission.admit_member. It first selects and prepares a pending inbound_message row itself, then hands the actual admission back to the normal member-admission flow so all the same checks still apply.
 
-*Call graph*: calls 1 internal fn (_edited); called by 1 (_applied_document); 1 external calls (rendered_prompt).
-
-
-##### `_edited`  (lines 401–409)
-
-```
-def _edited(content: str, edits: tuple[TextEdit, ...], subject: str) -> str
-```
-
-**Purpose**: Applies safe text replacements where each old text must appear exactly once. This avoids quiet, accidental changes when a phrase is missing or appears multiple times.
-
-**Data flow**: It receives source text, a tuple of text edits, and a human-readable subject name for error messages. For each edit it counts occurrences of the old text; if the count is not one, it raises a clear error. Otherwise it replaces the old text with the new text and returns the final content.
-
-**Call relations**: `_applied_prompt` uses this for prompt edits, and `_skills_with_document` uses it for skill-file edits. It is the common safety rule behind document-driven text changes.
-
-*Call graph*: called by 2 (_applied_prompt, _skills_with_document).
+*Call graph*: calls 1 internal fn (admit_member); 4 external calls (model_validate, select, update, workspace_tx).
 
 
-##### `_with_spawn_payload`  (lines 412–429)
+##### `Admission.invoke`  (lines 274–358)
 
 ```
-def _with_spawn_payload(selected: tuple[ToolDef, ...], targets: tuple[SpawnTarget, ...]) -> tuple[ToolDef, ...]
+async def invoke(self, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, authority: ExecutionAuthority, holds
 ```
 
-**Purpose**: Adds turn-specific spawn payload guidance to the `spawn` tool's input description. Spawn targets depend on current workspace state, so this information is placed into the description instead of a fixed static schema.
+**Purpose**: Admits an internal turn, such as work triggered by an extension, scheduled job, or subagent result. It carries explicit execution authority and can optionally refuse to run if a member has spoken since the caller began waiting.
 
-**Data flow**: It receives the selected tool definitions and the available spawn targets. It walks through the tools, and when it finds the spawn tool, it replaces that tool's input model with one whose `payload` field description explains the current target payload keys. Other tools pass through unchanged.
+**Data flow**: It receives the workspace, conversation, asserted agent, message, optional idempotency key and context, authority, scheduling and standalone flags, member-watermark values, and runtime settings. It passes these to Admission._admit. If the member-watermark check says the member already replied first, it returns None; otherwise it returns the admitted turn ID.
 
-**Call relations**: `HostEnvironment.assemble` calls this just before wrapping selected tools in a `ToolRegistry`. It uses `_described_model` to alter the field description and `spawn_payload_description` to generate the human-readable payload guidance.
+**Call relations**: Internal jobs and extension workflows use this instead of admit_member so they cannot pretend to be member speech. It delegates all important decisions to Admission._admit and translates the private _SupersededByMember signal into the public result None.
 
-*Call graph*: calls 1 internal fn (_described_model); called by 1 (assemble); 2 external calls (replace, spawn_payload_description).
-
-
-##### `_described_model`  (lines 432–445)
-
-```
-def _described_model(model: type[BaseModel], tool: str, parameters: dict[str, str]) -> type[BaseModel]
-```
-
-**Purpose**: Creates a new version of a tool input model with updated field descriptions. It changes what the model reads about parameters, not the actual parameter names or types.
-
-**Data flow**: It receives a Pydantic model class, the tool name, and a mapping from parameter names to new descriptions. It checks that every named parameter really exists, copies each field definition, updates the description, and returns a newly created model class based on the original.
-
-**Call relations**: `_applied_document` uses this when environment overrides change tool parameter descriptions. `_with_spawn_payload` uses it to describe the spawn payload field. It raises a clear error when an override names a parameter the tool does not take.
-
-*Call graph*: called by 2 (_applied_document, _with_spawn_payload); 2 external calls (deepcopy, create_model).
+*Call graph*: calls 1 internal fn (_admit).
 
 
-##### `_run_tool`  (lines 448–483)
+##### `Admission._admit`  (lines 360–565)
 
 ```
-def _run_tool(name: str, description: str, inputs: dict[str, ToolInput], run: str) -> ToolDef
+async def _admit(self, workspace_id: UUID, conversation_id: UUID, asserted_agent_id: UUID | None, body: str, speaker_member_id: UUID | None, idempotency_key: str | None, context: TurnContext | None, a
 ```
 
-**Purpose**: Creates a new tool definition backed by a shell command declared in an environment document. This is the one kind of tool an environment document can add, and it runs inside the turn's sandbox rather than granting outside authority.
+**Purpose**: Runs the full admission decision from start to finish. It is the central funnel that locks the conversation, checks duplicates, folds messages into live turns when safe, creates new turns when needed, records comments, and decides whether to enqueue work now.
 
-**Data flow**: It receives the tool name, description, declared inputs, and command string. It builds a Pydantic input model from the declared input types and descriptions, defines an async handler that will run the command, and returns a side-effecting `ToolDef` using that handler.
+**Data flow**: It receives all details about the proposed inbound message or internal invocation. Inside one database transaction, it locks the conversation, confirms the asserted agent still matches, checks archived-agent rules, validates the speaker, deduplicates idempotency keys, checks member wait watermarks, tries to fold into a live turn, or creates a new turn. It records optional comments and then calls Admission._finish_admission after the transaction to emit metrics and enqueue any runnable turn. It returns an Admitted result.
 
-**Call relations**: `_applied_document` calls this when a tool override includes a `run` command. The nested `_run_tool.handler` later performs the actual command execution when the model calls the generated tool.
+**Call relations**: Admission.admit_member and Admission.invoke both enter here. This function is the traffic controller: it calls _validate_member_watermarks, _deduplicate, _guard_member_watermark, _fold_live, _create_turn, _record_comment, and finally _finish_admission, depending on what it finds.
 
-*Call graph*: called by 1 (_applied_document); 3 external calls (__init__, Field, create_model).
-
-
-##### `_run_tool.handler`  (lines 460–475)
-
-```
-async def handler(ctx: ToolContext, payload: BaseModel) -> ToolResult
-```
-
-**Purpose**: Runs the sandbox command for a document-defined `run` tool and converts the process result into tool output the model can read. It reports timeouts and non-zero exit codes as errors.
-
-**Data flow**: It receives the tool context and the validated input payload from the model. It turns the payload into environment variables and a shell command using `_run_command`, starts the task with `run_task`, combines standard output and standard error, and returns a `ToolResult` containing either normal text or an error message.
-
-**Call relations**: This handler is created inside `_run_tool` and is called by the tool runtime when the generated tool is invoked. It delegates command-line construction to `_run_command` and execution to `run_task`.
-
-*Call graph*: calls 1 internal fn (_run_command); 3 external calls (__init__, __init__, run_task).
+*Call graph*: calls 7 internal fn (_create_turn, _deduplicate, _finish_admission, _fold_live, _guard_member_watermark, _record_comment, _validate_member_watermarks); called by 2 (admit_member, invoke); 8 external calls (__init__, __init__, __init__, exists, select, update, workspace_tx, uuid4).
 
 
-##### `_run_command`  (lines 486–494)
+##### `Admission._guard_member_watermark`  (lines 567–602)
 
 ```
-def _run_command(run: str, payload: BaseModel) -> str
+async def _guard_member_watermark(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, deduped: _ExistingTurn | None, turn_watermark: int | None, arrival_watermark: int | None
 ```
 
-**Purpose**: Builds the shell command string used by a document-defined `run` tool. It passes model-provided inputs as `INPUT_NAME` environment variables and quotes values so they are treated as data, not shell syntax.
+**Purpose**: Stops an internal wake-up from running if a member has already spoken after the caller started waiting. This prevents two competing resumes, such as a timer and a member reply, from both winning.
 
-**Data flow**: It receives the command text from the environment document and the validated payload model. It dumps the payload to simple JSON-style values, skips fields set to `None`, converts booleans with JSON spelling, shell-quotes each value and the command itself, and returns a command like `env INPUT_X=value sh -c 'command'` or just `sh -c 'command'` when there are no inputs.
+**Data flow**: It receives the database connection, workspace and conversation IDs, any already-deduplicated turn, and two sequence watermarks. If there is already a deduped turn or no watermarks, it does nothing. Otherwise it checks for newer member-spoken turns or newer member arrivals. If it finds one, it raises _SupersededByMember.
 
-**Call relations**: `_run_tool.handler` calls this immediately before starting the task. It is the small safety-focused bridge between structured tool inputs and the shell command run inside the sandbox.
+**Call relations**: Admission._admit calls this after deduplication and before folding or creating new work. Admission.invoke catches the resulting _SupersededByMember exception and returns None, telling the caller that the member response already ended the wait.
 
-*Call graph*: called by 1 (handler); 3 external calls (dumps, model_dump, quote).
+*Call graph*: called by 1 (_admit); 3 external calls (exists, execute, select).
+
+
+##### `Admission._validate_member_watermarks`  (lines 605–609)
+
+```
+def _validate_member_watermarks(turn_watermark: int | None, arrival_watermark: int | None) -> None
+```
+
+**Purpose**: Checks that member-wait protection is specified completely. A caller must provide both the turn sequence watermark and the inbound-message sequence watermark, because member speech can appear in either place.
+
+**Data flow**: It receives two optional numbers. If exactly one is present, it raises a ValueError; if both are present or both are absent, it returns without changing anything.
+
+**Call relations**: Admission._admit calls this at the start so later logic never has to guess whether only half of the member-wait question was asked.
+
+*Call graph*: called by 1 (_admit).
+
+
+##### `Admission._finish_admission`  (lines 611–643)
+
+```
+async def _finish_admission(self, workspace_id: UUID, conversation_id: UUID, surface: str, turn_id: UUID, status: TurnStatus | None, admitted: Admitted, counted_source: TurnAdmissionSource | None, fol
+```
+
+**Purpose**: Performs the after-transaction side effects of admission. It emits the admission metric and places the turn on the DBOS workflow queue when the turn is ready to run.
+
+**Data flow**: It receives the workspace, conversation, surface, turn ID, turn status, Admitted result, source to count, folded parked turn ID, dispatch flag, and optional workflow ID. It emits a metric if a new turn should be counted. If a parked turn was reawakened, it enqueues that. Otherwise it enqueues the admitted queued turn only when this turn is next in line. It returns the same Admitted result.
+
+**Call relations**: Admission._admit calls this after committing the database changes. This separation matters because the database record is made durable first, and then _finish_admission asks _enqueue to start background execution.
+
+*Call graph*: calls 1 internal fn (_enqueue); called by 1 (_admit); 2 external calls (emit_metric, uuid4).
+
+
+##### `Admission._deduplicate`  (lines 645–762)
+
+```
+async def _deduplicate(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, idempotency_key: str | None, runtime_config: TurnRuntimeConfig | None, inbound: _In
+```
+
+**Purpose**: Resolves a repeated idempotency key so the same delivered message does not create duplicate work. It can reconnect the caller to an existing turn, an existing folded arrival, or an orphaned arrival that should be retried.
+
+**Data flow**: It receives the database connection, workspace, conversation, agent, idempotency key, runtime settings, inbound message, and optional comment. With no key, it simply says there is no existing work. With a key, it first looks for a turn that already used it, then for an inbound_message row that used it. Depending on what it finds, it returns an existing turn, an already-admitted result, or a modified inbound message copied from the queued row after deleting that row for re-admission.
+
+**Call relations**: Admission._admit calls this before making any new turn or arrival. It may call _record_comment when a repeated delivery includes a comment that should be attached to the already-known target.
+
+*Call graph*: calls 1 internal fn (_record_comment); called by 1 (_admit); 10 external calls (__init__, __init__, __init__, model_validate, model_validate, replace, delete, execute, select, authority_from_member_id).
+
+
+##### `Admission._fold_live`  (lines 764–941)
+
+```
+async def _fold_live(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, conversation_member_id: UUID | None, agent_id: UUID, archived: bool, member_admission: bool, authorit
+```
+
+**Purpose**: Tries to place a new inbound message onto the queue of an already-live turn instead of creating a separate turn. This keeps a conversation from running multiple turns at once while still preserving each incoming message as its own arrival.
+
+**Data flow**: It receives the locked database connection, conversation and agent details, archived state, admission kind, authority, runtime settings, idempotency key, inbound message, and optional comment. It looks for the earliest non-terminal turn in the conversation, checks runtime compatibility, authority compatibility, seat access, and spending or balance permission. If folding is allowed, it inserts an inbound_message row pointing at the live turn. If the live turn was parked and is due to retry, it changes it back to queued. It returns a FoldResult saying whether the message folded, woke a parked turn, must wait for the live turn, or did not fold.
+
+**Call relations**: Admission._admit calls this only when there is no deduped turn and the admission is allowed to fold. It may call _record_comment to attach a surface comment to the folded arrival, or hand back a parked turn ID so _finish_admission can enqueue that turn again.
+
+*Call graph*: calls 1 internal fn (_record_comment); called by 1 (_admit); 16 external calls (__init__, __init__, __init__, __init__, __init__, model_validate, execute, insert, or_, select (+6 more)).
+
+
+##### `Admission._create_turn`  (lines 943–1091)
+
+```
+async def _create_turn(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, conversation_member_id: UUID | None, surface: str, agent_id: UUID, archived: bool, member_admission
+```
+
+**Purpose**: Creates a new turn row in the database when the message cannot or should not fold into a live turn. It also decides the new turn's initial status: queued, parked, or cancelled.
+
+**Data flow**: It receives the database connection, conversation metadata, surface, agent, archived state, admission kind, intent and scheduling flags, authority, duplicate key, runtime settings, and inbound message. It assigns the next sequence number, derives the stable turn ID, preserves subagent identity when needed, checks authority and seat refusal, evaluates spending and balance limits, inserts the turn row, fills a blank conversation title, and creates a writeback row for durable surfaces. It returns the created turn ID, sequence, status, and admission source.
+
+**Call relations**: Admission._admit calls this when no existing turn or fold handles the message. It calls _authority_refusal first, may use _refused for billing or cap refusals, and supplies the status later used by _finish_admission to decide whether to enqueue.
+
+*Call graph*: calls 2 internal fn (_authority_refusal, _refused); called by 1 (_admit); 14 external calls (__init__, __init__, __init__, __init__, model_dump, execute, insert, select, update, current_traceparent (+4 more)).
+
+
+##### `Admission._authority_refusal`  (lines 1093–1108)
+
+```
+async def _authority_refusal(self, connection: AsyncConnection, workspace_id: UUID, authority: ExecutionAuthority, archived: bool, member_admission: bool, holds_work_already_done: bool) -> tuple[TurnS
+```
+
+**Purpose**: Checks whether the caller has the basic right to admit this turn. It refuses archived apps, unresolved member-surface speakers, and members or scheduled work that lack a seat.
+
+**Data flow**: It receives a database connection, workspace ID, execution authority, archived flag, whether this is member admission, and whether the turn already contains completed work. It returns None if admission is allowed. Otherwise it returns a status and optional terminal message explaining the refusal, parking instead of cancelling when completed work must not be discarded.
+
+**Call relations**: Admission._create_turn calls this before spending checks. It uses _refused for cases where existing work may need protection, and direct cancellation for the special unresolved-speaker case.
+
+*Call graph*: calls 1 internal fn (_refused); called by 1 (_create_turn); 3 external calls (__init__, __init__, authority_member_id).
+
+
+##### `Admission._record_comment`  (lines 1110–1153)
+
+```
+async def _record_comment(self, connection: AsyncConnection, workspace_id: UUID, admitted: Admitted, comment: str | None, message_ref: UUID | None=None) -> Admitted
+```
+
+**Purpose**: Stores an optional surface comment as a mid-turn reply so clients can see a comment attached to the turn or folded arrival. It writes the comment only once even if the same admission is retried.
+
+**Data flow**: It receives the database connection, workspace ID, current Admitted result, optional comment text, and optional message reference. If there is no comment, it returns the original Admitted result. Otherwise it creates a deterministic comment ID, inserts a mid_turn_reply row if it does not already exist, and returns an Admitted result that includes the comment ID when a new row was written.
+
+**Call relations**: Admission._admit calls this for newly admitted or existing turns. _deduplicate and _fold_live also call it when repeated or folded deliveries carry a comment that should be visible to surfaces.
+
+*Call graph*: called by 3 (_admit, _deduplicate, _fold_live); 3 external calls (__init__, execute, mid_turn_reply_id_for).
+
+
+##### `Admission._enqueue`  (lines 1155–1202)
+
+```
+async def _enqueue(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID, workflow_id: str | None=None) -> None
+```
+
+**Purpose**: Offers a queued turn to DBOS, the background workflow system that will actually run the agent work. It also undoes the dispatch marker if the enqueue attempt is cancelled or fails, so the turn can be offered again later.
+
+**Data flow**: It receives workspace, conversation, turn ID, and an optional workflow ID. It reads the turn kind to choose the correct queue, builds DBOS enqueue options, and calls the DBOS client. If the task is cancelled or an error occurs, it clears dispatch_enqueued_at on the queued turn and logs failures that should be retried later.
+
+**Call relations**: Admission._finish_admission calls this after the database commit says a turn is ready to run. It is the bridge from durable admission records to asynchronous worker execution.
+
+*Call graph*: called by 1 (_finish_admission); 5 external calls (select, update, workspace_tx, log, turn_queue_for).
+
+
+##### `AdmissionInvoker.invoke`  (lines 1213–1243)
+
+```
+async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, authority: ExecutionAuthority, holds_work_already_don
+```
+
+**Purpose**: Provides a workspace-bound shortcut for internal invocation. Jobs and extensions can use it without being given the power to choose an arbitrary workspace or claim a member spoke.
+
+**Data flow**: It receives a conversation, agent, message, optional duplicate key, context, authority, scheduling flags, wait watermarks, and runtime settings. It adds the stored workspace ID and forwards everything to Admission.invoke. It returns the turn ID or None using the same meaning as Admission.invoke.
+
+**Call relations**: This is a narrow wrapper around Admission.invoke. The larger system can pass AdmissionInvoker to internal code as a limited capability rather than exposing the full Admission object.
+
+
+##### `AdmissionInvoker.member_reach`  (lines 1245–1293)
+
+```
+async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]
+```
+
+**Purpose**: Finds recent durable conversations where a specific member personally spoke and can be reached. This lets internal work discover which member-owned conversations are valid targets for follow-up.
+
+**Data flow**: It receives a member ID and a maximum number of results. It queries conversations on durable surfaces, joined to live agents and turns spoken by that member, restricted to that member's private audience. It orders by the most recent time the member spoke, converts timestamps to timezone-aware values, and returns MemberReach records.
+
+**Call relations**: This method belongs to the internal AdmissionInvoker capability. It uses _aware for timestamp cleanup and conversation_audience to enforce that only the member's own private conversation audience is returned.
+
+*Call graph*: calls 1 internal fn (_aware); 4 external calls (__init__, select, workspace_tx, conversation_audience).
+
+
+##### `_aware`  (lines 1296–1297)
+
+```
+def _aware(value: datetime) -> datetime
+```
+
+**Purpose**: Ensures a datetime value has timezone information. If the database returned a timestamp without a timezone, it treats it as UTC.
+
+**Data flow**: It receives a datetime. If the datetime already has timezone information, it returns it unchanged. Otherwise it returns a copy marked with the UTC timezone.
+
+**Call relations**: AdmissionInvoker.member_reach calls this before building MemberReach objects, so callers receive consistent time values.
+
+*Call graph*: called by 1 (member_reach); 1 external calls (replace).
+
+
+##### `MemberAdmission.admit`  (lines 1308–1330)
+
+```
+async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None, commen
+```
+
+**Purpose**: Provides a workspace-bound way for surfaces to admit member messages. It keeps surfaces on the member-admission path, where speaker and seat rules are enforced.
+
+**Data flow**: It receives a conversation, message, optional duplicate key, context, required speaker member ID, optional intent, comment, and runtime settings. It adds the stored workspace ID and forwards the request to Admission.admit_member. It returns the resulting Admitted record.
+
+**Call relations**: Surfaces are intended to receive this wrapper instead of the full Admission object. It delegates to Admission.admit_member, which then enters the shared Admission._admit flow.
+
+
+##### `ConnectResume.resume`  (lines 1358–1393)
+
+```
+async def resume(self, conversation_id: UUID, message: str, *, speaker_member_id: UUID, idempotency_key: str) -> bool
+```
+
+**Purpose**: Writes the result of an external account-connection callback back into the conversation that requested it. It admits the result as the granting member's own message, unless the target lane is a prepared-intent lane where free-text resume messages are intentionally declined.
+
+**Data flow**: It receives a conversation ID, message, speaker member ID, and idempotency key. It first checks the latest turn's admission source. If the lane is intent-only, it logs a decline and returns False. Otherwise it reads the current workspace, tries to admit the message through Admission.admit_member, logs and returns False on failure, and returns True on success.
+
+**Call relations**: This is used after a browser-based connect flow finishes. It calls back into Admission.admit_member so the resume message follows the same folding, deduplication, seat, and spending rules as any other member message.
+
+*Call graph*: 4 external calls (select, workspace_tx, log, ws_current).
+
+
+### `core/src/ufo/runtime/turns/dispatch.py`
+
+`orchestration` · `after a turn ends or during recovery dispatch`
+
+A conversation can have several user or system turns waiting to run, but they must not all run at once. This file is the careful gatekeeper for that rule. Think of it like a receptionist calling the next person from a waiting room only after checking that the consultation room is empty.
+
+The queue itself is deliberately simple and does not enforce conversation order. Instead, this code uses the database as the source of truth. It locks the conversation row, checks whether any turn is already marked as running, then looks for the earliest queued turn. If there is no eligible turn, or if that turn has already been marked as offered for dispatch, it stops.
+
+When it does find a turn to run, it first stamps the turn in the database with a dispatch time. That stamp matters because more than one recovery path may try to dispatch the same turn after crashes or races. The stamp lets only one attempt win. After the database transaction is complete, it asks DBOS, the workflow runner, to enqueue the turn’s workflow. If enqueueing fails, it clears the stamp so another attempt can try later, and logs that the enqueue was deferred.
+
+One important detail is that a turn that was previously claimed gets a fresh workflow id. This avoids DBOS treating the new attempt as a duplicate of an already-consumed workflow.
+
+#### Function details
+
+##### `dispatch_next_turn`  (lines 28–98)
+
+```
+async def dispatch_next_turn(client: DBOSClient, conversation_id: UUID) -> None
+```
+
+**Purpose**: This function offers the next queued turn in a conversation to the workflow runner, but only if no turn from that conversation is currently running. It protects turn order and prevents two turns in the same conversation from being started at the same time.
+
+**Data flow**: It receives a DBOS client, used to enqueue work, and a conversation id, used to find the relevant turns. It opens a database transaction, locks the conversation, checks for a running turn, and then finds the earliest queued turn. If that turn is eligible, it marks it as dispatch-enqueued in the database. After leaving the transaction, it builds enqueue options such as the queue name, workflow name, workflow id, and app version, then sends the turn id and workspace id to DBOS. If that send fails, it reopens the database, removes the dispatch stamp from the still-queued turn, and writes a log entry so the system can try again later.
+
+**Call relations**: This function is called by the parts of the runtime that finish or interrupt a turn, and also by recovery paths that sweep for work after failures. Inside its flow, it relies on `workspace_tx` for safe database changes, SQLAlchemy queries to read and update turn records, `turn_queue_for` to choose the right DBOS queue, `uuid4` when a retried turn needs a fresh workflow id, `DBOSClient.enqueue_async` to actually schedule the workflow, and `log` to record enqueue failures.
+
+*Call graph*: 7 external calls (enqueue_async, select, update, workspace_tx, log, turn_queue_for, uuid4).
 
 ## 📊 State Registers Touched
 
-- `reg-config-stack` — The merged settings that tell the whole service how to start, connect, and behave.
-- `reg-feature-flags` — The shared on/off switches and rollout choices that let operators change behavior without redeploying.
-- `reg-pack-composition` — The selected bundle of built-in extensions, prompts, skills, jobs, and setup steps for this deployment.
-- `reg-extension-registry` — The live catalog of installed extensions and the capabilities each one has registered.
-- `reg-model-catalog` — The shared list of available AI models, their abilities, providers, prices, and credential needs.
-- `reg-workspace-directory` — The saved list of workspaces, members, agents, admins, and workspace-level settings.
-- `reg-acting-authority` — The shared record of whether work is acting as a member, an agent, or only the workspace.
-- `reg-credentials-connections` — The stored secrets, connected accounts, grants, and refreshable permissions used to call outside services.
-- `reg-egress-policy` — The network access rules that decide which outside hosts sandboxed or connector code may contact.
-- `reg-conversation-transcript` — The saved conversation history, turns, compactions, titles, audiences, and generated references.
-- `reg-turn-runtime-config` — The per-turn saved runtime settings that must survive retries and keep a turn using the same execution choices.
-- `reg-host-environment` — The assembled per-turn world given to the agent: prompts, skills, files, model choice, tools, and extension context.
-- `reg-tool-catalog` — The shared catalog of tools and the policies that decide which tools may run with which permissions.
-- `reg-sandbox-state` — The remembered sandbox handles and execution environments where commands, files, and risky work run safely.
-- `reg-connector-brokers` — The shared catalog and runtime state for service connectors, MCP servers, broker accounts, and approved actions.
-- `reg-artifact-publication` — The shared state for files, previews, signed downloads, hosted sites, app pages, and published outputs.
-- `reg-subagent-state` — The parent-child turn links, delegation contracts, spawn identities, and pending result deliveries for helper agents.
-- `reg-agent-provisioning` — The saved provenance, setup needs, policies, and ownership for agents that are shipped by extensions or created in workspaces.
-- `reg-skill-library-cache` — Cached skill-package metadata, community skill listings, fetched descriptions, and probe results used when resolving skills for agents.
+- `reg-agent-records` — The saved assistant profiles, including their model choice, tools policy, setup needs, visibility, reasoning level, and spawn contracts.
+- `reg-workspace-member-seat-state` — The shared record of workspaces, members, admins, invitations, seats, and workspace-level limits.
+- `reg-surface-routing-state` — The saved routing information that maps web, Slack, iMessage, terminal, hosted app, and public-link traffic to the right workspace and conversation.
+- `reg-conversation-records` — The durable conversation state, including conversation identity, title, surface label, sandbox handle, audience, and related metadata.
+- `reg-turn-queue-state` — The durable queue of conversation turns, including admission source, run claim, parked state, resume state, and final status.
+- `reg-transcript-history` — The saved conversation timeline, including messages, compacted summaries, final answers, costs, and readable history.
+- `reg-audience-visibility-state` — The shared privacy labels that decide who may read or join conversation content and workspace objects.
+- `reg-live-updates-delivery` — The live reply and notification delivery state used to stream running turns and safely deliver mid-turn or delayed messages once.
+- `reg-runtime-fleet-claims` — The attendance and claim sheet for running service processes, including heartbeats, work ownership, and surface listener claims.
+- `reg-cancellation-cleanup-state` — The shared stop-and-cleanup state that records when active turns, workflows, child work, sandboxes, and streams are being wound down.
+- `reg-schedules-automations` — The durable alarm clock for future work, pauses, monitors, source-change triggers, notification inbox items, and extension jobs.
+- `reg-delegation-state` — The parent-child work state that tracks subagent turns, their contracts, trace links, pending results, and delivery back to the parent.
+- `reg-billing-ledger-balance` — The shared money and usage record, including spend caps, model costs, sandbox and egress usage, prepaid balances, and export progress.
+- `reg-inbound-message-buffer` — Durable inbound messages from external surfaces waiting to be rendered, admitted, deduplicated, or converted into conversation work.
+- `reg-human-request-state` — Pending and resolved human-interaction requests, including agent questions, secret requests, credential requests, and connection-authorization handoffs.

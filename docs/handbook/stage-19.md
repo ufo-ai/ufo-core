@@ -1,268 +1,121 @@
-# Persistent schema, migrations, durable storage, and blob storage  `stage-19` (cross-cutting infrastructure)
+# Public SDK, extension APIs, and generated protocols  `stage-19` (cross-cutting infrastructure)
 
-This stage is the system’s long-term memory and storage foundation. It is used during startup and upgrades to prepare the database, and then quietly supports the main work loop whenever conversations, jobs, files, settings, or results must be saved.
+This stage is the public front door for extension authors and nearby integrations. It is shared behind-the-scenes support, not the main user work loop. Its job is to give outside code stable names, safe data shapes, and approved entry points, even while the system’s private internals keep changing.
 
-The migration part is like a building inspector and renovation crew. It uses Alembic, a tool that runs ordered database change scripts, to create tables and update older installations without losing data. Core migrations maintain the main platform records, while extension migrations add storage for plug-in features such as memory, web, research, coding, reports, and scheduled tasks.
+The SDK authoring helpers define what an extension can declare and what limited toolbox it receives while running. The capability interfaces expose plug-in points for browser control, search, models, memory, terminal access, objects, and similar services. The identity and credential APIs provide safe public access to login tokens, connectors, OAuth, grants, and web sessions. The workspace and surface helpers expose billing, audience, listing, hub, and channel-integration types.
 
-The durable records and binary objects part defines what gets saved and how. It describes shared records for agents, turns, transcripts, credentials, artifacts, and job state, then maps them into database tables. It also stores larger file-like data, called blobs, in local storage or cloud storage.
-
-The `db.py` file is the safe doorway into all of this. It opens database connections, runs migrations, keeps each workspace’s data separate, wraps changes in transactions, and cleans up afterward.
+The sample extension acts like a test dummy that exercises all official hooks. The iMessage protocol area supplies generated message formats and network call wiring, so separate pieces can exchange the same structured data. Finally, conversation_slots.py defines what extensions may place into conversation portal areas, with size and safety rules so the display layer gets predictable content.
 
 ## Sub-stages
 
-- [Core and extension database migration commands](stage-19.1.md) `stage-19.1` — 192 files
-- [Durable records and binary objects](stage-19.2.md) `stage-19.2` — 6 files
+- [Public SDK authoring and execution helpers](stage-19.1.md) `stage-19.1` — 13 files
+- [Public SDK capability provider interfaces](stage-19.2.md) `stage-19.2` — 12 files
+- [Public SDK identity, credentials, connectors, and grants](stage-19.3.md) `stage-19.3` — 7 files
+- [Public SDK workspace, billing, audience, and surface helpers](stage-19.4.md) `stage-19.4` — 9 files
+- [Sample extension hook coverage](stage-19.5.md) `stage-19.5` — 1 files
+- [iMessage extension provider and generated protocol plumbing](stage-19.6.md) `stage-19.6` — 22 files
 
 ## Files in this stage
 
-### Persistent schema, migrations, durable storage, and blob storage
-### `core/src/ufo/db.py`
+### Public SDK, extension APIs, and generated protocols
+### `core/src/ufo/runtime/ext/conversation_slots.py`
 
-`io_transport` · `startup, request handling, background jobs, migrations, teardown`
+`data_model` · `request handling`
 
-This file solves a very practical problem: one running service may serve many customer workspaces, but every database transaction must see only the rows for the workspace it belongs to. It does that by keeping database engines private inside this module and making callers use `workspace_tx` for normal work. A transaction is like checking out a library book under a specific reader’s card: before queries run, the file pins the current workspace ID into PostgreSQL using a short-lived setting, so row-level security (database rules that filter rows automatically) can enforce the boundary. If no workspace was set, PostgreSQL fails closed instead of returning someone else’s data.
+This file is a contract between extensions and the conversation portal. A portal slot is a named area of the user interface where an extension can publish extra conversation information, like files produced during the chat, source links, task progress, websites, or scheduled automations. Without these definitions, each extension could send different or unsafe data, and the portal would not know how to display it reliably.
 
-The file also has `owner_tx`, a carefully limited exception for background sweeps that must list work across all workspaces. Those callers are expected to re-enter each workspace before reading its details.
+Most of the file is made of Pydantic models. Pydantic is a validation library: it checks incoming data and turns it into well-defined Python objects. These models forbid unknown fields, are frozen so they cannot be changed after creation, and set limits on text lengths and list sizes. That keeps portal payloads small, stable, and harder to misuse.
 
-Connections are pooled per asyncio event loop, because async database connections belong to the loop that created them. The file builds pools lazily, verifies reachability at startup when asked, measures transaction wait time, copes with cancellation, and disposes engines on the correct loop during shutdown. It also runs Alembic migrations, which are the ordered database schema changes, and applies SQLite-specific settings so local databases behave predictably.
+Several URL fields are checked carefully. Artifact, source, site, and image-preview links must be normal HTTP or HTTPS web links and must not contain embedded usernames or passwords. Image preview URLs are checked even more strictly because they may be drawn inside browser pages; the code rejects fragments, backslashes, and control characters that could confuse rendering or escaping.
+
+The file also defines provider and context dataclasses. These describe how an extension registers a slot, what data type it will return, and what conversation information is available when the system asks the extension to summarize or read that slot.
 
 #### Function details
 
-##### `_build_engine`  (lines 108–118)
+##### `ImagePreview.drawable_url`  (lines 52–69)
 
 ```
-def _build_engine(url: str, pool: _Pool) -> AsyncEngine
+def drawable_url(cls, value: str) -> str
 ```
 
-*Call graph*: calls 1 internal fn (_pool_kwargs); called by 2 (_engine_for, verify_db_reachable); 1 external calls (create_async_engine).
+**Purpose**: Checks that an image preview link is safe and usable by a browser. It protects the portal from image URLs that are missing a real web host, include hidden credentials, contain fragments, or include characters that could be interpreted in surprising ways.
+
+**Data flow**: A URL string comes in when an ImagePreview object is being created. The function breaks the URL into parts, decodes escaped characters, and inspects the scheme, host, username, password, fragment, backslashes, and control characters. If the URL is acceptable, the same string comes out unchanged; if not, model creation stops with a validation error.
+
+**Call relations**: Pydantic calls this validator while building an ImagePreview. The validator relies on urllib.parse.urlsplit to understand the URL, urllib.parse.unquote to inspect the decoded form, and unicodedata.category to spot control characters. Its result decides whether the preview can be included in a conversation artifact payload.
+
+*Call graph*: 3 external calls (category, unquote, urlsplit).
 
 
-##### `_pool_kwargs`  (lines 121–141)
-
-```
-def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]
-```
-
-*Call graph*: calls 1 internal fn (_driver_kwargs); called by 1 (_build_engine); 1 external calls (make_url).
-
-
-##### `_driver_kwargs`  (lines 144–171)
+##### `ConversationArtifact.http_url`  (lines 85–96)
 
 ```
-def _driver_kwargs(driver: str, pool: _Pool) -> dict[str, Any]
+def http_url(cls, value: str | None) -> str | None
 ```
 
-*Call graph*: called by 1 (_pool_kwargs).
+**Purpose**: Checks the optional download or view link attached to a conversation artifact. It allows the artifact to have no URL, but if a URL is present, it must be a normal HTTP or HTTPS link without embedded login information.
+
+**Data flow**: The artifact URL value comes in as either a string or None. If it is None, the function returns None immediately. If it is a string, the function splits it into URL parts and rejects it unless it has an http or https scheme, a host name, and no username or password. A valid URL is returned unchanged.
+
+**Call relations**: Pydantic calls this validator when creating a ConversationArtifact. The function uses urllib.parse.urlsplit to inspect the link before the artifact is accepted into an ArtifactsSlotPayload that the portal may display.
+
+*Call graph*: 1 external calls (urlsplit).
 
 
-##### `_engine_for`  (lines 174–190)
-
-```
-def _engine_for(url: str, pool: _Pool) -> AsyncEngine
-```
-
-*Call graph*: calls 1 internal fn (_build_engine); called by 2 (owner_tx, workspace_tx); 1 external calls (get_running_loop).
-
-
-##### `init_db`  (lines 193–197)
+##### `ConversationSource.http_url`  (lines 117–126)
 
 ```
-def init_db(url: str) -> None
+def http_url(cls, value: str) -> str
 ```
 
+**Purpose**: Checks that a source citation link points to a normal web address. This matters because source links may be shown to users, so they should not contain embedded credentials or malformed non-web schemes.
 
-##### `init_owner_db`  (lines 200–214)
+**Data flow**: A source URL string comes in during ConversationSource creation. The function splits it into parts and verifies that it is HTTP or HTTPS, has a host, and does not include a username or password. If it passes, the original URL string comes out; otherwise, validation fails.
 
-```
-def init_owner_db(url: str) -> None
-```
+**Call relations**: Pydantic invokes this validator while building a ConversationSource. It uses urllib.parse.urlsplit to inspect the link before the source can be included in a SourcesSlotPayload for the conversation portal.
 
-
-##### `verify_db_reachable`  (lines 217–237)
-
-```
-async def verify_db_reachable() -> None
-```
-
-*Call graph*: calls 1 internal fn (_build_engine).
+*Call graph*: 1 external calls (urlsplit).
 
 
-##### `dispose_db`  (lines 240–263)
+##### `TasksSlotPayload.consistent_progress`  (lines 155–169)
 
 ```
-async def dispose_db() -> None
+def consistent_progress(self) -> 'TasksSlotPayload'
 ```
 
-*Call graph*: calls 1 internal fn (_hand_off); 1 external calls (get_running_loop).
+**Purpose**: Makes sure the visible task list and the summary counts tell the same story. It prevents impossible task progress, such as having more completed tasks than total tasks or showing a full untruncated list whose length does not match the total count.
+
+**Data flow**: A complete TasksSlotPayload object comes in after its fields have been individually checked. The function compares completed_count, total_count, the number of visible tasks, each visible task status, and the truncated flag. If all numbers are consistent, it returns the same payload object; if any count contradicts another, it raises a validation error.
+
+**Call relations**: Pydantic calls this model-level validator after constructing a TasksSlotPayload. It does not hand work to other project functions; instead, it acts as the final sanity check before task progress can be shown in a conversation slot.
 
 
-##### `_hand_off`  (lines 266–273)
-
-```
-def _hand_off(loop: asyncio.AbstractEventLoop, engine: AsyncEngine) -> None
-```
-
-*Call graph*: called by 1 (dispose_db); 1 external calls (call_soon_threadsafe).
-
-
-##### `_dispose_on_this_loop`  (lines 276–300)
+##### `ConversationSite.http_url`  (lines 184–193)
 
 ```
-def _dispose_on_this_loop(engine: AsyncEngine) -> None
+def http_url(cls, value: str) -> str
 ```
 
-*Call graph*: 3 external calls (ensure_future, get_running_loop, dispose).
+**Purpose**: Checks that a site link is a normal HTTP or HTTPS web address without embedded credentials. This keeps site entries safe and predictable before they are shown or used by the portal.
 
+**Data flow**: A site URL string comes in during ConversationSite creation. The function splits it into URL parts and confirms that it has an http or https scheme, a host name, and no username or password. A valid URL is returned unchanged; an invalid one causes validation to fail.
 
-##### `_dispose_on_this_loop.finished`  (lines 295–298)
+**Call relations**: Pydantic calls this validator while creating a ConversationSite. It uses urllib.parse.urlsplit to inspect the URL before the site can be included in a SitesSlotPayload for conversation-level display.
 
-```
-def finished(done: asyncio.Task[None]) -> None
-```
-
-
-##### `dispose_loop_engines`  (lines 303–313)
-
-```
-async def dispose_loop_engines() -> None
-```
-
-*Call graph*: 1 external calls (get_running_loop).
-
-
-##### `_stopping`  (lines 316–323)
-
-```
-def _stopping() -> bool
-```
-
-*Call graph*: called by 1 (_opened); 1 external calls (current_task).
-
-
-##### `_await_opening`  (lines 326–337)
-
-```
-async def _await_opening(opening: asyncio.Future[AsyncConnection]) -> tuple[AsyncConnection, asyncio.CancelledError | None]
-```
-
-*Call graph*: called by 1 (_opened); 1 external calls (shield).
-
-
-##### `_await_close`  (lines 340–348)
-
-```
-async def _await_close(close: asyncio.Future[bool | None]) -> asyncio.CancelledError | None
-```
-
-*Call graph*: called by 1 (_opened); 1 external calls (shield).
-
-
-##### `_opened`  (lines 352–416)
-
-```
-async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 3 internal fn (_await_close, _await_opening, _stopping); called by 2 (owner_tx, workspace_tx); 7 external calls (Lock, ensure_future, AsyncExitStack, begin, monotonic, emit_histogram, emit_metric).
-
-
-##### `workspace_tx`  (lines 420–430)
-
-```
-async def workspace_tx() -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 2 internal fn (_engine_for, _opened); 1 external calls (text).
-
-
-##### `failed_statement`  (lines 433–453)
-
-```
-def failed_statement(error: BaseException) -> dict[str, str]
-```
-
-
-##### `owner_tx`  (lines 457–470)
-
-```
-async def owner_tx() -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 2 internal fn (_engine_for, _opened).
-
-
-##### `apply_migrations`  (lines 473–511)
-
-```
-def apply_migrations(url: str, pack: str | None=None) -> None
-```
-
-*Call graph*: calls 1 internal fn (_seal_sqlite_journal); 7 external calls (__init__, upgrade, from_config, Path, migration_locations, catch_warnings, simplefilter).
-
-
-##### `_seal_sqlite_journal`  (lines 514–530)
-
-```
-def _seal_sqlite_journal(url: str) -> None
-```
-
-*Call graph*: called by 1 (apply_migrations); 2 external calls (make_url, connect).
-
-
-##### `core_migration_head`  (lines 533–541)
-
-```
-def core_migration_head() -> str
-```
-
-*Call graph*: 2 external calls (__init__, from_config).
-
-
-##### `_sqlite_on_connect`  (lines 544–550)
-
-```
-def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
-```
-
-
-##### `_sqlite_begin_immediate`  (lines 553–555)
-
-```
-def _sqlite_begin_immediate(connection: sa.Connection) -> None
-```
-
-*Call graph*: 1 external calls (exec_driver_sql).
+*Call graph*: 1 external calls (urlsplit).
 
 ## 📊 State Registers Touched
 
-- `reg-config-stack` — The merged settings that tell the whole service how to start, connect, and behave.
-- `reg-extension-registry` — The live catalog of installed extensions and the capabilities each one has registered.
-- `reg-database-schema` — The durable database layout and connection layer used to store and retrieve system records safely.
-- `reg-workspace-directory` — The saved list of workspaces, members, agents, admins, and workspace-level settings.
-- `reg-credentials-connections` — The stored secrets, connected accounts, grants, and refreshable permissions used to call outside services.
-- `reg-access-subjects` — The shared visibility rules that say which members or audiences may read conversations, sources, and objects.
-- `reg-egress-policy` — The network access rules that decide which outside hosts sandboxed or connector code may contact.
-- `reg-billing-ledger` — The shared meter and wallet state for usage costs, spend caps, prepaid balances, and billing identity.
-- `reg-conversation-transcript` — The saved conversation history, turns, compactions, titles, audiences, and generated references.
-- `reg-turn-queue` — The durable queue of conversation turns waiting, running, parked, resumed, or blocked as duplicates.
-- `reg-turn-runtime-config` — The per-turn saved runtime settings that must survive retries and keep a turn using the same execution choices.
-- `reg-sandbox-state` — The remembered sandbox handles and execution environments where commands, files, and risky work run safely.
-- `reg-source-index-memory` — The saved external pages, search chunks, embeddings, memories, and recall indexes used as workspace knowledge.
-- `reg-scheduled-jobs` — The durable background work list for timers, recurring conversations, monitors, reports, and long-running tasks.
-- `reg-surface-routing` — The saved routing state that maps web, Slack, iMessage, terminal, and other surfaces to workspaces and agents.
-- `reg-inbound-message-queue` — The durable inbox of external messages waiting to be admitted into conversations exactly once.
-- `reg-artifact-publication` — The shared state for files, previews, signed downloads, hosted sites, app pages, and published outputs.
-- `reg-object-system` — The common address book and audit trail for durable workspace objects such as agents, members, artifacts, and connectors.
-- `reg-extension-store` — The per-workspace storage area where extensions keep their own durable settings and small JSON records.
-- `reg-runtime-instances` — The shared record of which server processes are alive and which background or surface duties they have claimed.
-- `reg-observability-trace` — The tracing, metrics, health, logs, and saved step history used to understand what the system did.
-- `reg-subagent-state` — The parent-child turn links, delegation contracts, spawn identities, and pending result deliveries for helper agents.
-- `reg-agent-provisioning` — The saved provenance, setup needs, policies, and ownership for agents that are shipped by extensions or created in workspaces.
-- `reg-blob-store` — The durable binary-object namespace and storage keys for large files, imported page bodies, previews, attachments, and other non-row data.
-- `reg-source-sync-state` — The source-ingestion control state: source definitions, cursors/change-feed positions, error counters, backoff or parked status, and removal markers.
-- `reg-surface-outbox` — The durable outbound delivery buffer and writeback markers for replies or mid-turn messages that must be sent to external surfaces exactly once.
-- `reg-transcript-access-audit` — The durable audit trail recording privileged reads of private transcripts for later security review.
-- `reg-conversation-change-snapshots` — Durable per-conversation workspace/file change snapshots saved after turns so later views and audits can show what changed.
-- `reg-credential-fulfillment` — Durable one-time markers that a requested credential/setup slot has been fulfilled for a workspace.
-- `reg-ledger-export-state` — Saved progress and options for exporting billing/ledger records, including BYOK-related export bookkeeping.
-- `reg-action-proposal-state` — Durable proposal records for actions or changes that require later review, approval, rejection, or replay.
+- `reg-pack-extension-registry` — The approved set of installed packs and extensions, including what tools, jobs, agents, hooks, providers, and surfaces they add.
+- `reg-extension-store` — The per-workspace saved data that extensions use to remember their own settings and state.
+- `reg-tool-catalog` — The shared menu of tools the agent may call, including built-in tools, extension tools, and guarded bridge tools.
+- `reg-model-provider-catalog` — The shared list of available AI models and providers, including limits, prices, credentials, and adapter rules.
+- `reg-auth-tokens-sessions` — The login, surface, sandbox, and signing tokens that prove who a request belongs to and what it may access.
+- `reg-authority-context` — The current acting identity for runtime work, saying which workspace, member, and agent are allowed to act.
+- `reg-surface-routing-state` — The saved routing information that maps web, Slack, iMessage, terminal, hosted app, and public-link traffic to the right workspace and conversation.
+- `reg-audience-visibility-state` — The shared privacy labels that decide who may read or join conversation content and workspace objects.
+- `reg-credential-vault-connections` — The lockbox of account connections, OAuth grants, API keys, BYOK attempts, and agent permissions to use outside services.
+- `reg-memory-index-profiles` — The searchable memory layer made from synced pages, chunks, embeddings, summaries, facts, and member or workspace profiles.
+- `reg-object-change-journal` — The durable history of object changes, recording who changed what and what the object looked like before and after.
+- `reg-schedules-automations` — The durable alarm clock for future work, pauses, monitors, source-change triggers, notification inbox items, and extension jobs.
+- `reg-portal-slots-ui-state` — The structured conversation portal display state that extensions can fill with artifacts, sources, tasks, sites, and automations.

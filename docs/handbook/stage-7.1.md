@@ -1,1078 +1,500 @@
-# Prompt, skill, and environment-document resolution  `stage-7.1`
+# Audience, visibility, and participation decisions  `stage-7.1`
 
-This stage is shared behind-the-scenes support for each agent turn. It prepares the “reference material” the model will see and makes sure it can be reproduced safely later. The prompt renderer fills in prompt templates, checks that every blank was filled, and records a fingerprint, like a version stamp, so prompt changes are traceable. The delivery register supplies common writing rules for messages sent to users or other agents.
+This stage is shared behind-the-scenes support that runs around each conversation turn. Its job is to answer a simple but important question: “Who is allowed to see or take part in this?” It keeps replies aimed at the right people and helps stop private workspace or member information from appearing in the wrong room.
 
-Skills are reusable instruction cards, sometimes with files. The skills runtime defines how they are read, registered, connected to dependencies, and copied into the sandbox, which is the agent’s working area. Skill selection chooses which saved skill cards to show the model on a given turn, so useful abilities are visible without flooding the conversation. The catalog skill builds a live table of available AI models, costs, limits, and features.
-
-Environment documents capture changes to a turn’s prompt, tools, skills, model, and files. They are stored by cryptographic digest, a unique content fingerprint, so the same document can be loaded exactly again, while safety checks prevent documents from adding broader powers than the turn already allowed.
+The audience code gives each turn a clear audience name, such as one member, a whole workspace, a room, or a room shared outside the workspace. It can compare and translate these names so the rest of the system knows what is safe to read or show. The subjects code supplies smaller labels for visibility, separating messages visible to everyone from messages tied to one member. The ambient reply code is a gatekeeper for busy group threads. If people are chatting without directly calling on the agent, it decides whether the agent should stay quiet instead of starting a costly full response. The web audience code applies similar access rules in the web portal, including admin tools for granting access and auditing private transcript views.
 
 ## Files in this stage
 
-### Skill presentation
-These files decide which skills the model can see on a turn, including a generated catalog of available deployment models.
+### Core turn audience decisions
+Runtime logic decides when an agent should participate and names or checks the audience and visibility scope for each turn.
 
-### `core/src/ufo/harness/models/catalog_skill.py`
+### `core/src/ufo/runtime/turns/ambient_reply.py`
 
-`domain_logic` · `startup`
+`domain_logic` · `request handling, before starting a new ambient turn`
 
-This file exists to prevent the model documentation from going stale. Instead of keeping a hand-written list of available models, it reads the same model records that the runtime uses when it chooses models, prices requests, and builds prompts. That means the catalog a user sees should match what the system can actually do.
+In a busy chat thread, not every new message is meant for the agent. Once the agent has participated, later replies can look relevant even when they are just one human asking another human for an opinion. This file is the small gatekeeper that checks those “ambient” messages before they become full agent turns.
 
-The main idea is simple: at boot time, the system already has a model registry, which is like a current menu of all supported models. This file turns that menu into a readable Markdown table. Each row shows a model’s id, provider, knowledge cutoff, context window, price for input and output tokens, whether it supports reasoning, and which API surface it uses.
+The main idea is simple: ask a cheap model one narrow question, and require a one-word answer: REPLY or NO_REPLY. If the answer is REPLY, the larger system may start a new turn. If it is NO_REPLY, the agent stays quiet. This is like having a receptionist quickly decide whether a call is actually for you before interrupting your work.
 
-It then wraps that table in a RuntimeSkill. A RuntimeSkill is a piece of instructions or reference material the runtime can load and show to the model or user. Here, the skill is named “model-catalog” and its description tells users to load it when they want to choose or compare models.
+The file defines AmbientMessage, a small record containing who spoke, what they said, and whether it was the agent’s own earlier message. It also defines AmbientReplyClassifier, which builds a compact view of the recent thread and sends it to the model with strict rules. The history is deliberately limited: only the most recent messages are included, and each message is shortened to a safe size. But the new message itself must fit without being cut; if it is too long, the classifier refuses to guess.
 
-A small helper formats prices into dollars per million tokens. Without this file, users might rely on outdated external notes or guesses about model availability, costs, and capabilities.
-
-#### Function details
-
-##### `_per_mtok`  (lines 18–19)
-
-```
-def _per_mtok(micro_usd_per_mtok: int) -> str
-```
-
-**Purpose**: This helper turns a stored price value into a friendly dollar string, such as “$1.25”. It is used so the catalog table shows prices in a form people can quickly read.
-
-**Data flow**: It receives a price stored as an integer number of micro-dollars per million tokens. It divides that by the constant that represents one full US dollar in micro-dollars, formats the result with two decimal places, and returns a string beginning with a dollar sign.
-
-**Call relations**: When model_catalog_skill is building each model row, it calls _per_mtok for the input price and again for the output price. The formatted strings are then inserted into the Markdown table shown in the generated catalog skill.
-
-*Call graph*: called by 1 (model_catalog_skill).
-
-
-##### `model_catalog_skill`  (lines 22–50)
-
-```
-def model_catalog_skill(registry: ModelRegistry) -> RuntimeSkill
-```
-
-**Purpose**: This function creates the actual model catalog skill from the live registry of models. Someone uses it at boot so the deployment can offer a current, trustworthy list of available models and their facts.
-
-**Data flow**: It receives a ModelRegistry, which contains the model specifications known to the running system. It sorts those model specifications by id, turns each one into a Markdown table row, formats prices with _per_mtok, combines the rows with a table header and explanatory text, then returns a RuntimeSkill containing the final instructions and raw skill Markdown.
-
-**Call relations**: This is the main builder in the file. During startup, code that has the live ModelRegistry calls model_catalog_skill to create the catalog. Inside that process it calls _per_mtok to make prices readable, then hands the completed name, description, instructions, and raw Markdown to RuntimeSkill.__init__ to create the skill object the rest of the runtime can load.
-
-*Call graph*: calls 1 internal fn (_per_mtok); 1 external calls (__init__).
-
-
-### `core/src/ufo/runtime/skills/selection.py`
-
-`domain_logic` · `request handling`
-
-Agents can have many saved skills, each with a name, description, and optional pin. The model needs to see these skills so it can use them, but prompts have limited space. This file is the rulebook for fitting those skill cards into that space.
-
-It uses two places to show skills. If the member’s saved skills are small enough, they are folded directly into the normal system prompt beside built-in deployed skills. If they are too large, they move into a separate <saved_skills> block in the turn message. Think of it like packing for a trip: a small set fits in your pocket, but a larger set needs its own bag.
-
-When the separate block is needed, the file fills it carefully. Pinned skills come first, because the user or system marked them as important. If the whole catalog fits, every skill gets a full name-and-description line. If not, the file chooses a small top group whose names or descriptions match the current query, gives those full descriptions, and still includes the remaining skills by name when possible. If even that is too much, it drops from the end and adds a note saying how many more skills exist and that skill_search can find them.
-
-All of this is pure calculation. It does no disk or network work, and it is designed to be predictable and cheap enough to run every turn.
+A key safety detail is that chat text is wrapped as JSON between fence lines, so user-written instructions inside the chat are treated as quoted data, not as instructions to the model. If the model fails or gives an unreadable answer, this file raises an error rather than silently suppressing the agent.
 
 #### Function details
 
-##### `_query_terms`  (lines 35–42)
+##### `MeteredModel.model`  (lines 95–95)
 
 ```
-def _query_terms(query: str) -> tuple[str, ...]
+def model(self) -> str
 ```
 
-**Purpose**: Turns a user query into a clean list of searchable words. It ignores very short words and limits how much text it reads, so a huge pasted query cannot make skill selection expensive.
+**Purpose**: This describes the model name that will be billed and used for the ambient-reply check. It exists as part of a small interface so this file can depend on “something that can call a model” without importing the larger model-access system directly.
 
-**Data flow**: It receives a query string. It lowercases it, looks only at the first allowed number of characters, splits it wherever there is punctuation or other non-word text, removes short terms, and keeps only the first copy of each term. It returns those distinct search terms as a tuple.
+**Data flow**: Nothing is passed in except the model object itself. Reading this property gives back the model identifier string that will be placed into the request sent to the model provider.
 
-**Call relations**: This is the shared first step for matching skills to text. lexical_score uses it when scoring one card, and select_top_k uses it once before ranking many cards.
-
-*Call graph*: called by 2 (lexical_score, select_top_k).
+**Call relations**: When AmbientReplyClassifier.decide prepares its one-question model request, it reads this property so the request is sent to the intended classifier model.
 
 
-##### `_term_hits`  (lines 45–47)
+##### `MeteredModel.complete`  (lines 97–97)
 
 ```
-def _term_hits(terms: Sequence[str], card: SkillCard) -> int
+async def complete(self, request: ModelRequest) -> str
 ```
 
-**Purpose**: Counts how many search terms appear in one skill card. This is the basic matching test used to decide whether a skill looks relevant to the current query.
+**Purpose**: This is the promised method for making one model call and getting the model’s text answer back. In this file, that answer is expected to contain the decision word REPLY or NO_REPLY.
 
-**Data flow**: It receives already-prepared search terms and one SkillCard. It joins the card’s name and description into one lowercase text area, then counts how many terms are found inside it. It returns that count as an integer.
+**Data flow**: A ModelRequest goes in, containing the system instructions, the thread payload, token limits, and other settings. The model service processes it and returns plain text, which the classifier later reads for the final decision word.
 
-**Call relations**: lexical_score calls this after preparing query terms. It is the small comparison step behind the public scoring helper.
-
-*Call graph*: called by 1 (lexical_score).
+**Call relations**: AmbientReplyClassifier.decide calls this after building the payload. The actual implementation lives elsewhere; this file only states the shape of the object it needs.
 
 
-##### `lexical_score`  (lines 50–55)
+##### `_entry`  (lines 100–105)
 
 ```
-def lexical_score(query: str, card: SkillCard) -> int
+def _entry(message: AmbientMessage) -> dict[str, object]
 ```
 
-**Purpose**: Gives one skill card a simple relevance score for a query. The score is just how many distinct meaningful query words appear in the card’s name or description.
+**Purpose**: This turns one AmbientMessage into the simple dictionary shape sent to the model. It also trims the message text to the configured character limit so the history stays small and predictable.
 
-**Data flow**: It receives a query and a SkillCard. It turns the query into cleaned terms with _query_terms, then asks _term_hits how many of those terms appear in the card. It returns the resulting number.
+**Data flow**: An AmbientMessage goes in, carrying speaker, own, and text. A dictionary comes out with the same speaker and own flag, plus text cut down to the allowed size.
 
-**Call relations**: This function combines the two lower-level matching helpers into a convenient single-card score. It does not drive the main block rendering directly, but it expresses the same matching rule used by the selection logic.
+**Call relations**: AmbientReplyClassifier._payload uses this helper for every recent history message and for the new message. It keeps the payload-building code simple and makes sure all messages have the same shape.
 
-*Call graph*: calls 2 internal fn (_query_terms, _term_hits).
-
-
-##### `select_top_k`  (lines 58–66)
-
-```
-def select_top_k(query: str, cards: Sequence[SkillCard]) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: Chooses the most relevant unpinned saved skills for the current query. It is used when there are too many skills to show every description, so only a few get full detail.
-
-**Data flow**: It receives the query and a sequence of SkillCards. It prepares the query terms once, removes pinned cards from the candidate list, scores each remaining card by term matches, sorts higher-scoring cards first while preserving original order for ties, and returns only the configured top number of cards.
-
-**Call relations**: member_visibility calls this only after deciding the whole catalog will not fit in the saved-skills block. The selected cards become the ones shown with full descriptions, while other unpinned skills may still be shown by name.
-
-*Call graph*: calls 1 internal fn (_query_terms); called by 1 (member_visibility).
+*Call graph*: called by 1 (_payload).
 
 
-##### `skill_line`  (lines 69–71)
+##### `AmbientReplyClassifier.decide`  (lines 118–136)
 
 ```
-def skill_line(card: SkillCard) -> str
+async def decide(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> AmbientDecision
 ```
 
-**Purpose**: Formats one skill card as a prompt-friendly line with its name and description. It also caps the line length so one long description cannot take too much room.
+**Purpose**: This is the main decision point: it asks whether the agent should answer one new ambient message. It uses a small model call instead of allowing every such message to become a full agent turn.
 
-**Data flow**: It receives a SkillCard. It builds text in the form “- name: description”, then cuts it off at the configured maximum character count. It returns that one formatted string.
+**Data flow**: The new AmbientMessage and a tuple of recent AmbientMessages go in. The function first refuses overly long new messages, because it does not want to decide from a cut-off version of the message. It then builds a fenced JSON payload, sends a ModelRequest to the configured model, searches the model’s answer for REPLY or NO_REPLY, and returns the last decision word it finds. If the message is too long or the answer cannot be read, it raises an error instead of choosing silence.
 
-**Call relations**: This is the common formatter used by the prompt and block sizing decisions. folds_into_prompt, prompt_index, catalog_fits, and member_visibility all rely on it so that measuring and rendering use the same shape of text.
+**Call relations**: This is the method the surrounding turn-admission code calls before founding a new ambient turn. It relies on AmbientReplyClassifier._payload to package the thread, uses Message and ModelRequest to form the model call, and then hands back only the compact decision that the caller needs.
 
-*Call graph*: called by 4 (catalog_fits, folds_into_prompt, member_visibility, prompt_index).
-
-
-##### `folds_into_prompt`  (lines 74–78)
-
-```
-def folds_into_prompt(cards: Sequence[SkillCard]) -> bool
-```
-
-**Purpose**: Decides whether all saved member skills are small enough to go directly into the system prompt. This keeps small skill sets simple while preventing large ones from bloating the prompt.
-
-**Data flow**: It receives a sequence of SkillCards. It formats each card with skill_line, measures the total joined text size with _joined_size, and compares that size to the prompt-fold budget. It returns true if the full set fits there, false otherwise.
-
-**Call relations**: prompt_index calls this before deciding whether to include member skills beside deployed skills. It uses the same line formatter as the later rendering path, so the size check matches what would actually be shown.
-
-*Call graph*: calls 2 internal fn (_joined_size, skill_line); called by 1 (prompt_index).
+*Call graph*: calls 1 internal fn (_payload); 2 external calls (__init__, __init__).
 
 
-##### `prompt_index`  (lines 81–93)
+##### `AmbientReplyClassifier._payload`  (lines 138–154)
 
 ```
-def prompt_index(registry: SkillRegistry) -> tuple[tuple[str, str], ...]
+def _payload(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> str
 ```
 
-**Purpose**: Builds the skill index entries that belong in the system prompt for one turn. It always includes deployed skills, and it also includes member saved skills when that member list is small enough.
+**Purpose**: This prepares the recent thread and the new message in a format the model can judge safely. It wraps the chat data as JSON between matching fence lines so the model can tell the difference between the system’s instructions and the users’ chat text.
 
-**Data flow**: It receives a SkillRegistry, which contains deployed skills and member saved cards. It reads the member cards, checks whether they fold into the prompt, and gets the deployed index from the registry. If member cards fit, it appends each member card as a name and capped description; if not, it returns only the deployed index.
+**Data flow**: The new message and recent history go in. The function keeps only the last configured number of history messages, converts each message with _entry, serializes the result to compact JSON, chooses a fence marker that does not appear inside the payload, and returns one string containing fence, JSON, and fence again.
 
-**Call relations**: This function is the prompt-side partner to member_block. When saved skills are small, prompt_index carries them; when they are too large, prompt_index leaves them out so member_visibility can place them in the separate saved-skills block instead.
+**Call relations**: AmbientReplyClassifier.decide calls this just before making the model request. Inside, it calls _entry to normalize each message and json.dumps to turn the thread object into a JSON string.
 
-*Call graph*: calls 3 internal fn (index, folds_into_prompt, skill_line).
-
-
-##### `catalog_fits`  (lines 96–99)
-
-```
-def catalog_fits(cards: Sequence[SkillCard]) -> bool
-```
-
-**Purpose**: Checks whether every saved skill can be shown as a full line inside the separate saved-skills block. If this is true, no relevance ranking is needed.
-
-**Data flow**: It receives skill cards, formats each one with skill_line, measures how large the wrapped block would be with _block_size, and compares that to the member-block budget. It returns true if the whole catalog fits.
-
-**Call relations**: This standalone check mirrors one of the decisions made inside member_visibility. It uses the same formatter and block-size helper so callers can ask the question without rendering the full visibility result.
-
-*Call graph*: calls 2 internal fn (_block_size, skill_line).
+*Call graph*: calls 1 internal fn (_entry); called by 1 (decide); 1 external calls (dumps).
 
 
-##### `member_visibility`  (lines 113–146)
+### `core/src/ufo/runtime/turns/audience.py`
 
-```
-def member_visibility(query: str, cards: Sequence[SkillCard]) -> MemberVisibility
-```
+`domain_logic` · `request handling and conversation turn processing`
 
-**Purpose**: Makes the full saved-skill visibility decision for one turn. It decides whether skills fold into the prompt, whether the whole catalog fits in a separate block, and what block text should be sent if needed.
+A conversation can have different disclosure scopes: shared with the workspace, private to one member, tied to a room, or tied to a room that includes an outside organization. This file gives those scopes exact string names and enforces their shape. Think of an audience string like a label on a folder: if the label is malformed, or if someone tries to swap it for a broader label, the code rejects it.
 
-**Data flow**: It receives the current query and the member skill cards. It formats each card once, measures whether the set fits the system prompt and the separate block, and returns an empty block if there are no cards or if they fold into the prompt. If a separate block is needed and the catalog fits, it renders pinned cards first and then the rest. If the catalog is too large, it uses select_top_k to choose described cards, adds remaining names where possible, trims from the end until the block fits, and returns a MemberVisibility record with the decisions and rendered text.
+The main type is `Audience`, a distinct name for a string so the rest of the code can signal, “this string is an audience label.” The file provides builders for known audience labels, such as the shared workspace audience, a member-specific audience, a normal room audience, and a foreign room audience. It also provides `parse_audience`, which acts like a gatekeeper: it accepts only labels that match the allowed patterns and raises an error for anything ambiguous or unsafe.
 
-**Call relations**: member_block calls this as its single source of truth. Inside, it brings together the sizing helpers, the line formatter, the top-k selector, and the renderer so the fold decision, catalog decision, and final block all agree with one another.
-
-*Call graph*: calls 5 internal fn (_block_size, _joined_size, _render, select_top_k, skill_line); called by 1 (member_block); 1 external calls (__init__).
-
-
-##### `member_block`  (lines 149–157)
-
-```
-def member_block(query: str, cards: Sequence[SkillCard]) -> str
-```
-
-**Purpose**: Returns just the saved-skills text block for a member turn. It is the simple interface for code that only needs the text to attach to the message.
-
-**Data flow**: It receives the current query and skill cards. It asks member_visibility to do the full decision and rendering work, then takes the block field from that result. It returns either an empty string or a complete <saved_skills> block.
-
-**Call relations**: This function is a thin wrapper around member_visibility. It lets the rest of the turn-building flow get the rendered block without separately caring about the fold and catalog-fit flags.
-
-*Call graph*: calls 1 internal fn (member_visibility).
-
-
-##### `_joined_size`  (lines 163–164)
-
-```
-def _joined_size(lines: Sequence[str]) -> int
-```
-
-**Purpose**: Measures how many characters a group of lines will use when joined with newline characters. It is used for budget checks before text is placed in a prompt or block.
-
-**Data flow**: It receives a sequence of strings. If there are lines, it adds each line length plus one newline character and subtracts the extra newline after the last line; if there are no lines, it returns zero. The output is the calculated character count.
-
-**Call relations**: folds_into_prompt and member_visibility use this to test prompt-fold size. _block_size also builds on it when measuring a full wrapped saved-skills block.
-
-*Call graph*: called by 3 (_block_size, folds_into_prompt, member_visibility).
-
-
-##### `_block_size`  (lines 167–168)
-
-```
-def _block_size(lines: Sequence[str]) -> int
-```
-
-**Purpose**: Measures how large a saved-skills block would be after adding its opening and closing tags. This prevents the code from forgetting that the wrapper text also consumes prompt space.
-
-**Data flow**: It receives the lines that would go inside the block. It first measures their joined size with _joined_size, then adds the fixed size of the <saved_skills> wrapper and the needed newline spacing. It returns the total character count.
-
-**Call relations**: catalog_fits and member_visibility call this when deciding whether full skill lines fit in the separate block. It depends on _joined_size for the inner line measurement.
-
-*Call graph*: calls 1 internal fn (_joined_size); called by 2 (catalog_fits, member_visibility).
-
-
-##### `_render`  (lines 171–172)
-
-```
-def _render(lines: tuple[str, ...]) -> str
-```
-
-**Purpose**: Builds the final saved-skills block text from prepared lines. It wraps the lines between the fixed opening and closing tags that tell the model what this section is.
-
-**Data flow**: It receives a tuple of already chosen text lines. It places the opening tag first, then the lines, then the closing tag, joining everything with newlines. It returns the final string.
-
-**Call relations**: member_visibility calls this after it has decided which lines fit. This function does not choose or trim anything; it only turns the chosen contents into the exact block format.
-
-*Call graph*: called by 1 (member_visibility).
-
-
-### Environment documents
-This file defines, validates, stores, and reloads digest-addressed environment documents and their associated sandbox files.
-
-### `core/src/ufo/host/environment.py`
-
-`domain_logic` · `turn setup and environment load`
-
-An environment document is like a sealed instruction sheet for an experiment. It can say, for example, "use this prompt text," "hide this tool," "change this tool description," "add this sandbox command as a tool," or "replace this skill." The important rule is that these changes can narrow what the platform offers, but they cannot grant new outside powers. A command-based tool runs only inside the turn's own sandbox, so it gets no more access than the sandbox already had. This file describes those allowed changes using Pydantic models, which are Python data classes that also validate incoming data. The validation is strict: unknown fields are rejected, prompt overrides must use exactly one style, disabled tools cannot also be edited, skill replacements must still parse as real skills, file destinations must stay inside the workspace, and digests must look like proper SHA-256 identifiers. The file also turns YAML or JSON author input into a canonical JSON form before hashing it. That means the same document gets the same digest even if one person wrote it as YAML and another as JSON. Finally, it saves and retrieves both documents and referenced files from a workspace blob store, checking hashes on load so corrupted or mismatched stored data is caught instead of silently used.
+Two helper ideas are especially important. `audience_subjects` says what stored subjects a conversation is allowed to read from. Foreign rooms are deliberately restricted to themselves, so internal workspace-shared facts are not recalled into an external channel. `narrow_audience` decides whether a requested audience change is safe, allowing movement to an equal or narrower scope but rejecting changes that would cross unrelated audiences.
 
 #### Function details
 
-##### `PromptOverride._one_form`  (lines 59–62)
+##### `conversation_audience`  (lines 14–15)
 
 ```
-def _one_form(self) -> 'PromptOverride'
+def conversation_audience(member_id: UUID | None) -> Audience
 ```
 
-**Purpose**: This validation step makes sure a prompt override has one clear meaning. It must either replace the whole prompt with new text or describe small text edits, but not both and not neither.
+**Purpose**: Creates the audience label for a normal conversation. If there is no member ID, the label means the shared workspace audience; if there is a member ID, the label means that one member’s private audience.
 
-**Data flow**: It reads the already-filled fields of a PromptOverride object. If exactly one of text or replace is present, the object is accepted unchanged. If the object is ambiguous or empty, it raises an error before the document can be used.
+**Data flow**: It receives either a member UUID or `None`. With `None`, it returns the shared audience constant. With a UUID, it builds a string using the member prefix plus that UUID, then wraps it as an `Audience`.
 
-**Call relations**: This runs automatically while an environment document is being validated. It protects later prompt assembly code from having to guess whether a prompt should be fully replaced or edited in place.
+**Call relations**: Other functions use this as the single trusted way to form member audience labels. `parse_audience` uses it to confirm that a text value is exactly the canonical member form, and `readable_audiences` uses it when listing what a member is allowed to read.
 
-
-##### `ToolOverride._one_meaning`  (lines 91–104)
-
-```
-def _one_meaning(self) -> 'ToolOverride'
-```
-
-**Purpose**: This validation step makes sure a tool override says one sensible thing. A tool can be hidden, rewritten, or defined as a sandbox command, but invalid mixtures are rejected.
-
-**Data flow**: It inspects the fields of a ToolOverride object: enabled, description, parameters, input, and run. It either returns the same object when the combination is allowed, or raises an error explaining the bad combination.
-
-**Call relations**: This runs automatically when tool override data is parsed. It keeps the rest of the system from receiving unclear instructions such as a disabled tool that also has a new description, or a command tool that also tries to rewrite an existing parameter schema.
+*Call graph*: called by 2 (parse_audience, readable_audiences).
 
 
-##### `EnvironmentDocument._entries_parse`  (lines 150–171)
+##### `room_audience`  (lines 18–19)
 
 ```
-def _entries_parse(self) -> 'EnvironmentDocument'
+def room_audience(surface: str, room: str) -> Audience
 ```
 
-**Purpose**: This validation step checks the parts of an environment document that need deeper inspection: skill replacements and sandbox file entries. It ensures skills are valid and file paths and digests are safe before any turn uses them.
+**Purpose**: Creates the audience label for a normal room on a given surface, such as a chat surface and room name. This marks a conversation as belonging to that internal room context.
 
-**Data flow**: It reads the document's skills and files. Full skill text is parsed as a real skill; each file destination is checked to be a relative path inside the workspace; each file digest is checked against the expected digest pattern. If everything is safe and well-formed, the document is returned unchanged; otherwise validation stops with an error.
+**Data flow**: It receives a surface name and room name. It passes them, along with the normal room prefix, to the shared room-building helper and returns the resulting `Audience`.
 
-**Call relations**: This is called automatically during EnvironmentDocument validation, including when documents are parsed from user-provided YAML or loaded from storage. It calls the skill parser to verify skill text, the containment helper to prevent paths escaping the workspace, and the digest pattern checker to reject malformed stored-file references.
+**Call relations**: This is the public wrapper for building normal room audiences. It delegates the validation and formatting work to `_room_audience`, and `parse_audience` calls it to check that an existing room audience string is in the expected canonical form.
 
-*Call graph*: 3 external calls (contained_relative, parse_skill_content, fullmatch).
-
-
-##### `parse_environment_document`  (lines 174–190)
-
-```
-def parse_environment_document(body: bytes) -> tuple[EnvironmentDocument, bytes, str]
-```
-
-**Purpose**: This function turns a user-written YAML or JSON environment document into a validated EnvironmentDocument, canonical stored bytes, and the SHA-256 digest that identifies those bytes. Use it when accepting a new document before saving or applying it.
-
-**Data flow**: It takes raw bytes as input. First it rejects documents over the size limit, then parses the bytes as YAML, validates the resulting data as an EnvironmentDocument, converts that validated object into sorted compact JSON, hashes those canonical bytes, and returns the document, the canonical bytes, and a digest string.
-
-**Call relations**: store_environment_document calls this before writing a document to the blob store. Inside, it relies on YAML parsing for input, JSON serialization for the canonical form, and SHA-256 hashing for the stable content address.
-
-*Call graph*: called by 1 (store_environment_document); 3 external calls (sha256, dumps, safe_load).
+*Call graph*: calls 1 internal fn (_room_audience); called by 1 (parse_audience).
 
 
-##### `store_environment_document`  (lines 193–196)
+##### `foreign_room_audience`  (lines 22–23)
 
 ```
-async def store_environment_document(blob: WorkspaceBlobStore, body: bytes) -> str
+def foreign_room_audience(surface: str, room: str) -> Audience
 ```
 
-**Purpose**: This function saves an environment document in the workspace blob store and returns the digest that can later pin it exactly. It is the write path for reusable environment documents.
+**Purpose**: Creates the audience label for a room that is externally shared with another organization. This distinction matters because foreign rooms must not automatically read internal shared workspace facts.
 
-**Data flow**: It receives a blob store and raw document bytes. It parses and canonicalizes the document, then writes the canonical bytes under a key based on the document's SHA-256 digest. Its output is the digest string callers can store on a turn configuration.
+**Data flow**: It receives a surface name and room name. It sends them, together with the foreign-room prefix, to `_room_audience`, which validates the pieces and builds the final label.
 
-**Call relations**: It is a thin storage wrapper around parse_environment_document. After parsing succeeds, it hands the canonical bytes to WorkspaceBlobStore.put so later turns can load the exact same document by digest.
+**Call relations**: This mirrors `room_audience` but for external rooms. `parse_audience` uses it to verify foreign room labels, while `_room_audience` supplies the common formatting and safety checks.
 
-*Call graph*: calls 2 internal fn (put, parse_environment_document).
-
-
-##### `load_environment_document`  (lines 199–205)
-
-```
-async def load_environment_document(blob: WorkspaceBlobStore, digest: str) -> EnvironmentDocument
-```
-
-**Purpose**: This function retrieves a previously stored environment document by digest and proves the stored bytes still match that digest. It prevents a turn from accidentally using the wrong or corrupted document.
-
-**Data flow**: It takes a blob store and a digest string. It first checks that the digest is well-formed, fetches the stored canonical JSON bytes, hashes them again, compares that hash to the requested digest, and then validates the JSON as an EnvironmentDocument. The result is the usable document object.
-
-**Call relations**: This is the read path that turn setup code can use when a turn points to an environment document digest. It calls WorkspaceBlobStore.get for the bytes, uses the shared digest pattern for input checking, and uses SHA-256 to verify content integrity before returning the document.
-
-*Call graph*: calls 1 internal fn (get); 2 external calls (sha256, fullmatch).
+*Call graph*: calls 1 internal fn (_room_audience); called by 1 (parse_audience).
 
 
-##### `store_environment_file`  (lines 208–217)
+##### `_room_audience`  (lines 26–29)
 
 ```
-async def store_environment_file(blob: WorkspaceBlobStore, body: bytes) -> str
+def _room_audience(prefix: str, surface: str, room: str) -> Audience
 ```
 
-**Purpose**: This function saves a raw file that an environment document may later place into a turn's sandbox. Unlike documents, it does not parse the file; it stores the exact bytes by digest.
+**Purpose**: Builds a room-style audience label after checking that its parts are safe to join with colons. It prevents unclear labels by rejecting empty values and values that already contain a colon.
 
-**Data flow**: It receives a blob store and raw file bytes. It rejects files over the size limit, computes a SHA-256 digest of the bytes, stores those bytes under an environment-file key based on the digest, and returns the digest string.
+**Data flow**: It receives a prefix, a surface, and a room. It checks that the surface and room are nonempty and contain no colon; if the check fails, it raises `ValueError`. If the pieces are safe, it returns an `Audience` string shaped like `prefix + surface + ':' + room`.
 
-**Call relations**: This is used when a document needs to reference an uploaded file. It hands the raw bytes to WorkspaceBlobStore.put and returns the digest that can be written into the document's files map.
+**Call relations**: This is the shared helper behind both `room_audience` and `foreign_room_audience`. Those functions choose the meaning of the label, while this helper enforces the common label format.
 
-*Call graph*: calls 1 internal fn (put); 1 external calls (sha256).
+*Call graph*: called by 2 (foreign_room_audience, room_audience).
 
 
-##### `load_environment_file`  (lines 220–224)
+##### `parse_audience`  (lines 32–55)
 
 ```
-async def load_environment_file(blob: WorkspaceBlobStore, digest: str) -> bytes
+def parse_audience(value: str) -> Audience
 ```
 
-**Purpose**: This function retrieves a raw environment file by digest and verifies that the bytes still match. It gives turn setup code the exact file contents to write into the sandbox.
+**Purpose**: Checks that a raw string is a valid audience label and returns it as an `Audience`. It is the file’s main guardrail against malformed or misleading audience strings.
 
-**Data flow**: It takes a blob store and a digest string, fetches the stored bytes from the environment-file area, hashes those bytes, and compares the result with the requested digest. If they match, it returns the bytes; if not, it raises an error.
+**Data flow**: It receives a string value. It first accepts the exact shared audience label. Otherwise, it splits the string around colons to identify whether it is a member, room, or foreign-room label. For member labels, it verifies the UUID and compares the result to `conversation_audience`; for room labels, it rebuilds the expected value using `room_audience` or `foreign_room_audience`. If anything does not match the allowed forms, it raises `ValueError`; otherwise, it returns the audience.
 
-**Call relations**: This is the read side of store_environment_file. When a validated environment document names a file digest, later setup code can call this to fetch the content safely before placing it in the workspace sandbox.
+**Call relations**: This function is called before interpreting or comparing audience labels in `audience_member`, `audience_subjects`, and `narrow_audience`. It hands off to the audience-building functions so validation and construction use the same rules.
 
-*Call graph*: calls 1 internal fn (get); 1 external calls (sha256).
-
-
-### Prompt rendering
-These files make prompt code importable, render final system prompts from templates, fingerprint them, and centralize shared delivery rules.
-
-### `core/src/ufo/runtime/prompts/__init__.py`
-
-`other` · `import/package discovery`
-
-This is an empty package marker file. In Python, a folder can contain an `__init__.py` file to show that the folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may hold useful things, but this label mainly tells Python where the drawer is and what name to use for it.
-
-Here, the drawer is `ufo.runtime.prompts`, which likely contains code or data related to prompts used at runtime. Because this file is empty, it does not set up defaults, expose helper functions, or run any startup code. Its value is structural: it helps keep the project’s import paths predictable and makes this directory part of the larger `ufo.runtime` package layout.
-
-Without this file, depending on the Python version and packaging setup, imports from this folder might be less explicit or could fail in environments that expect traditional package markers.
+*Call graph*: calls 3 internal fn (conversation_audience, foreign_room_audience, room_audience); called by 3 (audience_member, audience_subjects, narrow_audience); 1 external calls (UUID).
 
 
-### `core/src/ufo/runtime/prompts/render.py`
+##### `readable_audiences`  (lines 58–63)
 
-`domain_logic` · `prompt construction before a model turn`
+```
+def readable_audiences(member_id: UUID) -> tuple[Audience, ...]
+```
 
-A system prompt is the instruction sheet the model reads before doing any work. In this project, that instruction sheet is assembled from several pieces: a core shell, the agent’s own instructions, optional skills, workspace-specific sections, citation rules, delivery rules, and the model’s knowledge cutoff date. This file is the prompt assembly station.
+**Purpose**: Returns the conversation audiences a member is allowed to read when looking at member-facing data: the shared workspace audience and their own private audience. It deliberately does not include room audiences because the workspace does not know room membership here.
 
-It reads shared prompt text files from disk when the module loads, then exposes functions that combine those pieces safely. The important safety rule is: placeholders must never accidentally reach the model. Placeholders look like {{name}}. If an agent prompt declares a variable, the caller must provide it. If the caller provides an extra variable, that is also an error. After the full prompt is assembled, the file checks again for any leftover {{...}} slots and fails loudly if it finds one.
+**Data flow**: It receives a member UUID. It combines the shared audience constant with the member-specific audience made by `conversation_audience`, and returns both as a tuple.
 
-This matters because a half-rendered prompt can confuse the model or hide a configuration bug. It is like printing a form letter that still says “Dear {{customer_name}}”: the mistake should be caught before it is mailed.
+**Call relations**: This function relies on `conversation_audience` to build the member’s own label. It is meant for read paths that need a simple, consistent answer to “which audience buckets can this member see?”
 
-The file also formats optional blocks, such as available skills or workspace capabilities, so empty sections simply disappear instead of producing meaningless empty tags.
+*Call graph*: calls 1 internal fn (conversation_audience).
+
+
+##### `audience_member`  (lines 66–70)
+
+```
+def audience_member(audience: Audience) -> UUID | None
+```
+
+**Purpose**: Extracts the member ID from a member-specific audience label, if the label is for a member. For shared, room, and foreign-room audiences, it returns `None`.
+
+**Data flow**: It receives an `Audience`. It first validates it with `parse_audience`. If the parsed label does not start with the member prefix, it returns `None`. If it does, it removes the prefix, turns the remaining text into a UUID, and returns that UUID.
+
+**Call relations**: This function depends on `parse_audience` so it only tries to read member IDs from valid audience labels. It uses the standard UUID parser when turning the label text back into an ID.
+
+*Call graph*: calls 1 internal fn (parse_audience); 1 external calls (UUID).
+
+
+##### `audience_subjects`  (lines 73–80)
+
+```
+def audience_subjects(audience: Audience) -> frozenset[str]
+```
+
+**Purpose**: Tells the rest of the system which stored subjects a conversation with this audience may read. This is an access boundary: foreign rooms read only their own subject, while other audiences can also read the shared workspace subject.
+
+**Data flow**: It receives an `Audience` and validates it with `parse_audience`. If the audience is foreign, it returns a frozen set containing only that audience label. Otherwise, it returns a frozen set containing the shared subject and the audience’s own subject.
+
+**Call relations**: This function uses `parse_audience` as its safety check before making access decisions. Its output is likely used by conversation recall or lookup code to decide which stored facts are visible in a turn.
+
+*Call graph*: calls 1 internal fn (parse_audience).
+
+
+##### `narrow_audience`  (lines 83–98)
+
+```
+def narrow_audience(current: Audience, requested: Audience) -> Audience
+```
+
+**Purpose**: Decides whether a requested audience can safely replace the current audience without widening disclosure in an unsafe way. It allows staying the same, narrowing from shared to a more specific audience, and carefully resolving normal-vs-foreign room versions of the same room.
+
+**Data flow**: It receives the current audience and the requested audience. It validates both with `parse_audience`. If the request is the same or asks for shared while already in a more specific audience, it keeps the current audience. If the current audience is shared, it accepts the requested audience. If both are room-like labels for the same surface and room, it chooses the safer foreign label when one side is foreign. For unrelated changes, it raises `ValueError`.
+
+**Call relations**: This function is called when the system needs to reconcile an existing conversation audience with a newly requested one. It relies on `parse_audience` to make sure both labels are valid before comparing their parts.
+
+*Call graph*: calls 1 internal fn (parse_audience); 1 external calls (partition).
+
+
+### `core/src/ufo/runtime/turns/subjects.py`
+
+`data_model` · `cross-cutting`
+
+This file is a small naming helper for conversation visibility. In this system, a “subject” is a plain text label that represents an audience: either the whole shared workspace or one particular member. The file sets the shared label to the fixed word "shared", and it sets member labels to start with "member:" followed by that member’s unique ID. This is like putting either a public notice on a bulletin board, or putting a note into one person’s named mailbox.
+
+The main reason this file exists is consistency. If different parts of the system invented their own strings for “shared” or “member-specific,” visibility checks could silently disagree, and private or shared content might be shown to the wrong audience. By keeping the labels and the small helper functions in one place, source code that creates visibility subjects and source code that checks them can speak the same language.
+
+There is one helper to build a member-specific subject from a UUID, which is a standard unique identifier. There is another helper to test whether a subject is the special shared one. The comments make an important distinction: only the literal shared subject counts as readable by every workspace member. Other audience-like places, such as a room or externally shared channel, are not treated as shared here because they do not represent a workspace membership fact.
 
 #### Function details
 
-##### `rendered_prompt`  (lines 61–62)
+##### `member_subject`  (lines 9–10)
 
 ```
-def rendered_prompt(content: str) -> RenderedPrompt
+def member_subject(member_id: UUID) -> str
 ```
 
-**Purpose**: This function wraps finished prompt text together with a stable digest, which is a short fingerprint of the exact content. The digest lets logs and observability tools tell when the prompt text changed, even if the prompt itself is large.
+**Purpose**: This function turns a member’s unique ID into the standard subject label for content meant for that member. Code uses it so every member-specific label has the same shape.
 
-**Data flow**: It receives the final prompt text as a string. It turns that text into bytes, computes a SHA-256 hash, prefixes it with "sha256:", and returns a RenderedPrompt object containing both the digest and the original content. It does not change any outside state.
+**Data flow**: It receives a UUID, which is a unique identifier for a workspace member. It places the text prefix "member:" in front of that ID. It returns the finished subject string, such as a named mailbox label for that one member.
 
-**Call relations**: After render_template has filled and checked the prompt, it calls rendered_prompt as the final packaging step. rendered_prompt then creates the RenderedPrompt value that the rest of the runtime can send to the model and record for tracing.
-
-*Call graph*: called by 1 (render_template); 2 external calls (__init__, sha256).
+**Call relations**: When another part of the system needs to mark content as belonging to or readable by a particular member, it should call this helper instead of hand-writing the label. The function does not call other project code; it simply formats the shared convention into a string.
 
 
-##### `render_system_prompt`  (lines 65–82)
+##### `subject_shared`  (lines 13–18)
 
 ```
-def render_system_prompt(agent_prompt: str, sections: Sequence[tuple[str, str]], skills: Sequence[tuple[str, str]]=(), *, knowledge_cutoff: str) -> RenderedPrompt
+def subject_shared(subject: str) -> bool
 ```
 
-**Purpose**: This is the main entry point for building the primary agent’s system prompt. It combines the standard shell prompt with the agent instructions, contributed sections, skill list, and the model’s knowledge cutoff date.
+**Purpose**: This function answers the question: “Is this subject the one that means everyone in the workspace can read it?” It is used to separate truly shared content from member-specific or other audience labels.
 
-**Data flow**: It receives the agent prompt text, section blocks, optional skill descriptions, and a knowledge cutoff like "2026-02". It converts that machine-readable date into a human-readable month and year, places it into the knowledge-cutoff wording, inserts that block into the shell template, and passes everything to render_template. The result is a RenderedPrompt containing the complete prompt and its digest.
+**Data flow**: It receives a subject string. It compares that string with the single official shared label, "shared". It returns true if they match exactly, and false otherwise; it does not change anything else.
 
-**Call relations**: Code that needs the main agent prompt calls this function rather than assembling the shell by hand. render_system_prompt prepares the special knowledge cutoff piece, then hands the broader fill-and-validate work to render_template.
-
-*Call graph*: calls 1 internal fn (render_template); 1 external calls (strptime).
+**Call relations**: When visibility code needs to know whether content is broadly readable by workspace members, it can call this function for the decision. The function relies only on the constant defined in this file and does not hand work off elsewhere.
 
 
-##### `render_template`  (lines 85–103)
+### Web access controls
+Web portal logic determines member-agent visibility and provides administrative controls for granting access and auditing transcript access.
 
-```
-def render_template(template: str, agent_prompt: str, variables: Mapping[str, str], skills: Sequence[tuple[str, str]], sections: Sequence[tuple[str, str]]) -> RenderedPrompt
-```
+### `extensions/web/ufo_ext_web/audience.py`
 
-**Purpose**: This function fills a prompt template and makes sure the result is complete. It is the central safety gate that prevents unresolved {{placeholder}} text from being sent to the model.
+`domain_logic` · `request handling and admin access changes`
 
-**Data flow**: It receives a template, an agent prompt, a mapping of variable names to values, a list of skills, and a list of section blocks. First it asks _substitute_vars to fill variables inside the agent prompt. Then it replaces the known template slots for skills, citations, sections, and the agent prompt. It checks for any leftover {{name}} placeholders, collapses overly large blank gaps, trims the end, and returns the packaged RenderedPrompt. If something is missing or misplaced, it raises an error instead of returning bad prompt text.
+The web portal needs a clear answer to a sensitive question: “Is this person allowed to reach this agent or conversation?” This file is that rulebook. It treats a member’s email address as the web identity, then stores explicit access grants as small records keyed by agent and email. Without this file, private agents could either disappear from people who should see them, or worse, become visible to people who should not.
 
-**Call relations**: render_system_prompt calls this function to do the actual assembly. Inside, render_template relies on _substitute_vars for agent-prompt variables, render_skill_index for the available-skills block, and rendered_prompt for the final prompt-plus-digest wrapper.
+The main idea is simple. Workspace-visible agents are available to normal seated members. Private agents are available when the member has an explicit grant, owns the agent, or has a private extension conversation with that agent. Workspace admins can reach every agent, but the file still keeps a separate “member audience” so admin power is not accidentally used as normal discovery.
 
-*Call graph*: calls 3 internal fn (_substitute_vars, render_skill_index, rendered_prompt); called by 1 (render_system_prompt).
-
-
-##### `render_workspace_facts`  (lines 115–128)
-
-```
-def render_workspace_facts(lines: Sequence[str]) -> str
-```
-
-**Purpose**: This function turns a list of already-available workspace capabilities into one prompt block. It helps the model know what is already set up so it does not suggest setting it up again.
-
-**Data flow**: It receives a sequence of plain text lines, each describing one workspace capability. If the list is empty, it returns an empty string so no pointless section appears. Otherwise, it wraps the lines in a <workspace_capabilities> block and adds one shared closing sentence: "Already set up — do not offer again."
-
-**Call relations**: This helper is used when workspace-related prompt sections are being prepared. It does not call other functions in this file; instead, it produces a ready-made section that can later be included among the sections passed into the prompt renderer.
-
-
-##### `render_object_kinds`  (lines 134–151)
-
-```
-def render_object_kinds(kinds: Sequence[tuple[str, str, Sequence[str]]]) -> str
-```
-
-**Purpose**: This function describes the kinds of workspace objects the current turn can talk about, plus the actions available for each kind. It gives the model a compact menu of objects it may refer to or operate on.
-
-**Data flow**: It receives object-kind entries made of a name, a description, and a list of actions. If there are no kinds, it returns an empty string. Otherwise, it writes one line per kind and, when actions exist, an indented action list below that kind. It wraps the whole result in a <workspace_objects> block.
-
-**Call relations**: This helper prepares a prompt section for object-aware turns. The section it returns can be combined with other capability sections before render_template inserts them into the final system prompt.
-
-
-##### `render_skill_index`  (lines 154–163)
-
-```
-def render_skill_index(skills: Sequence[tuple[str, str]]) -> str
-```
-
-**Purpose**: This function formats the list of loadable skills into a prompt block. It tells the model which extra skills are available and what each one is for.
-
-**Data flow**: It receives a sequence of skill name and description pairs. If the list is empty, it returns an empty string. Otherwise, it creates an <available_skills> block with one bullet per skill, using the name and description from each pair.
-
-**Call relations**: render_template calls this when it reaches the {{skill_index}} slot in a prompt template. render_skill_index supplies the formatted block, and render_template places that block into the final prompt.
-
-*Call graph*: called by 1 (render_template).
-
-
-##### `_substitute_vars`  (lines 166–173)
-
-```
-def _substitute_vars(template: str, variables: Mapping[str, str]) -> str
-```
-
-**Purpose**: This function fills variables inside the agent prompt while checking both sides strictly. It exists to catch mistakes early, such as forgetting to provide a value or providing a value that the prompt never asked for.
-
-**Data flow**: It receives a prompt template string and a mapping of variable names to replacement text. It scans the template for placeholders like {{user_name}}, compares those declared names with the supplied mapping keys, and raises an error if anything is missing or extra. If the sets match exactly, it replaces each placeholder with its supplied value and returns the filled text.
-
-**Call relations**: render_template calls this before inserting the agent prompt into the larger shell. By doing this first, render_template can trust that the agent-specific instructions are complete before it checks the whole finished prompt for leftover slots.
-
-*Call graph*: called by 1 (render_template).
-
-
-### `core/src/ufo/runtime/turns/delivery_register.py`
-
-`config` · `prompt assembly`
-
-This file is a small but important source of house rules for agent output. Its main job is to read a Markdown file called `delivery_register.md` and expose that text as `DELIVERY_REGISTER_BLOCK`, so other parts of the system can insert the same instructions into prompts. Think of it like a shared style card pinned beside every workspace: each agent sees the same rules before handing over its final answer.
-
-It also sets size limits and wording guidance for direct prose results and subagent results. A subagent is an agent working under another agent, like an assistant reporting back to a project lead. The `SUBAGENT_RESULT_DESCRIPTION` tells that subagent to provide exactly one parent-visible result, keep it short, use the shared delivery rules, and call `finish` once the work is done instead of writing a normal assistant message first.
-
-Without this file, the system would likely duplicate these rules in several places, making them easier to drift out of sync. A change to the delivery style or result limits might then affect some agents but not others. This file keeps that behavior centralized and predictable.
-
-
-### Skill runtime
-These files make skill code importable and define the runtime machinery for reading, registering, resolving, and loading skills.
-
-### `core/src/ufo/runtime/skills/__init__.py`
-
-`other` · `import time`
-
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the label does not contain the tools, but it lets the rest of the workshop know the drawer exists and can be opened.
-
-Here, the drawer is `ufo.runtime.skills`. The actual skill-related code, if any, lives in other files inside this folder. This file exists so imports can refer to that package cleanly and consistently. Without it, some Python setups or tools might not recognize the folder as a package, which could make imports fail or behave differently.
-
-Because the file is empty, it does not run setup code, expose shortcut names, or change any state. Its value is structural: it helps organize the codebase and supports Python’s import system.
-
-
-### `core/src/ufo/runtime/skills/runtime.py`
-
-`domain_logic` · `startup and skill loading during agent turns`
-
-A skill is a folder with a SKILL.md file and optional extra files. The SKILL.md starts with YAML frontmatter, which is a small metadata block, followed by markdown instructions for the agent. This file turns those folders into structured Python objects, checks that they are valid, finds nested child skills, and builds a registry of all skills available during a run.
-
-The registry works like a library catalog. It stores stable deploy-time skills, such as core built-in skills, and can also include member-saved skills for the current agent. When the agent asks to load a skill, the registry expands that request to include anything listed in the skill’s depends field. It avoids loops and duplicates, so a circular dependency does not crash the system.
-
-After a skill set is resolved, this file can build the text shown to the model: each newly loaded skill contributes a header and its workflow instructions, while already-present workflows are only named instead of repeated. It also creates a tree of loaded files so the model can see where assets live.
-
-Finally, it prepares skill files for the sandbox. Deploy skills may come from a prebuilt bundle, while user/member skills are encoded and sent into the sandbox directly. In short, this file is the bridge between “a folder of reusable instructions” and “instructions and files safely available to the agent at runtime.”
+The file also exposes three tools. Admins can grant web access to a member, revoke that access, or acknowledge and record that they opened another member’s private transcript. These actions return human-readable results and refuse unsafe requests, such as a non-admin trying to grant access or a transcript acknowledgement coming from a channel shared with another organization. Think of it like the front desk access list for a building: this file writes the list, reads the list, and checks people against it at the door.
 
 #### Function details
 
-##### `skill_root`  (lines 52–54)
+##### `web_extension`  (lines 38–45)
 
 ```
-def skill_root(name: str) -> str
+def web_extension() -> ExtensionContext
 ```
 
-**Purpose**: Builds the stable runtime folder path for a named skill. This gives every skill a predictable home under $UFO_HOME/skills.
+**Purpose**: Creates the web extension’s own context, which is the safe handle used to read and write the web audience records. Code that starts from a web surface context uses this to reach the extension’s private store.
 
-**Data flow**: It receives a skill name, joins it onto the fixed skills root path, and returns that path as text. It does not read or change any files.
+**Data flow**: It takes no input. It builds a scoped store for the web extension and an empty credential-access description, then returns an extension context containing both. Nothing is written yet; it only prepares the doorway to the web extension’s data.
 
-**Call relations**: RuntimeSkill.root calls this helper when other code needs to know where a particular skill will live inside the runtime.
+**Call relations**: Surface code uses this kind of context when it needs to consult the web audience store. Inside, it constructs the store, credential access object, and extension context that later functions use for transactions and grant records.
 
-*Call graph*: called by 1 (root).
+*Call graph*: 3 external calls (__init__, __init__, __init__).
 
 
-##### `RuntimeSkill.all_files`  (lines 92–93)
+##### `_grant_key`  (lines 48–49)
 
 ```
-def all_files(self) -> dict[str, bytes]
+def _grant_key(agent_id: UUID, email: str) -> str
 ```
 
-**Purpose**: Returns every file that belongs to a parsed skill, including SKILL.md itself. This is useful when the system needs to hash, package, or send the whole skill somewhere.
+**Purpose**: Builds the storage key for one web access grant. The key says, in a consistent format, “this email may reach this agent.”
 
-**Data flow**: It reads the skill’s stored raw SKILL.md text and its asset file list, turns SKILL.md back into bytes, combines them into one dictionary keyed by file path, and returns that dictionary.
+**Data flow**: It receives an agent ID and an email address. It trims spaces from the email, lowercases it so case differences do not create duplicate identities, and combines it with the audience prefix and agent ID. The result is a single string used as the row name in storage.
 
-**Call relations**: The digest builder and sandbox wiring both use this method so they work from the exact same view of a skill’s files.
+**Call relations**: _grant uses this when saving a new access grant, and _revoke uses the same key shape when deleting one. This shared helper keeps grant and revoke pointed at the exact same storage location.
 
-*Call graph*: called by 2 (content_digest, _wire_skill).
+*Call graph*: called by 2 (_grant, _revoke).
 
 
-##### `RuntimeSkill.root`  (lines 95–96)
+##### `granted_emails`  (lines 52–59)
 
 ```
-def root(self) -> str
+async def granted_emails(store: ScopedStore) -> dict[UUID, tuple[str, ...]]
 ```
 
-**Purpose**: Returns the runtime directory where this skill should appear. It keeps path construction in one place instead of scattering string formatting across the code.
+**Purpose**: Reads all stored web access grants and groups them by agent. This is useful for an administration view that needs to show who has been granted access to each agent.
 
-**Data flow**: It reads the skill’s name, passes it to skill_root, and returns the resulting $UFO_HOME/skills/... path.
+**Data flow**: It receives the web extension’s scoped store. It lists every stored item whose key starts with the audience prefix, pulls the agent ID and email out of each key, groups emails under their agent, sorts each email list, and returns a dictionary from agent ID to email tuple.
 
-**Call relations**: The sandbox wiring code calls this when converting skill file paths into safe paths for loading.
+**Call relations**: This function reads the same grant rows that _grant writes and _revoke deletes. It relies on the store’s list operation and turns the raw key strings back into UUID agent IDs for callers that need a clean admin-facing summary.
 
-*Call graph*: calls 1 internal fn (skill_root); called by 1 (_wire_skill).
+*Call graph*: calls 1 internal fn (list); 1 external calls (UUID).
 
 
-##### `RuntimeSkill.card`  (lines 98–106)
+##### `_granted_agent_ids`  (lines 62–69)
 
 ```
-def card(self) -> SkillCard
+async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]
 ```
 
-**Purpose**: Creates the lightweight catalog entry for a runtime skill. The card contains routing information, not the full instruction body.
+**Purpose**: Finds the private agents explicitly granted to one email address. It is part of deciding what a particular web user is allowed to see.
 
-**Data flow**: It reads the skill’s name, description, dependencies, and agent targeting, then returns a SkillCard with those fields.
+**Data flow**: It receives the scoped store and an email address. It normalizes the email, scans all audience grant records, keeps only the records whose email matches, converts their agent IDs back from text into UUIDs, and returns them as an immutable set.
 
-**Call relations**: The registry uses these cards when it needs to search or resolve dependencies without reading or injecting full skill instructions.
+**Call relations**: web_audience calls this while building one member’s portal view. It supplies the explicit-grant part of the larger access decision, alongside workspace visibility, ownership, and private conversation access.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (list); called by 1 (web_audience); 1 external calls (UUID).
 
 
-##### `RuntimeSkill.content_digest`  (lines 108–114)
+##### `WebAudience.allows`  (lines 86–87)
 
 ```
-def content_digest(self) -> str
+def allows(self, agent_id: UUID) -> bool
 ```
 
-**Purpose**: Creates a stable fingerprint for a skill’s full contents. This lets different parts of the system tell whether two skill copies are exactly the same.
+**Purpose**: Answers whether this web audience may directly access a specific agent. It is a quick yes-or-no check used before opening or resolving agent views.
 
-**Data flow**: It gathers all skill files, sorts them, hashes each path and each file’s bytes, combines those hashes, and returns a sha256: digest string.
+**Data flow**: It receives an agent ID. It compares that ID with the IDs in the audience’s direct agent list and returns true if any match, otherwise false. It does not change the audience.
 
-**Call relations**: Sandbox wiring and system bundle creation rely on this digest to cache and identify skill content consistently.
+**Call relations**: Web surface routing code calls this when resolving existing chats, new chats, or chat targets. It gives those routes a simple door-check instead of making them repeat the full audience-building rules.
 
-*Call graph*: calls 1 internal fn (all_files); called by 1 (_wire_skill); 1 external calls (sha256).
+*Call graph*: called by 3 (_existing_chat_target, _new_chat_target, _resolve_chat).
 
 
-##### `SystemSkillBundle.from_skills`  (lines 126–151)
+##### `WebAudience.allows_chat`  (lines 89–90)
 
 ```
-def from_skills(cls, skills: Iterable[RuntimeSkill]) -> 'SystemSkillBundle'
+def allows_chat(self, agent_id: UUID) -> bool
 ```
 
-**Purpose**: Builds a deterministic ZIP archive for deploy-time system skills. Deterministic means the same inputs produce the same bytes, which is important for caching and verification.
+**Purpose**: Answers whether this audience may chat with a specific agent, including agents available through private extension conversations. This is slightly wider than direct portal access.
 
-**Data flow**: It receives runtime skills, rejects conflicting duplicate names, records each skill’s digest and file list in a manifest, writes the manifest and all skill files into an in-memory ZIP archive, and returns a SystemSkillBundle containing the bundle digest, archive bytes, and manifest bytes.
+**Data flow**: It receives an agent ID. It checks that ID against the combined chat-agent list, which includes normal allowed agents plus conversation-only agents, and returns true or false. It does not write anything.
 
-**Call relations**: Startup and serving code call this when preparing core or deploy-controlled skills for shared use by the runtime, terminal cache, or sandbox image.
+**Call relations**: It uses WebAudience.chat_agents to include both regular and conversation-based access. It is intended for chat checks where a member-private conversation can open access to that agent’s chat even if the agent is not part of the normal listed audience.
 
-*Call graph*: called by 4 (init_runtime, _mount_shared_surfaces, run, system_skill_bundle); 4 external calls (sha256, BytesIO, dumps, ZipFile).
 
+##### `WebAudience.chat_agents`  (lines 93–94)
 
-##### `SystemSkillBundle._write`  (lines 154–157)
-
-```
-def _write(archive: zipfile.ZipFile, path: str, content: bytes) -> None
-```
-
-**Purpose**: Writes one file into a system skill ZIP archive in a repeatable way. It fixes file timestamps and permissions so archives do not change just because they were built at a different time.
-
-**Data flow**: It receives an open ZIP archive, a path, and file bytes. It creates a ZIP entry with a fixed timestamp and normal file permissions, then writes the bytes into the archive.
-
-**Call relations**: SystemSkillBundle.from_skills uses this helper while assembling the manifest and skill files into the archive.
-
-*Call graph*: 2 external calls (writestr, ZipInfo).
-
-
-##### `LoadedSkill.prompt_body`  (lines 170–180)
-
-```
-def prompt_body(self) -> str
-```
-
-**Purpose**: Builds the piece of prompt text contributed by one loaded skill. It labels whether the agent asked for the skill directly or it arrived as a dependency.
-
-**Data flow**: It reads the loaded skill’s name, instructions, and dependency marker. It returns a markdown block with a header and the skill’s workflow instructions, but not asset file contents.
-
-**Call relations**: loaded_context uses this when creating the text that is placed in front of the model for newly loaded skills.
-
-
-##### `LoadedSkills.reseed`  (lines 206–225)
-
-```
-def reseed(self, loads: Iterable[tuple[LoadedRef, ...]], preloaded: tuple[LoadedSkill, ...]=()) -> None
-```
-
-**Purpose**: Rebuilds the tracker of which skill instructions are already in the model’s context. This prevents the same workflow from being injected again and again.
-
-**Data flow**: It receives prior resolved loads and optional preloaded skills, clears the old tracker, adds every skill name that is currently in context, and separately records which ones the agent directly asked for.
-
-**Call relations**: It calls reset first so the tracker reflects the current conversation window rather than old memory. This matters after compaction, replay, or subagent preloading.
-
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.drain`  (lines 227–232)
-
-```
-def drain(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the skills the agent directly asked for, then clears the tracker. This is used when a boundary drops workflow text but wants to remember what should be reloadable later.
-
-**Data flow**: It sorts the asked-for skill names, stores them as a tuple, resets both tracking sets, and returns the names.
-
-**Call relations**: It calls reset after collecting the names, making it a handoff point between one context window and the next.
-
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.reset`  (lines 234–236)
-
-```
-def reset(self) -> None
-```
-
-**Purpose**: Clears the record of loaded and directly requested skills. It is the simple “empty the notebook” operation for the skill context tracker.
-
-**Data flow**: It takes no new data, empties the in_context set, and empties the asked_for set. It returns nothing.
-
-**Call relations**: LoadedSkills.reseed calls it before rebuilding the tracker, and LoadedSkills.drain calls it after extracting the remembered direct requests.
-
-*Call graph*: called by 2 (drain, reseed).
-
-
-##### `_split_frontmatter`  (lines 239–245)
-
-```
-def _split_frontmatter(text: str) -> tuple[str, str]
-```
-
-**Purpose**: Separates a SKILL.md file into its metadata block and instruction body. It enforces the expected frontmatter format so malformed skills fail early.
-
-**Data flow**: It receives SKILL.md text, checks that it starts with the opening fence, finds the closing fence, and returns the metadata text and body text. If the fences are missing, it raises an error.
-
-**Call relations**: parse_skill_content calls this before interpreting the YAML metadata and building a RuntimeSkill.
-
-*Call graph*: called by 1 (parse_skill_content).
-
-
-##### `_child_skill_dirs`  (lines 248–253)
-
-```
-def _child_skill_dirs(skill_dir: Path) -> list[Path]
-```
-
-**Purpose**: Finds immediate subfolders that are themselves skills. A child skill is recognized by having its own SKILL.md file.
-
-**Data flow**: It receives a directory path, looks at its direct children, keeps only directories containing SKILL.md, sorts them, and returns the list.
-
-**Call relations**: parse_skill uses this to exclude child skill folders from the parent’s asset files, and discover_skills uses it to recursively register child skills.
-
-*Call graph*: called by 2 (discover_skills, parse_skill); 1 external calls (iterdir).
-
-
-##### `parse_skill_content`  (lines 256–297)
-
-```
-def parse_skill_content(dir_name: str, files: Mapping[str, bytes], registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Turns an in-memory set of skill files into a validated RuntimeSkill. This lets skills loaded from storage be checked the same way as skills read from disk.
-
-**Data flow**: It receives a claimed directory name, a mapping of file paths to bytes, and optional registry naming information. It reads SKILL.md, splits and parses the YAML frontmatter, checks that the skill name matches the directory, validates fields such as agents and indexed, separates asset files, and returns a RuntimeSkill.
-
-**Call relations**: parse_skill calls this after reading files from disk. It is the central validation step for skill metadata and instruction text.
-
-*Call graph*: calls 1 internal fn (_split_frontmatter); called by 1 (parse_skill); 3 external calls (__init__, PurePosixPath, safe_load).
-
-
-##### `parse_skill`  (lines 300–309)
-
-```
-def parse_skill(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Reads a skill folder from disk and parses it into a RuntimeSkill. It treats child skill folders as separate skills instead of bundling their files into the parent.
-
-**Data flow**: It receives a filesystem directory, finds child skill directories, reads all ordinary files outside those child skill subtrees, and passes the collected bytes to parse_skill_content. It returns the parsed RuntimeSkill.
-
-**Call relations**: discover_skills calls this for each skill directory it visits while flattening parent and child skills into the registry.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill_content); called by 1 (discover_skills); 1 external calls (rglob).
-
-
-##### `discover_skills`  (lines 312–330)
-
-```
-def discover_skills(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Discovers one skill and all of its nested child skills, returning them as a flat name-to-skill map. This makes nested folders usable through path-like names such as parent/child.
-
-**Data flow**: It receives a skill directory and optional registry naming information. It parses the current skill, records it, finds child skill directories, recursively discovers each child with a nested registry name, and returns the combined dictionary.
-
-**Call relations**: _load_core_skills calls this when building the built-in skill set from the source tree.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill); called by 1 (_load_core_skills).
-
-
-##### `_load_core_skills`  (lines 333–340)
-
-```
-def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Loads the core skills shipped with this codebase. These are the built-in skills that teach the system’s baseline behavior.
-
-**Data flow**: It receives a root directory, scans visible subdirectories, discovers skills under each one, and returns a dictionary keyed by skill name.
-
-**Call relations**: The module calls this at import time to build CORE_SKILLS_BY_NAME, which then feeds the default core SkillRegistry.
-
-*Call graph*: calls 1 internal fn (discover_skills); 1 external calls (iterdir).
-
-
-##### `SkillRegistry.__post_init__`  (lines 367–369)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: Fills in the default set of bundled skill names after a registry is created. If no explicit bundle list is supplied, all deploy-time skills are treated as bundled.
-
-**Data flow**: It checks whether bundled_names is missing. If so, it sets bundled_names to the current by_name keys while keeping the frozen dataclass behavior intact.
-
-**Call relations**: This runs automatically when a SkillRegistry is constructed, including the core registry and registries built by merge or member-attachment operations.
-
-
-##### `SkillRegistry.named`  (lines 371–375)
-
-```
-def named(self, name: str) -> RuntimeSkill
-```
-
-**Purpose**: Looks up a deploy-time skill by name and gives a helpful error if it is unknown. It is for places that need the full RuntimeSkill, not just a routing card.
-
-**Data flow**: It receives a name, tries to fetch it from the deploy skill dictionary, and returns the RuntimeSkill. If the name is absent, it raises the formatted unknown-skill error.
-
-**Call relations**: When lookup fails, it calls _unknown so the error can include close-name suggestions.
-
-*Call graph*: calls 1 internal fn (_unknown).
-
-
-##### `SkillRegistry._unknown`  (lines 377–380)
-
-```
-def _unknown(self, name: str) -> ValueError
-```
-
-**Purpose**: Creates a clear error for an unknown skill name. It suggests close matches so a typo is easier to fix.
-
-**Data flow**: It receives the bad name, asks known_names for all valid names, finds a few similar names, and returns a ValueError containing the unknown name and optional suggestions.
-
-**Call relations**: named and _card use this whenever a requested skill cannot be found.
-
-*Call graph*: calls 1 internal fn (known_names); called by 2 (_card, named); 1 external calls (get_close_matches).
-
-
-##### `SkillRegistry._card`  (lines 382–389)
-
-```
-def _card(self, name: str) -> SkillCard
-```
-
-**Purpose**: Gets the routing card for a skill, whether it is a deploy skill or a member-saved skill. The card is the small record used for dependency resolution.
-
-**Data flow**: It receives a skill name, first checks deploy skills and converts one to a card if found, then checks member cards. If neither exists, it raises the unknown-skill error.
-
-**Call relations**: closure and its nested add step call this as they walk requested skills and dependencies.
-
-*Call graph*: calls 1 internal fn (_unknown); called by 2 (closure, add).
-
-
-##### `SkillRegistry.known_names`  (lines 391–394)
-
-```
-def known_names(self) -> frozenset[str]
-```
-
-**Purpose**: Returns every skill name this registry can resolve. This includes both deploy-time skills and member-saved skill cards.
-
-**Data flow**: It reads the keys of the deploy skill dictionary and member card dictionary, combines them into one frozen set, and returns it.
-
-**Call relations**: _unknown uses this set to produce better error messages, and save paths can use the same idea to avoid name collisions.
-
-*Call graph*: called by 1 (_unknown).
-
-
-##### `SkillRegistry.all_cards`  (lines 396–401)
-
-```
-def all_cards(self) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: Returns lightweight routing cards for every loadable skill. This is useful for search and selection without loading full instruction bodies.
-
-**Data flow**: It converts each deploy RuntimeSkill into a SkillCard, appends the stored member cards, and returns all cards as a tuple.
-
-**Call relations**: Skill search code can score these cards to decide which skills might be relevant to an agent’s request.
-
-
-##### `SkillRegistry.bundled_skills`  (lines 403–406)
-
-```
-def bundled_skills(self) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: Returns the deploy skills that are part of the static bundle. These are the skills expected to already be available through the shipped archive or sandbox image.
-
-**Data flow**: It reads bundled_names, filters the deploy skill dictionary to those names, and returns the matching RuntimeSkill objects.
-
-**Call relations**: Serving code calls this when mounting shared surfaces that expose the bundled system skills.
-
-*Call graph*: called by 1 (_mount_shared_surfaces).
-
-
-##### `SkillRegistry.closure`  (lines 408–432)
-
-```
-def closure(self, *names: str) -> tuple[LoadedRef, ...]
-```
-
-**Purpose**: Expands requested skill names into the full set that must be loaded, including dependencies. It preserves direct requests as direct, avoids duplicates, and is safe against dependency cycles.
-
-**Data flow**: It receives one or more skill names, creates direct LoadedRef entries for the unique requested names, then walks each skill’s depends list. Each newly found dependency becomes a LoadedRef marked with the skill that pulled it. It returns the ordered tuple of references.
-
-**Call relations**: The runtime engine calls this before materializing skills, so it can know the complete load plan without reading member skill bodies yet.
-
-*Call graph*: calls 1 internal fn (_card); called by 1 (_loaded_skill_closures); 1 external calls (__init__).
-
-
-##### `SkillRegistry.closure.add`  (lines 422–427)
-
-```
-def add(card: SkillCard, dependency_of: str | None) -> None
-```
-
-**Purpose**: Adds one dependency and recursively adds its dependencies during closure building. It is the small inner worker that makes dependency expansion happen.
-
-**Data flow**: It receives a SkillCard and the name of the skill that depended on it. If that skill is already recorded, it stops; otherwise it records a LoadedRef and repeats the process for each dependency listed on the card.
-
-**Call relations**: SkillRegistry.closure uses this helper while walking dependency chains, and the helper calls _card whenever it needs the routing card for a dependency name.
-
-*Call graph*: calls 1 internal fn (_card); 1 external calls (__init__).
-
-
-##### `SkillRegistry.materialize`  (lines 434–456)
-
-```
-async def materialize(self, refs: Sequence[LoadedRef]) -> tuple[LoadedSkill, ...]
-```
-
-**Purpose**: Turns a resolved load plan into actual loaded skills with instruction bodies and files. This is where member skill bytes may be read through the materializer.
-
-**Data flow**: It receives LoadedRef entries, looks up each name in deploy skills or asks the materializer for a member skill, verifies the returned skill still has the expected name, wraps it as a LoadedSkill with dependency and bundled flags, and returns the tuple. If a skill disappeared, it raises an error.
-
-**Call relations**: This runs after closure resolution. It hands later prompt-building and sandbox-loading code concrete RuntimeSkill objects instead of lightweight cards.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `SkillRegistry.index`  (lines 458–467)
-
 ```
-def index(self) -> tuple[tuple[str, str], ...]
+def chat_agents(self) -> tuple[AgentSummary, ...]
 ```
-
-**Purpose**: Builds the visible skill index for the system prompt. It includes top-level deploy skills and child skills that explicitly opted into indexing.
 
-**Data flow**: It reads deploy skills in registry order, keeps skills with no parent or with indexed set to true, and returns name-description pairs. Member skills are intentionally left out.
+**Purpose**: Provides the full set of agents this audience may chat with. It combines ordinary visible agents with agents made available by private extension conversations.
 
-**Call relations**: Prompt-building code calls this to fill the {{skill_index}} area shown to the model.
+**Data flow**: It reads the WebAudience object’s agents tuple and conversation_agents tuple. It returns a new tuple containing both, leaving the original stored tuples unchanged.
 
-*Call graph*: called by 2 (_prompt_skill_index, prompt_index).
+**Call relations**: WebAudience.allows_chat depends on this property so chat checks use the broader chat list. The property keeps that combination rule in one place.
 
 
-##### `SkillRegistry.merged_with`  (lines 469–490)
+##### `web_audience`  (lines 97–127)
 
 ```
-def merged_with(self, generated: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
+async def web_audience(surface: SurfaceContext, extension: ExtensionContext, email: str) -> WebAudience
 ```
 
-**Purpose**: Creates a new registry that includes generated deploy-controlled skills. If a generated skill tries to reuse an existing deploy name, the existing skill wins.
+**Purpose**: Builds the complete web-portal audience for one email address in one workspace. This is the central function that decides which agents that person can see and chat with.
 
-**Data flow**: It copies the deploy skill dictionary, appends non-conflicting generated skills, logs any refused generated shadowing, removes member cards that now collide with deploy names, and returns a new SkillRegistry with the same materializer and bundle settings.
+**Data flow**: It receives a surface context, an extension context, and an email. It normalizes the email, reads the workspace seat list in a transaction, finds the matching seated member, lists the agents, reads explicit grants, and asks which agents have member-private extension conversations. If the email is not a seated member, it returns an empty audience. Otherwise it returns a WebAudience showing admin status, direct agents, member-level agents, and conversation-only agents.
 
-**Call relations**: This is used when runtime-generated skills, such as setup or spawn catalog skills, need to be added without letting them break the no-shadowing rule.
+**Call relations**: This function pulls together lower-level pieces: it uses the extension transaction to read seats, the surface context to list agents and member extension conversations, and _granted_agent_ids to include explicit grants. The result is the object later used by web routes such as chat resolution to decide what to allow.
 
-*Call graph*: 2 external calls (__init__, log).
+*Call graph*: calls 4 internal fn (transaction, list_agents, member_extension_agent_ids, _granted_agent_ids); 2 external calls (__init__, __init__).
 
 
-##### `SkillRegistry.with_member`  (lines 492–511)
+##### `_refusal`  (lines 137–138)
 
 ```
-def with_member(self, cards: Sequence[SkillCard], materialize: SkillMaterializer) -> 'SkillRegistry'
+def _refusal(text: str) -> ToolResult
 ```
 
-**Purpose**: Creates a new registry that includes the current agent’s saved member skills. Member skills are allowed as an extra tier but cannot replace deploy skills.
+**Purpose**: Creates a standard error result with a plain message for tool actions that must say no. It keeps refusals consistent and readable.
 
-**Data flow**: It receives member SkillCards and a materializer callback. It keeps only cards whose names do not collide with deploy skills, logs refused collisions, and returns a new registry with those member cards attached.
+**Data flow**: It receives a text message. It wraps that message in text content, marks the tool result as an error, and returns it. It does not inspect or change any external data.
 
-**Call relations**: Turn setup can call this to bind member skills for one agent while preserving the stable deploy skill catalog.
+**Call relations**: _gate and _read_private_transcript call this whenever a request fails a safety check, such as a non-admin attempting an admin-only action. It hands back a result the tool system can show directly to the user.
 
-*Call graph*: 2 external calls (__init__, log).
+*Call graph*: called by 2 (_gate, _read_private_transcript); 2 external calls (__init__, __init__).
 
 
-##### `_loaded_tree`  (lines 517–535)
+##### `_target_agent`  (lines 141–148)
 
 ```
-def _loaded_tree(loaded: Sequence[LoadedSkill]) -> str
+def _target_agent(ctx: ToolContext) -> tuple[UUID, str]
 ```
 
-**Purpose**: Builds a compact text tree showing every file made available by a skill load. This helps the model know where files are without printing their contents.
+**Purpose**: Figures out which agent an access action is about, and chooses a friendly label for the reply. If the action did not name another agent, it uses the current turn’s agent.
 
-**Data flow**: It receives loaded skills, gathers every skill file path under the skills root, sorts paths, emits each directory once with indentation, and returns the tree as text.
+**Data flow**: It receives the tool context. If there is no target object at all, it raises an internal error because the tool was dispatched incorrectly. If no separate agent was named, it returns the current agent ID and the label “this agent.” If an agent was named, it returns that agent’s ID and name.
 
-**Call relations**: loaded_context calls this at the end of the prompt text so every loaded workflow is accompanied by a map of available files.
+**Call relations**: _grant, _revoke, and _read_private_transcript call this after their basic checks. It gives them the exact agent ID needed for storage or transcript recording, plus the human-facing name used in the success message.
 
-*Call graph*: called by 1 (loaded_context); 1 external calls (PurePosixPath).
+*Call graph*: called by 3 (_grant, _read_private_transcript, _revoke).
 
 
-##### `loaded_context`  (lines 538–551)
+##### `_gate`  (lines 151–166)
 
 ```
-def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
+async def _gate(ctx: ToolContext, extension: ExtensionContext) -> ToolResult | SeatEntry
 ```
 
-**Purpose**: Builds the full text shown to the model for one skill load. It includes new workflow instructions, a note for workflows already in context, and the loaded file tree.
+**Purpose**: Performs the shared permission checks for granting or revoking web access. It makes sure the speaker is a workspace admin and that the targeted member really exists.
 
-**Data flow**: It receives LoadedSkill objects and a set of skill names already in context. It renders prompt bodies only for new skills, collects repeated names into one note, appends the loaded-files tree, and returns the final string.
+**Data flow**: It receives the tool context and extension context. It checks that there is a speaking member, asks whether that speaker is an admin, reads the workspace seat list, parses the target member ID, and looks up that member. On failure it returns an error ToolResult; on success it returns the member’s seat entry.
 
-**Call relations**: Both normal load_skill behavior and subagent preloading use this so skills look the same no matter how they are introduced.
+**Call relations**: _grant and _revoke both call this before touching access records. It centralizes the “only admins can change another member’s portal access” rule so the two actions cannot drift apart.
 
-*Call graph*: calls 1 internal fn (_loaded_tree).
+*Call graph*: calls 3 internal fn (transaction, speaker_is_admin, _refusal); called by 2 (_grant, _revoke); 2 external calls (__init__, UUID).
 
 
-##### `_wire_skill`  (lines 554–561)
+##### `_grant`  (lines 169–186)
 
 ```
-def _wire_skill(skill: RuntimeSkill) -> dict[str, object]
+async def _grant(ctx: ToolContext, args: WebAccessInput) -> ToolResult
 ```
 
-**Purpose**: Converts a RuntimeSkill into the wire format expected by the sandbox. Wire format here means a safe dictionary representation that can be sent across a boundary.
+**Purpose**: Implements the admin tool that gives a workspace member web access to an agent. It writes the grant record and returns a clear confirmation.
 
-**Data flow**: It receives a RuntimeSkill, gets all files, checks and normalizes each path under the skill root, base64-encodes each file’s bytes into text, computes the skill digest, and returns a dictionary with digest and files.
+**Data flow**: It receives the tool context and an empty validated input object. It requires an extension context, runs _gate to confirm the speaker may act and to find the target member, identifies the target agent, and special-cases the main agent because every member can already reach it. For normal grants, it stores a row keyed by agent and the member’s normalized email, including who granted it, then returns a success message.
 
-**Call relations**: install_skill and load_skills call this for user or member-provided skill content before asking the sandbox to load it.
+**Call relations**: This function is registered as the handler for the grant_web_access tool. It depends on _gate for admin and member checks, _target_agent for choosing the agent, and _grant_key for writing the storage row that web_audience later reads.
 
-*Call graph*: calls 3 internal fn (all_files, content_digest, root); called by 2 (install_skill, load_skills); 2 external calls (urlsafe_b64encode, contained_relative).
+*Call graph*: calls 4 internal fn (agent_is_main, _gate, _grant_key, _target_agent); 2 external calls (__init__, __init__).
 
 
-##### `install_skill`  (lines 564–568)
+##### `_revoke`  (lines 189–209)
 
 ```
-async def install_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None
+async def _revoke(ctx: ToolContext, args: WebAccessInput) -> ToolResult
 ```
 
-**Purpose**: Installs one materialized skill into the sandbox’s runtime skills directory. It is a convenience path for loading a single skill.
+**Purpose**: Implements the admin tool that removes a member’s explicit web access grant for an agent. It deletes the stored grant and explains the result.
 
-**Data flow**: It receives a sandbox session and a RuntimeSkill, converts the skill with _wire_skill, sends it to Sandbox.load_skills as user content, then checks that the sandbox reported a root path for that skill. If not, it raises an error.
+**Data flow**: It receives the tool context and an empty validated input object. It requires an extension context, runs _gate, identifies the target agent, normalizes the member’s email, and deletes the matching grant key from the store. If the action concerns the main agent, it explains that the member still reaches it because the main agent is available to every member; otherwise it confirms removal.
 
-**Call relations**: It hands the prepared skill off to the sandbox layer, which performs the actual runtime installation.
+**Call relations**: This function is registered as the handler for the revoke_web_access tool. It mirrors _grant by using the same permission gate, target-agent resolution, and grant-key format, so deleting a grant removes exactly the row that granting created.
 
-*Call graph*: calls 2 internal fn (load_skills, _wire_skill).
+*Call graph*: calls 4 internal fn (agent_is_main, _gate, _grant_key, _target_agent); 2 external calls (__init__, __init__).
 
 
-##### `load_skills`  (lines 571–578)
+##### `_read_private_transcript`  (lines 220–256)
 
 ```
-async def load_skills(sandbox: Sandbox, loaded: Sequence[LoadedSkill]) -> None
+async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInput) -> ToolResult
 ```
 
-**Purpose**: Loads a resolved group of skills into the sandbox. It separates bundled deploy skills from skills whose files must be sent directly.
+**Purpose**: Implements the admin tool that records an acknowledgement before opening another member’s private transcript in the web portal. The record is an audit trail: it notes who opened whose private conversation and when.
 
-**Data flow**: It receives a sandbox and LoadedSkill entries. Bundled skills become a name-to-digest map, non-bundled skills are converted with _wire_skill, both groups are sent to Sandbox.load_skills, and the function raises an error if any requested skill is missing from the sandbox response.
+**Data flow**: It receives the tool context and an empty validated input object. It checks that the speaker is a member, that the speaker is an admin, that the action is not happening in a foreign/shared audience, and that a conversation target is present. It finds the relevant agent, asks the surface layer to record transcript access, and either returns a refusal if nothing valid needed acknowledgement or returns a message confirming the record.
 
-**Call relations**: After the registry has resolved and materialized a skill load, this function is the handoff that makes those files available inside the sandbox.
+**Call relations**: This function is registered as the handler for the read_private_transcript tool. It uses _refusal for safety failures, _target_agent to identify which agent’s conversation is being opened, and record_transcript_access to write the audit record that the portal’s content gate relies on.
 
-*Call graph*: calls 2 internal fn (load_skills, _wire_skill).
+*Call graph*: calls 3 internal fn (speaker_is_admin, _refusal, _target_agent); 4 external calls (__init__, __init__, record_transcript_access, UUID).
