@@ -464,18 +464,27 @@ class ConnectorConnection:
     owner_member_id: UUID
 
 
-def _owner_note(withheld: Sequence[Grant], audience: Audience) -> str:
-    """Whose private accounts a refusal missed, so the retry names that member rather than guessing
-    which of a channel's speakers to bind. Empty when the connections name no owner address, and
-    empty in an externally-shared channel: the refusal is read back into a room another organization
-    sits in, so it asks for a member of this workspace without naming one."""
-    if audience.startswith(FOREIGN_AUDIENCE_PREFIX):
-        return ""
-    owners = sorted({grant.owner_email for grant in withheld if grant.owner_email})
-    if not owners:
-        return ""
-    label = "owner" if len(owners) == 1 else "owners"
-    return f" ({label}: {', '.join(owners)})"
+def _speaker_required(
+    subject: str, withheld: Sequence[Grant], audience: Audience
+) -> SpeakerRequired:
+    """The one refusal a missed private connection raises, whether the call targeted an account or
+    took the provider's only one. It names whose accounts the miss holds, so the retry names that
+    member rather than guessing which of a channel's speakers to bind. It names no owner when the
+    connections carry no owner address, and none in an externally-shared channel: the refusal is
+    read back into a room another organization sits in, so it asks for a member of this workspace
+    without naming one."""
+    owners = (
+        []
+        if audience.startswith(FOREIGN_AUDIENCE_PREFIX)
+        else sorted({grant.owner_email for grant in withheld if grant.owner_email})
+    )
+    note = ""
+    if owners:
+        label = "owner" if len(owners) == 1 else "owners"
+        note = f" ({label}: {', '.join(owners)})"
+    return SpeakerRequired(
+        f"{subject} is a member's private account{note}, and this call does not carry that member"
+    )
 
 
 @dataclass(frozen=True)
@@ -817,10 +826,8 @@ class ToolContext:
                 )
             targeted = [grant for grant in withheld if grant.account_id == account_id]
             if targeted:
-                note = _owner_note(targeted, self.audience)
-                raise SpeakerRequired(
-                    f"{provider!r} account {account_id!r} is a member's private account"
-                    f"{note}, and this call does not carry that member"
+                raise _speaker_required(
+                    f"{provider!r} account {account_id!r}", targeted, self.audience
                 )
             raise ValueError(
                 f"no active {provider!r} account {account_id!r} is available to this turn"
@@ -828,11 +835,7 @@ class ToolContext:
         preferred = private or shared
         if not preferred:
             if withheld:
-                note = _owner_note(withheld, self.audience)
-                raise SpeakerRequired(
-                    f"every {provider!r} account is a member's private account"
-                    f"{note}, and this call does not carry that member"
-                )
+                raise _speaker_required(f"every {provider!r} account", withheld, self.audience)
             raise ValueError(
                 f"no {provider!r} account is available to this turn — connect one with "
                 "connect_account"

@@ -1839,8 +1839,11 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
     """A Slack channel is a shared audience, so every member speaking there can be named: a private
     connection the call cannot use is a miss `requested_by` corrects, and the refusal is
     `SpeakerRequired` naming its owner — the call carrying no member, and the call carrying one who
-    does not own it, alike. The owner's own call resolves the connection. A member's own
-    conversation names nobody else, so a miss there stays the plain refusal."""
+    does not own it, alike, and whether it targets the account or takes the provider's only one.
+    A channel shared outside the workspace asks the same way but names no member address: the
+    refusal is read back into a room another organization sits in. The owner's own call resolves
+    the connection. A member's own conversation names nobody else, so a miss there stays the plain
+    refusal."""
     workspace_id = await _workspace()
     owner_id, agent_id = await _member_agent(workspace_id)
     asker_id = uuid4()
@@ -1886,12 +1889,16 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
     direct_asker = replace(
         _turn_context(workspace_id, agent_id, conversation_id, asker_id), grants=store
     )
+    foreign = replace(channel, audience=foreign_room_audience("slack", "C0FOREIGN"))
     with ws(workspace_id), agent(agent_id):
-        for missing in (channel, channel_asker):
-            with pytest.raises(SpeakerRequired, match=owner_email):
-                await missing.connector_account("drive")
-            with pytest.raises(SpeakerRequired, match="acct-drive"):
-                await missing.connector_account("drive", "acct-drive")
+        for account_id in (None, "acct-drive"):
+            for missing in (channel, channel_asker):
+                with pytest.raises(SpeakerRequired, match=owner_email):
+                    await missing.connector_account("drive", account_id)
+            with pytest.raises(SpeakerRequired) as outside:
+                await foreign.connector_account("drive", account_id)
+            assert "@" not in str(outside.value)
+            assert "private account, and this call" in str(outside.value)
         assert await channel_owner.connector_account("drive") == "acct-drive"
         selected = await channel_owner.connector_connection("drive", "acct-drive")
         assert (selected.account_id, selected.owner_member_id) == ("acct-drive", owner_id)
@@ -1902,44 +1909,6 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
         with pytest.raises(ValueError, match="connect one with connect_account") as unconnected:
             await channel.connector_account("nobody")
         assert not isinstance(unconnected.value, SpeakerRequired)
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_channel_shared_outside_the_workspace_asks_without_naming_the_member(
-    db: None,
-) -> None:
-    """The same miss in a Slack Connect channel still asks for the member, but names no member
-    address: the refusal is read back into a room another organization sits in. The workspace's own
-    channel keeps the owner in the text, which is what a retry binds."""
-    workspace_id = await _workspace()
-    owner_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, owner_id)
-    store = GrantStore()
-    await _record(
-        store,
-        workspace_id,
-        agent_id,
-        provider="drive",
-        account_id="acct-drive",
-        host=GRANTED_HOST,
-        grantor_member_id=owner_id,
-        conversation_id=conversation_id,
-        shared=False,
-    )
-    owner_email = f"{owner_id.hex[:8]}@x.test"
-    speakerless = replace(
-        _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
-    )
-    foreign = replace(speakerless, audience=foreign_room_audience("slack", "C0FOREIGN"))
-    internal = replace(speakerless, audience=SHARED_AUDIENCE)
-    with ws(workspace_id), agent(agent_id):
-        for account_id in (None, "acct-drive"):
-            with pytest.raises(SpeakerRequired) as outside:
-                await foreign.connector_account("drive", account_id)
-            assert "@" not in str(outside.value)
-            assert "private account, and this call" in str(outside.value)
-            with pytest.raises(SpeakerRequired, match=owner_email):
-                await internal.connector_account("drive", account_id)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

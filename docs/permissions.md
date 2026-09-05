@@ -61,7 +61,8 @@ accounts are other members' private ones the miss is `SpeakerRequired` naming th
 a channel can still name the member who owns the connection. A member's own conversation names
 nobody else, so the same miss there stays the plain refusal. A channel shared outside the workspace
 is read by another organization, so its refusal asks for a member of this workspace and names no
-owner address.
+owner address. A `requested_by` that names no active member message raises the same class before
+the handler runs, so a wrong ref is answered with those refs too instead of a dead end.
 
 `speaker_member_id` and `on_behalf_of_member_id` are mutually exclusive durable encodings. Core
 decodes them once, passes the exact value through model selection, internal invocation, probes,

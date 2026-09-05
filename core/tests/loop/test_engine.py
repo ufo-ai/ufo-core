@@ -1555,10 +1555,12 @@ async def test_requested_by_is_offered_only_where_another_member_could_ask(
 async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered(
     db: None, tmp_path: Path
 ) -> None:
-    """A handler refusing for want of a member gets its error extended with the active member
-    message refs exactly where `requested_by` could have carried one — a shared conversation with
-    members speaking. A background turn has no member to name; the member's own conversation was
-    not offered the ref, so the refusal stands alone there too."""
+    """A refusal for want of a member gets its error extended with the active member message refs
+    exactly where `requested_by` could have carried one — a shared conversation with members
+    speaking. A `requested_by` the model guessed wrong is refused before the handler runs and
+    carries the same refs, so both refusals answer the retry the same way. A background turn has no
+    member to name; the member's own conversation was not offered the ref, so the refusal stands
+    alone there too."""
 
     class StrictInput(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -1568,31 +1570,40 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
 
     probe = ToolDef(name="gate_probe", description="d", input_model=StrictInput, handler=refuse)
     arrival = uuid4()
+    stale = uuid4()
     shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
     speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
     colleague = await _seat_member(shared.workspace_id, "colleague@example.com")
     founder = await _seat_member(own.workspace_id, "founder@example.com")
+    channel = replace(
+        _engine(shared, EchoModel(), tmp_path),
+        turn=shared.model_copy(update={"speaker_member_id": speaker}),
+    )
+    speaking = {
+        shared.id: ActiveMessage(member_id=speaker, rendered="mine"),
+        arrival: ActiveMessage(member_id=colleague, rendered="no, mine"),
+    }
+    refusal = "SpeakerRequired: this act requires a speaking member"
+    hint = REQUESTED_BY_HINT.format(refs=f"{shared.id}, {arrival}")
     cases = (
+        (channel, speaking, {}, refusal + hint),
         (
-            replace(
-                _engine(shared, EchoModel(), tmp_path),
-                turn=shared.model_copy(update={"speaker_member_id": speaker}),
-            ),
-            {
-                shared.id: ActiveMessage(member_id=speaker, rendered="mine"),
-                arrival: ActiveMessage(member_id=colleague, rendered="no, mine"),
-            },
+            channel,
+            speaking,
+            {"requested_by": str(stale)},
+            "SpeakerRequired: requested_by does not name an active inbound message" + hint,
         ),
         (
             _engine(own, EchoModel(), tmp_path, member_id=founder),
             {own.id: ActiveMessage(member_id=founder, rendered="mine")},
+            {},
+            refusal,
         ),
-        (_engine(background, EchoModel(), tmp_path), {}),
+        (_engine(background, EchoModel(), tmp_path), {}, {}, refusal),
     )
-    texts: list[str] = []
-    for engine, requesters in cases:
+    for engine, requesters, tool_input, expected in cases:
         engine = replace(engine, tools=ToolRegistry((probe,)))
         result = await _dispatch(
             engine,
@@ -1606,64 +1617,11 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
                 audience=engine.audience,
                 artifact_token_secret=engine.artifact_token_secret,
             ),
-            ToolUseBlock(id="gate", name="gate_probe", input={}),
+            ToolUseBlock(id="gate", name="gate_probe", input=tool_input),
             requesters,
         )
         assert result.is_error
-        assert isinstance(result.content, str)
-        texts.append(result.content)
-
-    refusal = "SpeakerRequired: this act requires a speaking member"
-    assert texts[0] == refusal + REQUESTED_BY_HINT.format(refs=f"{shared.id}, {arrival}")
-    assert texts[1] == refusal
-    assert texts[2] == refusal
-
-
-async def test_a_ref_naming_no_active_message_names_the_refs_that_do(
-    db: None, tmp_path: Path
-) -> None:
-    """A `requested_by` the model guessed wrong is refused before the handler runs, and the refusal
-    carries the same member refs a handler's own refusal does — so the retry names a live message
-    instead of guessing a second time."""
-
-    class StrictInput(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-
-    async def answer(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        raise AssertionError("a call bound to no member never reaches its handler")
-
-    probe = ToolDef(name="gate_probe", description="d", input_model=StrictInput, handler=answer)
-    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
-    speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
-    engine = replace(
-        _engine(shared, EchoModel(), tmp_path),
-        turn=shared.model_copy(update={"speaker_member_id": speaker}),
-        tools=ToolRegistry((probe,)),
-    )
-    requesters = {shared.id: ActiveMessage(member_id=speaker, rendered="mine")}
-    stale = uuid4()
-    result = await _dispatch(
-        engine,
-        ToolContext(
-            sandbox=engine.sandbox,
-            blob=engine.blob,
-            turn=engine.turn,
-            agent=engine.agent,
-            spawn=engine.spawn,
-            speaker_member_id=None,
-            audience=engine.audience,
-            artifact_token_secret=engine.artifact_token_secret,
-        ),
-        ToolUseBlock(id="gate", name="gate_probe", input={"requested_by": str(stale)}),
-        requesters,
-    )
-
-    assert result.is_error
-    assert isinstance(result.content, str)
-    assert result.content == (
-        "SpeakerRequired: requested_by does not name an active inbound message"
-        + REQUESTED_BY_HINT.format(refs=str(shared.id))
-    )
+        assert result.content == expected
 
 
 async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:

@@ -823,6 +823,16 @@ def _raised_text(tool_name: str, error: Exception) -> str:
     return BARE_RAISE_NOTICE.format(cls=type(error).__name__, tool=tool_name)
 
 
+def _speaker_hint(error: Exception, member_refs: Sequence[UUID]) -> str:
+    """What a refusal for want of a member carries beyond its own text: the active member refs a
+    retry may name. One refusal class earns it wherever the round can name a ref, so a handler's
+    refusal and a `requested_by` that names no active message are answered alike. Empty for every
+    other error, and where no ref can be named."""
+    if not isinstance(error, SpeakerRequired) or not member_refs:
+        return ""
+    return REQUESTED_BY_HINT.format(refs=", ".join(str(ref) for ref in member_refs))
+
+
 def _meter_dispatch(
     tools: ToolRegistry,
     call: ToolUseBlock,
@@ -3080,12 +3090,9 @@ class TurnEngine:
         dimensions: Mapping[str, str] | None = None,
         member_refs: tuple[UUID, ...] = (),
     ) -> _RejectedToolCall:
-        text = f"{type(error).__name__}: {error}"
-        if isinstance(error, SpeakerRequired) and member_refs:
-            text += REQUESTED_BY_HINT.format(refs=", ".join(str(ref) for ref in member_refs))
         return _RejectedToolCall(
             call=call,
-            text=text,
+            text=f"{type(error).__name__}: {error}" + _speaker_hint(error, member_refs),
             outcome="invalid_call" if isinstance(error, (ValueError, KeyError)) else "step_failed",
             error_class=type(error).__name__,
             dimensions={} if dimensions is None else dimensions,
@@ -3590,13 +3597,8 @@ class TurnEngine:
                 raise
             raise parked from error
         except Exception as error:
-            content = _raised_text(bound.call.name, error)
-            if isinstance(error, SpeakerRequired) and bound.member_refs:
-                content += REQUESTED_BY_HINT.format(
-                    refs=", ".join(str(ref) for ref in bound.member_refs)
-                )
             return _HandlerOutput(
-                content,
+                _raised_text(bound.call.name, error) + _speaker_hint(error, bound.member_refs),
                 True,
                 tool.untrusted or isinstance(error, UntrustedContentError),
                 (),
