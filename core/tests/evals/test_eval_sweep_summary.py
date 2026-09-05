@@ -33,7 +33,9 @@ def cohort(summary, monkeypatch, tmp_path) -> Path:
     return tmp_path
 
 
-def _record(root: Path, summary, excluded: tuple[str, ...]) -> None:
+def _record(
+    root: Path, summary, excluded: tuple[str, ...], provider_faults: tuple[str, ...] = ()
+) -> None:
     task = next(task for task in summary.TASKS if task.name == SUITE)
     run = {
         "id": str(uuid4()),
@@ -55,6 +57,7 @@ def _record(root: Path, summary, excluded: tuple[str, ...]) -> None:
                         "reason": "recorded",
                         "evidence": {},
                         "excluded": case in excluded,
+                        "provider_fault": case in provider_faults,
                     }
                     for case in task.cases
                 ],
@@ -85,3 +88,19 @@ def test_the_cohort_refuses_an_exclusion_it_does_not_list(summary, cohort) -> No
 
     with pytest.raises(RuntimeError, match="unexpected exclusions"):
         summary.require_comparable(cohort, smoke=False)
+
+
+def test_the_cohort_accepts_an_exclusion_the_provider_owns(summary, cohort) -> None:
+    """A provider timeout lands on whichever case it lands on, so no list can name it. The night
+    keeps its trend point and the summary names the case."""
+    _record(
+        cohort,
+        summary,
+        ("xlsx-formula-structure",),
+        provider_faults=("xlsx-formula-structure",),
+    )
+
+    summary.require_comparable(cohort, smoke=False)
+
+    assert "1 cases excluded on provider faults" in summary.render(cohort, smoke=False)
+    assert "xlsx-formula-structure" in summary.render(cohort, smoke=False)

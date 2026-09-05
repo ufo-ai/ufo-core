@@ -15,6 +15,7 @@ from evals.harness.capability import (
     CapabilityVerdict,
     EvalSeed,
     grading_statement,
+    judge_unavailable_verdict,
     linked_artifacts,
     merge_tool_calls,
     source_digest,
@@ -214,7 +215,9 @@ def _scenario_evidence(
 @dataclass(frozen=True)
 class _Trial:
     """One independent run of the case's conversation and its verdict. `infra` marks a trial whose
-    turn crashed on a transient provider fault — excluded from scoring, not counted as a failure."""
+    turn crashed on a fault outside the model's capability — excluded from scoring, not counted as a
+    failure. `provider_fault` narrows that to the transients the provider owns, which the archived
+    record carries for the nightly cohort gate."""
 
     turns: tuple[ScenarioTurn, ...]
     stopped: bool
@@ -225,6 +228,7 @@ class _Trial:
     cost_micro_usd: int = 0
     grader_evidence: JsonObject | None = None
     infra: bool = False
+    provider_fault: bool = False
     judge: tuple[CriterionVerdict, ...] = ()
     followups: tuple[TargetResult, ...] = ()
 
@@ -286,6 +290,7 @@ class _ScenarioRun:
                 reason=f"all {len(trials)} trial(s) infra-excluded (transient model faults)",
                 evidence=evidence,
                 excluded=True,
+                provider_fault=all(trial.provider_fault for trial in trials),
                 tier=self.case.tier,
             )
         passes = sum(1 for trial in scored if trial.passed)
@@ -330,7 +335,15 @@ class _ScenarioRun:
                 if not is_transient_fault(type(error).__name__):
                     raise
                 return _Trial(
-                    tuple(turns), stopped, last, False, reason, tokens, cost_micro_usd, infra=True
+                    tuple(turns),
+                    stopped,
+                    last,
+                    False,
+                    reason,
+                    tokens,
+                    cost_micro_usd,
+                    infra=True,
+                    provider_fault=True,
                 )
             if STOP_TOKEN in message:
                 stopped = True
@@ -392,6 +405,7 @@ class _ScenarioRun:
                     tokens,
                     cost_micro_usd,
                     infra=_infra_owned_result(result),
+                    provider_fault=is_transient_fault(result.error_class),
                 )
         if last is None:
             return _Trial(
@@ -419,6 +433,7 @@ class _ScenarioRun:
                     tokens,
                     cost_micro_usd,
                     infra=infra_owned_fault(type(error).__name__, reason, None),
+                    provider_fault=is_transient_fault(type(error).__name__),
                 )
             followups = returned if isinstance(returned, tuple) else (returned,)
             for index, followup in enumerate(followups):
@@ -455,6 +470,7 @@ class _ScenarioRun:
                         tokens,
                         cost_micro_usd,
                         infra=_infra_owned_result(followup),
+                        provider_fault=is_transient_fault(followup.error_class),
                         followups=followups[: index + 1],
                     )
             last = await self._capture_artifacts(last, followups[-1])
@@ -473,9 +489,26 @@ class _ScenarioRun:
                 transcript = "\n".join(
                     f"member: {turn.user_message}\nassistant: {turn.reply}" for turn in turns
                 )
-                rubric = await rubric_pass(
-                    case.user.reason_for_call, transcript, case.rubric, self.target.judge
-                )
+                try:
+                    rubric = await rubric_pass(
+                        case.user.reason_for_call, transcript, case.rubric, self.target.judge
+                    )
+                except Exception as error:
+                    if not is_transient_fault(type(error).__name__):
+                        raise
+                    unjudged = judge_unavailable_verdict(error)
+                    return _Trial(
+                        tuple(turns),
+                        stopped,
+                        last,
+                        False,
+                        unjudged.reason,
+                        tokens,
+                        cost_micro_usd,
+                        infra=True,
+                        provider_fault=True,
+                        followups=followups,
+                    )
                 judged = rubric.criteria
                 verdict = CapabilityVerdict(
                     rubric.passed, f"{verdict.reason}; {rubric.reason}", verdict.evidence

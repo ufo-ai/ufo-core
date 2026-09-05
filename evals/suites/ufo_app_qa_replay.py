@@ -312,8 +312,8 @@ def _repair_followup(fixture: ReplayFixture, turns: RepairTurns):
             else:
                 instruction = (
                     "Repair only the live deterministic issues below in "
-                    "/workspace/ufo-app/app.tsx. Read that file before exact edits. Do not change "
-                    "another file."
+                    "/workspace/ufo-app/app.tsx. Read that file before exact edits. Never use "
+                    "replace_all. Do not change another file."
                 )
         else:
             final_name = f"{fixture.name}-final-evidence.json"
@@ -349,8 +349,8 @@ def _repair_followup(fixture: ReplayFixture, turns: RepairTurns):
                     "gap, or add minWidth: 0."
                 )
             instruction = " ".join(instructions) + (
-                " Do not replace a fixed background with a theme variable or read or change "
-                "another file."
+                " Never use replace_all. Do not replace a fixed background with a theme variable "
+                "or read or change another file."
             )
         issues = [issue.model_dump(mode="json") for issue in evidence.issues]
         turns.admit()

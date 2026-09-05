@@ -4,6 +4,7 @@ only against a run of the identical suite — a changed case moves the digest.""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from json import dumps
@@ -31,6 +32,11 @@ class EvalCaseResult(BaseModel):
     reason: str
     evidence: JsonObject
     excluded: bool = False
+    provider_fault: bool = False
+    """Whether this case excluded on a provider-owned transient — a timeout, an overload, a 429 —
+    rather than on the sweep's own shape. A transient lands on whichever case the provider happened
+    to drop, so no list can name it ahead of time: the nightly cohort gate reads this flag to tell
+    a night of provider weather from a suite that quietly stopped scoring a case."""
     tier: int | None = None
 
 
@@ -217,32 +223,54 @@ def digest_payload(payload: Mapping[str, Json]) -> str:
 
 
 INFRA_ERROR_MARKERS = (
-    "402",
-    "429",
     "payment required",
     "rate limit",
     "no_more_credits",
     "no credits remaining",
     "quota",
     "service unavailable",
-    " 500",
-    " 502",
-    " 503",
     "connection",
     "timed out",
     "timeout",
 )
+INFRA_ERROR_STATUS = re.compile(r"\b(?:402|429|500|502|503)\b")
+"""An HTTP status that names an external-service failure, matched as a whole number. Matched as a
+bare substring, these digits also read out of any identifier that happens to carry them — a run
+directory, a digest, a workspace id — and exclude a case the model genuinely failed."""
 
 
 def infra_error(errors: Sequence[str]) -> str:
     """The first tool error that signals an external-service failure, or "" if none. A
-    false-positive match now UNDER-counts (drops a real capability failure from scoring) rather
+    false-positive match UNDER-counts (drops a real capability failure from scoring) rather
     than green-washing it into a pass; excluded cases stay visible in the report for audit."""
     for message in errors:
         lowered = message.lower()
-        if any(marker in lowered for marker in INFRA_ERROR_MARKERS):
+        phrase = any(marker in lowered for marker in INFRA_ERROR_MARKERS)
+        if phrase or INFRA_ERROR_STATUS.search(lowered):
             return message
     return ""
+
+
+ACCOUNT_ERROR_MARKERS = (
+    "payment required",
+    "no_more_credits",
+    "no credits remaining",
+    "quota",
+)
+ACCOUNT_ERROR_STATUS = re.compile(r"\b402\b")
+
+
+def provider_owned_error(message: str) -> bool:
+    """Whether an infra tool error names a fault the provider owns — a 429, a 5xx, a dropped
+    connection, a timeout — rather than the eval account's own spent credit or quota. It draws
+    over a tool error the line `_unclean_verdict` draws over an error class: a transient is
+    provider weather the nightly cohort gate accepts, while an account we let run dry is ours and
+    stays an unexpected exclusion."""
+    lowered = message.lower()
+    account = any(
+        marker in lowered for marker in ACCOUNT_ERROR_MARKERS
+    ) or ACCOUNT_ERROR_STATUS.search(lowered)
+    return not account and bool(infra_error((message,)))
 
 
 TRANSIENT_ERROR_CLASSES = frozenset(

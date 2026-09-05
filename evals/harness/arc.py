@@ -24,7 +24,13 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from evals.harness.capability import WorkspaceFile, source_digest
-from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_owned_fault
+from evals.harness.harness import (
+    EvalCaseResult,
+    Json,
+    JsonObject,
+    infra_owned_fault,
+    is_transient_fault,
+)
 from evals.harness.target import CapabilityTarget
 from ufo.db import workspace_tx
 from ufo.runtime.workspace import ws_current
@@ -206,6 +212,7 @@ class ArcRun:
                         "openingErrorClass": opening.error_class or "",
                     },
                     excluded=infra_owned_fault(opening.error_class, opening.failure_reason, status),
+                    provider_fault=is_transient_fault(opening.error_class),
                 )
             await self._quiesce(conversation_id)
         finally:

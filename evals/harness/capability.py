@@ -28,11 +28,13 @@ from evals.harness.harness import (
     infra_error,
     infra_owned_fault,
     is_transient_fault,
+    provider_owned_error,
 )
 from evals.harness.judge import (
     JUDGE_REVISION,
     MAX_ANSWER_CHARS,
     CriterionVerdict,
+    JudgeLeg,
     RubricVerdict,
     rubric_pass,
     visual_rubric_pass,
@@ -70,12 +72,15 @@ if TYPE_CHECKING:
 class CapabilityVerdict:
     """`excluded` marks a sample the harness could not put a capability question to — its
     environment was not the one the case describes. Neither pass nor fail: counting it as a failure
-    charges the model for the harness, so it leaves the case's denominator instead."""
+    charges the model for the harness, so it leaves the case's denominator instead.
+    `provider_fault` narrows that to an exclusion the provider owns, which the archived record
+    carries so the nightly cohort gate can accept it."""
 
     passed: bool
     reason: str
     evidence: JsonObject = field(default_factory=dict)
     excluded: bool = False
+    provider_fault: bool = False
 
 
 @dataclass(frozen=True)
@@ -616,6 +621,8 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 reason=f"infra-excluded (web unavailable): {broke[:120]}",
                 evidence=evidence,
                 excluded=True,
+                provider_fault=provider_owned_error(broke)
+                or all(sample.verdict.provider_fault for sample in samples),
             )
     if not scored_indexes:
         return EvalCaseResult(
@@ -624,6 +631,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
             reason=verdict.reason,
             evidence=evidence,
             excluded=True,
+            provider_fault=all(sample.verdict.provider_fault for sample in samples),
         )
     passed = bool(winning_indexes)
     note = f" ({excluded_samples} infra-excluded)" if excluded_samples else ""
@@ -665,7 +673,8 @@ def _unclean_verdict(
         )
     ):
         return CapabilityVerdict(False, result.failure_reason)
-    if is_transient_fault(result.error_class):
+    transient = is_transient_fault(result.error_class)
+    if transient:
         owner = "the provider owns this fault"
     elif result.error_class == "CredentialValueInvalid" or provider_configuration:
         owner = "the eval configuration owns this fault"
@@ -673,7 +682,12 @@ def _unclean_verdict(
         owner = "the eval runner owns this fault"
     else:
         owner = "the harness's own wait expired on a working turn"
-    return CapabilityVerdict(False, f"{result.failure_reason}; {owner}", excluded=True)
+    return CapabilityVerdict(
+        False,
+        f"{result.failure_reason}; {owner}",
+        excluded=True,
+        provider_fault=transient,
+    )
 
 
 async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:
@@ -783,21 +797,45 @@ async def _sample_capability(case: CapabilityCase, target: CapabilityTarget) -> 
             CapabilityVerdict(False, "semantic rubric requires a model judge"),
             result.trajectory,
         )
+    try:
+        verdicts = await _rubric_verdicts(case, result.output, target.judge)
+    except Exception as error:
+        if not is_transient_fault(type(error).__name__):
+            raise
+        return CapabilitySample(
+            result.output,
+            judge_unavailable_verdict(error),
+            result.trajectory,
+        )
+    reason = "; ".join((deterministic.reason, *(verdict.reason for verdict in verdicts)))
+    return CapabilitySample(
+        result.output,
+        CapabilityVerdict(
+            deterministic.passed and all(verdict.passed for verdict in verdicts),
+            reason,
+            deterministic.evidence,
+        ),
+        result.trajectory,
+        judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),
+    )
+
+
+async def _rubric_verdicts(
+    case: CapabilityCase, output: CapabilityOutput, judge: JudgeLeg
+) -> tuple[RubricVerdict, ...]:
     verdicts: list[RubricVerdict] = []
     if case.rubric:
-        answer = result.output.response
+        answer = output.response
         if case.answer_spans_artifacts:
-            answer = _answer_spanning_artifacts(answer, result.output.artifacts)
-        verdicts.append(await rubric_pass(case.message, answer, case.rubric, target.judge))
+            answer = _answer_spanning_artifacts(answer, output.artifacts)
+        verdicts.append(await rubric_pass(case.message, answer, case.rubric, judge))
     if case.artifact_rubric:
         if case.written_report:
-            markdown = written_markdown(result.output, case.written_report)
+            markdown = written_markdown(output, case.written_report)
             missing = f"no written Markdown report matching {case.written_report} to judge"
         else:
             markdown = tuple(
-                artifact
-                for artifact in result.output.artifacts
-                if artifact.name.lower().endswith(".md")
+                artifact for artifact in output.artifacts if artifact.name.lower().endswith(".md")
             )
             missing = "no shared Markdown artifact to judge"
         if not markdown:
@@ -811,23 +849,25 @@ async def _sample_capability(case: CapabilityCase, target: CapabilityTarget) -> 
                 verdicts.append(RubricVerdict(False, "the Markdown report is not UTF-8"))
             else:
                 verdicts.append(
-                    await rubric_pass(case.message, answer, case.artifact_rubric, target.judge)
+                    await rubric_pass(case.message, answer, case.artifact_rubric, judge)
                 )
     if case.visual_rubric:
-        pages = _page_images(result.output.artifacts)
-        verdicts.append(
-            await visual_rubric_pass(case.message, pages, case.visual_rubric, target.judge)
-        )
-    reason = "; ".join((deterministic.reason, *(verdict.reason for verdict in verdicts)))
-    return CapabilitySample(
-        result.output,
-        CapabilityVerdict(
-            deterministic.passed and all(verdict.passed for verdict in verdicts),
-            reason,
-            deterministic.evidence,
-        ),
-        result.trajectory,
-        judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),
+        pages = _page_images(output.artifacts)
+        verdicts.append(await visual_rubric_pass(case.message, pages, case.visual_rubric, judge))
+    return tuple(verdicts)
+
+
+def judge_unavailable_verdict(error: BaseException) -> CapabilityVerdict:
+    """The verdict for a sample whose judge call died on a provider transient. The target answered,
+    so the answer is real evidence, but no grade was put to it: scoring it would charge the model
+    for the judge's transport, and letting the raise climb ended the whole shard, taking every
+    suite still queued behind it out of the night's cohort. It leaves the denominator as the
+    provider's fault, which the nightly gate accepts."""
+    return CapabilityVerdict(
+        False,
+        f"judge raised {type(error).__name__}; the provider owns this fault",
+        excluded=True,
+        provider_fault=True,
     )
 
 

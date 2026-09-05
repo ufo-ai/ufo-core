@@ -110,7 +110,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("problem_report", problem_report.CASES),
     capability_task("notify_raise", notify_raise.CASES),
-    capability_task("notify_triage", notify_triage.CASES, agent=notify_triage.AGENT),
+    capability_task("notify_triage", notify_triage.CASES, serial=True, agent=notify_triage.AGENT),
     capability_task(
         "site_restart",
         site_restart.CASES,

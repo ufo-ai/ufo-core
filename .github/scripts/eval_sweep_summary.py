@@ -170,11 +170,31 @@ def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
             f"{' '.join(case.reason.split())[:REASON_LIMIT]}"
             for suite, model, case in failures
         ]
+    provider_faults = tuple(
+        (report.name, report.target_model, case)
+        for _, report in reports
+        for case in report.cases
+        if case.excluded and case.provider_fault
+    )
+    if provider_faults:
+        lines += ["", f"## {len(provider_faults)} cases excluded on provider faults", ""]
+        lines += [
+            f"- `{suite}` / `{model or NOT_RECORDED}` / `{case.name}` — "
+            f"{' '.join(case.reason.split())[:REASON_LIMIT]}"
+            for suite, model, case in provider_faults
+        ]
     return "\n".join(lines) + "\n"
 
 
 def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) -> None:
-    """Require one complete fixed case cohort before the sweep becomes a trend point."""
+    """Require one complete fixed case cohort before the sweep becomes a trend point.
+
+    An exclusion the record attributes to the provider — a timeout, an overload, a 429 — is the
+    night's weather, not cohort drift: it lands on whichever case the provider dropped, so listing
+    it ahead of time is impossible and refusing it costs the sweep its trend point over a fault the
+    harness already decided not to score. `render` names those cases in the summary instead. Every
+    other exclusion still has to be one this file lists.
+    """
     planned_runs = _planned_runs(smoke, memory_ingestion)
     planned = tuple(suite for _, suite, _ in planned_runs)
     expected_counts = {task.name: len(task.cases) for task in TASKS if task.name in set(planned)}
@@ -210,13 +230,24 @@ def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) 
         for case in report.cases
         if case.excluded
     )
+    provider_faults = frozenset(
+        (report.name, case.name, report.target_model or NOT_RECORDED)
+        for report in reports
+        for case in report.cases
+        if case.excluded and case.provider_fault
+    )
     expected_exclusions = _sweep_exclusions(planned_runs, EXPECTED_FULL_EXCLUSIONS, smoke)
     accepted_exclusions = (
         *expected_exclusions,
         *_sweep_exclusions(planned_runs, TOLERATED_FULL_EXCLUSIONS, smoke),
     )
     unexpected_exclusions = sorted(
-        {row for row in excluded if not any(_matches(item, row) for item in accepted_exclusions)}
+        {
+            row
+            for row in excluded
+            if row not in provider_faults
+            and not any(_matches(item, row) for item in accepted_exclusions)
+        }
     )
     absent_exclusions = tuple(
         item for item in expected_exclusions if not any(_matches(item, row) for row in excluded)

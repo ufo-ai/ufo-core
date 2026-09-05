@@ -29,6 +29,7 @@ from evals.harness.capability import (
     ToolInvocation,
 )
 from evals.harness.harness import WAIT_EXPIRED
+from evals.harness.judge import JudgeLeg
 from evals.harness.registry import scenario_task
 from evals.harness.scenario import (
     MAX_SIMULATOR_REPLY_CHARS,
@@ -268,6 +269,7 @@ def _target(
     blob: FilesystemBlobStore,
     worker: ScriptedWorker,
     member: ScriptedMember,
+    judge: JudgeLeg | None = None,
 ) -> InProcessTarget:
     ctx = context_for(EXTENSION, frozenset(), blob=blob, invoker=worker)
     return InProcessTarget(
@@ -275,6 +277,7 @@ def _target(
         agent_id=agent_id,
         conversations=DbConversations(workspace_id, worker),
         outcome=CorpusOutcome(ctx),
+        judge=judge,
         simulator=member,
         blob=blob,
     )
@@ -764,6 +767,62 @@ async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path)
     ]
 
 
+async def test_a_followup_that_ends_on_a_transient_is_the_providers_fault(
+    db: None, tmp_path
+) -> None:
+    """A followup turn crashed on a provider overload excludes the case. The archived record has to
+    say the provider owns it, or the nightly cohort gate reds on provider weather."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="Application created."),),
+            (Message(role="assistant", content="..."),),
+        ),
+        statuses=("done", "failed"),
+        error_classes=("", "OverloadedError"),
+    )
+    member = ScriptedMember(("Create an application.", STOP_TOKEN))
+
+    async def followup(outcome: ScenarioOutcome, target: CapabilityTarget):
+        async with workspace_tx() as connection:
+            conversation_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one()
+        return await target.invoke(
+            conversation_id,
+            agent_id,
+            "Build the homepage.",
+            "homepage-seed",
+            authority=WORKSPACE_AUTHORITY,
+            as_scheduled=True,
+        )
+
+    case = ScenarioCase(
+        "overloaded-creation-journey",
+        _SUM_USER,
+        _sum_grader,
+        max_turns=2,
+        followup=followup,
+    )
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert not result.passed
+    assert result.excluded
+    assert result.provider_fault
+
+
 async def test_scenario_followup_exception_retains_the_completed_conversation(
     db: None, tmp_path
 ) -> None:
@@ -1057,6 +1116,7 @@ async def test_all_transient_trials_exclude_the_case(db: None, tmp_path) -> None
         )
 
     assert result.excluded
+    assert result.provider_fault
     assert not result.passed
     assert "all 2 trial(s) infra-excluded" in result.reason
 
@@ -1153,3 +1213,35 @@ async def test_genuine_simulator_error_propagates(db: None, tmp_path) -> None:
     with ws(workspace_id):
         with pytest.raises(ValueError, match="a real bug"):
             await run_scenario_case(case, _target(workspace_id, agent_id, blob, worker, member))
+
+
+async def test_a_judge_transient_excludes_the_trial_as_the_providers_fault(
+    db: None, tmp_path
+) -> None:
+    """The conversation finished and its grader passed; the judge's transport then dropped. The
+    trial leaves the denominator as the provider's fault instead of raising out of the shard."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob, workspace_id, replies=((Message(role="assistant", content="The total is 223."),),)
+    )
+    member = ScriptedMember(("Total my two purchases.", STOP_TOKEN))
+
+    class Judge:
+        async def complete(self, _system: str, _messages: tuple[Message, ...]) -> str:
+            raise httpx.ConnectError("judge transport dropped")
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        return CapabilityVerdict("223" in outcome.replies[-1], "totalled")
+
+    case = ScenarioCase("judge-weather", _SUM_USER, grade, max_turns=2, rubric=("Totals.",))
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member, judge=Judge())
+        )
+
+    assert result.excluded
+    assert result.provider_fault
+    assert "ConnectError" in result.evidence["attempts"][0]["reason"]
