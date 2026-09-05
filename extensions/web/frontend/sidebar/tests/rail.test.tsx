@@ -907,6 +907,31 @@ test("a row whose title is the whole of it is no tooltip trigger", async () => {
   const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
   expect(railRow.getAttribute("data-state")).toBeNull();
   expect(railRow.getAttribute("aria-describedby")).toBeNull();
+  expect(railRow.closest("li")?.getAttribute("aria-describedby")).toBeNull();
+});
+
+test("the fact stands beside the whole row, so it clears the pin and the options menu", async () => {
+  const foreign = {
+    ...CHAT_ROW,
+    conversation_id: "77777777-7777-4777-8777-777777777777",
+    agent_id: SECOND_ID,
+    agent_name: "second",
+    title: "An ops question",
+  };
+  wire({ ...chatsOnWire([foreign]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const title = await screen.findByRole("button", { name: /An ops question/ });
+  const row = title.closest("li")!;
+  fireEvent.focus(title);
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.textContent).toBe("Second");
+  /* The row is the box the tooltip is set beside; the title ends where the pin starts, and a
+     tooltip anchored there would stand over the pin and the menu. */
+  expect(row.getAttribute("aria-describedby")).toBe(tip.getAttribute("id"));
+  expect(title.getAttribute("aria-describedby")).toBeNull();
+  expect(within(row).getByRole("button", { name: "Pin" })).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "Thread options" })).toBeTruthy();
 });
 
 test("a conversation another member spoke stands at the foot and names them", async () => {

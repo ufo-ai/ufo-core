@@ -1651,6 +1651,10 @@ function RailList({
  *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. The
  *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read.
  *
+ *  The whole row holds the pointer, not the title alone. The title ends where the pin and the row's
+ *  menu begin, so a tooltip set beside the title stands over those two controls; set beside the row
+ *  it clears the sidebar's edge, and the member reads the fact with the pin still in reach.
+ *
  *  The title itself is the other half of that bargain. The rail is one column wide and a
  *  conversation is named in a sentence, so the row states as much of the title as it holds and
  *  ellipses the rest — until the member puts the pointer or the keyboard on it, when the title
@@ -1703,19 +1707,19 @@ function RailRow({
       <SurfaceGlyph surface={surface} />
     </SidebarPress>
   );
-  return (
+  const row = (
     <SidebarRow current={current}>
-      {facts ? (
-        <Tooltip>
-          <TooltipTrigger asChild>{button}</TooltipTrigger>
-          <TooltipContent>{facts}</TooltipContent>
-        </Tooltip>
-      ) : (
-        button
-      )}
+      {button}
       <ThreadPin pinned={pinned} onPin={onPin} />
       <RailRowActs archived={archived} onArchive={onArchive} />
     </SidebarRow>
+  );
+  if (!facts) return row;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{row}</TooltipTrigger>
+      <TooltipContent>{facts}</TooltipContent>
+    </Tooltip>
   );
 }
 
