@@ -1126,9 +1126,11 @@ class SyncDriver:
         status and URL of the request that drew it, query dropped, bounded, followed by the reason
         the response's own `errors` array names (`response_fault`, which reads that array and
         nothing else of the body) so a refused request says which part of it was refused; a
-        `StreamFault` renders the reason the backend authored for it, and a rejected model renders
-        the field paths and rules that rejected it, never the values; any other class is named by
-        `error_class` alone. The log goes first and each emission is suppressed on its own: this
+        `StreamFault` renders the reason the backend authored for it, a `ProxyError` the reason the
+        proxying hop authored (a broker transport's, or httpx's own — the provider's payload never
+        reaches either), and a rejected model renders the field paths and rules that rejected it,
+        never the values; any other class is named by `error_class` alone. The log goes first and
+        each emission is suppressed on its own: this
         sits on the failure path, where a telemetry fault would replace the error it exists to
         report and strand the claim the release is about to free, and where a fault reaching the
         collector would leave a count with nothing to search."""
@@ -1145,6 +1147,8 @@ class SyncDriver:
                     fault = f"{request}: {reason}" if reason else request
                 case StreamFault():
                     fault = error.reason
+                case httpx.ProxyError():
+                    fault = str(error)
                 case ValidationError():
                     fault = validation_fault(error)
                 case _:

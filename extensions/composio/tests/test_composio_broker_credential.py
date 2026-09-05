@@ -72,6 +72,66 @@ async def test_composio_broker_yields_a_transport_that_proxies_provider_http(
     assert response.json() == body
 
 
+DIAL_FAULT = (
+    "Connection failed to https://app.asana.com/api/1.0/workspaces?limit=100: fetch failed. "
+    "Please verify the endpoint is accessible."
+)
+
+
+@pytest.mark.parametrize(
+    ("proxy_answer", "reason"),
+    [
+        (
+            lambda: httpx.Response(400, json={"error": {"message": DIAL_FAULT}}),
+            f"composio proxy-execute 400: {DIAL_FAULT}",
+        ),
+        (
+            lambda: httpx.Response(502, text="<html>Bad Gateway</html>"),
+            "composio proxy-execute 502: <html>Bad Gateway</html>",
+        ),
+    ],
+)
+async def test_composio_broker_transport_raises_its_own_failure_as_a_proxy_error(
+    proxy_answer: Callable[[], httpx.Response], reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A status of 400 or more on the proxy-execute response is Composio's own — the provider's
+    status rides inside a 200 payload — so the transport raises it as the transport fault it is,
+    naming the status and Composio's reason, and never hands it through as the provider's answer.
+    An `httpx.ProxyError` is a `TransportError`, which the source framework's retry envelope
+    retries; a provider 400 it does not, and the fault behind this test ended a run on every dial
+    Composio dropped."""
+    workspace_id = uuid4()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/connected_accounts/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "id": ACCOUNT,
+                    "user_id": owner,
+                    "status": "ACTIVE",
+                    "toolkit": {"slug": "asana"},
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith(
+            composio_proxy.PROXY_EXECUTE_PATH
+        ):
+            return proxy_answer()
+        return httpx.Response(404, json={})
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+
+    credential = await ComposioBroker().credential(workspace_id, "asana", ACCOUNT)
+    async with httpx.AsyncClient(base_url=ASANA_BASE, transport=credential.transport) as http:
+        with pytest.raises(httpx.TransportError) as raised:
+            await http.get("/workspaces")
+
+    assert isinstance(raised.value, httpx.ProxyError)
+    assert str(raised.value) == reason
+
+
 SHEETS_ACCOUNT = "ca_googlesheets_1"
 SHEETS_BASE = "https://sheets.googleapis.com/v4"
 SHEET_RANGES = ["'Summary'", "'Q1 2026'", "'Owner''s View'"]

@@ -46,6 +46,7 @@ from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.indexing import TextChunker
+from ufo.runtime.sources import rest
 from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
@@ -318,8 +319,13 @@ async def _add_member(state: State) -> tuple[UUID, UUID]:
     return member_id, conversation_id
 
 
-def _composio_transport(workspace_id: UUID) -> httpx.MockTransport:
+def _composio_transport(workspace_id: UUID, *, dial_faults: int = 0) -> httpx.MockTransport:
+    """Composio mocked: the connected-account read names `workspace_id`'s broker user, and
+    proxy-execute answers the Asana workspaces page — after answering its own 400 `Connection
+    failed` to the first `dial_faults` calls, the shape Composio gives a dial to the provider that
+    failed on its side."""
     owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+    faults_left = [dial_faults]
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and "/connected_accounts/" in request.url.path:
@@ -336,6 +342,17 @@ def _composio_transport(workspace_id: UUID) -> httpx.MockTransport:
             payload = json.loads(request.content)
             assert payload["connected_account_id"] == ASANA_ACCOUNT
             assert httpx.URL(payload["endpoint"]).path.endswith("/workspaces")
+            if faults_left[0] > 0:
+                faults_left[0] -= 1
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": f"Connection failed to {payload['endpoint']}: fetch failed. "
+                            "Please verify the endpoint is accessible."
+                        }
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
@@ -631,6 +648,53 @@ async def _klaviyo_listener(seen: list[tuple[str, dict[str, str]]]) -> asyncio.S
         writer.close()
 
     return await asyncio.start_server(answer, "127.0.0.1", 0)
+
+
+async def test_a_brokered_run_survives_the_broker_failing_to_reach_the_provider(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composio's dial to the provider fails on one page request and the run still lands the page:
+    the transport raises the broker's own 400 as a transport fault, the connector's retry envelope
+    re-asks, and the row ends the run clean. Handed through as the provider's 400, the same answer
+    ended the run with nothing written and a failure on the row — the fault a multi-hour fan-out met
+    on every run."""
+    monkeypatch.setattr(rest, "RETRY_INITIAL_DELAY_SECONDS", 0.0)
+    state = await _state()
+    grants = GrantStore()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    client = composio.ComposioClient(
+        api_key="test", transport=_composio_transport(state.workspace_id, dial_faults=1)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    connectors = _registry(broker_manifest, "asana", _selected_fallback(store, broker_manifest))
+    await _register_grant(state, grants, "asana", ASANA_ACCOUNT, "app.asana.com")
+    context = _context(state, grants, connectors)
+
+    recalled, _ = await _sync_and_search(
+        state,
+        context,
+        "asana",
+        ASANA_ACCOUNT,
+        "workspaces",
+        "orbital launch workspace",
+        database_url,
+        tmp_path,
+    )
+
+    assert "orbital launch workspace" in recalled.lower()
+    async with workspace_tx() as connection:
+        errors = (
+            await connection.execute(
+                sa.select(tables.source.c.consecutive_errors).where(
+                    tables.source.c.workspace_id == state.workspace_id
+                )
+            )
+        ).scalar_one()
+    assert errors == 0
 
 
 async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_installed(

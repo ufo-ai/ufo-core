@@ -1830,6 +1830,26 @@ async def test_a_failing_source_is_isolated_and_released(
     assert missing_row["next_sync_at"] > before  # backed off, won't re-fail every lease
 
 
+async def test_a_failed_run_records_the_proxying_hops_own_reason(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broker transport that could not reach the provider raises `httpx.ProxyError` carrying the
+    reason it authored, and the failure record renders that reason as the fault — the way it renders
+    a `StreamFault` — so the alert's reader learns which hop failed and on what, not the class
+    alone. The provider's payload never rides in a proxy-layer error, which keeps it renderable."""
+    workspace_id = await _workspace()
+    await _seed_scripted_source(workspace_id, None)
+    reason = "composio proxy-execute 400: Connection failed to https://api.example.com/v1/items"
+    driver, _ = _scripted_driver([httpx.ProxyError(reason)], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        await _sync(driver)
+
+    (record,) = [record for record in caplog.records if record.message == "source_sync.failed"]
+    assert record.ufo["error_class"] == "ProxyError"
+    assert record.ufo["provider_fault"] == reason
+
+
 SCRIPTED_BACKEND = "scripted"
 
 
