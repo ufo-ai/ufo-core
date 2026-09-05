@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconBrandSlack,
@@ -15,11 +15,7 @@ import {
   IconMoon,
   IconPlug,
   IconSun,
-  IconDots,
-  IconPin,
-  IconPinFilled,
   IconTerminal2,
-  IconUserPlus,
   IconUsers,
   IconX,
 } from "@tabler/icons-react";
@@ -34,7 +30,6 @@ import {
 } from "@/components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
 import {
   Collapsible,
   CollapsibleContent,
@@ -43,14 +38,7 @@ import {
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AgentSetup } from "@/views/AgentSetup";
 
 import { Agents, AppsIndex } from "@/views/Agents";
@@ -79,18 +67,11 @@ import {
   surfaceWord,
   useViewer,
 } from "@/lib/audience";
-import { postKindAction, SIGN_OUT_PATH } from "@/lib/api";
+import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
-import {
-  Loading,
-  OutcomeNotice,
-  QUIET,
-  outcomeNotice,
-  usePanelRead,
-  type NoticeState,
-} from "@/kernel/panel";
+import { Loading, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
@@ -109,16 +90,8 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso, type RailGroup } from "@/lib/rail";
 import {
-  ARCHIVED_CHATS,
-  RAIL_SHOWN_OPTIONS,
-  railGroups,
-  railShut,
-  stampIso,
-  type RailGroup,
-} from "@/lib/rail";
-import {
-  archiveChat,
   foldSidebar,
   pickAppsExpanded,
   pickPinned,
@@ -126,8 +99,6 @@ import {
   pickRailShown,
   pickRailShut,
   pickRailSort,
-  pickRailView,
-  pinChat,
   quietRail,
   railActivity,
   railFounded,
@@ -536,7 +507,6 @@ function AccountMenu({ member }: { member: Member }) {
 
 const APPS = "Apps";
 const CHATS = "Chats";
-const ARCHIVE = ARCHIVED_CHATS;
 const CHANNELS = "Channels";
 const NEW_CHAT = "New chat";
 
@@ -640,17 +610,39 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
   return <IconDeviceDesktop className={GLYPH} aria-hidden />;
 }
 
-/** The member at the foot of the sidebar, and everything the workspace lets them do to their own
- *  session: the channels they reach it from, the palette it is drawn in, and the way back out. They
- *  stand behind the pill rather than beside it as a row of marks — a member reads one name they
- *  recognise, their own, and finds the three acts under it, instead of scanning glyphs for the one
- *  they meant.
- *
- *  The dot on the avatar states that a channel this deploy offers is still unconnected, because a
- *  fact worth acting on cannot wait behind a press. The channels read stands at the shell's own
- *  cadence and is taken again when the dialog closes, which is when a connect made inside it has
- *  landed. A row this deploy does not offer is no missing channel. */
-function MemberMenu({
+function SchemePick({ collapsed }: { collapsed: boolean }) {
+  const scheme = useScheme();
+  return (
+    <DropdownMenu>
+      <SidebarTooltip collapsed={collapsed} label="Theme">
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Theme"
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
+          >
+            <SchemeGlyph scheme={scheme} />
+          </button>
+        </DropdownMenuTrigger>
+      </SidebarTooltip>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
+          {SCHEME_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The channels a member reaches the workspace from, held behind the foot of the sidebar: the dot
+ *  states that one of the three is still unconnected, and the dialog is where they connect it. The
+ *  read stands at the shell's own cadence and is taken again when the dialog closes, which is when
+ *  a connect made inside it has landed. A row this deploy does not offer is no missing channel. */
+function ChannelsPick({
   collapsed,
   agent,
   member,
@@ -659,8 +651,6 @@ function MemberMenu({
   agent: Agent | null;
   member: Member;
 }) {
-  const scheme = useScheme();
-  const host = useDrawerHost();
   const [open, setOpen] = useState(false);
   const [toast, setToast] = useState(SILENT);
   const [reloads, setReloads] = useState(0);
@@ -671,75 +661,22 @@ function MemberMenu({
     state.payload.surfaces.some((row) => row.offered && !row.connected);
   return (
     <>
-      <DropdownMenu>
-        <SidebarTooltip collapsed={collapsed} label={member.email}>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label={member.email}
-              className={cn(
-                "flex min-h-(--size-row) w-full items-center gap-sm rounded-row border-0 px-sm",
-                "bg-transparent text-left text-inherit hover:bg-fill data-[state=open]:bg-fill",
-                collapsed && "w-auto justify-center px-2xs",
-              )}
-            >
-              <span className="relative shrink-0">
-                <Avatar>
-                  <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-                </Avatar>
-                {missing ? (
-                  <span
-                    aria-hidden
-                    className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
-                  />
-                ) : null}
-              </span>
-              <span className={cn("flex min-w-0 flex-1 flex-col", collapsed && "hidden")}>
-                <span className="truncate text-label">{member.email}</span>
-                <span className="text-small text-ink-soft">
-                  {member.admin ? "Admin" : "Member"}
-                </span>
-              </span>
-            </button>
-          </DropdownMenuTrigger>
-        </SidebarTooltip>
-        <DropdownMenuContent side="top" align="start" container={host}>
-          <DropdownMenuItem onSelect={() => setOpen(true)}>
-            <span className="flex items-center gap-sm">
-              <IconBroadcast className={GLYPH} aria-hidden />
-              {CHANNELS}
-            </span>
-            {missing ? (
-              <span aria-hidden className="size-sm shrink-0 rounded-full bg-attention-ink" />
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger
-              value={SCHEME_OPTIONS.find((option) => option.scheme === scheme)?.label}
-            >
-              <span className="flex items-center gap-sm">
-                <SchemeGlyph scheme={scheme} />
-                Theme
-              </span>
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
-                {SCHEME_OPTIONS.map((option) => (
-                  <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
-                    {option.label}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuItem onSelect={signOut}>
-            <span className="flex items-center gap-sm">
-              <IconLogout className={GLYPH} aria-hidden />
-              Sign out
-            </span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <SidebarTooltip collapsed={collapsed} label={CHANNELS}>
+        <button
+          type="button"
+          aria-label={CHANNELS}
+          onClick={() => setOpen(true)}
+          className="relative rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
+        >
+          <IconBroadcast className={GLYPH} aria-hidden />
+          {missing ? (
+            <span
+              aria-hidden
+              className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
+            />
+          ) : null}
+        </button>
+      </SidebarTooltip>
       {open && agent ? (
           <Dialog
             open
@@ -768,103 +705,6 @@ function MemberMenu({
       ) : null}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>
-  );
-}
-
-const INVITE = "Invite people";
-
-/** The workspace's one act on people, standing as its own row under the member's pill: an address
- *  is typed and that person is a member of this workspace. The act is a destination rather than a
- *  mark, so the sidebar names it in words, and what it opens is a dialog — typing a colleague's
- *  address is a piece of work the member finishes before going back to their own.
- *
- *  Only an admin is drawn the row. `add_member` is an admin's act and the kind refuses anyone else,
- *  so a control offered to every member would be a control that mostly fails; the roster on the
- *  workspace screen is where a member reads who is here. */
-function InviteAct({ collapsed, agent }: { collapsed: boolean; agent: Agent | null }) {
-  const [open, setOpen] = useState(false);
-  if (!agent) return null;
-  return (
-    <ul className="m-0 flex list-none flex-col gap-px p-0">
-      <NavRow
-        icon={<IconUserPlus className={GLYPH} aria-hidden />}
-        current={false}
-        collapsed={collapsed}
-        label={INVITE}
-        onClick={() => setOpen(true)}
-      />
-      <Dialog open={open} onOpenChange={setOpen}>
-        {open ? <InviteDialog agent={agent} /> : null}
-      </Dialog>
-    </ul>
-  );
-}
-
-/** The invite itself: one field, one tick, one act. The dialog carries the outcome the lane
- *  answered in the member's own words — the address landed, or why it did not — and holds open
- *  after a landed invite with the field cleared, because the reason a workspace invites one person
- *  is usually that it is inviting three. */
-function InviteDialog({ agent }: { agent: Agent }) {
-  const [email, setEmail] = useState("");
-  const [admin, setAdmin] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
-
-  async function invite(event: FormEvent) {
-    event.preventDefault();
-    const address = email.trim();
-    if (busy || !address) return;
-    setBusy(true);
-    const outcome = await postKindAction(agent.id, "member", "add_member", {
-      email: address,
-      admin,
-    });
-    setBusy(false);
-    setNotice(outcomeNotice(outcome));
-    if (outcome.applied) setEmail("");
-  }
-
-  return (
-    <DialogContent aria-label={INVITE}>
-      <DialogHeader>
-        <DialogTitle>{INVITE}</DialogTitle>
-        <DialogDescription>
-          The address is sent a way in, and that person works in this workspace.
-        </DialogDescription>
-      </DialogHeader>
-      <OutcomeNotice state={notice} />
-      <form id="invite-member" onSubmit={invite} className="flex flex-col items-start gap-sm">
-        <Input
-          autoFocus
-          type="email"
-          required
-          aria-label="Email"
-          placeholder="email@work.com"
-          className="w-full max-w-none"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-        />
-        <label className="flex items-center gap-xs text-ui">
-          <input
-            type="checkbox"
-            checked={admin}
-            onChange={(event) => setAdmin(event.target.checked)}
-          />
-          Admin
-        </label>
-      </form>
-      <DialogFooter>
-        <Button
-          type="submit"
-          form="invite-member"
-          variant="send"
-          busy={busy}
-          disabled={!email.trim()}
-        >
-          Send invite
-        </Button>
-      </DialogFooter>
-    </DialogContent>
   );
 }
 
@@ -1081,18 +921,33 @@ function WorkspaceSidebar({
           onClick={() => placeWorkspace(tabs[0], {}, "push")}
         />
       </ul>
-      {/* The foot is the member and the one act they do to other people. The pill holds what they
-          do to their own session, and the invite stands under it as a row of its own — a control a
-          member reaches for once a week is named in words, not left as a glyph beside their
-          address. */}
       <footer
         className={cn(
-          "flex shrink-0 flex-col gap-px px-sm",
-          collapsed && "items-center justify-center",
+          "flex shrink-0 items-center gap-sm px-lg",
+          collapsed && "flex-col justify-center px-sm",
         )}
       >
-        <MemberMenu collapsed={collapsed} agent={mainAgent} member={member} />
-        {member.admin ? <InviteAct collapsed={collapsed} agent={mainAgent} /> : null}
+        <SidebarTooltip collapsed={collapsed} label={member.email}>
+          <Avatar>
+            <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
+          </Avatar>
+        </SidebarTooltip>
+        <span className={cn("flex min-w-0 flex-1 flex-col", collapsed && "hidden")}>
+          <span className="truncate text-label">{member.email}</span>
+          <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
+        </span>
+        <ChannelsPick collapsed={collapsed} agent={mainAgent} member={member} />
+        <SchemePick collapsed={collapsed} />
+        <SidebarTooltip collapsed={collapsed} label="Sign out">
+          <button
+            type="button"
+            aria-label="Sign out"
+            onClick={signOut}
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
+          >
+            <IconLogout className={GLYPH} aria-hidden />
+          </button>
+        </SidebarTooltip>
       </footer>
     </nav>,
   );
@@ -1426,21 +1281,11 @@ function NotShared() {
  *  the other leaves it standing — the surfaces are read as a set, and the rail adjusts behind the
  *  menu while the member reads what each tick did. */
 function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: boolean) => void }) {
-  const { sort, shown, view } = useRail();
+  const { sort, shown } = useRail();
   const host = useDrawerHost();
   return (
-    <SectionHead label={view === "archive" ? ARCHIVE : CHATS} shut={shut} onShut={onShut}>
+    <SectionHead label={CHATS} shut={shut} onShut={onShut}>
       <DropdownMenuContent side="right" align="start" container={host}>
-        {/* The archive is a place the same rail is read in rather than a filter over it, so the
-            member goes there and comes back on one pick. */}
-        <DropdownMenuLabel>Read</DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={view}
-          onValueChange={(value) => pickRailView(value === "archive" ? "archive" : "chats")}
-        >
-          <DropdownMenuRadioItem value="chats">{CHATS}</DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="archive">{ARCHIVE}</DropdownMenuRadioItem>
-        </DropdownMenuRadioGroup>
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Sort by</DropdownMenuSubTrigger>
           <DropdownMenuSubContent>
@@ -1555,8 +1400,7 @@ function RailList({
   chatApp: Agent | null;
 }) {
   const rail = useRail();
-  const marks = { pinned: rail.chatsPinned, archived: rail.chatsArchived };
-  const groups = railGroups(rail.rows, rail.sort, rail.shown, marks, rail.view);
+  const groups = railGroups(rail.rows, rail.sort, rail.shown);
   const folded = railShut(
     rail.shut,
     groups.map((group) => group.label),
@@ -1570,8 +1414,6 @@ function RailList({
           isPortalChat(row.surface) ? null : origin(row),
           mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
         ].filter((fact): fact is string => fact !== null);
-        const pinned = rail.chatsPinned.includes(row.conversation_id);
-        const archived = rail.chatsArchived.includes(row.conversation_id);
         return (
           <RailRow
             key={row.conversation_id}
@@ -1579,10 +1421,6 @@ function RailList({
             facts={facts.length ? facts.join(" · ") : null}
             title={row.title}
             surface={row.surface}
-            pinned={pinned}
-            archived={archived}
-            onPin={() => pinChat(row.conversation_id, !pinned)}
-            onArchive={() => archiveChat(row.conversation_id, !archived)}
             onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
           />
         );
@@ -1607,12 +1445,6 @@ function RailList({
             Retry
           </button>
         </div>
-      ) : null}
-      {/* An archive holding nothing says so, because the member asked to read a place and an empty
-          column is not an answer. The rail itself never does: a workspace with no conversations is
-          answered by the new-conversation row above it. */}
-      {rail.view === "archive" && rail.phase === "ready" && !groups.length ? (
-        <p className="m-0 p-sm text-ink-soft">No conversation is archived.</p>
       ) : null}
       {groups.map((group) => {
         const label = group.label;
@@ -1651,10 +1483,6 @@ function RailList({
  *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. The
  *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read.
  *
- *  The whole row holds the pointer, not the title alone. The title ends where the pin and the row's
- *  menu begin, so a tooltip set beside the title stands over those two controls; set beside the row
- *  it clears the sidebar's edge, and the member reads the fact with the pin still in reach.
- *
  *  The title itself is the other half of that bargain. The rail is one column wide and a
  *  conversation is named in a sentence, so the row states as much of the title as it holds and
  *  ellipses the rest — until the member puts the pointer or the keyboard on it, when the title
@@ -1673,20 +1501,12 @@ function RailRow({
   facts,
   title,
   surface,
-  pinned,
-  archived,
-  onPin,
-  onArchive,
   onClick,
 }: {
   current: boolean;
   facts: string | null;
   title: string;
   surface: string;
-  pinned: boolean;
-  archived: boolean;
-  onPin: () => void;
-  onArchive: () => void;
   onClick: () => void;
 }) {
   const [asks, setAsks] = useState(0);
@@ -1707,91 +1527,17 @@ function RailRow({
       <SurfaceGlyph surface={surface} />
     </SidebarPress>
   );
-  const row = (
+  return (
     <SidebarRow current={current}>
-      {button}
-      <ThreadPin pinned={pinned} onPin={onPin} />
-      <RailRowActs archived={archived} onArchive={onArchive} />
-    </SidebarRow>
-  );
-  if (!facts) return row;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{row}</TooltipTrigger>
-      <TooltipContent>{facts}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-/** The pin at a conversation's row end, drawn as the pin at an app's row end is: the same mark, the
- *  same box, the same rest until the pointer is on the row or the keyboard reaches it. Pinning is
- *  one act, so it is one press rather than an item in a menu — and a member who pins a thread and
- *  an app does the same thing in the same place twice.
- *
- *  It is named for the act alone, as the row's menu beside it is: the thread is the row this
- *  control stands in, and a name that repeated it would read every title out twice. What the pin
- *  did is read off the column's order, which is the thing it changed. */
-function ThreadPin({ pinned, onPin }: { pinned: boolean; onPin: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-label={pinned ? "Unpin" : "Pin"}
-      aria-pressed={pinned}
-      onClick={onPin}
-      className={cn(
-        "shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-        "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-      )}
-    >
-      {pinned ? (
-        <IconPinFilled className="size-icon" aria-hidden />
+      {facts ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent>{facts}</TooltipContent>
+        </Tooltip>
       ) : (
-        <IconPin className="size-icon" aria-hidden />
+        button
       )}
-    </button>
-  );
-}
-
-/** The name the row's last control is read by. It states the act rather than the thread, because
- *  the thread is the row this control stands in and a name that repeated it would be read out with
- *  every title twice. */
-const THREAD_ACTS = "Thread options";
-
-/** Putting a conversation away, and taking it back out. It stands behind a mark rather than as a
- *  second press, because the pin beside it is the act a member does often and archiving is the one
- *  they do once — two presses of equal weight at a row's end would read as a toolbar.
- *
- *  The mark rests until the pointer is on the row, the row is reached by keyboard, or the menu
- *  stands open. */
-function RailRowActs({
-  archived,
-  onArchive,
-}: {
-  archived: boolean;
-  onArchive: () => void;
-}) {
-  const host = useDrawerHost();
-  return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={THREAD_ACTS}
-          className={cn(
-            "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-            "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-            "data-[state=open]:bg-fill data-[state=open]:opacity-100",
-          )}
-        >
-          <IconDots className="size-icon" aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent side="right" align="start" container={host}>
-        <DropdownMenuItem onSelect={onArchive}>
-          {archived ? "Unarchive" : "Archive"}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    </SidebarRow>
   );
 }
 

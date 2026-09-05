@@ -12,12 +12,9 @@ import {
   appRun,
   bumpChat,
   heldAppsExpanded,
-  heldArchivedChats,
-  heldPinnedChats,
   heldRailShown,
   heldRailShut,
   holdAppsExpanded,
-  holdPinnedChats,
   holdRailShown,
   holdRailShut,
   holdRailSort,
@@ -25,10 +22,9 @@ import {
   railGroups,
   railShut,
   stampIso,
-  NO_MARKS,
   type ChatRow,
 } from "@/lib/rail";
-import { archiveChat, pickAppsExpanded, railState, resetRailStore } from "@/lib/railStore";
+import { pickAppsExpanded, railState, resetRailStore } from "@/lib/railStore";
 import type { Agent } from "@/lib/types";
 
 import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
@@ -482,138 +478,6 @@ test("the query holding the narrow rail's groups open is the theme's own breakpo
   expect(NARROW).toBe("(width < " + declared![1] + "px)");
 });
 
-test("the threads the member pinned lead the chats list, under no heading of their own", () => {
-  const rows = [row("a", hoursAgo(1)), row("b", hoursAgo(2)), row("c", hoursAgo(3))];
-  const grouped = railGroups(rows, "recency", PORTAL_ONLY, { pinned: ["c"], archived: [] });
-  expect(grouped.map((group) => group.label)).toEqual([null]);
-  expect(grouped[0].rows.map((entry) => entry.conversation_id)).toEqual(["c", "a", "b"]);
-});
-
-test("a pin holds the head of the column under the agent sort too", () => {
-  const rows = [row("a", hoursAgo(1)), { ...row("b", hoursAgo(2)), agent_name: "support" }];
-  const grouped = railGroups(rows, "agent", PORTAL_ONLY, { pinned: ["b"], archived: [] });
-  expect(grouped.map((group) => group.label)).toEqual(["Support", "Assistant"]);
-  expect(grouped[0].rows.map((entry) => entry.conversation_id)).toEqual(["b"]);
-});
-
-test("a thread the member put away leaves the rail and stands in the archive", () => {
-  const rows = [row("a", hoursAgo(1)), row("b", hoursAgo(2))];
-  const marks = { pinned: [], archived: ["b"] };
-  expect(railGroups(rows, "recency", PORTAL_ONLY, marks)).toEqual([
-    { label: null, rows: [rows[0]] },
-  ]);
-  expect(railGroups(rows, "recency", PORTAL_ONLY, marks, "archive")).toEqual([
-    { label: null, rows: [rows[1]] },
-  ]);
-});
-
-test("an archive holding nothing is no group at all", () => {
-  const rows = [row("a", hoursAgo(1))];
-  expect(railGroups(rows, "recency", PORTAL_ONLY, NO_MARKS, "archive")).toEqual([]);
-});
-
-/** The row a title stands in, found by that title. */
-async function threadRow(title: string) {
-  const press = await screen.findByRole("button", { name: new RegExp(title) });
-  return press.closest("li")!;
-}
-
-/** The acts a rail row carries behind its own mark, which stands at that row's end. */
-async function threadActs(title: string) {
-  const row = await threadRow(title);
-  await userEvent.click(within(row).getByRole("button", { name: "Thread options" }));
-}
-
-const NEWER_CHAT = {
-  ...CHAT_ROW,
-  conversation_id: SECOND_ID,
-  title: "The newer thread",
-  last_at: "2026-08-01T11:00:00.000Z",
-};
-
-test("pinning a thread from its own row lifts it over a newer one, and the browser holds the pin", async () => {
-  wire({ ...chatsOnWire([NEWER_CHAT, CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const row = await threadRow(CHAT_ROW.title);
-  await userEvent.click(within(row).getByRole("button", { name: "Pin" }));
-
-  /* A pin is a place in the chats list and never a list of its own: the rail keeps one run of rows,
-     with the pinned thread at its head and no heading over it. */
-  await waitFor(() => {
-    const rows = screen.getAllByRole("button", { name: /thread/ });
-    expect(rows[0].textContent).toContain(CHAT_ROW.title);
-  });
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  expect(within(sidebar).queryByRole("button", { name: "Pinned" })).toBeNull();
-  expect(heldPinnedChats()).toEqual([CONVO_ID]);
-
-  /* The same press takes the pin off, and states which way the pin stands while it is on. */
-  const pinned = await threadRow(CHAT_ROW.title);
-  const unpin = within(pinned).getByRole("button", { name: "Unpin" });
-  expect(unpin.getAttribute("aria-pressed")).toBe("true");
-  await userEvent.click(unpin);
-  expect(heldPinnedChats()).toEqual([]);
-});
-
-test("a thread's pin is drawn as an app's pin is, and rests until the row is pointed at", async () => {
-  wire({ ...chatsOnWire([CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const thread = await threadRow(CHAT_ROW.title);
-  const pin = within(thread).getByRole("button", { name: "Pin" });
-  const app = screen.getByRole("button", { name: "Pin " + agentName(AGENT.name) });
-  expect(pin.querySelector("svg")!.getAttribute("class")).toBe(
-    app.querySelector("svg")!.getAttribute("class"),
-  );
-  expect(pin.className).toContain("group-hover/row:opacity-100");
-  expect(pin.className).toContain("opacity-0");
-});
-
-test("archiving a thread takes it out of the rail, and the archive is where it is read again", async () => {
-  wire({ ...chatsOnWire([NEWER_CHAT, CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await threadActs(CHAT_ROW.title);
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
-
-  await waitFor(() => expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull());
-  expect(heldArchivedChats()).toEqual([CONVO_ID]);
-
-  await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Archive" }));
-
-  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /The newer thread/ })).toBeNull();
-  expect(screen.getByRole("button", { name: "Archive options" })).toBeTruthy();
-  // The section head is the archive's one heading: no group heading repeats it under it.
-  expect(screen.getAllByRole("button", { name: "Archive" })).toHaveLength(1);
-});
-
-test("an archive holding nothing says so where the rows would stand", async () => {
-  wire({ ...chatsOnWire([CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Archive" }));
-
-  expect(await screen.findByText("No conversation is archived.")).toBeTruthy();
-});
-
-test("putting a pinned thread away drops its pin, so it comes back to the rail unpinned", () => {
-  holdPinnedChats([CONVO_ID]);
-  resetRailStore();
-
-  archiveChat(CONVO_ID, true);
-  expect(railState().chatsPinned).toEqual([]);
-  expect(railState().chatsArchived).toEqual([CONVO_ID]);
-
-  archiveChat(CONVO_ID, false);
-  expect(railState().chatsArchived).toEqual([]);
-  expect(heldArchivedChats()).toEqual([]);
-  expect(heldPinnedChats()).toEqual([]);
-});
-
 test("bumping a conversation moves it to the top", () => {
   const rows = [row("a", hoursAgo(3)), row("b", hoursAgo(4))];
   const bumped = bumpChat(rows, "b", NOW);
@@ -907,31 +771,6 @@ test("a row whose title is the whole of it is no tooltip trigger", async () => {
   const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
   expect(railRow.getAttribute("data-state")).toBeNull();
   expect(railRow.getAttribute("aria-describedby")).toBeNull();
-  expect(railRow.closest("li")?.getAttribute("aria-describedby")).toBeNull();
-});
-
-test("the fact stands beside the whole row, so it clears the pin and the options menu", async () => {
-  const foreign = {
-    ...CHAT_ROW,
-    conversation_id: "77777777-7777-4777-8777-777777777777",
-    agent_id: SECOND_ID,
-    agent_name: "second",
-    title: "An ops question",
-  };
-  wire({ ...chatsOnWire([foreign]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const title = await screen.findByRole("button", { name: /An ops question/ });
-  const row = title.closest("li")!;
-  fireEvent.focus(title);
-  const tip = await screen.findByRole("tooltip");
-  expect(tip.textContent).toBe("Second");
-  /* The row is the box the tooltip is set beside; the title ends where the pin starts, and a
-     tooltip anchored there would stand over the pin and the menu. */
-  expect(row.getAttribute("aria-describedby")).toBe(tip.getAttribute("id"));
-  expect(title.getAttribute("aria-describedby")).toBeNull();
-  expect(within(row).getByRole("button", { name: "Pin" })).toBeTruthy();
-  expect(within(row).getByRole("button", { name: "Thread options" })).toBeTruthy();
 });
 
 test("a conversation another member spoke stands at the foot and names them", async () => {
