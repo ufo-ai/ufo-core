@@ -99,17 +99,22 @@ _REQUIRED_REASONS = ReasoningSupport(
     supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
 )
 
-GLM_PROVIDER_ORDER = ("fireworks", "together", "baseten", "morph")
+GLM_PROVIDER_ORDER = ("fireworks", "baseten", "morph")
 PROVIDER_ORDER = {
     "z-ai/glm-5.3": GLM_PROVIDER_ORDER,
     "z-ai/glm-5.3-flash": GLM_PROVIDER_ORDER,
 }
 """The upstreams a slug may be served by, in OpenRouter's `provider.order`. A GLM slug names two
 dozen routes that differ in quantization, price and context window, while the spec books one rate
-and one window for the id. Fireworks and Together serve both ids with materially higher throughput,
-so they lead; BaseTen and Morph are the bounded fallbacks. `allow_fallbacks: false` keeps routing
-inside these four while OpenRouter tries each in order, so a request whose permitted set serves the
-model nowhere answers 404 rather than routing outside it. The dead-provider re-route's `ignore`
+and one window for the id. Fireworks serves both ids at materially higher throughput, so it leads;
+BaseTen and Morph are the bounded fallbacks. Together is not among them: replaying one production
+turn against each route, it broke the tool-call parse on 18 of 300 rounds — streaming the tail of
+the call as assistant text, so the act the call named never ran — where Fireworks broke none of 400
+and BaseTen none of 300. As the route a busy Fireworks fell to, it was breaking one tool call in
+every seventeen it took. Morph broke 1 of 281 and stays, because a set this small has to keep a
+route for the exclusions to subtract from. `allow_fallbacks: false` keeps routing
+inside these three while OpenRouter tries each in order, so a request whose permitted set serves
+the model nowhere answers 404 rather than routing outside it. The dead-provider re-route's `ignore`
 subtracts from the ordered set for a slug named here and is the whole `provider` object for one
 that is not, because an exclusion has to reach the wire for every id or the re-issue lands back on
 the upstream that answered empty. Naming a slug here is also what lets a stalled upstream stay
@@ -541,7 +546,7 @@ class OpenRouterModelClient:
     exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying no exclusion
     is byte-identical to the call the dead upstream answered empty, and the sticky routing key
     below pins it straight back to that upstream. An id in PROVIDER_ORDER rides the
-    exclusion in the same `provider` object as `order`, four routes against three exclusions at
+    exclusion in the same `provider` object as `order`, three routes against two exclusions at
     most; every other id — every Gemini one — sends `ignore` as its whole provider preference, so
     the pin stays where a slug names one. An unpinned slug can run out of upstreams before those
     retries do — every Gemini id serves from two — and OpenRouter then refuses the call outright; a
