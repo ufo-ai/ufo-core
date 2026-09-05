@@ -26,6 +26,7 @@ CORE_HEAD = (MIGRATIONS_DIR / "versions" / "HEAD").read_text().strip()
 RELEASED = "notification_0001"
 TRIAGE = "notification_0002"
 DELIVERY = "notification_0003"
+CARRY = "notification_0004"
 EDITED_PROMPT = "only tell me about churn"
 
 
@@ -176,3 +177,47 @@ def test_the_deliver_grant_reaches_every_live_shipped_row_and_the_prompt_the_une
     assert after["other"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
     assert after["archived"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
     assert restored["shipped"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+
+
+def test_the_carry_reaches_a_row_the_roll_window_created_behind_the_release(
+    tmp_path: Path,
+) -> None:
+    """A workspace whose first turn landed on an outgoing pod after the migrate Job holds a row at
+    an earlier release's prompt and allowlist — at that release's version, or at the current one
+    where a provisioning pass moved the version without touching the prompt. The carry finds both
+    by what they say, and a member's own wording, other extensions' rows and archived rows stand."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, DELIVERY)
+    engine = _seed(database_path, RELEASED_PROMPT, RELEASED_VERSION, TRIAGE_TOOLS)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "insert into workspace (id, created_at, updated_at) values "
+                "('z', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        connection.execute(
+            sa.text(
+                "insert into agent (id, workspace_id, name, prompt, tools, model, is_main, "
+                "visibility, provisioned_by, provisioned_name, provisioned_version, created_at, "
+                "updated_at) values ('versioned', 'z', 'notification', :prompt, :tools, 'auto', 0, "
+                "'workspace', :by, 'notification', :version, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "prompt": TRIAGE_PROMPT,
+                "tools": json.dumps(TRIAGE_TOOLS),
+                "by": NAME,
+                "version": VERSION,
+            },
+        )
+        connection.commit()
+    command.upgrade(config, CARRY)
+    after = _rows(engine)
+
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["versioned"] == (NOTIFICATION_AGENT_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["other"] == (RELEASED_PROMPT, RELEASED_VERSION, TRIAGE_TOOLS)
+    assert after["archived"] == (RELEASED_PROMPT, RELEASED_VERSION, TRIAGE_TOOLS)
