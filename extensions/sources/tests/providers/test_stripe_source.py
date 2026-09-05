@@ -3,12 +3,13 @@
 does not route Stripe's cross-object `*.deleted` events to other streams), the two-level
 `usage_records` fan-out asserted request by request with its parameters (Stripe rejects
 `/v1/subscription_items` without `subscription`), the per-request summary id kept out of the record
-and still walked as the wire cursor, a parent Stripe no longer resolves skipped with
-the rest of the walk intact, a refusal as `StreamSkipped`, and any other reason a client error
-names reaching the run as a `StreamFault`. Stripe's `created` cursor is the unix instant of the last
-sweep, emitted as decimal text the replaced image reads too; the sweep filters from thirty days
-behind it, and a capped run resumes on the adapter's positional envelope, so no record id is ever
-stored. Offline — a canned transport, no DB, no token."""
+and still walked as the wire cursor, period bounds projected without a nonexistent record
+timestamp, a missing parent or current-meter item skipped with the rest of the walk intact, a
+refusal as `StreamSkipped`, and any other reason a client error names reaching the run as a
+`StreamFault`. Stripe's `created` cursor is the unix instant of the last sweep, emitted as decimal
+text the replaced image reads too; the sweep filters from thirty days behind it, and a capped run
+resumes on the adapter's positional envelope, so no record id is ever stored. Offline — a canned
+transport, no DB, no token."""
 
 import json
 import time
@@ -50,6 +51,15 @@ GONE_SUBSCRIPTION = {
         "code": "resource_missing",
         "message": "No such subscription: 'sub_gone'",
         "param": "subscription",
+        "type": "invalid_request_error",
+    }
+}
+CURRENT_METER_ITEM = {
+    "error": {
+        "message": (
+            "Cannot list usage record summaries for `si_meter` because it is not on the legacy "
+            "metered billing system. Call /v1/billing/meters/:id/event_summaries instead."
+        ),
         "type": "invalid_request_error",
     }
 }
@@ -276,10 +286,9 @@ async def test_events_sync_as_plain_records() -> None:
                 "id": "ur_1",
                 "subscription_item": "si_1",
                 "period": {"start": 100, "end": 200},
-                "timestamp": 100,
             },
             "1970-01-01T00:01:40.000000+00:00",
-            None,
+            "1970-01-01T00:03:20.000000+00:00",
         ),
         (
             "checkout_sessions_line_items",
@@ -362,13 +371,45 @@ async def test_usage_records_skips_a_subscription_stripe_no_longer_resolves() ->
     assert _refs(result) == {"usage_records/si_1:100:200"}
 
 
+async def test_usage_records_skips_an_item_on_the_current_meter_system(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        match request.url.path:
+            case "/v1/subscriptions":
+                return httpx.Response(
+                    200, json={"data": [{"id": "sub_1", "created": 100}], "has_more": False}
+                )
+            case "/v1/subscription_items":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"id": "si_meter", "created": 100},
+                            {"id": "si_1", "created": 100},
+                        ],
+                        "has_more": False,
+                    },
+                )
+            case "/v1/subscription_items/si_meter/usage_record_summaries":
+                return httpx.Response(400, json=CURRENT_METER_ITEM)
+            case "/v1/subscription_items/si_1/usage_record_summaries":
+                return httpx.Response(200, json={"data": [_summary("sis_1")], "has_more": False})
+            case path:
+                raise AssertionError(f"unexpected request {path}")
+
+    result = await _fetch("usage_records", handle)
+    assert _refs(result) == {"usage_records/si_1:100:200"}
+    assert result.next_cursor is None
+    assert "source_sync.cursor_field_absent" not in caplog.messages
+
+
 def _summary(summary_id: str) -> dict:
     return {
         "id": summary_id,
         "subscription_item": "si_1",
         "period": {"start": 100, "end": 200},
         "total_usage": 7,
-        "timestamp": 100,
     }
 
 

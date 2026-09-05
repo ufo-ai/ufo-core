@@ -20,7 +20,10 @@ collection, then for each parent record fetches the child collection either by p
 stamping the parent id onto each row.
 A parent that is itself a query substream is enumerated through that same fan-out, so
 `usage_records` walks two levels: `/subscriptions` → `/subscription_items?subscription=<id>` →
-`/subscription_items/{id}/usage_record_summaries`.
+`/subscription_items/{id}/usage_record_summaries`. A summary has period bounds and no timestamp,
+so this complete fan-out is cursorless and projects those bounds as its page timestamps. An item on
+Stripe's current meter system has no legacy usage summaries; that one child is outside this stream
+and the remaining items continue.
 The `external_account_*` streams fan over accounts with an `object=<type>` filter. The pinned API
 version rides the `Stripe-Version` header. Records arrive flat, so `flatten` is the identity
 passthrough. A refusal (401/403) raises `StreamSkipped`; a fan-out child request Stripe answers
@@ -60,6 +63,11 @@ SWEEP_INTERVAL_SECONDS = 60 * 60
 CLOCK_SKEW_SECONDS = 120
 _MISSING_RESOURCE_STATUS = frozenset({400, 404})
 _MISSING_RESOURCE_CODE = "resource_missing"
+_CURRENT_METER_USAGE_PREFIX = "Cannot list usage record summaries for `"
+_CURRENT_METER_USAGE_SUFFIX = (
+    "` because it is not on the legacy metered billing system. "
+    "Call /v1/billing/meters/:id/event_summaries instead."
+)
 
 _SUBSTREAM_CHILD_PATHS: dict[str, str] = {
     "customer_balance_transactions": "/v1/customers/{id}/balance_transactions",
@@ -178,8 +186,9 @@ STRIPE_STREAMS: list[StreamSpec] = [
         "usage_records",
         source_object="subscription_items",
         primary_key=USAGE_PERIOD_KEY,
-        cursor_field="timestamp",
-        created_at_field="timestamp",
+        cursor_field=None,
+        created_at_field="period.start",
+        updated_at_field="period.end",
         canonical=True,
     ),
     _stream("accounts", cursor_field=None),
@@ -506,10 +515,20 @@ class StripeConnector(RestConnector):
             ):
                 yield page
         except httpx.HTTPStatusError as error:
-            if (
-                error.response.status_code not in _MISSING_RESOURCE_STATUS
-                or _stripe_error(error).get("code") != _MISSING_RESOURCE_CODE
-            ):
+            detail = _stripe_error(error)
+            missing = (
+                error.response.status_code in _MISSING_RESOURCE_STATUS
+                and detail.get("code") == _MISSING_RESOURCE_CODE
+            )
+            message = detail.get("message")
+            current_meter = (
+                stream.name == "usage_records"
+                and error.response.status_code == 400
+                and isinstance(message, str)
+                and message.startswith(_CURRENT_METER_USAGE_PREFIX)
+                and message.endswith(_CURRENT_METER_USAGE_SUFFIX)
+            )
+            if not missing and not current_meter:
                 raise
 
     def _stream_spec(self, name: str) -> StreamSpec:
