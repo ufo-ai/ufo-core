@@ -831,7 +831,7 @@ def test_an_ordered_id_prioritizes_fast_providers_and_limits_fallbacks(model: st
     kwargs = _client(ScriptedCreate(), spec)._create_kwargs(request, frozenset())
 
     assert kwargs["extra_body"]["provider"] == {
-        "order": ["fireworks", "baseten", "morph"],
+        "order": ["fireworks", "baseten"],
         "allow_fallbacks": False,
     }
 
@@ -871,11 +871,11 @@ async def test_a_dead_upstream_is_excluded_inside_the_ordered_providers() -> Non
 
     assert TextDelta(text="ok") in events
     assert create.calls[0]["extra_body"]["provider"] == {
-        "order": ["fireworks", "baseten", "morph"],
+        "order": ["fireworks", "baseten"],
         "allow_fallbacks": False,
     }
     assert create.calls[1]["extra_body"]["provider"] == {
-        "order": ["fireworks", "baseten", "morph"],
+        "order": ["fireworks", "baseten"],
         "allow_fallbacks": False,
         "ignore": ["Morph"],
     }
@@ -940,14 +940,14 @@ async def test_a_404_on_a_narrowed_call_still_fails_loud() -> None:
             pass
 
     assert create.calls[1]["extra_body"]["provider"] == {
-        "order": ["fireworks", "baseten", "morph"],
+        "order": ["fireworks", "baseten"],
         "allow_fallbacks": False,
         "ignore": ["Morph"],
     }
 
 
 GLM_FLASH_ROUTING = {
-    "order": ["fireworks", "baseten", "morph"],
+    "order": ["fireworks", "baseten"],
     "allow_fallbacks": False,
 }
 
@@ -974,6 +974,7 @@ async def test_every_glm_slug_is_pinned_and_none_of_them_name_a_dropped_route() 
     for routes in openrouter.PROVIDER_ORDER.values():
         assert "together" not in routes
         assert "modal" not in routes
+        assert "morph" not in routes
         assert len(routes) >= 2
 
 
@@ -1032,26 +1033,26 @@ async def test_a_transport_fault_mid_stream_leaves_its_upstream_too() -> None:
 
 
 async def test_stalled_upstreams_never_leave_a_pinned_slug_served_nowhere() -> None:
-    """`ignore` subtracts from the ordered routes, so a turn that stalled on all three would ask
-    for a slug served nowhere and 404 every round after it. Two exclusions ride at most — the bound
-    the dead-provider re-route already holds — so a route always stays open."""
+    """`ignore` subtracts from the ordered routes, so a turn that stalled on both would ask for a
+    slug served nowhere and 404 every round after it. One exclusion rides at most — the bound the
+    dead-provider re-route already holds — so a route always stays open."""
     request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
     create = ScriptedCreate(
-        *(_stalled_stream(upstream) for upstream in ("Baseten", "Fireworks", "Morph")),
+        *(_stalled_stream(upstream) for upstream in ("Baseten", "Fireworks")),
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
     )
     client = _client(create, _glm_flash_spec())
 
-    for _ in range(3):
+    for _ in range(2):
         with pytest.raises(ModelStreamInterrupted):
             async for _ in client.complete(request):
                 pass
     events = [event async for event in client.complete(request)]
 
     assert TextDelta(text="ok") in events
-    assert create.calls[3]["extra_body"]["provider"] == {
+    assert create.calls[2]["extra_body"]["provider"] == {
         **GLM_FLASH_ROUTING,
-        "ignore": ["Baseten", "Fireworks"],
+        "ignore": ["Baseten"],
     }
 
 
