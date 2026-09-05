@@ -353,6 +353,408 @@ resource "datadog_dashboard" "model_latency" {
 
 }
 
+# Every model round, read as a failure question: how often a provider fails a round, on which
+# class, for which model and profile. The latency board beside it holds the same population by
+# duration; this one holds it by outcome, with the three data sources that see a round laid in the
+# order of their coverage. The metrics see every round on every provider and are the numbers. The
+# APM spans are sampled and keep the failure under its own class name, where the metric folds an
+# unlisted class onto `other`; a span is the drill-down into one failed round's trace. The LLM
+# Observability stream is OpenRouter's own record of the generations it relayed — the upstream it
+# picked, the status it got back, the fallbacks it tried — and sees no other provider.
+#
+# One board for both fleets, in the root the deploy pipeline applies.
+
+resource "datadog_dashboard" "model_rounds" {
+  title       = "ufo model rounds"
+  layout_type = "ordered"
+
+  template_variable {
+    name             = "env"
+    prefix           = "env"
+    defaults         = ["prod"]
+    available_values = ["prod", "testing"]
+  }
+
+  template_variable {
+    name     = "provider"
+    prefix   = "provider"
+    defaults = ["*"]
+  }
+
+  template_variable {
+    name     = "model"
+    prefix   = "model"
+    defaults = ["*"]
+  }
+
+  template_variable {
+    name     = "profile"
+    prefix   = "profile"
+    defaults = ["*"]
+  }
+
+  # OpenRouter labels its generations with the API key that made them, not the fleet: the key named
+  # `ufo-testing` serves the prod fleet and `dev` serves testing. The presets move both selectors
+  # as one, so the stream at the foot reads the same fleet as the graphs above it.
+  template_variable {
+    name             = "api_key"
+    defaults         = ["ufo-testing"]
+    available_values = ["ufo-testing", "dev"]
+  }
+
+  template_variable_preset {
+    name = "prod"
+    template_variable {
+      name   = "env"
+      values = ["prod"]
+    }
+    template_variable {
+      name   = "api_key"
+      values = ["ufo-testing"]
+    }
+  }
+
+  template_variable_preset {
+    name = "testing"
+    template_variable {
+      name   = "env"
+      values = ["testing"]
+    }
+    template_variable {
+      name   = "api_key"
+      values = ["dev"]
+    }
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        A round that returned carries no `error_class`, so `error_class:*` is the failed
+        population and the rate is failed over all. `other` is a class the metric registry does
+        not list; the trace graph below the summary shows the same failures under their own names.
+
+        Read a rate against `rounds by provider`: one failure in ten rounds is 10% and means
+        nothing, one in ten thousand is the number. `provider retries` is what the client absorbed
+        before a round was counted at all, so a rising retry count under a flat error rate is the
+        provider degrading while the retries still hold.
+
+        The trace stream holds sampled rounds; open one for the waterfall. The OpenRouter stream is
+        the relay's own record and names the upstream that answered or refused.
+      EOT
+      background_color = "yellow"
+      font_size        = "14"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title       = "model round error rate"
+      autoscale   = false
+      custom_unit = "%"
+      precision   = 2
+      request {
+        q          = "100 * count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} / count:ufo.model_round_ms{$env,$provider,$model,$profile}"
+        aggregator = "sum"
+        conditional_formats {
+          comparator = ">"
+          value      = 5
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = ">"
+          value      = 1
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = "<="
+          value      = 1
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "failed rounds"
+      autoscale = true
+      precision = 0
+      request {
+        q          = "count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*}"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "rounds"
+      autoscale = true
+      precision = 0
+      request {
+        q          = "count:ufo.model_round_ms{$env,$provider,$model,$profile}"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "provider retries"
+      autoscale = true
+      precision = 0
+      request {
+        q          = "sum:ufo.model_provider_retry_total{$env,$provider,$model}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "error rate by provider (%)"
+      request {
+        q            = "100 * count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {provider} / count:ufo.model_round_ms{$env,$provider,$model,$profile} by {provider}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "error rate by provider and model (%)"
+      request {
+        q            = "100 * count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {provider,model} / count:ufo.model_round_ms{$env,$provider,$model,$profile} by {provider,model}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "error rate by profile (%)"
+      request {
+        q            = "100 * count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {profile} / count:ufo.model_round_ms{$env,$provider,$model,$profile} by {profile}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "failed rounds by error class"
+      request {
+        q            = "count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {error_class}"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "failed rounds by provider and error class"
+      request {
+        q            = "count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {provider,error_class}"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    query_table_definition {
+      title = "error class summary"
+      request {
+        formula {
+          formula_expression = "failed"
+          alias              = "failed rounds"
+          cell_display_mode  = "bar"
+        }
+        query {
+          metric_query {
+            name       = "failed"
+            query      = "count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {provider,model,profile,error_class}"
+            aggregator = "sum"
+          }
+        }
+      }
+    }
+  }
+
+  widget {
+    toplist_definition {
+      title = "error rate by provider and model (%)"
+      request {
+        q = "100 * count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} by {provider,model} / count:ufo.model_round_ms{$env,$provider,$model,$profile} by {provider,model}"
+        conditional_formats {
+          comparator = ">"
+          value      = 5
+          palette    = "white_on_red"
+        }
+        conditional_formats {
+          comparator = ">"
+          value      = 1
+          palette    = "white_on_yellow"
+        }
+        conditional_formats {
+          comparator = "<="
+          value      = 1
+          palette    = "white_on_green"
+        }
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "rounds by provider"
+      request {
+        q            = "count:ufo.model_round_ms{$env,$provider,$model,$profile} by {provider,model}"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "provider retries by provider and kind"
+      request {
+        q            = "sum:ufo.model_provider_retry_total{$env,$provider,$model} by {provider,model,kind}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "active model rounds"
+      request {
+        q            = "sum:ufo.model_round_active{$env,$provider,$model,$profile} by {provider,model}"
+        display_type = "line"
+      }
+    }
+  }
+
+  # The failures under their own class names. The metric folds a class the registry does not list
+  # onto `other` so an unlisted exception cannot mint a series; a span is one event and pays no such
+  # cost, so this is where `other` is opened. Sampled: read the shape, not the count.
+  widget {
+    timeseries_definition {
+      title = "failed rounds in traces, by error class (sampled)"
+      request {
+        display_type = "bars"
+        formula {
+          formula_expression = "failed"
+        }
+        query {
+          event_query {
+            name        = "failed"
+            data_source = "spans"
+            indexes     = ["*"]
+            compute {
+              aggregation = "count"
+            }
+            search {
+              query = "env:$env.value service:ufo resource_name:model.round status:error @ufo.provider:$provider.value @ufo.model:$model.value @ufo.profile:$profile.value"
+            }
+            group_by {
+              facet = "@ufo.error_class"
+              limit = 15
+              sort {
+                aggregation = "count"
+                order       = "desc"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  widget {
+    list_stream_definition {
+      title = "failed rounds (traces)"
+      request {
+        response_format = "event_list"
+        columns {
+          field = "timestamp"
+          width = "auto"
+        }
+        columns {
+          field = "@ufo.provider"
+          width = "auto"
+        }
+        columns {
+          field = "@ufo.model"
+          width = "auto"
+        }
+        columns {
+          field = "@ufo.profile"
+          width = "auto"
+        }
+        columns {
+          field = "@ufo.error_class"
+          width = "auto"
+        }
+        columns {
+          field = "@duration"
+          width = "auto"
+        }
+        query {
+          data_source  = "trace_stream"
+          query_string = "env:$env.value service:ufo resource_name:model.round status:error @ufo.provider:$provider.value @ufo.model:$model.value @ufo.profile:$profile.value"
+          sort {
+            column = "timestamp"
+            order  = "desc"
+          }
+        }
+      }
+    }
+  }
+
+  widget {
+    list_stream_definition {
+      title = "failed OpenRouter generations (LLM Observability)"
+      request {
+        response_format = "event_list"
+        columns {
+          field = "timestamp"
+          width = "auto"
+        }
+        columns {
+          field = "@meta.model_name"
+          width = "auto"
+        }
+        columns {
+          field = "@meta.model_provider"
+          width = "auto"
+        }
+        columns {
+          field = "@meta.metadata.status_code"
+          width = "auto"
+        }
+        columns {
+          field = "@meta.metadata.status_message"
+          width = "auto"
+        }
+        columns {
+          field = "@duration"
+          width = "auto"
+        }
+        query {
+          data_source  = "llm_observability_stream"
+          query_string = "@ml_app:ufo @status:error @tags:\"api_key_name:$api_key.value\""
+          sort {
+            column = "timestamp"
+            order  = "desc"
+          }
+        }
+      }
+    }
+  }
+}
+
 # The count behind the two `report_problem` widgets at the foot of the turns board.
 # `report_problem` emits one log record per report and nothing else, so the class and the cost of a
 # report are log fields; this derives a counter from them, because a log widget columns and groups

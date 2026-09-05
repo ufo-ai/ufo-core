@@ -31,6 +31,7 @@ from opentelemetry.sdk.metrics.export import (
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from pydantic import ValidationError
 
 from evals.harness.harness import TRANSIENT_ERROR_CLASSES
@@ -976,6 +977,23 @@ def test_span_nests_on_the_ambient_trace_and_redacts_attributes(monkeypatch):
         "model.provider_start",
         "model.first_visible_event",
     ]
+
+
+def test_a_returned_failure_marks_its_span_with_the_class(monkeypatch):
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(o11y.trace, "get_tracer", tracer_provider.get_tracer)
+    with o11y.span("model.round", model="z-ai/glm-5.3-flash", provider="openrouter") as opened:
+        o11y.mark_span_outcome(opened, "APITimeoutError", "Request timed out.")
+    with o11y.span("model.round", model="z-ai/glm-5.3-flash", provider="openrouter") as opened:
+        o11y.mark_span_outcome(opened, None)
+    failed, clean = exporter.get_finished_spans()
+    assert failed.attributes["ufo.error_class"] == "APITimeoutError"
+    assert failed.status.status_code is StatusCode.ERROR
+    assert failed.status.description == "Request timed out."
+    assert "ufo.error_class" not in clean.attributes
+    assert clean.status.status_code is StatusCode.UNSET
 
 
 def test_observability_static_contract() -> None:

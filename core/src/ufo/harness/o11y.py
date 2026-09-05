@@ -31,7 +31,7 @@ from opentelemetry.sdk.metrics.view import (
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Span, SpanKind
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from ufo.db import current_workspace
@@ -502,6 +502,19 @@ def span(name: str, kind: SpanKind = SpanKind.INTERNAL, **attributes: object) ->
     tracer = trace.get_tracer(INSTRUMENTATION_NAME)
     with tracer.start_as_current_span(name, kind=kind, attributes=flat) as opened:
         yield opened
+
+
+def mark_span_outcome(opened: Span, error_class: str | None, message: str | None = None) -> None:
+    """Record how a stage that returns its failure instead of raising it ended. A model round that
+    died on the provider's error comes back as a result carrying `error_class`, so the context
+    manager above sees no exception and would close the span `ok`; a class here puts it on the span
+    and sets the error status, so a trace reads the failure the metrics count — under the class's
+    own name, where the metric folds an unlisted one onto `other`. A `None` class is a clean
+    return and leaves the span as it closed."""
+    if error_class is None:
+        return
+    opened.set_attribute("ufo.error_class", error_class)
+    opened.set_status(Status(StatusCode.ERROR, message or error_class))
 
 
 def redact_payload(fields: Mapping[str, object]) -> dict[str, JsonValue]:

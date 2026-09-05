@@ -112,6 +112,7 @@ from ufo.harness.o11y import (
     formatted_stack,
     log,
     log_error,
+    mark_span_outcome,
     span,
     turn_profile,
 )
@@ -2860,6 +2861,7 @@ class TurnEngine:
                 "model.round",
                 model=request.model,
                 provider=provider,
+                profile=self.profile,
                 round=round_input.round_index,
             ) as round_span:
                 runner: ModelRoundRunner[ModelRequest, ToolUseBlock, ReasoningBlock, Usage] = (
@@ -2882,6 +2884,7 @@ class TurnEngine:
                     )
                 )
                 result = await runner.run(request, ReplyRedaction())
+                mark_span_outcome(round_span, result.error_class, result.error_message)
         finally:
             emit_up_down_metric("model_round_active", -1, **active_dimensions)
         emit_histogram(

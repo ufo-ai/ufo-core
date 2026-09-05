@@ -4380,6 +4380,7 @@ def _check_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
     assert re.findall(r'resource "datadog_dashboard" "(\w+)"', dashboards) == [
         "database",
         "model_latency",
+        "model_rounds",
         "turns",
         "coding_quality",
         "prompt_cache",
@@ -4416,16 +4417,49 @@ def _check_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
     dashboards = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
     assert re.findall(r"avg:aws\.rds\.\w+\{([^}]*)\}", dashboards) == ["$dbinstance"] * 7
     assert "avg:aws.rds.cpucredit_balance{$dbinstance}" in dashboards
-    assert dashboards.count("template_variable_preset {") == 2
+    assert dashboards.count("template_variable_preset {") == 4
     assert re.findall(r"available_values = \[([^]]*)\]", dashboards) == [
         '"testing", "prod"',
         '"ufo-testing-postgres", "prod-postgres"',
         '"testing", "prod"',
+        '"prod", "testing"',
+        '"ufo-testing", "dev"',
         '"sweep", "smoke"',
         '"claude-opus-5", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"',
         '"testing", "prod"',
         '"prod", "testing"',
     ]
+
+
+def _check_the_model_rounds_board_reads_failures_from_all_three_sources() -> None:
+    """The metrics see every round, the spans keep the class the metric folds onto `other`, and
+    OpenRouter's LLM Observability record is keyed by API key name rather than fleet, so the `prod`
+    and `testing` presets carry the key that serves each fleet."""
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    board = dashboard.split('resource "datadog_dashboard" "model_rounds" {', 1)[1].split(
+        'resource "datadog_dashboard" "turns" {', 1
+    )[0]
+    scope = "{$env,$provider,$model,$profile"
+    assert board.count("count:ufo.model_round_ms" + scope) == 16
+    assert (
+        "100 * count:ufo.model_round_ms{$env,$provider,$model,$profile,error_class:*} "
+        "/ count:ufo.model_round_ms{$env,$provider,$model,$profile}"
+    ) in board
+    assert "count:ufo.model_round_ms{$env}" not in board
+    assert board.count('data_source = "spans"') == 1
+    assert board.count('data_source  = "trace_stream"') == 1
+    assert board.count('data_source  = "llm_observability_stream"') == 1
+    assert board.count("status:error @ufo.provider:$provider.value") == 2
+    assert 'facet = "@ufo.error_class"' in board
+    assert '@tags:\\"api_key_name:$api_key.value\\"' in board
+    presets = board.split("template_variable_preset {")[1:]
+    assert [
+        (
+            re.search(r'name = "(\w+)"', preset).group(1),
+            re.search(r'name   = "api_key"\s+values = \["([^"]+)"\]', preset).group(1),
+        )
+        for preset in presets
+    ] == [("prod", "ufo-testing"), ("testing", "dev")]
 
 
 def _check_eval_dashboard_scopes_every_score_to_the_target_model() -> None:
@@ -4482,7 +4516,8 @@ def _check_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> No
     ranked = [query for query in census if query.startswith("top(")]
     assert len(ranked) == 5
     assert all("'max', 'desc')" in query for query in ranked)
-    funnel_queries = dashboard.split("metric_query {")[1:]
+    product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
+    funnel_queries = product.split("metric_query {")[1:]
     assert len(funnel_queries) == 1
     assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in funnel_queries)
 
@@ -4709,6 +4744,7 @@ def _check_deploy_workflow_static_contract() -> None:
         _check_deployment_gate_joins_every_selected_result,
         _check_testing_owns_one_database_and_model_board_for_both_fleets,
         _check_the_rds_widgets_switch_fleet_on_the_instance_identifier,
+        _check_the_model_rounds_board_reads_failures_from_all_three_sources,
         _check_eval_dashboard_scopes_every_score_to_the_target_model,
         _check_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics,
         _check_the_product_board_counts_a_workspace_out_of_one_census_bucket,
