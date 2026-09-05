@@ -25,11 +25,12 @@ class TextFilter(Protocol):
 
 class ModelStreamInterrupted(RuntimeError):
     """A provider stream died mid-round to a transient provider or transport fault — an error frame
-    injected into the live stream, a dropped connection, a usage ledger that never indexed the
-    generation. Any model client raises it, whether or not the round has already yielded visible
-    output: the partial round is discardable because the engine commits a round only when its
-    stream completes. The runner records `kind` on the collected round, and the engine re-runs the
-    round once on it; a second interruption of the same round fails the turn."""
+    injected into the live stream, a dropped connection, a response that never opened, a usage
+    ledger that never indexed the generation, or a stream that completed with a tool call whose
+    arguments never closed. Any model client raises it, whether or not the round has already
+    yielded visible output: the partial round is discardable because the engine commits a round
+    only when its stream completes. The runner records `kind` on the collected round, and the
+    engine re-runs the round once on it; a second interruption of the same round fails the turn."""
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
@@ -230,16 +231,24 @@ class _RoundState[RequestT, ToolCallT, ReasoningT, UsageT]:
             )
         if not self.usages:
             raise RuntimeError("model stream produced no usage")
+        try:
+            arguments = {
+                call_id: json.loads("".join(self.call_json[call_id]))
+                if "".join(self.call_json[call_id]).strip()
+                else {}
+                for call_id in self.call_order
+            }
+        except json.JSONDecodeError as error:
+            return self.result(
+                ModelStreamInterrupted(
+                    "tool_call_json",
+                    f"model stream ended with unparseable tool-call arguments: {error}",
+                ),
+                wall_ms,
+            )
         tool_calls = tuple(
             self.runner.new_tool_call(
-                call_id,
-                self.call_names[call_id],
-                cast(
-                    dict[str, object],
-                    json.loads("".join(self.call_json[call_id]))
-                    if "".join(self.call_json[call_id]).strip()
-                    else {},
-                ),
+                call_id, self.call_names[call_id], cast(dict[str, object], arguments[call_id])
             )
             for call_id in self.call_order
         )

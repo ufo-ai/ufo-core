@@ -108,6 +108,33 @@ async def test_collects_one_stream_and_builds_tool_calls_in_provider_order() -> 
     assert milestones == ["provider_start", "first_visible_event"]
 
 
+async def test_a_stream_that_ends_on_unclosed_tool_arguments_is_an_interruption() -> None:
+    """The provider ended the stream cleanly but the tool call it emitted never closed its JSON,
+    so the act it named cannot run. That is the provider's fault, not a parse error of ours: the
+    round is discardable exactly like one whose stream died, so it takes the interruption exit the
+    engine re-runs once, with the unclosed call kept on the partial output."""
+
+    async def complete(_request: str) -> AsyncIterator[object]:
+        yield ToolStart("call", "write")
+        yield ToolDelta("call", '{"path": "a.tx')
+        yield Usage(7)
+
+    runner = ModelRoundRunner(
+        complete=complete,
+        events=EVENTS,
+        new_tool_call=ToolCall,
+        publish_text=lambda _text: None,
+    )
+
+    result = await runner.run("request", Withheld())
+
+    assert result.tool_calls == ()
+    assert result.usages == (Usage(7),)
+    assert result.error_class == "ModelStreamInterrupted"
+    assert result.error_kind == "tool_call_json"
+    assert result.partial_output == '[tool call: write]\n{"path": "a.tx'
+
+
 async def test_stream_failure_modes_preserve_partial_usage_and_fail_loud() -> None:
     async def complete(_request: str) -> AsyncIterator[object]:
         yield Text("partial")

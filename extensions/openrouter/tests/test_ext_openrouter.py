@@ -380,41 +380,18 @@ async def test_gemini_flash_abort_after_tool_call_start_interrupts_the_round() -
     assert len(create.calls) == 1
 
 
-@pytest.mark.parametrize(
-    ("model_request", "error"),
-    [
-        pytest.param(
-            GEMINI_FLASH_REQUEST,
-            _status_error(400, "The operation was aborted"),
-            id="status-subclass",
-        ),
-        pytest.param(
-            GEMINI_FLASH_REQUEST,
-            openai.APITimeoutError(
-                request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions")
-            ),
-            id="timeout-subclass",
-        ),
-        pytest.param(
-            GEMINI_FLASH_REQUEST,
-            openai.APIConnectionError(
-                message="The operation was aborted",
-                request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
-            ),
-            id="connection-subclass",
-        ),
-    ],
-)
-async def test_api_error_subclasses_keep_raising_raw(
-    model_request: ModelRequest, error: openai.APIError
-) -> None:
+async def test_a_status_error_keeps_raising_raw() -> None:
+    """A 400 is a refusal of the request, not a fault in carrying it: it takes the status path,
+    which re-issues only around an upstream that named itself, and raises as itself otherwise —
+    never the injected-frame retry the exact APIError class gets."""
+    error = _status_error(400, "The operation was aborted")
     create = ScriptedCreate(
         error,
         [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
     )
 
     with pytest.raises(type(error)) as raised:
-        async for _ in _client(create).complete(model_request):
+        async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
             pass
 
     assert raised.value is error
@@ -728,6 +705,42 @@ async def test_a_read_timeout_mid_stream_interrupts_the_round() -> None:
     assert raised.value.kind == "stream_transport"
     assert "ReadTimeout" in str(raised.value)
     assert events == [ModelStreamStart(), TextDelta(text="partial")]
+    assert len(create.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            openai.APITimeoutError(
+                request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions")
+            ),
+            id="timeout",
+        ),
+        pytest.param(
+            openai.APIConnectionError(
+                message="Connection refused",
+                request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+            ),
+            id="connection",
+        ),
+    ],
+)
+async def test_a_response_that_never_opens_interrupts_the_round(
+    error: openai.APIConnectionError,
+) -> None:
+    """The SDK raises its connection-error classes for a response that never sends headers — a
+    wedged upstream that accepts and never answers, a refused connect — and each arrives with no
+    chunk to name the route. Nothing was sent to the engine, so the round is the mid-stream
+    timeout's twin and takes the same exit: re-run once rather than fail the turn."""
+    create = ScriptedCreate(error)
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for _ in _client(create).complete(REQUEST):
+            pass
+
+    assert raised.value.kind == "stream_transport"
+    assert type(error).__name__ in str(raised.value)
     assert len(create.calls) == 1
 
 

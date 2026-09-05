@@ -596,8 +596,10 @@ class OpenRouterModelClient:
     OpenRouter's own behavior. 429/5xx retry with retry-after-aware backoff but only until visible
     output yields; finish_reason=length raises ModelResponseTruncated. A fault on the live stream —
     an error frame OpenRouter injects when its upstream stalls or dies (the exact APIError class), a
-    raw timeout or peer disconnect mid-body, or a usage lookup the ledger never answers (a 404 past
-    the indexing window, a transport fault past the same window) — raises
+    response that never opens (the SDK's connection-error classes, its timeout among them, each
+    arriving with no chunk to name the route), a timeout or peer disconnect mid-body, or a usage
+    lookup the ledger never answers (a 404 past the indexing window, a transport fault past the
+    same window) — raises
     ModelStreamInterrupted whether or not output already yielded: the engine discards the partial
     round and re-runs it once, and a second interruption fails the turn. A stream that died on the
     wire takes its upstream out of the turn's routing first, because that re-run is otherwise the
@@ -608,7 +610,7 @@ class OpenRouterModelClient:
     exclusion rides `provider.ignore` for every id, and it has to: a re-issue carrying no exclusion
     is byte-identical to the call the dead upstream answered empty, and the sticky routing key
     below pins it straight back to that upstream. An id in PROVIDER_ORDER rides the
-    exclusion in the same `provider` object as `order`, three routes against two exclusions at
+    exclusion in the same `provider` object as `order`, two routes against one exclusion at
     most; every other id — every Gemini one — sends `ignore` as its whole provider preference, so
     the pin stays where a slug names one. An unpinned slug can run out of upstreams before those
     retries do — every Gemini id serves from two — and OpenRouter then refuses the call outright; a
@@ -670,13 +672,17 @@ class OpenRouterModelClient:
                 self._stalled_out(slug, _refused_upstream(error), "provider_refused")
                 retry = await retry.status(error, state.yielded, ignore_providers)
                 continue
-            except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
+            except (
+                httpx.TimeoutException,
+                httpx.RemoteProtocolError,
+                openai.APIConnectionError,
+            ) as error:
                 if state.usage is not None:
                     yield state.usage
                 self._stalled_out(slug, state.provider, "stream_transport")
                 raise ModelStreamInterrupted(
                     "stream_transport",
-                    f"OpenRouter stream died mid-round ({type(error).__name__}): {error}",
+                    f"OpenRouter stream died ({type(error).__name__}): {error}",
                 ) from error
             except openai.APIError as error:
                 if state.usage is not None:
