@@ -6,14 +6,18 @@ import { isPortalChat } from "@/lib/audience";
 import {
   bumpChat,
   heldAppsExpanded,
+  heldArchivedChats,
   heldPinned,
+  heldPinnedChats,
   heldRailShown,
   heldRailShut,
   heldRailSort,
   heldSectionsShut,
   heldSidebar,
   holdAppsExpanded,
+  holdArchivedChats,
   holdPinned,
+  holdPinnedChats,
   holdRailShown,
   holdRailShut,
   holdRailSort,
@@ -26,6 +30,7 @@ import {
   type ConversationsPayload,
   type RailShown,
   type RailSort,
+  type RailView,
 } from "@/lib/rail";
 import type { OwnedConversation } from "@/lib/types";
 
@@ -60,6 +65,13 @@ export type RailState = {
   shut: string[] | null;
   collapsed: boolean;
   pinned: string[] | null;
+  /** The conversations the member pinned to the head of the rail, newest pin first. */
+  chatsPinned: string[];
+  /** The conversations the member put away, which the rail draws only in the archive. */
+  chatsArchived: string[];
+  /** Which rail the member is reading. It is a place rather than a preference, so a reload lands
+   *  on their conversations however they left the archive. */
+  view: RailView;
   appsExpanded: boolean;
   /** The sections the member has folded shut, by name. */
   sectionsShut: string[];
@@ -79,6 +91,9 @@ function fresh(): RailState {
     shut: heldRailShut(),
     collapsed: heldSidebar(),
     pinned: heldPinned(),
+    chatsPinned: heldPinnedChats(),
+    chatsArchived: heldArchivedChats(),
+    view: "chats",
     appsExpanded: heldAppsExpanded(),
     sectionsShut: heldSectionsShut(),
   };
@@ -228,6 +243,30 @@ export function foldSidebar(collapsed: boolean): void {
 export function pickPinned(pinned: string[]): void {
   holdPinned(pinned);
   update((held) => ({ ...held, pinned }));
+}
+
+/** Pin a conversation to the head of the rail, or take the pin off. A fresh pin leads the ones
+ *  already standing: the thread the member just reached for is the one they reach for next. */
+export function pinChat(conversationId: string, pinned: boolean): void {
+  const rest = railState().chatsPinned.filter((id) => id !== conversationId);
+  const next = pinned ? [conversationId, ...rest] : rest;
+  holdPinnedChats(next);
+  update((held) => ({ ...held, chatsPinned: next }));
+}
+
+/** Put a conversation away, or take it back out. Archiving drops the pin with it — a thread the
+ *  member put away is not one they are keeping at the head of the column — so taking it back out
+ *  returns it to the rail rather than to the pins. */
+export function archiveChat(conversationId: string, archived: boolean): void {
+  const rest = railState().chatsArchived.filter((id) => id !== conversationId);
+  const next = archived ? [conversationId, ...rest] : rest;
+  holdArchivedChats(next);
+  update((held) => ({ ...held, chatsArchived: next }));
+  if (archived) pinChat(conversationId, false);
+}
+
+export function pickRailView(view: RailView): void {
+  update((held) => ({ ...held, view }));
 }
 
 /** Fold a section shut, or open it again. Held by name, so a section the sidebar has stopped

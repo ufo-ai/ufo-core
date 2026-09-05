@@ -829,7 +829,7 @@ test("a member with no rollup sees only their own figure and no workspace sectio
 test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(await screen.findByRole("button", { name: "Theme" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: MEMBER.email })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
