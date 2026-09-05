@@ -1,5 +1,6 @@
 """What the Notification app declares: the `notify` tool every agent holds, the `notification`
-object kind, and the `notification` agent whose inbox the rows are.
+object kind, the `notification` agent whose inbox the rows are, and the per-minute drain that folds
+each member's open rows into one turn on that agent's lane.
 
 The app ships as an `agents` provision on the shared apps infrastructure, the way Radar does. Its
 allowlist is the fence the whole design rests on: it omits `notify`, so the app can never raise a
@@ -11,22 +12,32 @@ by the provision that shipped it rather than by a name a member may already hold
 
 from pathlib import Path
 
+from ufo.sdk.context import ExtensionContext
+from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import AgentProvision, AgentSpec, Manifest, SkillSpec
+from ufo_ext_app_notification.drain import InboxDrain
 from ufo_ext_app_notification.kind import NOTIFICATION_OBJECT
 from ufo_ext_app_notification.notify_tool import NOTIFICATION_AGENT_NAME, NOTIFY_TOOL
-from ufo_ext_app_notification.store import EXTENSION_NAME
+from ufo_ext_app_notification.store import EXTENSION_NAME, untriaged_workspaces
 
 NAME = EXTENSION_NAME
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-notification-home"
+DRAIN_JOB = "notification_drain"
+DRAIN_SCHEDULE = "0 * * * * *"
 NOTIFICATION_AGENT_PROMPT = (
     "You are the Notification app for this workspace. Every agent's turns put messages for a "
     "member in your inbox with the `notify` tool, and those messages read back as the "
-    "`notification` object kind. When a member asks what has been raised for them, list the kind "
-    "and answer from it; when they say one is handled or unwanted, delete it. Your homepage lists "
-    "the same kind; when a member asks you to change the page, load the skill "
-    f"`{HOME_SKILL}` and follow it."
+    "`notification` object kind. A turn that opens with a `<notifications>` block is a batch "
+    "raised for one member since you last read their inbox: pass on what changes what they do "
+    "today — revenue moving, production down, a customer or investor waiting on them — and reply "
+    "with that decision, in one message in your own words saying what happened and what it means "
+    "for them. Drop the rest without comment: routine syncs, green runs, receipts, newsletters. A "
+    "member who hears from you about everything stops reading you. "
+    "When a member asks what has been raised for them, list the kind and answer from it; when "
+    "they say one is handled or unwanted, delete it. Your homepage lists the same kind; when a "
+    f"member asks you to change the page, load the skill `{HOME_SKILL}` and follow it."
 )
 NOTIFICATION_AGENT_PURPOSE = (
     "Decides which of the things your agents noticed are worth interrupting you for."
@@ -60,6 +71,10 @@ NOTIFICATION_AGENT = AgentProvision(
 )
 
 
+async def _drain(ctx: ExtensionContext) -> None:
+    await InboxDrain(ctx=ctx).run()
+
+
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
@@ -67,6 +82,14 @@ def manifest() -> Manifest:
         tools=(NOTIFY_TOOL,),
         objects=(NOTIFICATION_OBJECT,),
         member_context_read=True,
+        jobs=(
+            JobSpec(
+                name=DRAIN_JOB,
+                schedule=DRAIN_SCHEDULE,
+                handler=_drain,
+                candidates=untriaged_workspaces(),
+            ),
+        ),
         agents=(NOTIFICATION_AGENT,),
         skills=(SkillSpec(path=SKILLS_ROOT / HOME_SKILL),),
     )

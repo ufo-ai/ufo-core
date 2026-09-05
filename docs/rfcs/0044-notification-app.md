@@ -79,20 +79,33 @@ notification = sa.Table(
     sa.Column("produced_in_conversation_id", sa.Uuid, nullable=False),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),  # unit 2
     sa.Column("triaged_turn_id", sa.Uuid, nullable=True),   # unit 2: the drain turn that read it
+    sa.Column("triaged_at", sa.DateTime(timezone=True), nullable=True),  # unit 2: the cooldown's clock
     sa.Column("delivered_turn_id", sa.Uuid, nullable=True), # unit 3: the relay turn; the loop fence
     sa.Column("delivered_surface", sa.Text, nullable=True), # unit 3: null = read on the portal only
     sa.Column("created_at", ...), sa.Column("updated_at", ...),
-    sa.Index("notification_open_subject", "workspace_id", "to_agent_id", "member_id", "subject",
-             unique=True, postgresql_where=OPEN, sqlite_where=OPEN),  # OPEN = triaged_turn_id is null
+    sa.Index("notification_subject", "workspace_id", "to_agent_id", "member_id", "subject", unique=True),
+    sa.Index("notification_untriaged", "workspace_id", "to_agent_id", "member_id",
+             postgresql_where=OPEN, sqlite_where=OPEN),  # unit 2; OPEN = triaged_turn_id is null
     sa.Index("notification_delivered_turn", "workspace_id", "delivered_turn_id"),
 )
 ```
 
 The table above is the shape the three units reach together. Each column and index lands in the
 unit that first writes and reads it, in that unit's own migration: unit 1 ships the row and the
-total unique index `notification_subject`, unit 2 adds the claim and the triage stamp and makes
-that index partial on the open row, unit 3 adds the delivery stamps. A migration adds only the
-columns its unit wires.
+total unique index `notification_subject`, unit 2 adds the claim, the triage stamp and the drain's
+index over open rows, unit 3 adds the delivery stamps. A migration adds only the columns its unit
+wires. One row per subject per lane, always: the unique index is the fold's arbiter in every
+release, so a post on a triaged subject reopens its row — counted on, producer replaced, stamps
+cleared — rather than opening a second one. A row is therefore the subject's running record: first
+and last raised, times raised, the latest body, and where the current cycle stands. `triaged_at`
+outlives the reopen as the lane cooldown's clock, so a subject raised again right after its turn
+waits like a fresh one, and the count the drain key carries makes the reopened row a new batch.
+
+A unit that changes the `notification` agent's declaration carries it onto the rows a workspace
+already holds in that unit's migration: a provisioning pass writes setup and purpose alone, so the
+prompt and the allowlist would otherwise reach new workspaces only. The prompt moves where the row
+still says what the release that created it said — a member's own wording stands — the allowlist
+always, since no member can write one, and `provisioned_version` moves with them.
 
 One kind, `notification`, on `MemberOwnedObjects`, owner `ObjectOwner(member_id, shared=False)`:
 list and get; apply refuses naming the tool; delete dismisses. `list_fields = {subject, occurrences,
@@ -142,7 +155,7 @@ page-revision rule, applied to a message.
 
 | Fence | Mechanism |
 |---|---|
-| fold | the partial unique index: 400 changed pages under `source/<name>` is one row saying 400 |
+| fold | the unique index on the subject: 400 changed pages under `source/<name>` is one row saying 400 |
 | altitude | more than `NOTIFY_SUBJECTS_PER_TURN` (8) distinct subjects in one turn is refused with the reason |
 | loop | a turn recorded in `delivered_turn_id` cannot post; the producing agent cannot post to its own inbox |
 | batch | the drain wakes one turn per lane per tick, whatever arrived |
@@ -379,7 +392,7 @@ eval is stable, not before.
 
 | Unit | Test |
 |---|---|
-| `store.post` | two posts on one subject are one row with `occurrences=2` and the second body; a post after triage opens a new row (mutation-check the partial predicate); the same subject for two members is two rows; the ninth subject in a turn refuses; a relay turn refuses; the Notification agent's own turn refuses |
+| `store.post` | two posts on one subject are one row with `occurrences=2` and the second body; a post after triage reopens the row, counted on, with the new producer; the same subject for two members is two rows; the ninth subject in a turn refuses; a relay turn refuses; the Notification agent's own turn refuses |
 | `member_reach` | a live-surface conversation is absent; another member's private conversation is absent; a conversation the member never spoke in is absent; newest first |
 | `InboxDrain.run` | twenty-five rows for one lane produce one turn whose inbound carries all twenty-five; two members are two lanes and two turns; a lane inside the cooldown is skipped and rows stay untriaged; a failed invoke leaves the lease to lapse; the lane conversation is opened on the first batch and reused on the second |
 | `deliver` | picks the newest reach; records the relay turn on the rows; a second `deliver` in the same triage turn refuses; a second call on the same rows settles on the same relay turn through the key; no reach marks portal-only |
@@ -432,7 +445,7 @@ one row) if `notify_raise` shows the tool underfires; the app's homepage pane.
   one-batch-one-invoke, park on an unseated member, and a lane that opens on first content. The
   inbox is not a source: sources are upstream producers of it.
 - **Enforce, don't document.** Fold, altitude, loop, one-delivery-per-turn, and isolation are a
-  partial index, a count, a column lookup, and an allowlist. No time-window counters. The prompts
+  unique index, a count, a column lookup, and an allowlist. No time-window counters. The prompts
   carry only what the ablation keeps.
 - **Fail loud.** A notification with no member refuses; a second provision naming `deliver`
   crashes the call; an unwired invoker raises.

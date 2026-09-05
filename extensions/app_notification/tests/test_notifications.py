@@ -264,6 +264,7 @@ async def test_a_repeat_on_a_subject_already_raised_folds_and_counts(db: None) -
     [row] = rows
     assert row["occurrences"] == 2
     assert row["body"] == "now 400 pages changed"
+    assert row["last_raised_at"] >= row["created_at"]
     assert row["produced_by_turn_id"] == first.turn.id
 
 

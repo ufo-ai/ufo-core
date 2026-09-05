@@ -20,11 +20,11 @@ from ufo.sdk.context import ExtensionContext
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_app_notification.store import (
     BODY_MAX,
-    EXTENSION_NAME,
     SUBJECT_MAX,
     NotificationStore,
     Posted,
     Refused,
+    inbox_agent_id,
 )
 
 NOTIFY_TOOL_NAME = "notify"
@@ -47,7 +47,7 @@ NOTIFY_NO_INBOX = "the Notification app is not live in this workspace, so there 
 NOTIFY_SELF = "the notification agent does not notify itself"
 NOTIFY_QUEUED = "Queued. Nothing answers back on this conversation."
 NOTIFY_FOLDED = (
-    "Folded into the open notification on this subject, now raised {n} times. Nothing answers "
+    "Folded into the notification on this subject, now raised {n} times. Nothing answers "
     "back on this conversation."
 )
 
@@ -88,14 +88,7 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
     if member_id is None:
         return _refusal(NOTIFY_NEEDS_A_MEMBER)
     ext = _require_ext(ctx.ext)
-    inbox = next(
-        (
-            agent.id
-            for agent in await ext.workspace_agents()
-            if agent.provisioned_by == EXTENSION_NAME and not agent.archived
-        ),
-        None,
-    )
+    inbox = await inbox_agent_id(ext)
     if inbox is None:
         return _refusal(NOTIFY_NO_INBOX)
     if inbox == ctx.turn.agent_id:
