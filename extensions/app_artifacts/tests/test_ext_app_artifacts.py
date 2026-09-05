@@ -22,7 +22,7 @@ def test_app_artifacts_ships_one_workspace_agent() -> None:
     assert manifest.name == "app_artifacts"
     assert [provision.name for provision in manifest.agents] == ["artifacts"]
     provision = manifest.agents[0]
-    assert provision.icon == "books"
+    assert provision.icon == "stack-2"
     assert provision.spec.visibility == "workspace"
     assert "app-artifacts-home" in provision.spec.prompt
     assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-artifacts-home"}

@@ -33,7 +33,7 @@ ARTIFACTS_APP_AGENT = AgentProvision(
         internet_access_allowed=False,
         visibility="workspace",
     ),
-    icon="books",
+    icon="stack-2",
 )
 
 
