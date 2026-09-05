@@ -1619,6 +1619,53 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
     assert texts[2] == refusal
 
 
+async def test_a_ref_naming_no_active_message_names_the_refs_that_do(
+    db: None, tmp_path: Path
+) -> None:
+    """A `requested_by` the model guessed wrong is refused before the handler runs, and the refusal
+    carries the same member refs a handler's own refusal does — so the retry names a live message
+    instead of guessing a second time."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def answer(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        raise AssertionError("a call bound to no member never reaches its handler")
+
+    probe = ToolDef(name="gate_probe", description="d", input_model=StrictInput, handler=answer)
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
+    engine = replace(
+        _engine(shared, EchoModel(), tmp_path),
+        turn=shared.model_copy(update={"speaker_member_id": speaker}),
+        tools=ToolRegistry((probe,)),
+    )
+    requesters = {shared.id: ActiveMessage(member_id=speaker, rendered="mine")}
+    stale = uuid4()
+    result = await _dispatch(
+        engine,
+        ToolContext(
+            sandbox=engine.sandbox,
+            blob=engine.blob,
+            turn=engine.turn,
+            agent=engine.agent,
+            spawn=engine.spawn,
+            speaker_member_id=None,
+            audience=engine.audience,
+            artifact_token_secret=engine.artifact_token_secret,
+        ),
+        ToolUseBlock(id="gate", name="gate_probe", input={"requested_by": str(stale)}),
+        requesters,
+    )
+
+    assert result.is_error
+    assert isinstance(result.content, str)
+    assert result.content == (
+        "SpeakerRequired: requested_by does not name an active inbound message"
+        + REQUESTED_BY_HINT.format(refs=str(shared.id))
+    )
+
+
 async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None, acts_on_behalf=True)
     model = CapturingModel()

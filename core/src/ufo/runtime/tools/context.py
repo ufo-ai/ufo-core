@@ -42,7 +42,7 @@ tool gets `ext=None`."""
 
 import asyncio
 import shlex
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol
@@ -80,6 +80,7 @@ from ufo.runtime.search import SearchProvider
 from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.runtime.turns.audience import (
+    FOREIGN_AUDIENCE_PREFIX,
     SHARED_AUDIENCE,
     Audience,
     audience_subjects,
@@ -463,6 +464,20 @@ class ConnectorConnection:
     owner_member_id: UUID
 
 
+def _owner_note(withheld: Sequence[Grant], audience: Audience) -> str:
+    """Whose private accounts a refusal missed, so the retry names that member rather than guessing
+    which of a channel's speakers to bind. Empty when the connections name no owner address, and
+    empty in an externally-shared channel: the refusal is read back into a room another organization
+    sits in, so it asks for a member of this workspace without naming one."""
+    if audience.startswith(FOREIGN_AUDIENCE_PREFIX):
+        return ""
+    owners = sorted({grant.owner_email for grant in withheld if grant.owner_email})
+    if not owners:
+        return ""
+    label = "owner" if len(owners) == 1 else "owners"
+    return f" ({label}: {', '.join(owners)})"
+
+
 @dataclass(frozen=True)
 class ToolContext:
     sandbox: Sandbox
@@ -774,9 +789,10 @@ class ToolContext:
         targets any account this turn may use; omitted, MemberAuthority prefers that member's own
         private grants and agent-shared ones are the fallback, while WorkspaceAuthority admits only
         agent-shared grants — exactly one account must exist in the winning tier. Fails loud when no
-        grant subsystem is configured or the selection is absent or ambiguous. A WorkspaceAuthority
-        call that misses only because the accounts are members' private ones raises
-        `SpeakerRequired`, so the engine can name the member refs a retry may carry."""
+        grant subsystem is configured or the selection is absent or ambiguous. A call that misses
+        only because the accounts are other members' private ones raises `SpeakerRequired`
+        wherever another member can still be named — a speakerless call, and any call in a
+        shared-audience conversation — so the engine can name the member refs a retry may carry."""
         return (await self.connector_connection(provider, account_id)).account_id
 
     async def connector_connection(
@@ -799,10 +815,12 @@ class ToolContext:
                     account_id=match.account_id,
                     owner_member_id=match.owner_member_id,
                 )
-            if any(grant.account_id == account_id for grant in withheld):
+            targeted = [grant for grant in withheld if grant.account_id == account_id]
+            if targeted:
+                note = _owner_note(targeted, self.audience)
                 raise SpeakerRequired(
-                    f"{provider!r} account {account_id!r} is a member's private account, and this "
-                    "call names no member"
+                    f"{provider!r} account {account_id!r} is a member's private account"
+                    f"{note}, and this call does not carry that member"
                 )
             raise ValueError(
                 f"no active {provider!r} account {account_id!r} is available to this turn"
@@ -810,9 +828,10 @@ class ToolContext:
         preferred = private or shared
         if not preferred:
             if withheld:
+                note = _owner_note(withheld, self.audience)
                 raise SpeakerRequired(
-                    f"every {provider!r} account is a member's private account, and this call "
-                    "names no member"
+                    f"every {provider!r} account is a member's private account"
+                    f"{note}, and this call does not carry that member"
                 )
             raise ValueError(
                 f"no {provider!r} account is available to this turn — connect one with "
@@ -866,7 +885,13 @@ class ToolContext:
         self, provider: str
     ) -> tuple[list[Grant], list[Grant], list[Grant]]:
         """The provider's grants this call may use, private then shared, and third the private
-        grants a WorkspaceAuthority call cannot use — the ones a member ref would have unlocked."""
+        grants this call cannot use — the ones a member ref would have unlocked.
+
+        The third tier is what a miss is answered with, so it is decided by whether another member
+        can still be named, never by whether one is bound already: a shared-audience conversation
+        carries every member speaking there, so another member's private account is a miss
+        `requested_by` corrects. A member's own conversation names nobody else, so a call bound
+        there withholds nothing and its miss stays the plain refusal."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         acting = authority_member_id(self.authority)
@@ -885,6 +910,14 @@ class ToolContext:
             (grant for grant in granted if grant.connection_shared),
             key=lambda grant: grant.account_id,
         )
-        if acting is not None:
+        if acting is not None and self.audience != SHARED_AUDIENCE:
             return private, shared, []
-        return private, shared, [grant for grant in granted if not grant.connection_shared]
+        return (
+            private,
+            shared,
+            [
+                grant
+                for grant in granted
+                if not grant.connection_shared and grant.owner_member_id != acting
+            ],
+        )

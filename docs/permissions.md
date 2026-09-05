@@ -55,8 +55,13 @@ Elsewhere omission means `WorkspaceAuthority`, except a turn carrying a durable 
 member — a scheduled fire, a subagent, a monitor's arrival — retains `MemberAuthority`; a handler
 that refuses for want of a member raises `SpeakerRequired`, and the tool error then lists the active
 member refs so the model retries with the right one. Connector account selection is one such
-handler: a `WorkspaceAuthority` call in a channel sees only shared connections, so when the
-provider's accounts are all members' private ones the miss is `SpeakerRequired`, not "no account".
+handler: a call sees the shared connections plus the bound member's own, so when the provider's
+accounts are other members' private ones the miss is `SpeakerRequired` naming their owners, not
+"no account" — in a shared-audience conversation whether the call carries a member or none, since
+a channel can still name the member who owns the connection. A member's own conversation names
+nobody else, so the same miss there stays the plain refusal. A channel shared outside the workspace
+is read by another organization, so its refusal asks for a member of this workspace and names no
+owner address.
 
 `speaker_member_id` and `on_behalf_of_member_id` are mutually exclusive durable encodings. Core
 decodes them once, passes the exact value through model selection, internal invocation, probes,

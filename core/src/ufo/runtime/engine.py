@@ -3075,10 +3075,14 @@ class TurnEngine:
         call: ToolUseBlock,
         error: Exception,
         dimensions: Mapping[str, str] | None = None,
+        member_refs: tuple[UUID, ...] = (),
     ) -> _RejectedToolCall:
+        text = f"{type(error).__name__}: {error}"
+        if isinstance(error, SpeakerRequired) and member_refs:
+            text += REQUESTED_BY_HINT.format(refs=", ".join(str(ref) for ref in member_refs))
         return _RejectedToolCall(
             call=call,
-            text=f"{type(error).__name__}: {error}",
+            text=text,
             outcome="invalid_call" if isinstance(error, (ValueError, KeyError)) else "step_failed",
             error_class=type(error).__name__,
             dimensions={} if dimensions is None else dimensions,
@@ -3123,7 +3127,12 @@ class TurnEngine:
             )
             raise TerminalGone(str(error)) from error
         except Exception as error:
-            return self._rejected(item.call, error, dimensions=item.meter_dimensions())
+            return self._rejected(
+                item.call,
+                error,
+                dimensions=item.meter_dimensions(),
+                member_refs=self._member_refs(requesters),
+            )
 
     async def _dispatch(
         self,
@@ -3204,7 +3213,11 @@ class TurnEngine:
         nobody else can be asking there; the ref carries information only where more than one member
         could be, and there its omission means conversation-common work. Both routes read the same
         active messages, so a message a hook denied — absorbed without ever entering them —
-        withholds its author's authority whichever route the model takes."""
+        withholds its author's authority whichever route the model takes.
+
+        A ref that names no active member message is refused as `SpeakerRequired`, the same class
+        a handler refusing for want of a member raises, so the refusal carries the refs the retry
+        can name instead of leaving the model to guess a second time."""
         call = item.call
         tool_input = dict(call.input)
         requester: UUID | None = None
@@ -3214,16 +3227,16 @@ class TurnEngine:
         elif REQUESTED_BY in tool_input:
             raw = tool_input.pop(REQUESTED_BY)
             if not isinstance(raw, str):
-                raise ValueError(f"{REQUESTED_BY} must be a message ref")
+                raise SpeakerRequired(f"{REQUESTED_BY} must be a message ref")
             try:
                 message_id = UUID(raw)
             except ValueError as error:
-                raise ValueError(f"{REQUESTED_BY} must be a message ref") from error
+                raise SpeakerRequired(f"{REQUESTED_BY} must be a message ref") from error
             if message_id not in requesters:
-                raise ValueError(f"{REQUESTED_BY} does not name an active inbound message")
+                raise SpeakerRequired(f"{REQUESTED_BY} does not name an active inbound message")
             requester = requesters[message_id].member_id
             if requester is None:
-                raise ValueError(f"{REQUESTED_BY} message has no member requester")
+                raise SpeakerRequired(f"{REQUESTED_BY} message has no member requester")
         elif (member := self._own_member(requesters)) is not None:
             requester = member
         authority = (
