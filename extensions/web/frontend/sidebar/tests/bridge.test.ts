@@ -683,3 +683,51 @@ test("a message from a child of the homepage window is ignored", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(posted).toHaveLength(0);
 });
+
+/** The body a browser hands back for an aborted fetch: the stream errors with the abort, so the
+ *  reader the shell holds rejects mid-relay. */
+function abortingStream(signal: AbortSignal | null | undefined): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('event: delta\ndata: {"text":"hi"}\n\n'));
+      signal?.addEventListener("abort", () =>
+        controller.error(new DOMException("signal is aborted without reason", "AbortError")),
+      );
+    },
+  });
+}
+
+async function relayingStream(posted: unknown[], iframe: HTMLIFrameElement): Promise<void> {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn<typeof fetch>(async (_url, init) => new Response(abortingStream(init?.signal))),
+  );
+  deliver(
+    { ufo: "call", id: "s1", method: "GET", path: "turns/" + CONVERSATION_ID + "/stream" },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(2));
+}
+
+test("a stream the page asked to close ends without stating a fault to the page", async () => {
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  await relayingStream(posted, iframe);
+
+  deliver({ ufo: "close", id: "s1" }, iframe.contentWindow);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(posted).toHaveLength(2);
+});
+
+test("a stream the shell dropped on detach states no fault to the frame it let go of", async () => {
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  await relayingStream(posted, iframe);
+
+  bridge.detach();
+  bridge = null;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(posted).toHaveLength(2);
+});

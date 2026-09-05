@@ -64,6 +64,17 @@ async function refusal(res: Response): Promise<string> {
   return body && body.length <= REFUSAL_MAX_CHARS ? body : fallback;
 }
 
+/** True for the rejection a read raises because the surface aborted it: a pane superseding its own
+ *  read, a frame the shell let go of. That abort is our act and not a fault the member met, so a
+ *  caller drops it where it would state any other rejection. */
+export function aborted(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
 /** A GET of the portal API, answered as `{ok, payload}` or `{ok: false, message, status}`; the
  * message is the route's own sentence to the member. */
 export async function getJson<T>(path: string, signal?: AbortSignal): Promise<Fetched<T>> {

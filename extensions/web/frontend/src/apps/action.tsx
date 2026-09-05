@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { BASE, REFUSAL_HEADER, getJson } from "@/lib/api";
+import { BASE, REFUSAL_HEADER, aborted, getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 export type ApplicationActionRecord = {
@@ -39,11 +39,17 @@ export function ApplicationAction({
 
   useEffect(() => {
     const controller = new AbortController();
-    void getJson<ActionDetail>(readPath, controller.signal).then((answer) => {
-      if (!answer.ok) return;
-      const result = answer.payload.status?.result;
-      if (typeof result === "string") setMessage(result);
-    });
+    void getJson<ActionDetail>(readPath, controller.signal)
+      .then((answer) => {
+        if (!answer.ok) return;
+        const result = answer.payload.status?.result;
+        if (typeof result === "string") setMessage(result);
+      })
+      /* The cleanup aborts this read, and that abort rejects the chain: it is the row's own act,
+         so it ends here. A read that broke for any other reason says so. */
+      .catch((error: unknown) => {
+        if (!aborted(error)) setMessage("Network error — try again.");
+      });
     return () => controller.abort();
   }, [readPath]);
 

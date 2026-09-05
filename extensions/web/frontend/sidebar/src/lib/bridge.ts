@@ -307,7 +307,10 @@ export function attachBridge({
       }
       reply({ ufo: "end", id });
     } catch {
-      reply({ ufo: "end", id, error: "The stream ended." });
+      // A stream this side aborted ended because the page asked to close it or because the shell
+      // let the frame go. Either way the read rejects on the abort, and there is no fault to carry
+      // back to a page that already knows.
+      if (!control.signal.aborted) reply({ ufo: "end", id, error: "The stream ended." });
     } finally {
       streams.delete(id);
     }

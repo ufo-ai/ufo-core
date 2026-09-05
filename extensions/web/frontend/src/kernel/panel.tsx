@@ -2,7 +2,7 @@ import { IconLoader2 } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
-import { getJson } from "@/lib/api";
+import { aborted, getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 export type PanelState<T> =
@@ -78,6 +78,15 @@ export function usePanelRead<T>(
             ? { phase: "ready", payload: result.payload }
             : { phase: "failed", message: result.message, status: result.status },
         );
+      })
+      /* The cleanup below aborts the read it supersedes, and that abort rejects this chain. The
+         abort is the effect's own act on a read nothing waits for any more, so it ends here rather
+         than reaching the browser as an error the member never caused. Every other rejection is a
+         read that broke, and the pane states it. */
+      .catch((error: unknown) => {
+        if (!live || aborted(error)) return;
+        failed.current = true;
+        setState({ phase: "failed", message: "Network error — try again.", status: 0 });
       })
       .finally(() => {
         if (live) reading.current = false;
