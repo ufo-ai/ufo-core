@@ -389,27 +389,42 @@ function DatadogLinks(props: { turn: Turn; site: string | null }) {
     /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i,
   );
   if (!props.site || !match) return null;
-  const query = `trace_id:${match[1]}`;
+  const origin = `https://${props.site}`;
   const start = Date.parse(props.turn.created_at) - 300_000;
   const end = Date.parse(props.turn.updated_at ?? new Date().toISOString()) + 300_000;
-  const trace = new URL("/apm/traces", `https://${props.site}`);
-  trace.searchParams.set("query", query);
-  trace.searchParams.set("start", String(start));
-  trace.searchParams.set("end", String(end));
-  trace.searchParams.set("paused", "true");
-  const logs = new URL("/logs", `https://${props.site}`);
-  logs.searchParams.set("query", query);
-  logs.searchParams.set("from_ts", String(start));
-  logs.searchParams.set("to_ts", String(end));
-  logs.searchParams.set("live", "false");
+  const traces = (path: string, query: string) => {
+    const url = new URL(path, origin);
+    url.searchParams.set("query", query);
+    url.searchParams.set("start", String(start));
+    url.searchParams.set("end", String(end));
+    url.searchParams.set("paused", "true");
+    return url.toString();
+  };
+  const logs = (query: string) => {
+    const url = new URL("/logs", origin);
+    url.searchParams.set("query", query);
+    url.searchParams.set("from_ts", String(start));
+    url.searchParams.set("to_ts", String(end));
+    url.searchParams.set("live", "false");
+    return url.toString();
+  };
+  const trace = `trace_id:${match[1]}`;
+  const links: [string, string][] = [
+    ["trace", traces("/apm/traces", trace)],
+    ["logs", logs(trace)],
+    ["model retries", logs(`${trace} model.*`)],
+    [
+      "model calls",
+      traces("/llm/traces", `@session_id:"${props.turn.conversation_id}"`),
+    ],
+  ];
   return (
     <span className="trace-links">
-      <a href={trace.toString()} target="_blank" rel="noopener">
-        trace
-      </a>
-      <a href={logs.toString()} target="_blank" rel="noopener">
-        logs
-      </a>
+      {links.map(([label, href]) => (
+        <a key={label} href={href} target="_blank" rel="noopener">
+          {label}
+        </a>
+      ))}
     </span>
   );
 }
