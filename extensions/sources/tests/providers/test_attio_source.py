@@ -2,7 +2,7 @@
 lifts a nested composite id and reduces each `values` value-cell to its primitive (the point of this
 provider — without it a record has no top-level primary key), its record timestamps reaching the
 page projection, the full-snapshot `delete_missing` semantics, and the two refuse-paths
-(`standard_object_disabled` on objects, `403 unauthorized` on meetings) mapping to `StreamSkipped`.
+(`standard_object_disabled` on objects, `403 unauthorized` anywhere) mapping to `StreamSkipped`.
 Offline — a canned transport, no DB, no token, no broker."""
 
 from collections.abc import Callable
@@ -95,3 +95,17 @@ async def test_a_missing_scope_on_meetings_skips_the_stream() -> None:
 
     with pytest.raises(StreamSkipped):
         await _fetch("meetings", handle)
+
+
+@pytest.mark.parametrize(
+    ("stream", "path"), [("people", "/v2/objects/people/records/query"), ("tasks", "/v2/tasks")]
+)
+async def test_a_missing_scope_on_any_stream_skips_the_stream(stream: str, path: str) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == path
+        return httpx.Response(
+            403, json={"code": "unauthorized", "message": "record_permission:read"}
+        )
+
+    with pytest.raises(StreamSkipped):
+        await _fetch(stream, handle)

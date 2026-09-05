@@ -267,11 +267,32 @@ class AttioConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name in {"tasks", "notes", "meetings", "call_recordings"}:
-            async for page in self._paginate_named(client, stream.name):
+        try:
+            async for page in self._pages(client, stream):
                 yield page
-            return
+        except httpx.HTTPStatusError as error:
+            if self._is_scope_unauthorized(error):
+                raise StreamSkipped(self._scope_skip_reason(error)) from error
+            raise
 
+    def _pages(
+        self, client: httpx.AsyncClient, stream: StreamSpec
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        match stream.name:
+            case "tasks":
+                return self._paginate_simple(client, "/v2/tasks", page_size=TASKS_PAGE_LIMIT)
+            case "notes":
+                return self._paginate_simple(client, "/v2/notes", page_size=NOTES_PAGE_LIMIT)
+            case "meetings":
+                return self._paginate_cursor(client, "/v2/meetings", page_size=MEETINGS_PAGE_LIMIT)
+            case "call_recordings":
+                return self._paginate_call_recordings(client)
+            case _:
+                return self._paginate_records(client, stream)
+
+    async def _paginate_records(
+        self, client: httpx.AsyncClient, stream: StreamSpec
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         path = f"/v2/objects/{stream.source_object}/records/query"
         offset = 0
         while True:
@@ -291,34 +312,6 @@ class AttioConnector(RestConnector):
             if len(records) < PAGE_LIMIT:
                 return
             offset += len(records)
-
-    async def _paginate_named(
-        self, client: httpx.AsyncClient, name: str
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        if name == "tasks":
-            async for page in self._paginate_simple(
-                client, "/v2/tasks", page_size=TASKS_PAGE_LIMIT
-            ):
-                yield page
-            return
-        if name == "notes":
-            async for page in self._paginate_simple(
-                client, "/v2/notes", page_size=NOTES_PAGE_LIMIT
-            ):
-                yield page
-            return
-        try:
-            pages = (
-                self._paginate_cursor(client, "/v2/meetings", page_size=MEETINGS_PAGE_LIMIT)
-                if name == "meetings"
-                else self._paginate_call_recordings(client)
-            )
-            async for page in pages:
-                yield page
-        except httpx.HTTPStatusError as error:
-            if self._is_scope_unauthorized(error):
-                raise StreamSkipped(self._scope_skip_reason(error)) from error
-            raise
 
     async def _paginate_simple(
         self, client: httpx.AsyncClient, path: str, *, page_size: int
