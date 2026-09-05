@@ -857,12 +857,6 @@ OPENROUTER_MODEL_SPECS = (
         reasoning=_REQUIRED_REASONS,
     ),
     _openrouter(
-        "z-ai/glm-5.2",
-        ModelPrice(1_000_000, 3_000_000, 0, 0, 0),
-        "2026-03",
-        accepts_image_input=False,
-    ),
-    _openrouter(
         "z-ai/glm-5.3",
         ModelPrice(1_400_000, 4_400_000, 260_000, 0, 0),
         "2026-03",
