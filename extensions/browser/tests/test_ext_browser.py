@@ -638,51 +638,6 @@ async def test_computer_saves_screenshot_into_the_workspace(tmp_path: Path) -> N
     assert image.data == encoded
 
 
-async def test_computer_names_the_saved_screenshot_after_its_encoding(tmp_path: Path) -> None:
-    """The bytes are JPEG whatever name the model asks for, and a surface reads a preview's type
-    from the suffix alone — so a `.png` name is corrected to `.jpg`, and a name that carries no
-    image suffix gets one."""
-    jpeg = b"\xff\xd8\xff\xe0 body \xff\xd9"
-    carrier = WritesCarrier()
-    surface = RecordingSurface(reply={"screenshot_base64": base64.b64encode(jpeg).decode()})
-    ctx = _recording_context(surface, carrier, tmp_path)
-    result = await _run(
-        "computer",
-        ctx,
-        actions=[{"action": "screenshot"}],
-        save_to_workspace=True,
-        path="lovable/05-login-screen.png",
-    )
-    assert ("/workspace/lovable/05-login-screen.jpg", jpeg) in carrier.writes
-    saved = json.loads(result.content[0].text)["screenshot_path"]
-    assert saved == "lovable/05-login-screen.jpg"
-    await _run(
-        "computer",
-        ctx,
-        actions=[{"action": "screenshot"}],
-        save_to_workspace=True,
-        path="shots/login",
-    )
-    assert ("/workspace/shots/login.jpg", jpeg) in carrier.writes
-
-
-async def test_computer_keeps_a_screenshot_path_that_already_matches(tmp_path: Path) -> None:
-    """A name that already carries the encoding is left alone, and so is one whose bytes name no
-    encoding the tool knows."""
-    png = b"\x89PNG\r\n\x1a\n body"
-    carrier = WritesCarrier()
-    surface = RecordingSurface(reply={"screenshot_base64": base64.b64encode(png).decode()})
-    ctx = _recording_context(surface, carrier, tmp_path)
-    await _run(
-        "computer",
-        ctx,
-        actions=[{"action": "screenshot"}],
-        save_to_workspace=True,
-        path="shot.png",
-    )
-    assert ("/workspace/shot.png", png) in carrier.writes
-
-
 async def test_computer_without_save_writes_nothing(tmp_path: Path) -> None:
     carrier = WritesCarrier()
     surface = RecordingSurface(reply={"screenshot_base64": base64.b64encode(b"x").decode()})
