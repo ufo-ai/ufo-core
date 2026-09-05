@@ -21,6 +21,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 100
 API_PREFIX = "/api/3"
@@ -172,6 +173,7 @@ class ActiveCampaignConnector(RestConnector):
     name = "active_campaign"
     base_url = ""
     streams_list = ACTIVECAMPAIGN_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         if credential.transport is not None:

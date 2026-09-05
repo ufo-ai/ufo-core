@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from ufo_ext_sources.watermark import text_checkpoint
 
 GRAPH_VERSION = "v25.0"
 PAGE_SIZE = 100
@@ -72,6 +73,7 @@ class FacebookAdsConnector(RestConnector):
     name = "facebook_ads"
     base_url = f"https://graph.facebook.com/{GRAPH_VERSION}"
     streams_list = FACEBOOK_ADS_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def _paged(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None

@@ -34,6 +34,7 @@ from ufo.sdk.sources import (
     StreamSpec,
     get_path,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _EVENT_DELTA_LOOKBACK = timedelta(days=365)
@@ -123,6 +124,7 @@ class OutlookConnector(RestConnector):
     name = "outlook"
     base_url = "https://graph.microsoft.com/v1.0"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def paginate_source(
         self,

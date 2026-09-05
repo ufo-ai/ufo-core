@@ -56,6 +56,7 @@ from ufo.sdk.sources import (
     get_path,
     with_context,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 REPO_PARTITION_FIELD = "repo_full_name"
@@ -194,6 +195,7 @@ class GitHubConnector(RestConnector):
     name = "github"
     base_url = "https://api.github.com"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def streams(self) -> list[StreamSpec]:
         """The runnable subset: streams whose `_PATHS` dispatch is wired. Adding a path promotes a

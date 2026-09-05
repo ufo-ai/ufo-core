@@ -18,6 +18,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from ufo_ext_sources.watermark import text_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
 _PAGERDUTY_ACCEPT = "application/vnd.pagerduty+json;version=2"
@@ -70,6 +71,7 @@ class PagerDutyConnector(RestConnector):
     name = "pagerduty"
     base_url = "https://api.pagerduty.com"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)

@@ -22,6 +22,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -62,6 +63,7 @@ class PandaDocConnector(RestConnector):
     name = "pandadoc"
     base_url = "https://api.pandadoc.com"
     streams_list = PANDADOC_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         """PandaDoc's key rides its own `API-Key` scheme, so a member-added key is layered on the

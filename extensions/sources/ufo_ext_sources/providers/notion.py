@@ -26,6 +26,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 MAX_BLOCK_DEPTH = 30
@@ -76,6 +77,7 @@ class NotionConnector(RestConnector):
     name = "notion"
     base_url = "https://api.notion.com/v1"
     streams_list = NOTION_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)

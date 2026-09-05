@@ -36,6 +36,7 @@ from ufo.sdk.sources import (
     StreamSkipped,
     StreamSpec,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 100
 _FORMS_SUBMISSIONS_LIMIT = 50
@@ -623,6 +624,7 @@ class HubSpotConnector(RestConnector):
     name = "hubspot"
     base_url = "https://api.hubapi.com"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _build_search_body(

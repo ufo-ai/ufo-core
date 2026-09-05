@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -51,6 +52,7 @@ class DeelConnector(RestConnector):
     name = "deel"
     base_url = "https://api.letsdeel.com"
     streams_list = DEEL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _initial_params(stream: StreamSpec, cursor: str | None) -> dict[str, Any]:

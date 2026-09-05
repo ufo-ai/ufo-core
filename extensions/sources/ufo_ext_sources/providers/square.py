@@ -17,6 +17,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at
+from ufo_ext_sources.watermark import text_checkpoint
 
 SQUARE_VERSION = "2026-04-16"
 PAGE_SIZE = 100
@@ -82,6 +83,7 @@ class SquareConnector(RestConnector):
     name = "square"
     base_url = "https://connect.squareup.com/v2"
     streams_list = SQUARE_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)

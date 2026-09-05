@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _MODIFIED_SINCE_STREAMS = frozenset({"tasks", "projects"})
@@ -71,6 +72,7 @@ class AsanaConnector(RestConnector):
     name = "asana"
     base_url = "https://app.asana.com/api/1.0"
     streams_list = ASANA_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

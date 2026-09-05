@@ -34,6 +34,7 @@ from ufo.sdk.sources import (
     StreamSpec,
     list_or_empty,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 IDENTITY_HOST = "https://account.docusign.com"
 USERINFO_PATH = "/oauth/userinfo"
@@ -75,6 +76,7 @@ class DocuSignConnector(RestConnector):
     name = "docusign"
     base_url = IDENTITY_HOST
     streams_list = DOCUSIGN_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def _account_base(self, client: httpx.AsyncClient) -> str:
         """The account-and-region REST base every data call is issued against, resolved from the

@@ -9,9 +9,7 @@ segments`, a single response). `conversation_parts` and `company_segments` are s
 out from a parent conversation/company. Auth layers an `Intercom-Version` header on whichever client
 the base built from the resolved `Credential`.
 
-Intercom's incremental cursor is `updated_at`, a unix-second integer; ufo advances a watermark
-only over a string cursor, so `flatten` renders that integer as its decimal string (the value the
-search filter parses back with `int(...)`), leaving the record otherwise untouched. A refusal
+Intercom orders its `updated_at` watermark as Unix seconds and stores it as decimal text. A refusal
 (HTTP 401/403) raises `StreamSkipped` so the run records a skip. The write path is intentionally
 absent — the source seam only reads."""
 
@@ -22,6 +20,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import integer_checkpoint
 
 PAGE_LIMIT = 150
 INTERCOM_VERSION = "2.11"
@@ -97,6 +96,7 @@ class IntercomConnector(RestConnector):
     name = "intercom"
     base_url = "https://api.intercom.io"
     streams_list = INTERCOM_STREAMS
+    checkpoint = staticmethod(integer_checkpoint)
 
     def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
         if stream.name not in _ATTRIBUTE_MODELS:
@@ -200,19 +200,13 @@ class IntercomConnector(RestConnector):
         return flat
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
-        """Lift each stream's envelope fields onto flat keys, then render the integer `cursor_field`
-        as its decimal string so the watermark (string-only in the adapter) advances; the search
-        filter parses it back with `int(...)`."""
+        """Lift each stream's envelope fields onto flat keys."""
         if stream.name == "conversations":
             record = self._flatten_conversation(record)
         elif stream.name == "conversation_parts":
             record = self._flatten_conversation_part(record)
         elif stream.name == "contacts":
             record = self._flatten_contact(record)
-        if stream.cursor_field:
-            value = record.get(stream.cursor_field)
-            if isinstance(value, int):
-                return {**record, stream.cursor_field: str(value)}
         return record
 
     async def paginate(

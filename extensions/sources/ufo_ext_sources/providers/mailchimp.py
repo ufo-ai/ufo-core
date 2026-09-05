@@ -20,6 +20,7 @@ from urllib.parse import quote
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 500
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -144,6 +145,7 @@ class MailchimpConnector(RestConnector):
     name = "mailchimp"
     base_url = ""
     streams_list = MAILCHIMP_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
         if stream.name != "unsubscribes":

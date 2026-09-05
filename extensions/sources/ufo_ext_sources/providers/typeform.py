@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 200
 RESPONSES_PAGE_SIZE = 1000
@@ -48,6 +49,7 @@ class TypeformConnector(RestConnector):
     name = "typeform"
     base_url = "https://api.typeform.com"
     streams_list = TYPEFORM_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
         if stream.name != "webhooks":

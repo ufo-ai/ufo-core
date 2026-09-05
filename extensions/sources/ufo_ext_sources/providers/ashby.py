@@ -21,6 +21,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -79,6 +80,7 @@ class AshbyConnector(RestConnector):
     name = "ashby"
     base_url = "https://api.ashbyhq.com"
     streams_list = ASHBY_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         if credential.transport is not None:

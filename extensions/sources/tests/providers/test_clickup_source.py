@@ -88,6 +88,25 @@ async def test_tasks_fan_out_per_list_and_advance_the_watermark() -> None:
     assert result.next_cursor == "200"
 
 
+async def test_task_filter_compares_numeric_timestamps() -> None:
+    hierarchy = _hierarchy_handler()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/list/l1/task"):
+            tasks = [{"id": "tk1", "date_updated": "1000"}]
+            return httpx.Response(
+                200, json={"tasks": tasks if request.url.params.get("page") == "0" else []}
+            )
+        return hierarchy(request)
+
+    first = await _fetch("tasks", handle, cursor="999")
+    assert {page.source_ref for page in first.pages} == {"tasks/tk1"}
+    assert first.next_cursor == "1000"
+    second = await _fetch("tasks", handle, cursor=first.next_cursor)
+    assert second.pages == ()
+    assert second.next_cursor == "1000"
+
+
 def _shaped_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path

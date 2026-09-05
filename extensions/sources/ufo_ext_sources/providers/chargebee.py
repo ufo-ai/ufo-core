@@ -20,6 +20,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import integer_checkpoint
 
 PAGE_SIZE = 100
 TIMEOUT_CONNECT_SECONDS = 30.0
@@ -123,6 +124,7 @@ class ChargebeeConnector(RestConnector):
     name = "chargebee"
     base_url = ""
     streams_list = CHARGEBEE_STREAMS
+    checkpoint = staticmethod(integer_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         timeout = httpx.Timeout(TIMEOUT_CONNECT_SECONDS, read=TIMEOUT_READ_SECONDS)

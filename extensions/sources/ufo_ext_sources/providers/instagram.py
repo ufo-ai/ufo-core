@@ -24,6 +24,7 @@ from ufo.sdk.sources import (
     records_at,
     with_context,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 GRAPH_VERSION = "v25.0"
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -88,6 +89,7 @@ class InstagramConnector(RestConnector):
     name = "instagram"
     base_url = f"https://graph.facebook.com/{GRAPH_VERSION}"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def _paged(
         self,

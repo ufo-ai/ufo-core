@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, with_context
+from ufo_ext_sources.watermark import text_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
 _SENTRY_NEXT_RE = re.compile(r'rel="next";\s*results="true";\s*cursor="([^"]+)"')
@@ -85,6 +86,7 @@ class SentryConnector(RestConnector):
     name = "sentry"
     base_url = "https://sentry.io/api/0"
     streams_list = SENTRY_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
         if stream.name != "organizations":

@@ -91,6 +91,7 @@ from ufo.sdk.sources import (
     list_or_empty,
 )
 from ufo_ext_sources.providers import google
+from ufo_ext_sources.watermark import text_checkpoint
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SHEETS_API_URL = "https://sheets.googleapis.com/v4"
@@ -149,6 +150,7 @@ class GoogleSheetsConnector(RestConnector):
     name = "googlesheets"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_SHEETS_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

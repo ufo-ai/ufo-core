@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -47,6 +48,7 @@ class RipplingConnector(RestConnector):
     name = "rippling"
     base_url = "https://rest.ripplingapis.com"
     streams_list = RIPPLING_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _next_path(next_link: str | None) -> str | None:

@@ -23,6 +23,7 @@ from ufo.sdk.sources import (
     records_at,
     with_context,
 )
+from ufo_ext_sources.watermark import integer_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
 
@@ -57,6 +58,7 @@ class ClickUpConnector(RestConnector):
     name = "clickup"
     base_url = "https://api.clickup.com/api/v2"
     streams_list = CLICKUP_STREAMS
+    checkpoint = staticmethod(integer_checkpoint)
 
     async def _teams(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
         data = await self._get(client, "/team")
@@ -122,7 +124,7 @@ class ClickUpConnector(RestConnector):
                     records_at(data, "tasks"), list_id=list_id, list_name=task_list.get("name")
                 )
                 if cursor:
-                    tasks = [t for t in tasks if str(t.get("date_updated") or "") > cursor]
+                    tasks = [t for t in tasks if int(t.get("date_updated") or 0) > int(cursor)]
                 if tasks:
                     yield tasks
                 if not records_at(data, "tasks"):
@@ -146,7 +148,7 @@ class ClickUpConnector(RestConnector):
                 records_at(data, key), list_id=list_id, list_name=task_list.get("name")
             )
             if cursor and stream.cursor_field:
-                records = [r for r in records if str(r.get(stream.cursor_field) or "") > cursor]
+                records = [r for r in records if int(r.get(stream.cursor_field) or 0) > int(cursor)]
             if records:
                 yield records
 

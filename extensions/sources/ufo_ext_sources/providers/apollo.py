@@ -20,6 +20,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, get_path, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -57,6 +58,7 @@ class ApolloConnector(RestConnector):
     name = "apollo"
     base_url = "https://api.apollo.io"
     streams_list = APOLLO_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         """Apollo reads its key from its own `X-Api-Key` header and refuses a bearer, so a

@@ -20,6 +20,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 100
 TIMEOUT_CONNECT_SECONDS = 30.0
@@ -106,6 +107,7 @@ class FreshdeskConnector(RestConnector):
     name = "freshdesk"
     base_url = ""
     streams_list = FRESHDESK_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
         if stream.name == "settings":

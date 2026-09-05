@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -92,6 +93,7 @@ class RampConnector(RestConnector):
     name = "ramp"
     base_url = "https://api.ramp.com"
     streams_list = RAMP_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _next_path(next_link: Any) -> str | None:

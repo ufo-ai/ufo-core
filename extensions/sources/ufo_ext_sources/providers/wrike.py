@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, dict_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
 _RUNNABLE_STREAMS = frozenset(
@@ -68,6 +69,7 @@ class WrikeConnector(RestConnector):
     name = "wrike"
     base_url = "https://www.wrike.com/api/v4"
     streams_list = WRIKE_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

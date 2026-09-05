@@ -114,7 +114,7 @@ class Ordering(StrEnum):
 class StreamSpec:
     """One stream a connector knows how to sync: its registry `name`, the source-side object, the
     `primary_key` inside each record (the stable id the page is keyed by), and the optional
-    `cursor_field` an incremental stream advances a watermark over. `created_at_field` and
+    `cursor_field` the connector uses to compute its checkpoint. `created_at_field` and
     `updated_at_field` are independent provider-record paths projected onto each page; they default
     to the conventional `created_at` and `updated_at` keys. `delete_missing` marks a stream
     whose run enumerates the complete current collection — the adapter returns it as an
@@ -146,10 +146,9 @@ class StreamSpec:
 
 @dataclass(frozen=True)
 class StreamPage:
-    """One provider page of stream changes. Most connectors yield plain `list[dict]` because the
-    source only returns live rows; delta-token and webhook-backed sources yield this richer shape so
-    the adapter advances the provider cursor and tombstones removals (named by their source-side
-    external ids in `deletes`) through the same run."""
+    """Records, removals, and an opaque provider checkpoint. The adapter stores `next_cursor`
+    without interpreting record fields. A connector emits a checkpoint only after it has yielded
+    every record in the connector-defined read that the checkpoint completes."""
 
     records: list[dict[str, Any]] = field(default_factory=list)
     deletes: tuple[str, ...] = ()
@@ -455,6 +454,13 @@ class Connector(ABC):
         run. A connector declaring `backfill_window_days` translates it into its provider's own
         floor (a `q=after:` term, a `$filter`) on the request that opens a walk; a resume carries
         its own and needs none. None is unbounded."""
+
+    def checkpoint(
+        self, stream: StreamSpec, records: list[dict[str, Any]], cursor: str | None
+    ) -> str | None:
+        """Return opaque state after records the adapter accepted. Native page checkpoints take
+        priority."""
+        return cursor
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         """One record as `(title, body)` for recall. The default titles from the first present

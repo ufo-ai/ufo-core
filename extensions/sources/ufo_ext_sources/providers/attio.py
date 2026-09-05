@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 50  # Attio records-query limit cap
 TASKS_PAGE_LIMIT = 500  # /v2/tasks default + max
@@ -75,6 +76,7 @@ class AttioConnector(RestConnector):
     name = "attio"
     base_url = "https://api.attio.com"
     streams_list = ATTIO_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _build_query_body(offset: int) -> dict[str, Any]:

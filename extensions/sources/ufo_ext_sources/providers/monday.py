@@ -26,6 +26,7 @@ from ufo.sdk.sources import (
     dict_or_empty,
     list_or_empty,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
 
@@ -102,6 +103,7 @@ class MondayConnector(RestConnector):
     name = "monday"
     base_url = "https://api.monday.com/v2"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def _graphql(
         self,

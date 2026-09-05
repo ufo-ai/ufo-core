@@ -20,6 +20,7 @@ import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
 from ufo_ext_sources.providers import google
+from ufo_ext_sources.watermark import text_checkpoint
 
 DOC_MIME = "application/vnd.google-apps.document"
 DOCS_API_URL = "https://docs.googleapis.com/v1"
@@ -47,6 +48,7 @@ class GoogleDocsConnector(RestConnector):
     name = "googledocs"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_DOCS_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

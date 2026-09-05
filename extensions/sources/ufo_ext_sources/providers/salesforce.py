@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 API_VERSION = "v60.0"
 PAGE_LIMIT = 200
@@ -73,6 +74,7 @@ class SalesforceConnector(RestConnector):
     name = "salesforce"
     base_url = ""
     streams_list = SALESFORCE_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _build_soql(stream: StreamSpec, fields: list[str], cursor: str | None) -> str:

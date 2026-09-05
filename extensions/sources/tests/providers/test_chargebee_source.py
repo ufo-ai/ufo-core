@@ -53,8 +53,8 @@ async def test_customers_lift_envelope_and_advance_watermark() -> None:
                     {
                         "customer": {
                             "id": "c1",
-                            "created_at": "2026-01-01T00:00:00Z",
-                            "updated_at": "2026-02-01T00:00:00Z",
+                            "created_at": 1767225600,
+                            "updated_at": 1769904000,
                         }
                     }
                 ],
@@ -64,7 +64,7 @@ async def test_customers_lift_envelope_and_advance_watermark() -> None:
 
     result = await _fetch("customer", handle)
     assert _refs(result) == {"customer/c1"}
-    assert result.next_cursor == "2026-02-01T00:00:00Z"
+    assert result.next_cursor == "1769904000"
     assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
     assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
     body = result.pages[0].body
@@ -78,8 +78,28 @@ async def test_incremental_after_param_sent_when_a_cursor_is_stored() -> None:
         seen.append(request.url.params.get("updated_at[after]"))
         return httpx.Response(200, json={"list": [], "next_offset": None})
 
-    await _fetch("customer", handle, cursor="2026-01-01T00:00:00Z")
-    assert seen and seen[0] == "2026-01-01T00:00:00Z"
+    await _fetch("customer", handle, cursor="1767225600")
+    assert seen and seen[0] == "1767225600"
+
+
+async def test_integer_watermark_round_trips_to_the_incremental_filter() -> None:
+    seen: list[str | None] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params.get("updated_at[after]"))
+        return httpx.Response(
+            200,
+            json={
+                "list": [
+                    {"customer": {"id": str(value), "updated_at": value}} for value in (999, 1000)
+                ]
+            },
+        )
+
+    first = await _fetch("customer", handle, cursor="998")
+    assert first.next_cursor == "1000"
+    await _fetch("customer", handle, cursor=first.next_cursor)
+    assert seen == ["998", "1000"]
 
 
 @pytest.mark.parametrize(

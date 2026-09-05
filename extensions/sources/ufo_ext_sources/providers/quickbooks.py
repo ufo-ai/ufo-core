@@ -7,7 +7,7 @@ MetaData.LastUpdatedTime] STARTPOSITION <N> MAXRESULTS 100`), and the response w
 An
 incremental stream rides the `WHERE` clause on `Metadata.LastUpdatedTime`; the reference entities
 without that cursor (`payment_methods`, `tax_agencies`) full-refresh. Because the cursor is nested
-(`MetaData.LastUpdatedTime`), `flatten` lifts it to a flat key so the adapter advances the watermark
+(`MetaData.LastUpdatedTime`), `flatten` lifts it to a key so the provider computes the watermark
 over it. `Id` is the primary key for every entity. A refusal (401/403) raises `StreamSkipped`. The
 credential is resolved through the auth proxy the runner threads; this connector holds no token.
 
@@ -23,6 +23,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, get_path
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 CURSOR_FIELD = "MetaData.LastUpdatedTime"
@@ -83,6 +84,7 @@ class QuickBooksConnector(RestConnector):
     name = "quickbooks"
     base_url = ""
     streams_list = QUICKBOOKS_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _build_query(stream: StreamSpec, *, cursor: str | None, start_position: int) -> str:

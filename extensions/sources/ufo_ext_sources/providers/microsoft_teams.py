@@ -6,7 +6,7 @@ through the absolute `@odata.nextLink`, walked by the shared `_get_odata_pages`.
 signed-in user's joined teams and chats, so the connector fans out — `/me/joinedTeams` then each
 team's `/channels` and each channel's `/messages`, and `/me/chats` then each chat's `/messages`.
 Channel and chat messages are incremental: each record's `lastModifiedDateTime` is filtered past the
-stored watermark, which the adapter advances. `render` lifts a message's `body.content` (Graph
+stored watermark, which the provider computes. `render` lifts a message's `body.content` (Graph
 stores it as HTML) into readable text under its subject; the structural streams (teams, channels,
 chats) use the default titled-JSON. A per-team or per-chat `403`/`404` is skipped so the other
 parents still sync; a grant that can't enumerate teams/chats at all (`401`/`403` on the first call)
@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, get_path, with_context
+from ufo_ext_sources.watermark import text_checkpoint
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -54,6 +55,7 @@ class MicrosoftTeamsConnector(RestConnector):
     name = "microsoft_teams"
     base_url = "https://graph.microsoft.com/v1.0"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def _teams(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

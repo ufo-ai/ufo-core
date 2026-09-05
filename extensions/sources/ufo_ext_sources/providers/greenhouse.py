@@ -10,7 +10,7 @@ transport injects auth and the client is left as the base built it. Pagination i
 substreams (per-application, per-candidate, per-job, per-user, per-question) walk the parent
 collection first and fetch the nested collection per parent, stamping each child with its parent id.
 Incremental streams filter server-side by `?updated_after` (with `applications` on `created_after`
-and `eeoc` on `submitted_after`); the adapter advances a watermark over each stream's cursor field.
+and `eeoc` on `submitted_after`); the provider computes a watermark over each stream's cursor field.
 A grant the account can't read (`401`/`403`) raises `StreamSkipped` so the run records a skip, not a
 failure. The credential is resolved through the auth proxy the runner threads — this connector holds
 no token. The write path is intentionally absent — the source seam only reads."""
@@ -22,6 +22,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 500
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -226,6 +227,7 @@ class GreenhouseConnector(RestConnector):
     name = "greenhouse"
     base_url = "https://harvest.greenhouse.io"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         """Greenhouse Harvest uses HTTP Basic auth — the API key is the username, the password

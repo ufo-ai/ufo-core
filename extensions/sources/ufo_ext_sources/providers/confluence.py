@@ -33,6 +33,7 @@ from ufo.sdk.sources import (
     records_at,
     with_context,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 50
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -120,6 +121,7 @@ class ConfluenceConnector(RestConnector):
     name = "confluence"
     base_url = "https://api.atlassian.com"
     streams_list = CONFLUENCE_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

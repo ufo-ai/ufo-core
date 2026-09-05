@@ -3,9 +3,21 @@ pages.
 
 Stripe has one list shape across every top-level stream: `{data: [...], has_more: bool}` walked with
 `?limit=100&starting_after=<last_id>`, filtered incrementally with `?created[gte]=<unix>` when the
-stream's cursor is `created`. Substreams fan out: `paginate` walks the parent collection, then for
-each parent record fetches the child collection either by path (`/customers/{id}/payment_methods`)
-or by query param (`/subscription_items?subscription=<id>`), stamping the parent id onto each row.
+stream's cursor is `created`. Stripe filters a list by creation only, and a charge, invoice, or
+subscription keeps changing after it is created, so once per `SWEEP_INTERVAL_SECONDS` the filter
+reaches `CREATED_LOOKBACK_SECONDS` behind the cursor and re-reads that window. The cursor of a
+`created` stream is the instant of that sweep, stored as unix seconds: each run of the hour after it
+filters from it, so a record created since the sweep lands again and a between-sweep run costs that
+hour of records rather than the whole window. The run that finishes the next sweep stores its own
+start instant. One decimal timestamp is also what the release this one replaces reads out of that
+column — it filters `created[gte]` from it and advances it as a watermark — so through a rolling
+deploy a pod of either image reads the row the other wrote, and neither skips a record. A capped run
+stores no position of its own: the adapter's positional envelope resumes it, and Stripe returning
+the newest record first makes the between-sweep filter a prefix of the sweep filter, so the skip
+count lands on the same record either way. Substreams fan out: `paginate` walks the parent
+collection, then for each parent record fetches the child collection either by path
+(`/customers/{id}/payment_methods`) or by query param (`/subscription_items?subscription=<id>`),
+stamping the parent id onto each row.
 A parent that is itself a query substream is enumerated through that same fan-out, so
 `usage_records` walks two levels: `/subscriptions` → `/subscription_items?subscription=<id>` →
 `/subscription_items/{id}/usage_record_summaries`.
@@ -13,9 +25,10 @@ The `external_account_*` streams fan over accounts with an `object=<type>` filte
 version rides the `Stripe-Version` header. Records arrive flat, so `flatten` is the identity
 passthrough. A refusal (401/403) raises `StreamSkipped`; a fan-out child request Stripe answers
 `resource_missing` skips that one parent and the walk carries on; any other reason Stripe names
-raises `StreamFault` so the failure record carries it. The credential is resolved through the auth
-proxy the runner threads; this connector holds no token. The write path is intentionally absent —
-source seam only reads."""
+raises `StreamFault` so the failure record carries it; a stored `created` cursor this image cannot
+read raises `CursorExpired`, which the driver clears rather than refusing forever. The credential is
+resolved through the auth proxy the runner threads; this connector holds no token. The write path is
+intentionally absent — source seam only reads."""
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -24,13 +37,27 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamFault, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    CursorExpired,
+    RestConnector,
+    StreamFault,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+)
+from ufo_ext_sources.watermark import integer_checkpoint
 
 PAGE_SIZE = 100
 STRIPE_VERSION = "2024-10-28.acacia"
 _REFUSAL_STATUS = frozenset({401, 403})
 VOLATILE_FIELDS = frozenset({"receipt_url", "hosted_invoice_url", "invoice_pdf"})
 USAGE_PERIOD_KEY = "usage_period"
+CREATED_LOOKBACK_SECONDS = 30 * 24 * 60 * 60
+SWEEP_INTERVAL_SECONDS = 60 * 60
+# Stripe stamps `created` off its own clock, so a record minted while a walk runs can carry an
+# instant slightly behind the walk's start: the sweep is stored that far back, and the next filter
+# still reaches such a record.
+CLOCK_SKEW_SECONDS = 120
 _MISSING_RESOURCE_STATUS = frozenset({400, 404})
 _MISSING_RESOURCE_CODE = "resource_missing"
 
@@ -214,6 +241,19 @@ class StripeConnector(RestConnector):
     base_url = "https://api.stripe.com"
     streams_list = STRIPE_STREAMS
 
+    def checkpoint(
+        self, stream: StreamSpec, records: list[dict[str, Any]], cursor: str | None
+    ) -> str | None:
+        """Advance record watermarks. A created walk emits its sweep checkpoint at completion."""
+        if stream.cursor_field is None or stream.cursor_field == "created":
+            return cursor
+        timestamp = self._cursor_to_unix(cursor)
+        if cursor is not None and timestamp is None:
+            raise ValueError("stripe: invalid timestamp cursor")
+        normalized = str(timestamp) if timestamp is not None else None
+        result = integer_checkpoint(stream, records, normalized)
+        return cursor if result == normalized else result
+
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)
         client.headers["Stripe-Version"] = STRIPE_VERSION
@@ -240,7 +280,7 @@ class StripeConnector(RestConnector):
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name in {"external_account_bank_accounts", "external_account_cards"}:
                 async for page in self._paginate_external_accounts(client, stream):
@@ -253,6 +293,10 @@ class StripeConnector(RestConnector):
             if stream.name in _SUBSTREAM_QUERY_PARENTS:
                 async for page in self._paginate_substream_query(client, stream):
                     yield page
+                return
+            if stream.cursor_field == "created":
+                async for checkpointed in self._created_walk(client, stream, cursor=cursor):
+                    yield checkpointed
                 return
             async for page in self._page_loop(
                 client, self._list_path(stream), stream, cursor=cursor
@@ -271,6 +315,44 @@ class StripeConnector(RestConnector):
                 f"stripe: {error.response.status_code} {error.request.method} "
                 f"{error.request.url.copy_with(query=None)}: {reason}"
             ) from error
+
+    async def _created_walk(
+        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        """The `created` walk of one stream, filtered from the stored sweep instant and, once the
+        sweep is due, from `CREATED_LOOKBACK_SECONDS` behind it. The instant is stored only when the
+        walk reaches the end of the collection, so a run the adapter caps mid-walk resumes through
+        the adapter's positional envelope over an unchanged cursor and repeats this same filter.
+        This list read covers recent records inside that bounded window; older records are outside
+        its read set and remain available through Stripe's events stream.
+        A stored value this image cannot read is `CursorExpired`, which the driver clears — the walk
+        then restarts whole, where holding it would refuse the same value every run forever."""
+        stored = self._cursor_to_unix(cursor)
+        if cursor is not None and stored is None:
+            raise CursorExpired(f"stripe: {stream.name!r} cursor {cursor!r} is not a timestamp")
+        now = int(datetime.now(UTC).timestamp())
+        if stored is None or now - stored >= SWEEP_INTERVAL_SECONDS:
+            gte = None if stored is None else max(stored - CREATED_LOOKBACK_SECONDS, 0)
+            swept = max(now - CLOCK_SKEW_SECONDS, 0)
+        else:
+            gte, swept = stored, stored
+        path = self._list_path(stream)
+        after: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": PAGE_SIZE, **_EXTRA_PARAMS.get(stream.name, {})}
+            if after is not None:
+                params["starting_after"] = after
+            if gte is not None:
+                params["created[gte]"] = gte
+            data = await self._get(client, path, params=params)
+            rows = data.get("data") or []
+            if rows:
+                yield [self._browse_record(record, stream) for record in rows]
+            last_id = rows[-1].get("id") if rows else None
+            if not data.get("has_more") or not isinstance(last_id, str) or not last_id:
+                break
+            after = last_id
+        yield StreamPage(next_cursor=str(swept))
 
     async def _page_loop(
         self,

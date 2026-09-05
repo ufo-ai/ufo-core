@@ -227,13 +227,14 @@ async def test_an_unrepresentable_record_is_dropped_and_named_not_run_failing(
     run commits nothing and advances no cursor, so a record the provider keeps returning holds every
     later record behind it every interval."""
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
-    connector = _UntitledRecordConnector(stream, [_records(1, 2)])
+    connector = _UntitledRecordConnector(
+        stream, [StreamPage(records=_records(1, 2), next_cursor="2026-01-02T00:00:00Z")]
+    )
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
         result = await _run(connector, stream)
 
     assert [page.source_ref for page in result.pages] == ["items/1"]
-    # the watermark is the dropped record's own: the next run resumes past it, not at it
     assert result.next_cursor == "2026-01-02T00:00:00Z"
     assert result.dropped == 1
     dropped = [
@@ -312,7 +313,12 @@ async def test_a_record_with_no_declared_key_is_dropped_and_named_not_content_ke
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
-    feed: Feed = [[{"name": "keyless", "updated_at": "2026-01-03T00:00:00Z"}, *_records(1)]]
+    feed: Feed = [
+        StreamPage(
+            records=[{"name": "keyless", "updated_at": "2026-01-03T00:00:00Z"}, *_records(1)],
+            next_cursor="2026-01-03T00:00:00Z",
+        )
+    ]
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
         result = await _fetch(stream, feed)
@@ -347,7 +353,15 @@ async def test_a_cursor_stream_whose_records_lack_the_field_is_named(
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        await _fetch(stream, [[{"id": 1, "lastmodified": "2026-01-03T00:00:00Z"}]])
+        await _fetch(
+            stream,
+            [
+                StreamPage(
+                    records=[{"id": 1, "lastmodified": "2026-01-03T00:00:00Z"}],
+                    next_cursor="2026-01-03T00:00:00Z",
+                )
+            ],
+        )
     assert not [r for r in caplog.records if r.getMessage() == "source_sync.cursor_field_absent"]
 
 
@@ -377,6 +391,13 @@ async def _check_connector_normalizes_integer_timestamps() -> None:
     )
     assert result.pages[0].created_at == "2025-07-23T18:50:00.000000+00:00"
     assert result.pages[0].updated_at == "2025-07-23T19:50:00.000000+00:00"
+
+
+async def _check_record_fields_cannot_change_an_opaque_cursor() -> None:
+    stream = StreamSpec(name="charges", source_object="charges", cursor_field="created")
+    feed: Feed = [[{"id": "ch_1", "created": 999}, {"id": "ch_2", "created": 1000}]]
+    result = await _fetch(stream, feed, cursor="encoded:998")
+    assert result.next_cursor == "encoded:998"
 
 
 async def test_malformed_record_timestamp_warns_without_dropping_pages(
@@ -426,7 +447,7 @@ async def test_capped_run_without_checkpoint_stores_the_envelope(
     feed: Feed = [_records(7, 8), _records(9)]
     result = await _fetch(stream, feed, cursor="2026-01-01T00:00:00Z")
     assert len(result.pages) == 2
-    assert result.next_cursor == _envelope("2026-01-01T00:00:00Z", 2, "2026-01-08T00:00:00Z")
+    assert result.next_cursor == _envelope("2026-01-01T00:00:00Z", 2, "2026-01-01T00:00:00Z")
     assert result.snapshot is False
 
 
@@ -452,6 +473,7 @@ async def test_slicing_lands_every_record_exactly_once(monkeypatch: pytest.Monke
     monkeypatch.setattr(backend_module, "MAX_RECORDS_PER_RUN", 2)
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
     feed: Feed = [_records(1), _records(2), _records(3), _records(4), _records(5)]
+    feed.append(StreamPage(next_cursor="2026-01-05T00:00:00Z"))
     landed: list[str] = []
     cursor: str | None = None
     for _ in range(10):
@@ -495,6 +517,17 @@ async def _check_connector_json_map_cursor_round_trips_untouched() -> None:
     assert len(result.pages) == 2
 
 
+@pytest.mark.parametrize("token", ["", "000999", "eyJvZmZzZXQiOiAxMDB9", '{"offset": 100}'])
+async def test_provider_cursor_round_trips_without_interpretation(token: str) -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
+    connector = _FeedConnector(stream, [StreamPage(records=_records(1), next_cursor=token)])
+    first = await _run(connector, stream)
+    second = await _run(connector, stream, cursor=first.next_cursor)
+    assert first.next_cursor == token
+    assert second.next_cursor == token
+    assert connector.received_cursors == [None, token]
+
+
 def _check_envelope_decoder_rejects_extra_keys() -> None:
     corrupted = json.dumps(
         {"ufo_backfill": {"origin": None, "skip": 0, "watermark": None, "junk": True}}
@@ -516,12 +549,59 @@ async def test_non_advancing_checkpoints_end_at_the_overrun_ceiling(
     first = await _fetch(stream, feed)
     assert len(first.pages) == ceiling
     assert json.loads(first.next_cursor) == {
-        "ufo_backfill": {"origin": None, "skip": ceiling, "watermark": None}
+        "ufo_backfill": {"origin": None, "skip": ceiling, "watermark": "stuck"}
     }
     second = await _fetch(stream, feed, cursor=first.next_cursor)
     landed = {page.source_ref for page in second.pages}
     assert landed == {f"items/{index}" for index in range(ceiling, 2 * ceiling)}
     assert second.snapshot is False
+
+
+class _NewestFirstConnector(RestConnector):
+    name = "newest-first"
+    base_url = "https://newest-first.example"
+    streams_list: ClassVar[list[StreamSpec]] = [
+        StreamSpec(name="items", source_object="items", cursor_field="sequence")
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records = [{"id": str(sequence), "sequence": sequence} for sequence in range(4, 0, -1)]
+
+    async def paginate(
+        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        minimum = int(cursor) if cursor is not None else None
+        for record in self.records:
+            if minimum is None or record["sequence"] >= minimum:
+                yield [record]
+
+    def checkpoint(
+        self, stream: StreamSpec, records: list[dict[str, Any]], cursor: str | None
+    ) -> str | None:
+        values = [int(cursor)] if cursor is not None else []
+        values.extend(record["sequence"] for record in records)
+        return str(max(values)) if values else None
+
+
+async def test_tier_two_checkpoint_excludes_the_skipped_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_module, "MAX_RECORDS_PER_RUN", 2)
+    connector = _NewestFirstConnector()
+    stream = connector.streams_list[0]
+
+    first = await _run(connector, stream)
+    connector.records = [
+        {"id": str(sequence), "sequence": sequence} for sequence in range(6, 0, -1)
+    ]
+    second = await _run(connector, stream, cursor=first.next_cursor)
+    third = await _run(connector, stream, cursor=second.next_cursor)
+    fourth = await _run(connector, stream, cursor=third.next_cursor)
+    fifth = await _run(connector, stream, cursor=fourth.next_cursor)
+
+    assert fourth.next_cursor == "4"
+    assert [page.source_ref for page in fifth.pages] == ["items/6", "items/5"]
 
 
 class _RestFeedConnector(RestConnector):
@@ -535,6 +615,11 @@ class _RestFeedConnector(RestConnector):
     def __init__(self) -> None:
         super().__init__()
         self.paginate_closed = False
+
+    def checkpoint(
+        self, stream: StreamSpec, records: list[dict[str, Any]], cursor: str | None
+    ) -> str | None:
+        raise AssertionError("native page checkpoints must bypass the record checkpoint callback")
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
@@ -610,6 +695,7 @@ async def test_connector_backend_async_contract() -> None:
         _check_an_empty_key_is_no_key_so_the_record_is_dropped,
         _check_a_declared_key_resolves_a_nested_provider_id,
         _check_connector_normalizes_integer_timestamps,
+        _check_record_fields_cannot_change_an_opaque_cursor,
         _check_resumed_run_drives_from_origin_and_skips_the_prefix,
         _check_uncapped_snapshot_run_keeps_snapshot_semantics,
         _check_connector_json_map_cursor_round_trips_untouched,

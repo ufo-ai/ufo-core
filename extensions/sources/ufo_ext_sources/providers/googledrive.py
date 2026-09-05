@@ -28,6 +28,7 @@ from ufo.sdk.sources import (
     list_or_empty,
 )
 from ufo_ext_sources.providers import google
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 1000
 CHILD_PAGE_SIZE = 100
@@ -83,6 +84,7 @@ class GoogleDriveConnector(RestConnector):
     name = "googledrive"
     base_url = "https://www.googleapis.com"
     streams_list = GOOGLE_DRIVE_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

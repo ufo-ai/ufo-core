@@ -25,6 +25,7 @@ import httpx
 
 from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec, list_or_empty
 from ufo_ext_sources.providers import google
+from ufo_ext_sources.watermark import text_checkpoint
 
 MEET_API_BASE = "https://meet.googleapis.com"
 DOCS_API_URL = "https://docs.googleapis.com/v1"
@@ -51,6 +52,7 @@ class GoogleMeetConnector(RestConnector):
     name = "googlemeet"
     base_url = MEET_API_BASE
     streams_list = GOOGLE_MEET_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

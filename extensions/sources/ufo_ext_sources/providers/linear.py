@@ -7,7 +7,7 @@ pageInfo { hasNextPage endCursor } } }`. `paginate` POSTs one page at a time thr
 `_post` retry envelope, threads `pageInfo.endCursor` into the next request's `after`, and stops when
 `hasNextPage` is false. A stream Linear filters by `updatedAt` (`accepts_filter`) sorts by
 `updatedAt` and, once a watermark exists, gates the server with `filter: { updatedAt: { gte:
-<cursor> } }` so only rows changed since the last run come back; the adapter advances the watermark
+<cursor> } }` so only rows changed since the last run come back; the provider computes the watermark
 over `updatedAt`. The four collections Linear exposes without an `updatedAt` filter (customer
 statuses/tiers, issue relations, project statuses) full-refresh each run. `render` lifts an
 issue/project/comment/user into readable prose (title, description, state, assignee) rather than the
@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 GRAPHQL_PATH = "/graphql"
 ORDER_BY_UPDATED_AT = "updatedAt"
@@ -261,6 +262,7 @@ class LinearConnector(RestConnector):
     name = "linear"
     base_url = "https://api.linear.app"
     streams_list = LINEAR_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

@@ -22,6 +22,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, dict_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 GOOGLE_ADS_VERSION = "v24"
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -67,6 +68,7 @@ class GoogleAdsConnector(RestConnector):
     name = "googleads"
     base_url = f"https://googleads.googleapis.com/{GOOGLE_ADS_VERSION}"
     streams_list = ALL_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _developer_token(self) -> str:
         token = os.getenv("UFO_GOOGLE_ADS_DEVELOPER_TOKEN") or os.getenv(

@@ -288,16 +288,18 @@ class RestConnector(Connector):
                 async for page in source:
                     if not page:
                         continue
-                    if isinstance(page, StreamPage):
-                        self._validate_page(page.records, stream)
+                    native = page if isinstance(page, StreamPage) else None
+                    records = page.records if isinstance(page, StreamPage) else page
+                    self._validate_page(records, stream)
+                    records = [self.flatten(record, stream) for record in records]
+                    if native is not None:
                         yield StreamPage(
-                            records=[self.flatten(record, stream) for record in page.records],
-                            deletes=page.deletes,
-                            next_cursor=page.next_cursor,
+                            records=records,
+                            deletes=native.deletes,
+                            next_cursor=native.next_cursor,
                         )
-                        continue
-                    self._validate_page(page, stream)
-                    yield [self.flatten(record, stream) for record in page]
+                    else:
+                        yield records
             finally:
                 if isinstance(source, AsyncGenerator):
                     await source.aclose()

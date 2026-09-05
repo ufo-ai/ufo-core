@@ -5,7 +5,7 @@ Brex paginates uniformly: every list endpoint returns `{items: [...], next_curso
 the next page is requested with `?cursor=<token>&limit=100`; the loop stops when `next_cursor` is
 null. Records arrive flat, so `flatten` stays the identity passthrough. Most endpoints expose no
 `updated_at` filter, so the sync is full-refresh; `transactions` and `expenses` carry a cursor field
-(`posted_at_date` / `purchased_at`) the adapter advances a watermark over, without a server-side
+(`posted_at_date` / `purchased_at`) the provider computes a watermark over, without a server-side
 filter. Auth is the OAuth bearer the resolved `Credential` carries.
 
 `transfers` is the polled form of Brex's own `TRANSFER_PROCESSED`/`TRANSFER_FAILED` webhook: the
@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -69,6 +70,7 @@ class BrexConnector(RestConnector):
     name = "brex"
     base_url = "https://platform.brexapis.com"
     streams_list = BREX_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

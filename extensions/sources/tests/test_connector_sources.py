@@ -23,6 +23,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.providers.github import GitHubConnector
+from ufo_ext_sources.watermark import text_checkpoint
 
 from ufo.db import workspace_tx
 from ufo.runtime.access.connectors import (
@@ -456,10 +457,12 @@ async def test_a_jittered_wait_stays_under_the_bound_that_governs_it(
 
 class _CannedConnector(RestConnector):
     """A connector whose `paginate` yields pre-canned pages, so the adapter's collapse — snapshot vs
-    delta, watermark, deletes → source refs — is what's under test, not an HTTP loop."""
+    delta, checkpoint, deletes → source refs — is what's under test, not an HTTP loop. It owns its
+    checkpoint the way a text-watermark provider does, since the adapter reads no record field."""
 
     name = "canned"
     base_url = "https://api.canned.test"
+    checkpoint = staticmethod(text_checkpoint)
 
     def __init__(self, stream: StreamSpec, pages: list[list[dict[str, Any]] | StreamPage]) -> None:
         self._canned_stream = stream

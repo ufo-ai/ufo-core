@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -171,6 +172,7 @@ class ZendeskConnector(RestConnector):
     name = "zendesk"
     base_url = ""
     streams_list = ZENDESK_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     @staticmethod
     def _data_field(stream: StreamSpec) -> str:

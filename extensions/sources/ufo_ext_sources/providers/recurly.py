@@ -20,6 +20,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 RECURLY_API_VERSION = "application/vnd.recurly.v2021-02-25"
 PAGE_SIZE = 200
@@ -79,6 +80,7 @@ class RecurlyConnector(RestConnector):
     name = "recurly"
     base_url = "https://v3.recurly.com"
     streams_list = RECURLY_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         timeout = httpx.Timeout(TIMEOUT_CONNECT_SECONDS, read=TIMEOUT_READ_SECONDS)

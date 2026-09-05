@@ -24,6 +24,7 @@ from ufo.sdk.sources import (
     dict_or_empty,
     with_context,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -70,6 +71,7 @@ class CalendlyConnector(RestConnector):
     name = "calendly"
     base_url = "https://api.calendly.com"
     streams_list = CALENDLY_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def _current_user(self, client: httpx.AsyncClient) -> dict[str, Any]:
         data = await self._get(client, "/users/me")

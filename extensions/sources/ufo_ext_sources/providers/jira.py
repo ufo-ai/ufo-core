@@ -28,6 +28,7 @@ from ufo.sdk.sources import (
     records_at,
     with_context,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 ISSUE_FIELDS = "summary,description,status,priority,created,updated,project,assignee,reporter"
@@ -69,6 +70,7 @@ class JiraConnector(RestConnector):
     name = "jira"
     base_url = "https://api.atlassian.com"
     streams_list = JIRA_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

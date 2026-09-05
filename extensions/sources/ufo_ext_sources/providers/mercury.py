@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty, with_context
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 ACCOUNT_FIELD = "account_id"
@@ -58,6 +59,7 @@ class MercuryConnector(RestConnector):
     name = "mercury"
     base_url = "https://api.mercury.com"
     streams_list = MERCURY_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

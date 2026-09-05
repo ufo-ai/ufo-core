@@ -19,7 +19,10 @@ the backend authored rather than an exception message built out of the response.
 Rather than implement `SourceBackend` from scratch, a REST provider subclasses `RestConnector` —
 declaring its `StreamSpec`s and a `Pagination` strategy (or overriding `paginate`) — and wraps it in
 `ConnectorBackend`, the adapter that drives one stream to completion per run and collapses its pages
-into a `SyncResult`. The pagination helpers (`get_path`, `list_or_empty`, `records_at`,
+into a `SyncResult`. A provider returns opaque checkpoint state through `RestConnector.checkpoint`
+after each record page; the framework publishes it after enumeration. A provider that can resume
+between pages emits `StreamPage.next_cursor` directly, which takes priority over that callback.
+The pagination helpers (`get_path`, `list_or_empty`, `records_at`,
 `with_context`) are the shared record-shaping primitives a provider reaches for. A stream that fans
 out over partitions (one cursor per repo, channel) drives `PartitionWalk` with an `Ordering` and a
 per-partition page factory, so the per-partition cursor-map codec and bounded-backfill resume live

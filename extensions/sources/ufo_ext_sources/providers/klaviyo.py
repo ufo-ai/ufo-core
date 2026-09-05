@@ -25,6 +25,7 @@ import httpx
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo_ext_sources.watermark import text_checkpoint
 
 KLAVIYO_REVISION = "2024-10-15"
 PAGE_SIZE = 100
@@ -109,6 +110,7 @@ class KlaviyoConnector(RestConnector):
     name = "klaviyo"
     base_url = "https://a.klaviyo.com"
     streams_list = KLAVIYO_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         """Layer Klaviyo's pinned `revision` header on the base client, and — when the credential

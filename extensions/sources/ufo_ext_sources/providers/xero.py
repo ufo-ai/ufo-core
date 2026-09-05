@@ -27,6 +27,7 @@ from ufo.sdk.sources import (
     StreamSpec,
     list_or_empty,
 )
+from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
 CONNECTIONS_URL = "https://api.xero.com/connections"
@@ -138,6 +139,7 @@ class XeroConnector(RestConnector):
     name = "xero"
     base_url = "https://api.xero.com/api.xro/2.0"
     streams_list = XERO_STREAMS
+    checkpoint = staticmethod(text_checkpoint)
 
     def __init__(self, tenant_id: str | None = None) -> None:
         self._tenant_id = tenant_id

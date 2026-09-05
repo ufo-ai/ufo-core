@@ -8,7 +8,7 @@ that carries no value for its stream's declared `primary_key`, is dropped, warne
 the result's `dropped` rather than failing the run (`_page`).
 A full-collection stream (`delete_missing`) returns as an authoritative `snapshot` so the driver
 tombstones records that vanished; an incremental stream returns `snapshot=False`, advances a
-watermark over its `cursor_field`, and names any provider-reported removals in `deletes`. A row
+provider checkpoint, and names any provider-reported removals in `deletes`. A row
 whose config pins a `backfill_after` hands that instant to `fetch_page` beside the spec — never on
 it, so the spec holds only connector declarations and nothing on it invites a per-run recomputation.
 
@@ -38,16 +38,15 @@ connector's own JSON map) is opaque and reaches `fetch_page` untouched. A capped
 checkpoint stores `{origin, skip: records consumed so far, watermark}`; the next run re-drives
 `fetch_page` from `origin` (never the watermark — the connector must reproduce the same record
 sequence for the skip count to be sound), discards the first `skip` records, lands the rest, and
-advances the count. The envelope dissolves to a plain watermark cursor once a run finally exhausts
+advances the count. The envelope dissolves to the provider checkpoint once a run finally exhausts
 the stream.
 
 `snapshot = delete_missing`: only a full-snapshot stream tombstones, and it is never capped, so its
 run always enumerates the whole collection. An incremental (tier-1/tier-2) run never snapshots.
 Trades: tier 2 re-fetches the skipped prefix over HTTP each slice; the skip count
 assumes the connector enumerates in a stable order between runs, and an edit between runs that
-reorders the enumeration moves the count off its boundary — the reordered row carries a fresh
-`cursor_field` value a later incremental pass catches, the row it displaced past the boundary
-carries none. A cursor-less stream re-walks fully regardless.
+reorders the enumeration moves the count off its boundary. The connector owns incremental
+filtering and checkpoint ordering. A cursor-less stream re-walks fully regardless.
 
 The credential the proxy hands back is a broker's proxying transport (the secret never leaves the
 broker) or a member-added key read host-side from the credential store (the direct/BYOK backend) —
@@ -85,7 +84,7 @@ BACKFILL_KEY = "ufo_backfill"
 class _BackfillEnvelope(BaseModel):
     """The tier-2 resume state the adapter round-trips through a source's cursor when a capped run
     yielded no native checkpoint: the connector cursor the slice re-drives from, the record count to
-    discard off its front, and the watermark folded over what has landed so far. Persisted in the
+    discard off its front, and the last opaque checkpoint. Persisted in the
     source row's cursor, so a validated model that rejects anything beyond its three fields."""
 
     model_config = ConfigDict(extra="forbid")
@@ -165,6 +164,7 @@ class ConnectorBackend:
         skipped = 0
         over = False
         cap_checkpoint: str | None = None
+        native_checkpointed = False
         stream_pages = self.connector.fetch_page(
             stream,
             cursor=origin,
@@ -176,22 +176,26 @@ class ConnectorBackend:
         try:
             async for page in stream_pages:
                 records = page.records if isinstance(page, StreamPage) else page
+                checkpoint_records: list[dict[str, Any]] = []
                 for record in records:
                     consumed += 1
                     if skipped < skip_target:
                         skipped += 1
                         continue
+                    checkpoint_records.append(record)
                     page_row = self._page(stream, record)
                     if page_row is None:
                         dropped += 1
                     else:
                         pages.append(page_row)
-                    if stream.cursor_field:
-                        watermark = _max_str(watermark, record.get(stream.cursor_field))
                 if isinstance(page, StreamPage):
                     deletes.extend(f"{stream.name}/{external_id}" for external_id in page.deletes)
-                    if page.next_cursor:
+                    if page.next_cursor is not None:
+                        native_checkpointed = True
                         page_cursor = page.next_cursor
+                        watermark = page.next_cursor
+                if not native_checkpointed and checkpoint_records:
+                    watermark = self.connector.checkpoint(stream, checkpoint_records, watermark)
                 if not stream.delete_missing and len(pages) >= MAX_RECORDS_PER_RUN:
                     if not over:
                         over = True
@@ -383,11 +387,3 @@ def _record_timestamp(
         field=field,
     )
     return None
-
-
-def _max_str(current: str | None, value: Any) -> str | None:
-    if not isinstance(value, str):
-        return current
-    if current is None or value > current:
-        return value
-    return current

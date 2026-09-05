@@ -1,6 +1,6 @@
 """Intercom connector over a mock transport: the search-API POST body + `pages.next.starting_after`
-cursor, the scroll API, the `Intercom-Version` header, the integer→string cursor normalization the
-adapter needs to advance a watermark, and the `StreamSkipped` a refusal raises. Offline — a canned
+cursor, the scroll API, the `Intercom-Version` header, numeric watermark ordering,
+and the `StreamSkipped` a refusal raises. Offline — a canned
 transport, no DB, no token, no broker."""
 
 import json
@@ -94,6 +94,25 @@ async def test_search_paginates_and_normalizes_the_cursor() -> None:
     assert "Login issue" in page.body
 
 
+async def test_watermark_compares_integer_values_across_decimal_widths() -> None:
+    seen: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content)["query"]["value"])
+        return httpx.Response(
+            200,
+            json={
+                "conversations": [{"id": str(value), "updated_at": value} for value in (999, 1000)],
+                "pages": {},
+            },
+        )
+
+    first = await _fetch("conversations", handle, cursor="998")
+    assert first.next_cursor == "1000"
+    await _fetch("conversations", handle, cursor=first.next_cursor)
+    assert seen == [998, 1000]
+
+
 async def test_conversations_flatten_lifts_source_and_requester_and_keeps_cursor_stringify() -> (
     None
 ):
@@ -114,7 +133,7 @@ async def test_conversations_flatten_lifts_source_and_requester_and_keeps_cursor
     assert record["source__subject"] == "Bug"
     assert record["source__body"] == "<p>broken</p>"
     assert record["requester_id"] == "ct1"
-    assert record["updated_at"] == "1700000200"
+    assert record["updated_at"] == 1700000200
 
 
 async def test_conversation_parts_flatten_surface_author_type_and_id() -> None:
