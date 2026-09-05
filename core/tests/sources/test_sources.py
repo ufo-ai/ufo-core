@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import ClassVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import asyncpg
 import httpx
 import pytest
 import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
 import ufo_ext_memory.manifest as memory_manifest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -2425,6 +2427,7 @@ async def _source_state(source_id: UUID) -> sa.RowMapping:
                         tables.source.c.parked_at,
                         tables.source.c.parked_reason,
                         tables.source.c.next_sync_at,
+                        tables.source.c.claimed_by,
                     ).where(tables.source.c.id == source_id)
                 )
             )
@@ -3383,15 +3386,39 @@ class _ConnectorSource:
 
 
 class _NeverOpens:
-    """A transaction that never opens, the way one fails against a pool with nothing left."""
+    """A transaction that never opens, the way one fails against a pool with nothing left.
+    SQLAlchemy's own `TimeoutError` is what a checkout past the ceiling raises — a class the
+    database layer alone can raise, and never the socket class of the same name."""
 
     async def __aenter__(self) -> object:
-        raise TimeoutError("connection pool exhausted")
+        raise sa_exc.TimeoutError(
+            "QueuePool limit of size 1 overflow 0 reached, connection timed out"
+        )
 
     async def __aexit__(self, *_: object) -> None: ...
 
 
-async def _seed_connector_source(workspace_id: UUID) -> UUID:
+class _FullVolume(FilesystemBlobStore):
+    """A blob volume that refuses every body, the shape a full or read-only filesystem raises out of
+    `put` while the database under the same commit is healthy."""
+
+    async def put(self, key: str, data: bytes) -> None:
+        raise OSError("no space left on device")
+
+
+class _ConnectionDies:
+    """A transaction whose connection is already gone, the shape a database outage raises through
+    the asyncpg driver."""
+
+    async def __aenter__(self) -> object:
+        raise sa_exc.InterfaceError(
+            "connection was closed", None, asyncpg.InterfaceError("connection is closed")
+        )
+
+    async def __aexit__(self, *_: object) -> None: ...
+
+
+async def _seed_connector_source(workspace_id: UUID, *, consecutive_errors: int = 0) -> UUID:
     source_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -3401,6 +3428,7 @@ async def _seed_connector_source(workspace_id: UUID) -> UUID:
                 backend=CONNECTOR_PROVIDER,
                 config={"account": CONNECTOR_ACCOUNT, "stream": CONNECTOR_STREAM},
                 cursor=None,
+                consecutive_errors=consecutive_errors,
                 next_sync_at=sa.func.now(),
                 claimed_by=None,
                 claim_expires_at=None,
@@ -3502,17 +3530,18 @@ async def test_a_failed_stream_reports_its_provider_stream_and_cause(
     ]
 
 
-async def test_a_stream_whose_transaction_never_opened_still_reports_the_failure(
+async def test_a_stream_whose_pool_had_nothing_left_defers_instead_of_failing(
     db: None,
     database_url: str,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pool-exhaustion shape: every transaction after the claim times out, so the release that
-    would have counted the error cannot write either and the run dies with the error. The event is
-    emitted before that release, so the stream, its provider and the `TimeoutError` are on record
-    even though the row itself never took the error."""
+    """The pool-exhaustion shape: every checkout after the claim reaches the pool's ceiling and
+    raises `sqlalchemy.exc.TimeoutError`, so the release that would have freed the row cannot write
+    either. A pool this fleet saturated is this deploy's own fault and never the provider's, so the
+    run is deferred rather than failed, the release that cannot write is suppressed, and the claim
+    lease is what frees the row. The stream and the class stay on record."""
     workspace_id = await _workspace()
     source_id = await _seed_connector_source(workspace_id)
     driver = _connector_driver([SyncResult(pages=())], database_url, tmp_path / "blobs")
@@ -3526,17 +3555,218 @@ async def test_a_stream_whose_transaction_never_opened_still_reports_the_failure
 
     monkeypatch.setattr(sync, "workspace_tx", _only_the_claim_opens)
 
-    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(TimeoutError):
+    with caplog.at_level(logging.INFO, logger="ufo"):
         await _sync(driver)
 
     monkeypatch.undo()
-    failures = _events(caplog, "source_sync.failed")
+    assert not _events(caplog, "source_sync.failed")
+    deferrals = _events(caplog, "source_sync.deferred")
     assert [
         (record.ufo["provider"], record.ufo["stream"], record.ufo["error_class"])
-        for record in failures
+        for record in deferrals
     ] == [(CONNECTOR_PROVIDER, CONNECTOR_STREAM, "TimeoutError")]
-    assert failures[0].ufo["consecutive_errors"] == 1
+    assert deferrals[0].ufo["consecutive_errors"] == 0
     assert (await _source_state(source_id))["consecutive_errors"] == 0
+
+
+async def test_a_database_outage_defers_the_run_instead_of_counting_it_against_the_source(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection this deploy's database lost is not a stream that failed: the provider answered,
+    and what raised was the transaction the run wrote through. The event names the same fields as a
+    failure so one search reads both, and the counter, the metric and the CRITICAL check all stay
+    where they were — the database has its own monitor, and a page from this one would name the
+    wrong subsystem. The row comes back at the normal interval, not at a backoff earned by a source
+    that did nothing wrong."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id, consecutive_errors=2)
+    driver = _connector_driver([SyncResult(pages=())], database_url, tmp_path / "blobs")
+    opened = 0
+    real_tx = sync.workspace_tx
+
+    def _the_commit_loses_its_connection() -> object:
+        nonlocal opened
+        opened += 1
+        return _ConnectionDies() if opened == 2 else real_tx()
+
+    monkeypatch.setattr(sync, "workspace_tx", _the_commit_loses_its_connection)
+    started = datetime.now(UTC)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    monkeypatch.setattr(sync, "workspace_tx", real_tx)
+    state = await _source_state(source_id)
+    assert state["consecutive_errors"] == 2
+    assert state["claimed_by"] is None
+    assert not _events(caplog, "source_sync.failed")
+    deferrals = _events(caplog, "source_sync.deferred")
+    assert len(deferrals) == 1
+    assert deferrals[0].levelno == logging.WARNING
+    assert deferrals[0].ufo == {
+        "workspace_id": str(workspace_id),
+        "source_id": str(source_id),
+        "provider": CONNECTOR_PROVIDER,
+        "stream": CONNECTOR_STREAM,
+        "account_id": CONNECTOR_ACCOUNT,
+        "error_class": "InterfaceError",
+        "provider_fault": "",
+        "consecutive_errors": 2,
+        "next_sync_at": _utc(state["next_sync_at"]).isoformat(),
+        "cursor_reset": False,
+    }
+    assert _utc(state["next_sync_at"]) >= started + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
+    assert _metric_points(reader, SYNC_METRIC) == []
+    assert submitted == []
+
+
+async def test_a_provider_http_error_is_still_a_failed_run(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deferral is for this deploy's database alone. A provider that answered with a status the
+    stream cannot use is the failure this driver reports: the event, the counter, the row's error
+    count and the CRITICAL check all stand as they did."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    request = httpx.Request("GET", f"https://{CONNECTOR_HOST}/api/conversations.history")
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        rest._raise_for_status(httpx.Response(500, text="server error", request=request))
+    driver = _connector_driver([raised.value], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    assert not _events(caplog, "source_sync.deferred")
+    failures = _events(caplog, "source_sync.failed")
+    assert len(failures) == 1
+    assert failures[0].ufo["error_class"] == "HTTPStatusError"
+    assert failures[0].ufo["consecutive_errors"] == 1
+    assert (await _source_state(source_id))["consecutive_errors"] == 1
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {
+            "provider": CONNECTOR_PROVIDER,
+            "stream": CONNECTOR_STREAM,
+            "error_class": "HTTPStatusError",
+        }
+    ]
+    assert [status for _name, status, _message, _tags in submitted] == [o11y.SERVICE_CHECK_CRITICAL]
+
+
+async def test_a_provider_socket_timeout_is_still_a_failed_run(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider socket that never answered raises the builtin `TimeoutError`, the class a lost
+    database dial raises too. The stream is the one thing the run did reach for, so the class alone
+    never buys a deferral: the event, the counter, the row's error count and the CRITICAL check all
+    stand as they did."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    driver = _connector_driver(
+        [TimeoutError("provider timed out")], database_url, tmp_path / "blobs"
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    assert not _events(caplog, "source_sync.deferred")
+    failures = _events(caplog, "source_sync.failed")
+    assert len(failures) == 1
+    assert failures[0].ufo["error_class"] == "TimeoutError"
+    assert failures[0].ufo["consecutive_errors"] == 1
+    assert (await _source_state(source_id))["consecutive_errors"] == 1
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {
+            "provider": CONNECTOR_PROVIDER,
+            "stream": CONNECTOR_STREAM,
+            "error_class": "TimeoutError",
+        }
+    ]
+    assert [status for _name, status, _message, _tags in submitted] == [o11y.SERVICE_CHECK_CRITICAL]
+
+
+async def test_a_blob_volume_that_refuses_a_body_is_still_a_failed_run(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The body write sits inside the commit, past the fetch, and a full or read-only volume raises
+    `OSError` there — the class a lost database dial raises as well. Deferring it would refetch the
+    whole provider every interval and leave the sync monitor blind to a volume that takes no writes,
+    so the blob store's own fault stays the failed run: the event, the counter, the row's error
+    count and the CRITICAL check all stand."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_connector_source(workspace_id)
+    page = Page(
+        source_ref="C1/1700000000.1",
+        body="the deploy is green",
+        stream=CONNECTOR_STREAM,
+        title="#general",
+    )
+    driver = SyncDriver(
+        backends={CONNECTOR_PROVIDER: _ConnectorSource([SyncResult(pages=(page,))])},
+        blob=_FullVolume(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    assert not _events(caplog, "source_sync.deferred")
+    failures = _events(caplog, "source_sync.failed")
+    assert len(failures) == 1
+    assert failures[0].ufo["error_class"] == "OSError"
+    assert failures[0].ufo["consecutive_errors"] == 1
+    assert (await _source_state(source_id))["consecutive_errors"] == 1
+    assert _metric_points(reader, SYNC_METRIC) == [
+        {
+            "provider": CONNECTOR_PROVIDER,
+            "stream": CONNECTOR_STREAM,
+            "error_class": "OSError",
+        }
+    ]
+    assert [status for _name, status, _message, _tags in submitted] == [o11y.SERVICE_CHECK_CRITICAL]
 
 
 async def test_a_synced_stream_reports_what_it_wrote_and_what_it_dropped(

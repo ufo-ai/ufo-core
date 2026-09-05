@@ -18,7 +18,10 @@ derivation state lives in the indexer's own mirror. The driver polls; it never f
 it makes. `source_sync.failed` and `source_sync_failed_total` name a failed provider stream;
 `source_sync.ok` records what a successful run wrote and how many records it dropped;
 the `ufo.source_sync` service check carries each source row's current state, CRITICAL from the run
-that failed until the run that succeeds. A provider that keeps refusing a stream is neither: after
+that failed until the run that succeeds. A run this deploy's own database ended is none of those:
+`source_sync.deferred` records it, the error counter stands, and the row returns at the normal
+interval, because the database pages its own monitor and the provider was never asked anything.
+A provider that keeps refusing a stream is a case of its own: after
 `SOURCE_REFUSAL_PARK_THRESHOLD` refusals the row parks — held at
 `SOURCE_PARK_RETRY_SECONDS` instead of the interval, and recorded by `source_sync.parked` and
 `source_sync_parked_total` — until a run of it succeeds. A park pages nobody: only a member widening
@@ -35,8 +38,10 @@ from pathlib import Path
 from typing import ClassVar, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import asyncpg
 import httpx
 import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -76,6 +81,11 @@ SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
 SOURCE_SYNC_PARKED_METRIC = "source_sync_parked_total"
 SOURCE_SYNC_CHECK = "source_sync"
 SYNC_PROVIDER_FAULT_MAX_CHARS = 500
+_ASYNCPG_CONNECTION_ERRORS = (
+    asyncpg.PostgresConnectionError,
+    asyncpg.CannotConnectNowError,
+    asyncpg.InterfaceError,
+)
 
 
 class SourceRowConfig(BaseModel):
@@ -511,6 +521,31 @@ def _config_value(source: ClaimedSource, key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _database_unreachable(error: BaseException) -> bool:
+    """Whether a run died on this deploy's own database rather than on the source it syncs: a
+    checkout no pooled connection was left to serve, or a connection that died under the
+    transaction. `workspace_tx` and `owner_tx` surround every fetch and every write, so such a fault
+    raises on rows whose provider was never asked anything — it belongs to the database's own
+    monitor, and naming the stream that happened to be claimed would page the sync monitor for a
+    subsystem it does not watch.
+
+    A pool at its ceiling raises `sqlalchemy.exc.TimeoutError`; a connection that died raises
+    `InterfaceError` from the driver, or `OperationalError` carrying a connection-class asyncpg
+    error as its origin. Nothing but the database layer raises those classes, so where they raised
+    says nothing more, and the phase of the run says nothing either. A dial that never landed
+    carries no DBAPI wrapper at all — it is the socket's own `TimeoutError` or `OSError`, the two
+    classes the provider's socket raises under the fetch and the blob volume raises under the
+    commit — so neither the class nor the phase attributes it to the database, and it stays the
+    failed run this driver exists to report. An `OperationalError` from a live connection — a lock
+    timeout, a constraint the statement broke — is the sync's own failure and is classified as
+    one."""
+    if isinstance(error, sa_exc.TimeoutError | sa_exc.InterfaceError):
+        return True
+    if isinstance(error, sa_exc.OperationalError):
+        return isinstance(error.orig, _ASYNCPG_CONNECTION_ERRORS)
+    return False
+
+
 @dataclass(frozen=True)
 class PageBrowse:
     id: UUID
@@ -655,6 +690,9 @@ class SyncDriver:
                 )
             await self._skip(source, skipped.reason, awaits_grant=skipped.awaits_grant)
         except Exception as error:
+            if _database_unreachable(error):
+                await self._defer(source, error)
+                return
             cursor_reset = isinstance(error, CursorExpired)
             errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
             await self._report_failed(source, error, cursor_reset, errors, next_sync_at)
@@ -1131,6 +1169,34 @@ class SyncDriver:
                 f"{errors} consecutive failed runs, last {error_class}",
                 **_check_tags(source),
             )
+
+    async def _defer(self, source: ClaimedSource, error: Exception) -> None:
+        """A run this deploy's database ended, recorded as the interruption it is rather than as a
+        failure of the stream: `source_sync.deferred` carries the same fields as
+        `source_sync.failed`, so one search reads both, and the error class names what the database
+        raised. No `source_sync_failed_total` and no CRITICAL check, because the run says nothing
+        about the provider — the database has its own monitor, and a sync page here would name the
+        wrong subsystem to whoever answers it.
+
+        The row keeps its error counter and comes back at the normal interval: the source did not
+        fail, so neither the backoff nor the count it feeds has anything to measure. The release
+        opens a transaction against the database that just failed, so it is suppressed and the claim
+        lease is what frees the row when it cannot be written."""
+        next_sync_at = datetime.now(UTC) + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
+        with suppress(Exception):
+            warn(
+                "source_sync.deferred",
+                source_id=str(source.source_id),
+                **_stream_tags(source),
+                account_id=_config_value(source, "account"),
+                error_class=type(error).__name__,
+                provider_fault="",
+                consecutive_errors=source.consecutive_errors,
+                next_sync_at=next_sync_at.isoformat(),
+                cursor_reset=False,
+            )
+        with suppress(Exception):
+            await self._release(source, False, source.consecutive_errors, next_sync_at)
 
     async def _release(
         self, source: ClaimedSource, cursor_reset: bool, errors: int, next_sync_at: datetime
