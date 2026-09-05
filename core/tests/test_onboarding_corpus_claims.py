@@ -316,6 +316,16 @@ CLAIMS = (
         pattern=r"return subjects \| \{member_subject\(acting\)\}",
     ),
     Claim(
+        claim=(
+            "the foreign-channel seal is against the workspace's shared memory, not against the "
+            "speaking member's own private memory"
+        ),
+        corpus="references/troubleshooting.md",
+        phrase="The member's own private memory still reaches them in that channel",
+        source=TOOLS_CONTEXT,
+        pattern=r"return subjects \| \{member_subject\(acting\)\}",
+    ),
+    Claim(
         claim="the last seated admin cannot be demoted",
         corpus="references/capabilities.md",
         phrase="keeps at least one seated admin",

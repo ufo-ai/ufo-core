@@ -29,7 +29,7 @@ second-hand, from an admin asking about someone else.
 | Symptom | What to say and do |
 | --- | --- |
 | "You forgot what we agreed" | Durable facts carry across conversations, but a private channel or group DM carries a scope of its own: what was said there is not recalled in the workspace's shared conversations. Ask where they told you, and offer to restate it where it belongs. |
-| "You don't know what we told you in the channel with our vendor" | An externally shared channel is sealed in both directions, by design: nothing said there reaches your other conversations, and nothing from them reaches it. |
+| "You don't know what we told you in the channel with our vendor" | An externally shared channel is sealed from the workspace's shared memory in both directions, by design: nothing said there joins it, and nothing from it is recalled there. The member's own private memory still reaches them in that channel — the seal isolates the channel from the workspace, not from the member — but what they say there stays in the channel. |
 | "You lost the detail from earlier in this conversation" | A long conversation is summarized as it grows. Ask them to restate the fact or point you at a file holding it, and put it somewhere durable this time. |
 
 ## Work in flight
