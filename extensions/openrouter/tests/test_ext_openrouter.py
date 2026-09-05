@@ -1075,6 +1075,193 @@ async def test_a_stall_off_the_order_narrows_nothing() -> None:
     assert "provider" not in create.calls[1]["extra_body"]
 
 
+def _relayed_refusal(
+    upstream: str = "Morph",
+    raw: str = "morph-glm53flash accepts text parts only",
+) -> openai.BadRequestError:
+    """A 400 an upstream raised and OpenRouter relayed, as the SDK hands it over: the `error`
+    envelope unwrapped, the upstream named beside the upstream's own body."""
+    return openai.BadRequestError(
+        "Provider returned error",
+        response=httpx.Response(
+            400,
+            request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+        ),
+        body={
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {
+                "provider_name": upstream,
+                "raw": json.dumps({"error": {"message": raw, "type": "invalid_request_error"}}),
+            },
+        },
+    )
+
+
+async def test_a_relayed_refusal_reroutes_to_another_upstream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The live failure this closes: two routes answered 429, the third refused a content part it
+    alone rejects, and the whole request died on that 400 while a route it never asked was still
+    open. The refusing upstream joins `ignore` and the call is re-issued."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        _relayed_refusal(),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    with caplog.at_level(logging.INFO):
+        events = [event async for event in _client(create, _glm_flash_spec()).complete(request)]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[0]["extra_body"]["provider"] == GLM_FLASH_ROUTING
+    assert create.calls[1]["extra_body"]["provider"] == {**GLM_FLASH_ROUTING, "ignore": ["Morph"]}
+    assert create.calls[1]["extra_body"]["session_id"] == SESSION
+    refused = next(
+        record for record in caplog.records if record.getMessage() == "model.provider_refused_retry"
+    )
+    assert refused.ufo == {
+        "provider": "openrouter",
+        "model": "z-ai/glm-5.3-flash",
+        "upstream": "Morph",
+        "attempt": 1,
+    }
+
+
+async def test_a_relayed_refusal_off_the_order_reroutes_on_its_exclusion_alone() -> None:
+    """An unpinned id carries no `only`, so the re-route's `ignore` is its whole provider
+    preference here too — and it has to carry one, or the sticky session_id pins the re-issue back
+    to the upstream that just refused it."""
+    create = ScriptedCreate(
+        _relayed_refusal("Google", "unsupported content part in messages[4]"),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    events = [event async for event in _client(create).complete(REQUEST)]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[1]["extra_body"]["provider"] == {"ignore": ["Google"]}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "This endpoint's maximum context length is 131072 tokens",
+        "No auth credentials found: the API key is invalid",
+        "Insufficient credit to serve this request",
+    ],
+)
+async def test_a_refusal_every_route_repeats_still_fails_loud(raw: str) -> None:
+    """A relayed 400 naming the request's size, the key or the account is the request being
+    unservable, not one route's own limit: another route answers it identically, so the error
+    reaches the caller on the first refusal."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        _relayed_refusal("Morph", raw),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    with pytest.raises(openai.BadRequestError):
+        async for _ in _client(create, _glm_flash_spec()).complete(request):
+            pass
+
+    assert len(create.calls) == 1
+
+
+async def test_a_400_openrouter_raised_itself_still_fails_loud() -> None:
+    """A 400 with no `metadata.provider_name` is the router refusing the call it read, so there is
+    no upstream to route around and nothing a re-issue would change."""
+    error = openai.BadRequestError(
+        "messages: expected an array",
+        response=httpx.Response(
+            400,
+            request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+        ),
+        body={"message": "messages: expected an array", "code": 400},
+    )
+    create = ScriptedCreate(
+        error,
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    with pytest.raises(openai.BadRequestError) as raised:
+        async for _ in _client(create).complete(REQUEST):
+            pass
+
+    assert raised.value is error
+    assert len(create.calls) == 1
+
+
+async def test_exhausted_refusal_reroutes_raise_the_last_refusal() -> None:
+    """The bound preserves the old behavior at the end of the routes: when every upstream the
+    re-route reaches refuses the messages, the caller still gets the BadRequestError."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    last = _relayed_refusal("Fireworks")
+    create = ScriptedCreate(_relayed_refusal("Morph"), _relayed_refusal("Baseten"), last)
+
+    with pytest.raises(openai.BadRequestError) as raised:
+        async for _ in _client(create, _glm_flash_spec()).complete(request):
+            pass
+
+    assert raised.value is last
+    assert len(create.calls) == openrouter.MAX_REFUSED_PROVIDER_RETRIES + 1
+
+
+async def test_exhausted_refusal_exclusions_degrade_to_the_empty_result() -> None:
+    """An unpinned slug sends every refusing upstream as its whole `ignore`, so the re-route can
+    cover the slug and the call after it is refused with a 404. A refusal streams no usage of its
+    own, so the degrade ends the round on a zero Usage — a round that yields nothing at all fails
+    the turn instead of degrading to the empty result."""
+    create = ScriptedCreate(
+        _relayed_refusal("Google", "unsupported content part in messages[4]"),
+        _relayed_refusal("Google AI Studio", "unsupported content part in messages[4]"),
+        _routing_error(),
+    )
+
+    events = [event async for event in _client(create).complete(REQUEST)]
+
+    assert events == [Usage()]
+    assert len(create.calls) == openrouter.MAX_REFUSED_PROVIDER_RETRIES + 1
+    assert create.calls[2]["extra_body"]["provider"] == {"ignore": ["Google", "Google AI Studio"]}
+
+
+async def test_a_refusal_after_output_yielded_keeps_its_plain_raise() -> None:
+    """Output already reached the engine, so a re-issue would stream the round's opening twice."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        [_chunk(content="partial", provider="Morph"), _relayed_refusal()],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    events = []
+
+    with pytest.raises(openai.BadRequestError):
+        async for event in _client(create, _glm_flash_spec()).complete(request):
+            events.append(event)
+
+    assert events == [ModelStreamStart(), TextDelta(text="partial")]
+    assert len(create.calls) == 1
+
+
+async def test_a_refusing_upstream_leaves_the_rest_of_the_turn() -> None:
+    """The content part the upstream refused stays in the messages for every later round, and the
+    sticky session_id pins the next round back to that upstream, so the exclusion outlives the
+    round exactly as a stall's does."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        _relayed_refusal(),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+        [_chunk(content="again"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    client = _client(create, _glm_flash_spec())
+
+    async for _ in client.complete(request):
+        pass
+    events = [event async for event in client.complete(request)]
+
+    assert TextDelta(text="again") in events
+    assert create.calls[2]["extra_body"]["provider"] == {**GLM_FLASH_ROUTING, "ignore": ["Morph"]}
+
+
 async def test_the_gemini_flash_abort_retry_keeps_its_identical_call() -> None:
     """The abort is the model's own no-output fault, not a wedged route: it clears on an immediate
     identical retry, so it is the one mid-stream fault that leaves no upstream behind."""

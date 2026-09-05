@@ -79,6 +79,22 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+MAX_REFUSED_PROVIDER_RETRIES = 2
+UNSERVABLE_REQUEST_MARKERS = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "too many tokens",
+    "too long",
+    "api key",
+    "authentication",
+    "unauthorized",
+    "credit",
+    "quota",
+)
+"""What a relayed 400 says when every other route says it too. A refusal naming the request's size,
+the key, or the account is the request itself being unservable, so re-issuing it elsewhere only
+spends the round on the same answer."""
 GEMINI_ABORT_RETRY_MODEL = "google/gemini-3.7-flash"
 GEMINI_ABORT_ERROR = "The operation was aborted"
 JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
@@ -321,6 +337,28 @@ def _chunk_provider(chunk: ChatCompletionChunk) -> str | None:
     return str(provider) if provider else None
 
 
+def _refused_upstream(error: openai.APIStatusError) -> str | None:
+    """The upstream to route around when OpenRouter answers 400, or None when the 400 belongs to the
+    request. OpenRouter refuses a call it reads itself with its own error and no `metadata`, while
+    an upstream's refusal is relayed with `metadata.provider_name` and the provider's raw body —
+    which is the case another route can still serve: Morph rejects a content part its two peers
+    accept, and a call that dies there dies holding routes that were never asked. A relayed refusal
+    naming something no route escapes keeps the plain raise."""
+    if error.status_code != 400 or not isinstance(error.body, dict):
+        return None
+    metadata = error.body.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    upstream = metadata.get("provider_name")
+    if not isinstance(upstream, str) or not upstream:
+        return None
+    raw = metadata.get("raw")
+    said = f"{error.body.get('message', '')} {raw if isinstance(raw, str) else json.dumps(raw)}"
+    if any(marker in said.lower() for marker in UNSERVABLE_REQUEST_MARKERS):
+        return None
+    return upstream
+
+
 def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage:
     details = usage.prompt_tokens_details
     cached_tokens = (details.cached_tokens or 0) if details is not None else 0
@@ -418,9 +456,32 @@ class _OpenRouterRetry:
     model: str
     delay: float = INITIAL_RETRY_DELAY_SECONDS
     attempt: int = 0
+    refused: int = 0
     abort_retried: bool = False
 
-    async def status(self, error: openai.APIStatusError, yielded: bool) -> "_OpenRouterRetry":
+    async def status(
+        self, error: openai.APIStatusError, yielded: bool, dead: set[str]
+    ) -> "_OpenRouterRetry":
+        """The next retry state for a status error, or the error raised. A 400 one upstream raised
+        for messages its peers accept re-issues at once around that upstream, which `dead` carries
+        onto the next call; 429 and 5xx wait out the retry-after backoff; anything else raises."""
+        upstream = _refused_upstream(error)
+        if upstream is not None and not yielded and self.refused < MAX_REFUSED_PROVIDER_RETRIES:
+            dead.add(upstream)
+            log(
+                "model.provider_refused_retry",
+                provider=self.spec.provider,
+                model=self.model,
+                upstream=upstream,
+                attempt=self.refused + 1,
+            )
+            emit_metric(
+                "model_provider_retry_total",
+                provider=self.spec.provider,
+                model=self.model,
+                kind="refused",
+            )
+            return replace(self, refused=self.refused + 1)
         attempt = self.attempt + 1
         retryable = error.status_code == 429 or error.status_code >= 500
         if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
@@ -555,6 +616,16 @@ class OpenRouterModelClient:
     exclusions cannot cover the slug, and the first call of a round carries none at all, so a 404
     there is the account's own routing policy and keeps its plain raise. Gemini 3.7 Flash's exact
     no-output abort retries once immediately.
+    A 400 an upstream raised and OpenRouter relayed — `metadata.provider_name` beside the
+    provider's raw body — is one route refusing what its peers accept, most often a content part
+    only that route rejects, so it joins `ignore` and the call is re-issued up to
+    MAX_REFUSED_PROVIDER_RETRIES times before the last refusal raises. Those exclusions can leave an
+    unpinned slug served nowhere exactly as the empty-provider ones can, and that 404 degrades the
+    same way — on a zero Usage, because a refusal streams none of its own and a round that ends
+    holding no usage fails the turn instead of degrading. A 400 OpenRouter raised itself carries no
+    provider to route around, and a relayed one naming the request's size, the key or the account
+    (UNSERVABLE_REQUEST_MARKERS) is refused everywhere; both keep the plain raise, as does a refusal
+    that arrives after output already yielded.
     The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter derives
     from max_tokens when the model's spec supports it; `off` rides there too, as `enabled: false`,
     because an omitted parameter leaves the upstream model reasoning at its own default effort
@@ -581,25 +652,22 @@ class OpenRouterModelClient:
         slug = openrouter_slug(request.model)
         empty_attempt = 0
         ignore_providers: set[str] = set()
+        usage_yielded = False
         while True:
             state = _OpenRouterStream(bool(self.spec.price.cache_write_30m))
             try:
-                stream = await self.client.chat.completions.create(
-                    **self._create_kwargs(request, self._excluded(slug, ignore_providers))
-                )
-                stream_started = False
-                async for chunk in stream:
-                    if not stream_started:
-                        stream_started = True
-                        yield ModelStreamStart()
-                    for event in state.accept(chunk):
-                        yield event
+                async for event in self._stream(request, state, ignore_providers):
+                    yield event
             except openai.APIStatusError as error:
                 if state.usage is not None:
                     yield state.usage
+                    usage_yielded = True
                 if self._nowhere_left(slug, request.model, error, ignore_providers):
+                    if not usage_yielded:
+                        yield Usage()
                     return
-                retry = await retry.status(error, state.yielded)
+                self._stalled_out(slug, _refused_upstream(error), "provider_refused")
+                retry = await retry.status(error, state.yielded, ignore_providers)
                 continue
             except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
                 if state.usage is not None:
@@ -634,9 +702,26 @@ class OpenRouterModelClient:
                     kind="empty",
                 )
                 yield usage
+                usage_yielded = True
                 continue
             yield usage
             return
+
+    async def _stream(
+        self, request: ModelRequest, state: _OpenRouterStream, ignore_providers: set[str]
+    ) -> AsyncIterator[ModelEvent]:
+        """One call's events, the stream's opening marked when its first chunk lands."""
+        slug = openrouter_slug(request.model)
+        stream = await self.client.chat.completions.create(
+            **self._create_kwargs(request, self._excluded(slug, ignore_providers))
+        )
+        stream_started = False
+        async for chunk in stream:
+            if not stream_started:
+                stream_started = True
+                yield ModelStreamStart()
+            for event in state.accept(chunk):
+                yield event
 
     def _excluded(self, slug: str, dead: set[str]) -> frozenset[str]:
         """The upstreams this call routes around: the ones that answered empty in this round, then
@@ -665,7 +750,9 @@ class OpenRouterModelClient:
         return True
 
     def _stalled_out(self, slug: str, upstream: str | None, kind: str) -> None:
-        """Keep the upstream a stream died on out of the rest of this turn's calls. The engine
+        """Keep the upstream a stream died on, or that refused the messages, out of the rest of
+        this turn's calls. A refusal is remembered whether or not the round re-issues around it:
+        the content part the upstream rejected is in every later round's messages too. The engine
         re-runs an interrupted round with the same messages under the same sticky session_id, so
         without this the re-run is the call that just stalled and OpenRouter pins it back to the
         upstream that stalled it — which is how one wedged route spent both attempts of a round and
