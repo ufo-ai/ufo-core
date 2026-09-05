@@ -4,7 +4,7 @@ import {
   IconDots,
   IconHistory,
   IconLayoutSidebarRight,
-  IconPencil,
+  IconMessageDots,
   IconPlug,
   IconPlus,
   IconSettings,
@@ -692,7 +692,7 @@ export function AgentPane({
             {speaks ? null : (
               <Button
                 variant="quiet"
-                size={held !== undefined ? "icon" : "bar"}
+                size="icon"
                 aria-label={
                   (held !== undefined ? "Close edit of " : "Edit ") + agentName(agent.name)
                 }
@@ -713,10 +713,7 @@ export function AgentPane({
                 {held !== undefined ? (
                   <IconLayoutSidebarRight aria-hidden />
                 ) : (
-                  <>
-                    <IconPencil className="size-(--size-glyph)" aria-hidden />
-                    Edit
-                  </>
+                  <IconMessageDots aria-hidden />
                 )}
               </Button>
             )}

@@ -256,9 +256,9 @@ test("the right-side chat's band starts another conversation, and carries no men
   expect(screen.queryByRole("button", { name: "Conversations with Assistant" })).toBeNull();
 });
 
-/** The toggle states the act it will perform. Shut, it is the word and the mark of an edit; open,
- *  it is the mark of the lane it would close, and the label goes — a control that says "Edit" while
- *  the lane stands open names the thing rather than the act. It stays one control across both, so
+/** The toggle states the act it will perform. Shut, it is the mark of a chat; open, it is the mark
+ *  of the lane it would close. It carries no word in either state — the mark alone stands in the
+ *  page's gutter, and the act is named to a screen reader. It stays one control across both, so
  *  the press that opened the lane keeps the focus that opened it.
  *
  *  The band's own act founds another conversation, and is spent where the lane already stands on
@@ -269,13 +269,13 @@ test("the chat toggle states the act it will perform, and the band's act is spen
 
   await screen.findByTitle("Assistant homepage");
   const shut = screen.getByRole("button", { name: "Edit Assistant" });
-  expect(shut.textContent).toContain("Edit");
+  expect(shut.textContent).toBe("");
   expect(shut.getAttribute("aria-pressed")).toBe("false");
 
   await userEvent.click(shut);
 
   const open_ = await screen.findByRole("button", { name: "Close edit of Assistant" });
-  expect(open_.textContent).not.toContain("Edit");
+  expect(open_.textContent).toBe("");
   expect(open_.getAttribute("aria-pressed")).toBe("true");
   expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
 
