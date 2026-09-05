@@ -11,6 +11,7 @@ import anthropic
 import httpx
 
 from ufo.harness.models.interface import (
+    PROVIDER_PARK_THRESHOLD_SECONDS,
     ContentBlock,
     ImageBlock,
     ImageSource,
@@ -43,7 +44,6 @@ OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.
 MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
-PROVIDER_PARK_THRESHOLD_SECONDS = 10.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
 STABLE_PREFIX_CACHE_TTL = "1h"
 STREAM_TRANSPORT_ERRORS = (

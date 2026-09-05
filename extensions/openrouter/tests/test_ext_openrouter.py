@@ -64,7 +64,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.credentials import CredentialValueInvalid
-from ufo.sdk.models import ModelStreamInterrupted
+from ufo.sdk.models import ModelRetryAfter, ModelStreamInterrupted
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -1138,8 +1138,96 @@ async def test_a_relayed_refusal_reroutes_to_another_upstream(
         "provider": "openrouter",
         "model": "z-ai/glm-5.3-flash",
         "upstream": "Morph",
+        "status_code": 400,
         "attempt": 1,
     }
+
+
+async def test_a_relayed_rate_limit_reroutes_to_another_upstream_at_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The live failure this closes: one pinned route answered 429 seven times in a row, the client
+    slept out its whole 2-4-8-16-32-60 ladder against that same route — the sticky session pins a
+    re-issue carrying no exclusion straight back to it — and the turn died two minutes later while
+    the other pinned route was never asked. A 429 that names its upstream is that upstream's limit,
+    not the request's, so it joins `ignore` and the call re-issues at once."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    relayed = openai.RateLimitError(
+        "Provider returned error",
+        response=httpx.Response(
+            429, request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions")
+        ),
+        body={
+            "message": "Provider returned error",
+            "code": 429,
+            "metadata": {
+                "provider_name": "Fireworks",
+                "raw": json.dumps({"error": {"message": "rate limit exceeded"}}),
+            },
+        },
+    )
+    create = ScriptedCreate(
+        relayed,
+        [
+            _chunk(content="ok", provider="BaseTen"),
+            _chunk(finish="stop"),
+            _chunk(usage=_usage(1, 1)),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO):
+        events = [event async for event in _client(create, _glm_flash_spec()).complete(request)]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[0]["extra_body"]["provider"] == GLM_FLASH_ROUTING
+    assert create.calls[1]["extra_body"]["provider"] == {
+        **GLM_FLASH_ROUTING,
+        "ignore": ["Fireworks"],
+    }
+    rerouted = next(
+        record for record in caplog.records if record.getMessage() == "model.provider_refused_retry"
+    )
+    assert rerouted.ufo["status_code"] == 429
+    assert not [r for r in caplog.records if r.getMessage() == "model.provider_status_retry"]
+
+
+async def test_a_rate_limit_naming_no_upstream_waits_out_the_backoff() -> None:
+    """OpenRouter's own 429 names no route to go around, so it keeps the retry-after wait and the
+    identical call."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash"})
+    create = ScriptedCreate(
+        _status_error(429, "rate limited"),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    events = [event async for event in _client(create, _glm_flash_spec()).complete(request)]
+
+    assert TextDelta(text="ok") in events
+    assert create.calls[1]["extra_body"]["provider"] == GLM_FLASH_ROUTING
+
+
+async def test_a_long_rate_limit_parks_a_deferred_caller() -> None:
+    """A caller that deferred long retries ends its request on `ModelRetryAfter` once the wait
+    passes the park threshold, the way the Anthropic client already does, instead of holding a
+    minute-long sleep inside the round."""
+    request = REQUEST.model_copy(update={"model": "z-ai/glm-5.3-flash", "defer_long_retry": True})
+    long_wait = openai.RateLimitError(
+        "rate limited",
+        response=httpx.Response(
+            429,
+            headers={"retry-after": str(int(openrouter.PROVIDER_PARK_THRESHOLD_SECONDS) + 20)},
+            request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+        ),
+        body=None,
+    )
+    create = ScriptedCreate(long_wait)
+
+    with pytest.raises(ModelRetryAfter) as parked:
+        async for _ in _client(create, _glm_flash_spec()).complete(request):
+            pass
+
+    assert parked.value.seconds == openrouter.PROVIDER_PARK_THRESHOLD_SECONDS + 20
+    assert len(create.calls) == 1
 
 
 async def test_a_relayed_refusal_off_the_order_reroutes_on_its_exclusion_alone() -> None:

@@ -124,6 +124,11 @@ class ToolSchema(BaseModel):
     input_schema: dict[str, Any]
 
 
+PROVIDER_PARK_THRESHOLD_SECONDS = 10.0
+"""The retry delay past which a caller that set `defer_long_retry` parks its turn instead of
+holding the wait inside the request — the bound `ModelRetryAfter` is raised at."""
+
+
 class ModelRequest(BaseModel):
     """`reasoning` is the extended-thinking depth each client renders in its provider's shape — the
     Anthropic `thinking` block plus `output_config.effort`, the OpenAI/OpenRouter `reasoning`/effort

@@ -37,11 +37,13 @@ from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo.sdk.models import (
     DEFAULT_COMPACTION_KEEP_MESSAGES,
     OPENAI_TOOL_ERROR_PREFIX,
+    PROVIDER_PARK_THRESHOLD_SECONDS,
     Message,
     ModelEvent,
     ModelPrice,
     ModelRequest,
     ModelResponseTruncated,
+    ModelRetryAfter,
     ModelSpec,
     ModelStreamInterrupted,
     ModelStreamStart,
@@ -338,14 +340,15 @@ def _chunk_provider(chunk: ChatCompletionChunk) -> str | None:
     return str(provider) if provider else None
 
 
-def _refused_upstream(error: openai.APIStatusError) -> str | None:
-    """The upstream to route around when OpenRouter answers 400, or None when the 400 belongs to the
-    request. OpenRouter refuses a call it reads itself with its own error and no `metadata`, while
-    an upstream's refusal is relayed with `metadata.provider_name` and the provider's raw body —
-    which is the case another route can still serve: an upstream rejects a content part its peers
-    accept, and a call that dies there dies holding routes that were never asked. A relayed refusal
-    naming something no route escapes keeps the plain raise."""
-    if error.status_code != 400 or not isinstance(error.body, dict):
+def _named_upstream(error: openai.APIStatusError) -> str | None:
+    """The upstream to route around when OpenRouter relays its 400 or 429, or None when the answer
+    is OpenRouter's own. OpenRouter refuses a call it reads itself with its own error and no
+    `metadata`, while an upstream's answer is relayed with `metadata.provider_name` and the
+    provider's raw body — which is the case another route can still serve: one upstream rejects a
+    content part its peers accept, one upstream is at its rate limit while its peers are not, and a
+    call that dies there dies holding routes that were never asked. A relayed 400 naming something
+    no route escapes keeps the plain raise; a 429 is never about the request."""
+    if error.status_code not in (400, 429) or not isinstance(error.body, dict):
         return None
     metadata = error.body.get("metadata")
     if not isinstance(metadata, dict):
@@ -353,6 +356,8 @@ def _refused_upstream(error: openai.APIStatusError) -> str | None:
     upstream = metadata.get("provider_name")
     if not isinstance(upstream, str) or not upstream:
         return None
+    if error.status_code == 429:
+        return upstream
     raw = metadata.get("raw")
     said = f"{error.body.get('message', '')} {raw if isinstance(raw, str) else json.dumps(raw)}"
     if any(marker in said.lower() for marker in UNSERVABLE_REQUEST_MARKERS):
@@ -455,6 +460,7 @@ def _openrouter_messages(
 class _OpenRouterRetry:
     spec: ModelSpec
     model: str
+    defer_long_retry: bool
     delay: float = INITIAL_RETRY_DELAY_SECONDS
     attempt: int = 0
     refused: int = 0
@@ -463,10 +469,14 @@ class _OpenRouterRetry:
     async def status(
         self, error: openai.APIStatusError, yielded: bool, dead: set[str]
     ) -> "_OpenRouterRetry":
-        """The next retry state for a status error, or the error raised. A 400 one upstream raised
-        for messages its peers accept re-issues at once around that upstream, which `dead` carries
-        onto the next call; 429 and 5xx wait out the retry-after backoff; anything else raises."""
-        upstream = _refused_upstream(error)
+        """The next retry state for a status error, or the error raised. A 400 or 429 one upstream
+        answered while its peers were never asked re-issues at once around that upstream, which
+        `dead` carries onto the next call — a re-issue without it is the same call, and the sticky
+        session pins it back to the route that just answered. A 429 or 5xx naming no upstream is
+        OpenRouter's own and waits out the retry-after backoff, unless the caller deferred long
+        retries and the wait passes the park threshold, when the turn parks on `ModelRetryAfter`
+        rather than holding the wait inside the request; anything else raises."""
+        upstream = _named_upstream(error)
         if upstream is not None and not yielded and self.refused < MAX_REFUSED_PROVIDER_RETRIES:
             dead.add(upstream)
             log(
@@ -474,13 +484,14 @@ class _OpenRouterRetry:
                 provider=self.spec.provider,
                 model=self.model,
                 upstream=upstream,
+                status_code=error.status_code,
                 attempt=self.refused + 1,
             )
             emit_metric(
                 "model_provider_retry_total",
                 provider=self.spec.provider,
                 model=self.model,
-                kind="refused",
+                kind="rate_limited" if error.status_code == 429 else "refused",
             )
             return replace(self, refused=self.refused + 1)
         attempt = self.attempt + 1
@@ -513,6 +524,12 @@ class _OpenRouterRetry:
             model=self.model,
             kind="status",
         )
+        if (
+            self.defer_long_retry
+            and error.status_code == 429
+            and wait > PROVIDER_PARK_THRESHOLD_SECONDS
+        ):
+            raise ModelRetryAfter(wait) from error
         await asyncio.sleep(wait)
         return replace(
             self,
@@ -593,8 +610,10 @@ class _OpenRouterStream:
 class OpenRouterModelClient:
     """The OpenRouter backend behind the `ModelClient` protocol: it streams ModelEvents from the
     Chat Completions wire, ending with one Usage, exactly as core's OpenAIClient does, and adds
-    OpenRouter's own behavior. 429/5xx retry with retry-after-aware backoff but only until visible
-    output yields; finish_reason=length raises ModelResponseTruncated. A fault on the live stream —
+    OpenRouter's own behavior. A 400 or 429 an upstream answered re-issues at once around it; a
+    429/5xx that is OpenRouter's own retries with retry-after-aware backoff but only until visible
+    output yields, parking a deferred caller past the threshold instead of holding a long wait;
+    finish_reason=length raises ModelResponseTruncated. A fault on the live stream —
     an error frame OpenRouter injects when its upstream stalls or dies (the exact APIError class), a
     response that never opens (the SDK's connection-error classes, its timeout among them, each
     arriving with no chunk to name the route), a timeout or peer disconnect mid-body, or a usage
@@ -651,7 +670,7 @@ class OpenRouterModelClient:
     _stalled: list[str] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        retry = _OpenRouterRetry(self.spec, request.model)
+        retry = _OpenRouterRetry(self.spec, request.model, request.defer_long_retry)
         slug = openrouter_slug(request.model)
         empty_attempt = 0
         ignore_providers: set[str] = set()
@@ -669,7 +688,8 @@ class OpenRouterModelClient:
                     if not usage_yielded:
                         yield Usage()
                     return
-                self._stalled_out(slug, _refused_upstream(error), "provider_refused")
+                if error.status_code == 400:
+                    self._stalled_out(slug, _named_upstream(error), "provider_refused")
                 retry = await retry.status(error, state.yielded, ignore_providers)
                 continue
             except (
