@@ -662,7 +662,7 @@ const NEW_CHAT_PLACEHOLDER = "Start new chat…";
 const FOLLOW_UP_PLACEHOLDER = "Ask a follow-up…";
 /** What the start screen says before the member has said anything. The screen is otherwise empty,
  *  and a pane that opens on nothing states nothing about what it is for. */
-const START_INTRO = "What can I help you with?";
+const START_INTRO = "What can UFO do for you?";
 
 /** The message box holds as many lines as the member writes. Enter sends it and Shift+Enter opens
  *  a line, which is the pairing every chat composer ships and the only one a member arrives

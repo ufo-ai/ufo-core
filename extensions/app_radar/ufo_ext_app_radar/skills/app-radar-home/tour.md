@@ -14,7 +14,7 @@ points:
 ---
 ## Conversations: shared or private
 
-Every member reaches the same agents. A conversation has a scope that controls who can read it and what the agent may read:
+Every member reaches the same agents and the same conversations, minus the ones a scope keeps private. A conversation has a scope that controls who can read it and what the agent may read:
 
 - **Shared.** A conversation shared with the workspace. Any teammate can open it, add to it, and read it.
 - **Private.** A direct message. No other member can open it or see it listed.
@@ -43,7 +43,7 @@ Three surfaces reach the workspace:
 
 ## The object system
 
-Every persistent resource in the workspace is an object with access controls, addressable from any conversation. The common kinds:
+The workspace keeps its parts as objects. Every persistent resource is an object with access controls, addressable from any conversation. The common kinds:
 
 - **Agents** — the apps and assistants, each with its own prompt, model, and homepage.
 - **Sites** — access controlled realtime websites the workspace hosts.
@@ -85,6 +85,6 @@ Each agent runs on the model you pick, or on the automatic choice. Say "run the 
 
 ## Artifacts
 
-An artifact is a file the work produced: a report, a spreadsheet, an image, or a hosted site. The Artifacts app lists each one with the run that produced it.
+An artifact is a file the work produced: a report, a spreadsheet, an image, or a hosted site. The Artifacts app lists every one with the run that produced it.
 
 The workspace already holds one file to ask for: "ufo-logo-ratio.pdf", the logo sheet, with the mark's proportions and the spacing around it. Say "share the logo sheet" and it lands in Artifacts as the first file of your own.
