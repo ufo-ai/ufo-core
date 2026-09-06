@@ -2248,6 +2248,7 @@ async def test_dm_links_member_by_email_and_status_anchors_to_the_message(
         "timezone": "America/New_York",
         "question": None,
         "source": "https://acme.slack.com/archives/D9/p70?thread_ts=7.0&cid=D9",
+        "reply_reaches": "slack",
     }
 
 

@@ -813,6 +813,8 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
         lines.append(f"question: {context.question}")
     if context is not None and context.source:
         lines.append(f"source: {context.source}")
+    if context is not None and context.reply_reaches:
+        lines.append(f"reply_reaches: {context.reply_reaches}")
     return "<context>\n" + "\n".join(lines) + "\n</context>\n"
 
 

@@ -22,8 +22,10 @@ from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.runtime.surfaces.admission import (
     ADMITTED_TURN_METRIC,
     ARCHIVED_REFUSAL_MESSAGE,
+    REPLY_REACHES_NOBODY,
     Admission,
 )
+from ufo.runtime.turns.audience import conversation_audience
 from ufo.schema import tables
 from ufo.schema.records import (
     SURFACE_COMMENT_ROUND_INDEX,
@@ -1809,3 +1811,52 @@ async def test_an_admission_that_rolls_back_counts_nothing_and_its_retry_counts_
 
     assert _admitted_points(reader) == [("cli", "member", 1)]
     assert await _turn_count(conversation_id) == 1
+
+
+async def _reply_reaches(turn_id: UUID) -> str | None:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+    return None if row is None else row.get("reply_reaches")
+
+
+async def test_admission_stamps_where_a_turn_reply_lands(db: None) -> None:
+    """A turn cannot work out for itself whether its answer reaches anyone: a background turn on an
+    extension's own conversation writes into a room nobody watches, and reads exactly like one a
+    member is waiting on. Admission knows, so it stamps where the reply lands — the surface, when a
+    member spoke there or the surface posts, and `nobody` otherwise."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    posts = Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"}))
+    spoken = await posts.admit_member(workspace_id, conversation_id, "hello", member_id)
+
+    quiet_conversation = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=quiet_conversation,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="sources",
+                queue_key="source-trigger:probe",
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    quiet = Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"}))
+    background = await quiet.invoke(
+        workspace_id,
+        quiet_conversation,
+        agent_id,
+        "the review found two blocking defects",
+        "probe-key",
+        authority=MemberAuthority(member_id),
+    )
+
+    assert await _reply_reaches(spoken.turn_id) == "cli"
+    assert background is not None
+    assert await _reply_reaches(background) == REPLY_REACHES_NOBODY

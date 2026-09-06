@@ -1137,9 +1137,7 @@ class Admission:
                     None if spawned_identity is None else spawned_identity.subagent_name
                 ),
                 result_delivery=None if spawned_identity is None else DELIVERY_PENDING,
-                context=(
-                    None if inbound.context is None else inbound.context.model_dump(mode="json")
-                ),
+                context=_reply_context(inbound, surface, self.durable_surfaces),
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 idempotency_key=idempotency_key,
                 traceparent=current_traceparent(),
@@ -1323,6 +1321,23 @@ class Admission:
                 turn_id=str(turn_id),
                 error_class=type(error).__name__,
             )
+
+
+REPLY_REACHES_NOBODY = "nobody"
+
+
+def _reply_context(inbound: _Inbound, surface: str, durable: frozenset[str]) -> dict[str, object]:
+    """The context this turn carries, with where its reply lands stamped on. A durable surface posts
+    the reply, and a member who spoke is reading the conversation they spoke in; anything else
+    answers into a room nobody is watching, which is the one fact a background turn cannot work out
+    for itself."""
+    reached = (
+        surface
+        if surface in durable or inbound.speaker_member_id is not None
+        else REPLY_REACHES_NOBODY
+    )
+    context = (inbound.context or TurnContext()).model_copy(update={"reply_reaches": reached})
+    return context.model_dump(mode="json")
 
 
 @dataclass(frozen=True)

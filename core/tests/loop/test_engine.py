@@ -6197,6 +6197,19 @@ async def test_member_turn_carries_the_context_tag_and_a_subagent_turn_does_not(
         "</context>\n"
         "hi"
     )
+    unread = (await _seed_turn("queued", None)).model_copy(
+        update={"context": TurnContext(reply_reaches="nobody")}
+    )
+    unread_model = CapturingModel()
+    await _engine(unread, unread_model, tmp_path).run()
+    assert unread_model.seen[0][-1].content == (
+        "<context>\n"
+        f"message_ref: {unread.id}\n"
+        "time: Thursday 2026-07-09 18:32 UTC\n"
+        "reply_reaches: nobody\n"
+        "</context>\n"
+        "hi"
+    )
     child = (await _seed_turn("queued", None)).model_copy(
         update={"subagent_profile": "probe", "parent_turn_id": uuid4()}
     )

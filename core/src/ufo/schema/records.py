@@ -533,8 +533,13 @@ class TurnContext(BaseModel):
     timezone: str | None = None
     question: str | None = None
     source: str | None = None
+    reply_reaches: str | None = None
+    """Where this turn's reply goes, stamped by admission: the surface that posts it, or `nobody`
+    when nothing does. A turn cannot otherwise tell — the reply of a background turn on an
+    extension's own conversation is written and read by no one unless a member opens the page — and
+    a turn that believes it has told the member stays quiet about what it found."""
 
-    @field_validator("sender", "question", "source")
+    @field_validator("sender", "question", "source", "reply_reaches")
     @classmethod
     def _tag_safe_line(cls, value: str | None) -> str | None:
         if value is None:

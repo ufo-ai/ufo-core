@@ -1149,6 +1149,7 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
         "timezone": "America/Los_Angeles",
         "question": None,
         "source": "ufo cli (owner@example.com)",
+        "reply_reaches": "ufo",
     }
     assert timezone == "America/Los_Angeles"
 

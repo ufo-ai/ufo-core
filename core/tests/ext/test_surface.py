@@ -1020,7 +1020,7 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
         speaker_member_id=member_id,
     )
     turn, _, audience = await _load_turn(admitted.turn_id)
-    assert turn.context == ambient
+    assert turn.context == ambient.model_copy(update={"reply_reaches": "test_surface"})
     assert turn.speaker_member_id == member_id
     assert audience == SHARED_AUDIENCE
     assert turn.created_at.tzinfo is not None
