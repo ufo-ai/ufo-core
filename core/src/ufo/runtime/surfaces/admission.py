@@ -35,11 +35,21 @@ wait.
 The inbound spend decision routes the turn before it is enqueued: allow queues it; a breached cap
 either parks it (held, not enqueued — the resume job re-admits it when the cap is raised) or, when
 the cap rejects, commits it cancelled with the reason, so a client's wait ends in-surface either
-way. The seat gate runs first in the same commit: a speaking member without a seat — or a
-scheduled fire into a seatless member's conversation — commits cancelled with the refusal, an
-unseated speaker's message never folds into a live turn, and a member-surface message whose
-speaker never resolved to a member is refused rather than answered as a ghost — unconditionally,
-because every member surface resolves its speaker, so one that did not is a stranger."""
+way. A spent balance parks a member's message rather than refusing it, and writes the hold as a
+reply the surface delivers: cancelled, the message is dead the moment the credit runs out, where the
+same sweep resumes a parked one the minute an admin adds credit; parked in silence, the member
+reads nothing. A member's later messages fold into that held turn and add no notice of their own,
+so one thread holds one turn, one notice, and one answer once the credit lands. Only a member's
+message is held: a prepared intent's panel has already read the refusal and moved on, and a
+scheduled fire or an internal delivery re-fires on its own schedule — those are refused as
+before. The hold is also the balance's alone: a cap that rejects or parks in the same breath
+refuses as it always did, because credit does not lift a cap and the sweep would hold such a turn
+past the one thing its notice promises. The seat gate runs first in the same commit: a speaking
+member without a seat — or a scheduled fire into a seatless member's conversation — commits
+cancelled with the refusal, an unseated speaker's message never folds into a live turn, and a
+member-surface message whose speaker never resolved to a member is refused rather than answered as
+a ghost — unconditionally, because every member surface resolves its speaker, so one that did not
+is a stranger."""
 
 import asyncio
 from collections.abc import Callable
@@ -63,6 +73,7 @@ from ufo.runtime.authority import (
     turn_authority,
 )
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
+from ufo.runtime.billing.balance import balance_park_message
 from ufo.runtime.ext.context import AgentArchived, MemberReach
 from ufo.runtime.ext.surface import Admitted, conversation_name
 from ufo.runtime.hub import Absorbed, ArrivalQueued, Hub, Reply
@@ -71,6 +82,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
+    BALANCE_PARK_ROUND_INDEX,
     DBOS_APP_VERSION,
     DELIVERY_PENDING,
     INTENT_ADMISSION,
@@ -530,6 +542,7 @@ class Admission:
                     workspace_id,
                     conversation_id,
                     conversation.member_id,
+                    conversation.surface,
                     agent_id,
                     archived,
                     member_admission,
@@ -833,6 +846,7 @@ class Admission:
         workspace_id: UUID,
         conversation_id: UUID,
         conversation_member_id: UUID | None,
+        surface: str,
         agent_id: UUID,
         archived: bool,
         member_admission: bool,
@@ -940,7 +954,15 @@ class Admission:
                 ),
             )
         )
-        if live_turn is None or fold_balance is None or fold_balance.outcome != ALLOW:
+        absorbs = fold_balance is not None and fold_balance.outcome == ALLOW
+        held_by_balance = (
+            member_admission
+            and live_turn is not None
+            and live_turn.status == PARKED
+            and fold_balance is not None
+            and fold_balance.outcome != ALLOW
+        )
+        if live_turn is None or not (absorbs or held_by_balance):
             return _FoldResult()
         message_seq = (
             await connection.execute(
@@ -978,15 +1000,11 @@ class Admission:
             admission_source=arrival_source,
             turn_status=live_turn.status,
         )
-        if live_turn.status != PARKED:
-            admitted = await self._record_comment(
-                connection,
-                workspace_id,
-                Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id),
-                comment,
+        if held_by_balance and surface in self.durable_surfaces:
+            await self._record_park_notice(
+                connection, workspace_id, live_turn.id, balance_park_message(self.billing_url)
             )
-            return _FoldResult(admitted=admitted)
-        if not live_turn.retry_due:
+        if live_turn.status != PARKED or held_by_balance or not live_turn.retry_due:
             admitted = await self._record_comment(
                 connection,
                 workspace_id,
@@ -1056,6 +1074,7 @@ class Admission:
             else INTERNAL_ADMISSION
         )
         terminal: TerminalFrame | None
+        park_notice: str | None = None
         refusal = await self._authority_refusal(
             connection,
             workspace_id,
@@ -1079,6 +1098,9 @@ class Admission:
                 )
             )
             match decision.outcome:
+                case "allow" if balance.outcome != ALLOW and member_admission and intent is None:
+                    status, terminal = PARKED, None
+                    park_notice = balance_park_message(self.billing_url)
                 case _ if balance.outcome != ALLOW:
                     status, terminal = _refused(holds_work_already_done, balance.message)
                 case "allow":
@@ -1149,6 +1171,8 @@ class Admission:
                     updated_at=sa.func.now(),
                 )
             )
+            if park_notice is not None:
+                await self._record_park_notice(connection, workspace_id, turn_id, park_notice)
         return _CreatedTurn(turn_id, seq, status, admission_source)
 
     async def _authority_refusal(
@@ -1171,6 +1195,40 @@ class Admission:
         if not await Seats(workspace_id).admits(connection, authority):
             return _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
         return None
+
+    async def _record_park_notice(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        turn_id: UUID,
+        notice: str,
+    ) -> None:
+        """Tell the thread it is held. The turn is parked, not terminal, so its writeback delivers
+        nothing until it runs and answers — a durable surface would otherwise go silent from the
+        moment the balance ran out until an admin noticed. This is the same row a spoken span rides;
+        a live surface reads the same sentence off the status poll that ends its stream instead.
+
+        Two paths reach it: the message the balance holds at the door, and a member's next message
+        folding onto a turn already held — which is what covers a turn the engine parked mid-flight,
+        since that park ends the live stream and writes nothing durable. The row's id is the turn's
+        own, so however many messages fold on, the thread reads the hold exactly once."""
+        insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+        await connection.execute(
+            insert(tables.mid_turn_reply)
+            .values(
+                id=mid_turn_reply_id_for(turn_id, BALANCE_PARK_ROUND_INDEX, 0),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                round_index=BALANCE_PARK_ROUND_INDEX,
+                span_index=0,
+                message_ref=None,
+                text=notice,
+                status=WRITEBACK_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .on_conflict_do_nothing(index_elements=[tables.mid_turn_reply.c.id])
+        )
 
     async def _record_comment(
         self,

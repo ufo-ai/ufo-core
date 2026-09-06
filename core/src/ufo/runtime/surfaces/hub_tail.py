@@ -22,7 +22,7 @@ from ufo.db import workspace_tx
 from ufo.harness.o11y import log
 from ufo.runtime.authority import turn_authority
 from ufo.runtime.billing.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
-from ufo.runtime.billing.balance import balance_refusal_message, read_headroom
+from ufo.runtime.billing.balance import balance_park_message, read_headroom
 from ufo.runtime.hub import Activity, ArrivalQueued, Hub, LiveFrame, Parked, Terminal
 from ufo.runtime.seats import SEAT_REVOKED_MESSAGE, Seats
 from ufo.schema import tables
@@ -158,7 +158,7 @@ async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> Li
             headroom is not None
             and headroom.balance_micro_usd <= headroom.reserve_micro_usd - headroom.grace_micro_usd
         ):
-            return Parked(message=balance_refusal_message(billing_url))
+            return Parked(message=balance_park_message(billing_url))
         member_id = (
             await connection.execute(
                 sa.select(tables.conversation.c.member_id).where(

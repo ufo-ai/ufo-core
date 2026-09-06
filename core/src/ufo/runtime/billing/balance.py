@@ -100,6 +100,21 @@ def balance_refusal_message(billing_url: str | None) -> str:
     return f"This workspace is out of credit. An admin can add credit at {billing_url}"
 
 
+def balance_park_message(billing_url: str | None) -> str:
+    """What a member reads when the balance holds their message instead of refusing it: the fact,
+    that the message is answered on its own once credit lands — the resume sweep makes that true —
+    and where an admin adds it. The screen ends the sentence it appears in, because a period after a
+    URL reads as part of the address; with no screen the sentence names the act, as the refusal
+    does."""
+    held = (
+        "This workspace is out of credit. "
+        "Your message is answered automatically once credit is added."
+    )
+    if billing_url is None:
+        return f"{held} An admin can set up automatic refills."
+    return f"{held} An admin can add credit at {billing_url}"
+
+
 @dataclass(frozen=True, slots=True)
 class AutoTopup:
     """What a workspace refills itself with, and the balance that triggers it. Both are set

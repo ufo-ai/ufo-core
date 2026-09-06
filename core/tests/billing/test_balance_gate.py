@@ -5,6 +5,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 from test_spend_caps import (
     StubDbos,
+    _bill,
     _dispatch,
     _insert_parked,
     _seed,
@@ -17,6 +18,7 @@ from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
 from ufo.runtime.billing.balance import (
     TOPUP_GRACE_MICRO_USD,
+    balance_park_message,
     balance_refusal_message,
     credit,
     debit,
@@ -110,6 +112,174 @@ async def test_no_balance_row_allows_admission(db: None) -> None:
         workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
     )
     assert dbos.enqueued == [str(turn_id)]
+
+
+async def _notices(turn_id: UUID) -> list[str]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(tables.mid_turn_reply.c.text)
+                    .where(tables.mid_turn_reply.c.turn_id == turn_id)
+                    .order_by(tables.mid_turn_reply.c.round_index)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def _seat(connection: AsyncConnection, member_id: UUID) -> None:
+    await connection.execute(
+        sa.update(tables.member)
+        .where(tables.member.c.id == member_id)
+        .values(seated_at=sa.func.now())
+    )
+
+
+async def _arrivals(turn_id: UUID) -> list[str]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(tables.inbound_message.c.body)
+                    .where(tables.inbound_message.c.admitted_turn_id == turn_id)
+                    .order_by(tables.inbound_message.c.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def test_a_spent_balance_parks_a_member_message_and_says_so_once(db: None) -> None:
+    """A member's message is held rather than cancelled, from the first message of a conversation
+    on, and the hold is written as a reply the surface delivers. Cancelled, the message was dead the
+    moment the credit ran out and no refill could wake it; parked in silence, the member read
+    nothing. The member's next message joins the held turn — no second turn, no second notice — and
+    the sweep that re-decides the balance every minute enqueues the one turn once credit lands."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, _, conversation_id = await _seed(connection)
+        await _seat(connection, member_id)
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=5)
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset({"cli"}))
+    parked = await admission.admit_member(workspace_id, conversation_id, "help", member_id)
+    assert dbos.enqueued == []
+    assert await _status(parked.turn_id) == "parked"
+    assert await _notices(parked.turn_id) == [balance_park_message(None)]
+
+    joined = await admission.admit_member(workspace_id, conversation_id, "and this", member_id)
+    assert joined.turn_id == parked.turn_id
+    assert joined.arrival_id is not None
+    assert dbos.enqueued == []
+    assert await _status(parked.turn_id) == "parked"
+    assert await _arrivals(parked.turn_id) == ["and this"]
+    assert await _notices(parked.turn_id) == [balance_park_message(None)]
+
+    dbos = StubDbos()
+    await _dispatch(dbos)
+    assert dbos.enqueued == []
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, 20 * DOLLAR, 20 * DOLLAR, "top-up")
+    dbos = StubDbos()
+    await _dispatch(dbos)
+    assert dbos.enqueued == [str(parked.turn_id)]
+    assert await _notices(parked.turn_id) == [balance_park_message(None)]
+
+
+async def test_folding_onto_a_turn_parked_mid_flight_tells_the_thread_it_is_held(
+    db: None,
+) -> None:
+    """A turn the engine parked mid-flight ends its live stream and writes nothing durable, so the
+    thread holds no notice. The member's next message folds onto it, and the fold is what has to say
+    the thread is held — cancelling that message is what used to put the line in the thread. The
+    notice rides the turn's own id, so a third and fourth message add none."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _seat(connection, member_id)
+        held = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=5)
+    assert await _notices(held) == []
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset({"cli"}))
+    folded = await admission.admit_member(workspace_id, conversation_id, "and this", member_id)
+    assert folded.turn_id == held
+    assert folded.arrival_id is not None
+    assert dbos.enqueued == []
+    assert await _status(held) == "parked"
+    assert await _notices(held) == [balance_park_message(None)]
+
+    again = await admission.admit_member(workspace_id, conversation_id, "and more", member_id)
+    assert again.turn_id == held
+    assert await _notices(held) == [balance_park_message(None)]
+
+
+async def test_a_breached_cap_refuses_the_message_a_spent_balance_would_have_held(
+    db: None,
+) -> None:
+    """Credit lifts a balance; it does not lift a cap. Held on both, the turn would sit past the one
+    thing its notice promises — the sweep re-decides the cap too and keeps holding, and nothing
+    turns a parked turn terminal — so the member would wait forever on a message that reads as
+    answered soon. The cap decides first and the wait ends in-surface, as it did before the hold
+    existed."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _seat(connection, member_id)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 10 * DOLLAR, seq=1)
+        await _set_cap(connection, workspace_id, "workspace", None, 3600, DOLLAR, "reject")
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=5)
+    dbos = StubDbos()
+    admitted = await Admission(dbos=dbos, durable_surfaces=frozenset({"cli"})).admit_member(
+        workspace_id, conversation_id, "help", member_id
+    )
+    assert dbos.enqueued == []
+    assert await _status(admitted.turn_id) == "cancelled"
+    assert (await _terminal(admitted.turn_id)).text == balance_refusal_message(None)
+    assert await _notices(admitted.turn_id) == []
+
+
+async def test_a_parking_cap_refuses_the_message_a_spent_balance_would_have_held(
+    db: None,
+) -> None:
+    """The same for a cap that parks rather than rejects: its window rolling is what releases it,
+    which the hold notice does not say and credit does not do."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
+        await _seat(connection, member_id)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 10 * DOLLAR, seq=1)
+        await _set_cap(connection, workspace_id, "workspace", None, 3600, DOLLAR, "park")
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=5)
+    dbos = StubDbos()
+    admitted = await Admission(dbos=dbos, durable_surfaces=frozenset({"cli"})).admit_member(
+        workspace_id, conversation_id, "help", member_id
+    )
+    assert dbos.enqueued == []
+    assert await _status(admitted.turn_id) == "cancelled"
+    assert (await _terminal(admitted.turn_id)).text == balance_refusal_message(None)
+    assert await _notices(admitted.turn_id) == []
+
+
+async def test_a_scheduled_fire_is_still_refused_by_a_spent_balance(db: None) -> None:
+    """A schedule re-fires on its own; a fire held until credit lands would replay every missed
+    fire at once, and a durable thread would read a hold notice per fire meanwhile."""
+    async with workspace_tx() as connection:
+        workspace_id, _, agent_id, conversation_id = await _seed(connection)
+        await _bill(connection, workspace_id, conversation_id, agent_id, 0, seq=1)
+        await _fund(connection, workspace_id, dollars=1, reserve_dollars=5)
+    dbos = StubDbos()
+    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset({"cli"})).invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "fire",
+        authority=WORKSPACE_AUTHORITY,
+        as_scheduled=True,
+    )
+    assert dbos.enqueued == []
+    assert await _status(turn_id) == "cancelled"
+    assert (await _terminal(turn_id)).text == balance_refusal_message(None)
+    assert await _notices(turn_id) == []
 
 
 async def test_a_credit_readmits_a_parked_turn(db: None) -> None:
@@ -398,7 +568,7 @@ async def test_the_park_notice_names_the_balance_rather_than_a_cap(db: None) -> 
         await debit(connection, workspace_id, 5 * DOLLAR)
         turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
     with ws(workspace_id):
-        assert await turn_status_frame(turn_id) == Parked(message=balance_refusal_message(None))
+        assert await turn_status_frame(turn_id) == Parked(message=balance_park_message(None))
 
 
 async def test_the_park_notice_names_the_cap_that_holds_the_turn(db: None) -> None:

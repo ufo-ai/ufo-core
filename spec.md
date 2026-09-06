@@ -1183,8 +1183,14 @@ would let an overdrawn workspace spend the platform's money one turn at a time w
 workspace that has spent past its floor owes for that work and is refused like any other until it is
 credited; what it owes is real money, not the model rounds its own key paid for.
 
-A workspace whose balance is spent is refused at admission with a line the member reads, and a
-running turn parks rather than spending past its floor. That line names the billing screen an admin
+A workspace whose balance is spent parks a member's message at admission rather than refusing it,
+and a running turn parks rather than spending past its floor. The hold is one sentence, written as a
+reply a durable surface delivers and read off the status poll that ends a live surface's stream: the
+dispatcher re-decides the balance every minute, so the message answers on its own once an admin
+credits the workspace, where a cancelled one stayed dead. The member's later messages fold into the
+held turn and add no notice, so one thread holds one turn and one answer. A prepared intent, a
+scheduled fire, and an internal delivery are refused as before — the panel has already read its
+refusal, and a schedule re-fires on its own. Each line names the billing screen an admin
 adds credit on — composed at boot from the deploy's public base and the surface claiming the browser
 home, threaded into every gate that writes the refusal, and left unsaid where the deploy has neither,
 since a self-host node has no screen to send anyone to. The two lines are deliberately different:

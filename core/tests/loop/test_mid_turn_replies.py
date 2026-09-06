@@ -57,6 +57,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.replies import MarkedReply
 from ufo.runtime import queue as loop_queue
+from ufo.runtime.billing.balance import balance_park_message, credit, set_reserve
 from ufo.runtime.engine import FORCE_FINAL_PROMPT
 from ufo.runtime.ext import surface as surface_module
 from ufo.runtime.ext.surface import (
@@ -76,7 +77,7 @@ from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Turn, mid_turn_reply_id_for
+from ufo.schema.records import BALANCE_PARK_ROUND_INDEX, Turn, mid_turn_reply_id_for
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -84,6 +85,7 @@ pytestmark = [
 ]
 
 ANSWERED = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
+DOLLAR = 1_000_000
 SPAN_TEXT = "Filed the launch issue as metalcraftai/ufo#1801."
 CLOSING_TEXT = "Both are done."
 
@@ -485,6 +487,51 @@ async def test_a_spoken_reply_reaches_a_durable_surface_once(db: None, tmp_path:
 
     assert surface.spoken == [(reply_id, ANSWERED, SPAN_TEXT)]
     assert [(row.status, row.reply_ref) for row in rows] == [(WRITEBACK_DELIVERED, "C1:9.9:1")]
+    assert surface.posted == []
+
+
+async def test_a_thread_parked_by_the_balance_speaks_its_hold_once(
+    db: None, tmp_path: Path
+) -> None:
+    """A member message admitted with the balance spent is parked, and the hold rides the same row a
+    spoken span does — so a durable surface says it instead of going silent until an admin notices.
+    A second drain speaks nothing, and the turn's own writeback is still owed: the answer it gives
+    once it resumes is delivered on top of the hold, not in place of it."""
+    workspace_id, _, member_id = await _seed(member_email="m@x.y")
+    assert member_id is not None
+    blob = FilesystemBlobStore(root=tmp_path)
+    answered = await _seed_surface_turn(workspace_id, "C9:1.0", "done", "answered")
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == answered)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(seated_at=sa.func.now())
+        )
+        await credit(connection, workspace_id, DOLLAR, DOLLAR, "seed")
+        await set_reserve(connection, workspace_id, 5 * DOLLAR)
+    admitted = await Admission(dbos=StubDbos(), durable_surfaces=frozenset({SURFACE})).admit_member(
+        workspace_id, conversation_id, "and this", member_id
+    )
+    parked = admitted.turn_id
+    surface = RecordingSurface(ref="C9:9.9")
+    poller = _mid_turn_poller(workspace_id, surface, blob)
+    with ws(workspace_id):
+        await poller.drain()
+        await poller.drain()
+        rows = await _replies(parked)
+        owed = await _writeback(parked)
+
+    assert [(row.round_index, row.text) for row in rows] == [
+        (BALANCE_PARK_ROUND_INDEX, balance_park_message(None))
+    ]
+    assert surface.spoken == [(rows[0].id, None, balance_park_message(None))]
+    assert rows[0].status == WRITEBACK_DELIVERED
+    assert owed.status == WRITEBACK_PENDING
     assert surface.posted == []
 
 

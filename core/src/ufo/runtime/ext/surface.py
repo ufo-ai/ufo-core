@@ -2792,10 +2792,11 @@ class SurfaceContext:
 
         Admission takes the same decision again under the conversation lock, so this is a read of
         the moment and never an authority. It answers the founding cases it must not miss: the
-        conversation's oldest live turn is the one a fold lands on, a parked turn absorbs nothing
-        because it is held rather than running, and the fold carries both gates the arrival is
-        admitted under — the caps and the prepaid balance — so a spent balance or a breached cap
-        answers None here rather than promising a fold admission then refuses.
+        conversation's oldest live turn is the one a fold lands on, and the fold carries both gates
+        the arrival is admitted under — the caps and the prepaid balance — so a breached cap answers
+        None here rather than promising a fold admission then refuses. A parked turn absorbs nothing
+        while it is merely held, with one exception that mirrors admission: a turn the balance holds
+        takes a member's next message into its queue, so a spent balance names that turn here.
 
         The balance is read with the same model resolution admission uses, so a workspace serving
         its turns with its own provider key is answered the same way in both places. Without it this
@@ -2821,7 +2822,7 @@ class SurfaceContext:
                     .limit(1)
                 )
             ).one_or_none()
-            if row is None or row.status == PARKED:
+            if row is None:
                 return None
             decision = await SpendEvaluator(self.workspace_id, row.member_id, row.agent_id).decide(
                 connection, 0
@@ -2829,7 +2830,11 @@ class SurfaceContext:
             balance = await BalanceGate(self.workspace_id).admits(
                 connection, row.agent_id, self._key_slot_for
             )
-        return row.id if ALLOW == decision.outcome == balance.outcome else None
+        if decision.outcome != ALLOW:
+            return None
+        if row.status == PARKED:
+            return None if balance.outcome == ALLOW else row.id
+        return row.id if balance.outcome == ALLOW else None
 
     def tail(
         self, turn_id: UUID, since: str = ""

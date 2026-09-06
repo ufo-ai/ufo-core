@@ -67,6 +67,7 @@ from ufo.runtime.access.credentials import (
     seal_credential_request,
 )
 from ufo.runtime.billing.accounting import PARK, REJECT, OffTurnSpendRefused, SpendOutcome
+from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.engine import INJECTED_CONTEXT, _context_tag
 from ufo.runtime.ext.surface import (
     CONVERSATION_TITLE_CHARS,
@@ -3508,3 +3509,26 @@ async def test_render_preview_is_none_on_service_refusal(tmp_path, monkeypatch) 
         lambda request: httpx.Response(415, json={"error": "unsupported_type"}), monkeypatch
     )
     assert await context.render_preview("pdf", b"not a pdf") is None
+
+
+async def test_a_turn_the_balance_holds_absorbs_a_member_message(db: None, tmp_path: Path) -> None:
+    """Slack asks this before its ambient gate; None hands a thread reply to the classifier, which
+    may leave it silent. Admission folds a member's message into a turn the balance holds, so the
+    read says so — and once credit lands the resume sweep, not a fold, wakes the turn."""
+    workspace_id, _, _ = await _seed()
+    held = await _seed_turn(workspace_id, "C9:1.0", "parked", "")
+    dollar = 1_000_000
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == held)
+            )
+        ).scalar_one()
+        await credit(connection, workspace_id, dollar, dollar, "seed")
+        await set_reserve(connection, workspace_id, 5 * dollar)
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    with ws(workspace_id):
+        assert await context.absorbing_turn(conversation_id) == held
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 20 * dollar, 20 * dollar, "top-up")
+        assert await context.absorbing_turn(conversation_id) is None

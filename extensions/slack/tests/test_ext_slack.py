@@ -2095,13 +2095,13 @@ async def test_a_reply_from_an_unseated_speaker_faces_the_decision(
     assert await _conversation_load(workspace_id) == (1, 0)
 
 
-async def test_a_reply_onto_a_parked_turn_faces_the_decision(
+async def test_a_reply_onto_a_balance_held_turn_joins_it_past_the_decision(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """A workspace under its reserve is refused at admission rather than parked, so the reply is
-    turned away with a line the member reads instead of joining a backlog the dispatcher would
-    release in one burst once the balance is credited. Parking is reserved for a turn that already
-    holds work the ledger booked, which an un-addressed reply never does."""
+    """A workspace under its reserve parks the founding mention rather than refusing it, and writes
+    the hold as a reply for the thread. The un-addressed reply that follows joins that held turn as
+    an arrival — admission folds it, so the gate skips the decision — and the one turn answers both
+    once the balance is credited, with no second notice."""
     workspace_id, _ = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -2114,15 +2114,25 @@ async def test_a_reply_onto_a_parked_turn_faces_the_decision(
             )
         )
     decision = await _gated_ambient_reply(tmp_path, monkeypatch, workspace_id)
-    assert len(decision.asked) == 1
-    assert await _conversation_load(workspace_id) == (1, 0)
+    assert decision.asked == []
+    assert await _conversation_load(workspace_id) == (1, 1)
     async with workspace_tx() as connection:
-        status = (
+        held = (
             await connection.execute(
-                sa.select(tables.turn.c.status).where(tables.turn.c.workspace_id == workspace_id)
+                sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+        notices = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.mid_turn_reply)
+                .where(tables.mid_turn_reply.c.turn_id == held.id)
             )
         ).scalar_one()
-    assert status == "cancelled"
+    assert held.status == "parked"
+    assert notices == 1
 
 
 async def test_a_reply_onto_a_turn_whose_cap_broke_faces_the_decision(

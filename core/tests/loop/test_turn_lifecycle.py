@@ -75,6 +75,7 @@ from ufo.runtime import queue as loop_queue
 from ufo.runtime import workspace as workspace_module
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore, member_slot
+from ufo.runtime.billing.balance import balance_park_message, credit, debit
 from ufo.runtime.engine import (
     EMPTY_RESPONSE_NUDGE,
     FINISH_TOOL,
@@ -1757,6 +1758,61 @@ async def test_member_cap_parks_a_turn_in_surface_then_resumes_when_raised(
             )
         ).scalar_one()
     assert billed == 1
+
+
+async def test_a_spent_balance_holds_member_messages_then_answers_them_on_credit(
+    surface: Turns,
+) -> None:
+    """The whole chain a refill has to wake: a member's message parks at the door with the hold
+    sentence on its stream, the next message joins that turn instead of founding one, the sweep
+    holds while the balance is spent, and once credit lands it enqueues the one turn, which runs
+    and answers both messages."""
+    seed = await _bootstrap()
+    dollar = 1_000_000
+    first = await surface.admit(seed, "ping")
+    _, first_terminal = await surface.consume(seed, first)
+    assert first_terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        await credit(connection, seed.workspace_id, dollar, dollar, "seed")
+        await debit(connection, seed.workspace_id, 2 * dollar)
+    held = await surface.admit(seed, "again")
+    assert await surface.consume_park(seed, held) == balance_park_message(None)
+    assert await surface.admit(seed, "and more") == held
+    status, conversation_id = await _turn_row(held)
+    assert status == "parked"
+    assert loop_queue._runtime is not None
+    with ws(seed.workspace_id):
+        await TurnDispatcher(client=loop_queue._runtime.dbos).run()
+    status, _ = await _turn_row(held)
+    assert status == "parked"
+    async with workspace_tx() as connection:
+        await credit(connection, seed.workspace_id, 20 * dollar, 20 * dollar, "top-up")
+    with ws(seed.workspace_id):
+        await TurnDispatcher(client=loop_queue._runtime.dbos).run()
+    await _await_status(held, "done")
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.conversation_id == conversation_id)
+            )
+        ).scalar_one()
+        unconsumed = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.inbound_message)
+                .where(tables.inbound_message.c.consumed_turn_id.is_(None))
+            )
+        ).scalar_one()
+    assert turns == 2
+    assert unconsumed == 0
+    _, _, blob = _runtime_parts()
+    stored = await _read_transcript(blob, conversation_id, 2)
+    bodies = _bodies(stored)
+    assert "again" in bodies
+    assert "and more" in bodies
+    assert str(bodies[-1]).startswith("echo:")
 
 
 async def test_failure_after_usage_bills_partial_usage(surface: Turns) -> None:

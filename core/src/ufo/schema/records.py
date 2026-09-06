@@ -262,6 +262,10 @@ DBOS_APP_NAME = "ufo"
 DBOS_APP_VERSION = "ufo"
 DBOS_MAX_EXECUTOR_THREADS = 8192
 SURFACE_COMMENT_ROUND_INDEX = -1
+BALANCE_PARK_ROUND_INDEX = -2
+"""The round a balance park notice is written under. No model round produced it — admission did,
+before the turn ran — so it takes an index of its own beside the comment's, and one turn holds at
+most one of each."""
 
 
 def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID:

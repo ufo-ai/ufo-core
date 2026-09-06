@@ -12,6 +12,7 @@ from ufo.harness import o11y
 from ufo.runtime.billing.balance import (
     BALANCE_CHARGED_METRIC,
     balance_absent,
+    balance_park_message,
     balance_refusal_message,
     billing_screen_url,
     count_charge,
@@ -173,6 +174,19 @@ def test_a_refusal_with_no_screen_names_the_act_and_trails_off_at_nothing() -> N
     "at" here, so the sentence without a screen is written out rather than derived."""
     message = balance_refusal_message(None)
     assert message == "This workspace is out of credit. An admin can set up automatic refills."
+    assert " at" not in message
+
+
+def test_the_hold_says_the_message_resumes_and_where_credit_is_added() -> None:
+    assert balance_park_message("https://ufo.example.com/surface/web#/workspace/billing") == (
+        "This workspace is out of credit. Your message is answered automatically once credit is "
+        "added. An admin can add credit at https://ufo.example.com/surface/web#/workspace/billing"
+    )
+    message = balance_park_message(None)
+    assert message == (
+        "This workspace is out of credit. Your message is answered automatically once credit is "
+        "added. An admin can set up automatic refills."
+    )
     assert " at" not in message
 
 
