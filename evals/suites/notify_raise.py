@@ -8,6 +8,10 @@ moving, production down, a person waiting on them. Over-raising is the expensive
 full of green runs and receipts is one the triage agent stops trusting — and so is raising ufo's own
 condition: a connection that stopped authenticating is `report_problem`'s, not a notification.
 
+Raising and the copy that follows it are graded apart. A reply that announces the queue is worth
+catching, but ANDing it onto the raise verdict failed a correct raise for a blemish in the sentence
+after it, which buried the judgment the suite exists to measure. One case carries the copy rule.
+
 The suite is built as opposing pairs and neither half can be passed by learning the other. Signal:
 a churn spike, a deploy failed on main, an investor's deadline going unanswered, a customer turning,
 a cluster of failed payments, and two of those landing in one report (two subjects, two calls, never
@@ -150,9 +154,13 @@ MENTIONS_THE_QUEUE = re.compile(r"\bnotif|\bqueue", re.IGNORECASE)
 
 
 def _raised_exactly(subjects: frozenset[str]) -> Grader:
-    """One `notify` per subject in `subjects`, no more and none for anything else — and a reply
-    that never says so. The member reads the reply; the notification reaches them on its own, and a
-    line about the tool or the queue is a line they cannot act on and did not ask for."""
+    """One `notify` per subject in `subjects`, no more and none for anything else.
+
+    Raising is the only thing these cases grade. Whether the reply then announces the queue is a
+    separate property with its own case below: folding the two together failed a correct raise for
+    a blemish in copy, and it did so often enough to bury the behaviour the suite exists to
+    measure — eleven of the thirty-six control samples of 2026-09-06 raised exactly right and
+    failed on the sentence that followed."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         raised = [
@@ -162,10 +170,28 @@ def _raised_exactly(subjects: frozenset[str]) -> Grader:
             return CapabilityVerdict(
                 False, f"raised {sorted(raised)}, wanted one each of {sorted(subjects)}"
             )
+        return CapabilityVerdict(True, f"raised once each about {sorted(subjects)}")
+
+    return grade
+
+
+def _raises_and_says_nothing_about_it(subject: str) -> Grader:
+    """The copy rule on its own: the raise has to happen, and the reply must not announce it. The
+    member reads the reply; the notification reaches them by itself, so a line about the tool or the
+    queue is one they cannot act on and did not ask for. Every match the regex found across forty
+    flagged replies was a real announcement — "I filed this in the notification inbox", "flagged in
+    your notification queue" — so the pattern is the whole test, not a proxy for one."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        raised = [
+            str(call.arguments.get("subject")) for call in output.calls if call.call == NOTIFY
+        ]
+        if raised != [subject]:
+            return CapabilityVerdict(False, f"raised {raised}, wanted one about {subject!r}")
         said = MENTIONS_THE_QUEUE.search(output.response)
         if said is not None:
-            return CapabilityVerdict(False, f"the reply mentions the queue: {said.group(0)!r}")
-        return CapabilityVerdict(True, f"raised once each about {sorted(subjects)}, said nothing")
+            return CapabilityVerdict(False, f"the reply announces the queue: {said.group(0)!r}")
+        return CapabilityVerdict(True, "raised it and said nothing about having done so")
 
     return grade
 
@@ -240,6 +266,17 @@ CASES = (
             _file(DEPLOY_LOG, DEPLOY_LINES),
         ),
         digest_tag="notify:two-subjects",
+    ),
+    CapabilityCase(
+        name="raises-without-announcing-it",
+        message=(
+            REPORT_FRAME.format(source="Stripe account", path=CHURN_CSV)
+            + f" {CHURN_PRIOR_WEEKS} holds the prior four weeks for comparison. The source's ref "
+            f"is {STRIPE}."
+        ),
+        grader=_raises_and_says_nothing_about_it(STRIPE),
+        workspace_files=(_file(CHURN_CSV, CHURN_ROWS), _file(CHURN_PRIOR_WEEKS, CHURN_PRIOR_ROWS)),
+        digest_tag="notify:says-nothing",
     ),
     CapabilityCase(
         name="restraint-green-ci-and-deploys",
