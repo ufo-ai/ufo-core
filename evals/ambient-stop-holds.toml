@@ -1,0 +1,72 @@
+name = "ambient-stop-holds"
+base = "HEAD"
+suites = ["slack_silence"]
+repeats = 3
+concurrency = 1
+max_stacks = 1
+budget_usd = 5.0
+est_usd_per_case = 0.001
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+# The ambient reply gate reads one prompt, so every arm is a cut of it measured on the whole
+# slack_silence suite: the three stop cases and their lift control are what the stop rule claims to
+# move, the two exchanges between members are what the statement rule claims to move, and the nine
+# earlier cases are the controls neither may regress. The control arm is the base prompt with every
+# rule standing.
+
+# Rule 1 out: a stop in the history no longer holds. The stop cases are owed NO_REPLY by nothing
+# else — a question the agent could answer and a correction of its work are rule 2's REPLY — so
+# this arm says whether the stop rule is what silences them.
+
+[[arm]]
+name = "no-stop-rule"
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/ambient_reply.py"
+old = """
+    "1. An earlier message in `history` — not the new message itself — told the agent to stop, "
+    "drop it, be quiet, or stay out of the thread, and no message after that one names the agent "
+    "-> NO_REPLY. The stop holds over everything that follows it — a question the agent could "
+    "answer, a correction of its work, more talk between the members — and only a message naming "
+    "the agent lifts it. The stop itself, when it is the new message, is answered once, under rule "
+    "2.\\n"
+"""
+new = """
+"""
+
+# Rule 4 and the tie-break back to their earlier wording: silence "unless the agent can add
+# something the participants could not easily get themselves", and a balanced call answered. The
+# exchanges between members are where that wording spoke; this arm says whether the statement rule
+# is what keeps the agent out of them.
+
+[[arm]]
+name = "no-statement-rule"
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/ambient_reply.py"
+old = """
+    "4. Any other traffic in the thread -> NO_REPLY. A statement is not a question: a member's "
+    "conclusion, inference, plan, or opinion — even about the agent's work, even one the agent "
+    "could confirm, refine, or correct — asks for nothing. That the agent could add something is "
+    "not a reason to speak; only a message asking for something the thread has not answered and "
+    "only the agent can supply -> REPLY.\\n"
+    "Two things a rule above never turns into silence. A reply that would be only an "
+    "acknowledgement is still a reply: the agent cannot react, so REPLY. And when the rules leave "
+    "a message that asks for something genuinely balanced, REPLY — a dropped request costs the "
+    "member their answer. A message that asks for nothing is never balanced: NO_REPLY.\\n"
+"""
+new = """
+    "4. Any other traffic in the thread -> NO_REPLY, unless the agent can add something the "
+    "participants could not easily get themselves -> REPLY.\\n"
+    "Two things a rule above never turns into silence. A reply that would be only an "
+    "acknowledgement is still a reply: the agent cannot react, so REPLY. And when the rules leave "
+    "it genuinely balanced, REPLY — an unwanted line costs one line, a dropped request costs the "
+    "member their answer.\\n"
+"""

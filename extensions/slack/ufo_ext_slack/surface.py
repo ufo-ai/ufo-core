@@ -139,6 +139,7 @@ from ufo.sdk.manifest import HookContext, HookOutcome
 from ufo.sdk.o11y import log, warn
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
+    AMBIENT_HISTORY_MESSAGES,
     NOTHING_DELIVERED,
     WORKSPACE_WRITE_MAX_BYTES,
     Admitted,
@@ -861,7 +862,6 @@ MEMBER_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
 AMBIENT_FETCH_LIMIT = 100
 AMBIENT_CHANNEL_FETCH_LIMIT = 15
 AMBIENT_CHANNEL_AFTER_LIMIT = 3
-AMBIENT_REPLY_FETCH_LIMIT = 20
 AMBIENT_UNSEEN_LIMIT = 20
 AMBIENT_FETCH_TIMEOUT_SECONDS = 2.5
 AMBIENT_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
@@ -2239,11 +2239,11 @@ async def _ambient_history(
 
     Read from Slack rather than from the conversation's turns, because the turns are only the
     messages that founded one: a thread whose last three messages this very decision dropped would
-    otherwise look like the agent spoke last. Only the trailing AMBIENT_REPLY_FETCH_LIMIT of the
-    read are kept, and a read that cannot be trusted yields nothing, which the caller admits —
-    stale evidence is the one input this decision must never run on. Other bots' posts are dropped
-    and ours kept: both carry a `bot_id`, and only the agent's own words say whether it already
-    answered this."""
+    otherwise look like the agent spoke last. Only the trailing AMBIENT_HISTORY_MESSAGES of the
+    read are kept — the decision's own window, so a stop it has to honour is in the tail it reads —
+    and a read that cannot be trusted yields nothing, which the caller admits: stale evidence is the
+    one input this decision must never run on. Other bots' posts are dropped and ours kept: both
+    carry a `bot_id`, and only the agent's own words say whether it already answered this."""
     channel, _, root_ts = inbound.queue_key.partition(":")
     items = await _thread_tail(bot_token, channel, root_ts, inbound.ts)
     if items is None:
@@ -2252,7 +2252,7 @@ async def _ambient_history(
         entry for item in items if (entry := _ambient_entry(item, inbound, identity)) is not None
     ]
     kept.sort(key=lambda entry: entry[0])
-    return tuple(message for _, message in kept[-AMBIENT_REPLY_FETCH_LIMIT:])
+    return tuple(message for _, message in kept[-AMBIENT_HISTORY_MESSAGES:])
 
 
 async def _thread_tail(

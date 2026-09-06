@@ -6,8 +6,9 @@ cost each one reads back off the ledger.
 The suite's shape is pinned too, because a silence suite is trivially gamed in either direction: a
 gate that never replies passes every silence case, and one that always replies passes every answer
 case. Both halves have to be present, the answer cases have to carry no mention of the agent (what
-makes them controls rather than restatements of the admission rule), every case has to carry the
-thread history its decision is only decidable from, and every case runs one decision."""
+makes them controls rather than restatements of the admission rule), the stop cases have to hold
+the stop and nothing naming the agent after it, every case has to carry the thread history its
+decision is only decidable from, and every case runs one decision."""
 
 import asyncio
 import json
@@ -25,6 +26,7 @@ from evals.suites.slack_silence import (
     BOT_USER_ID,
     CASES,
     MARSHALL,
+    RECORDED_THREAD,
     SlackSilenceSuite,
     slack_silence_task,
 )
@@ -33,25 +35,47 @@ from ufo.db import workspace_tx
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.models.interface import ModelRequest
 from ufo.runtime.billing.accounting import record_workspace_usage
-from ufo.runtime.turns.ambient_reply import AmbientDecision, AmbientMessage
+from ufo.runtime.turns.ambient_reply import (
+    AMBIENT_HISTORY_MESSAGES,
+    AmbientDecision,
+    AmbientMessage,
+)
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
 BY_NAME = {case.name: case for case in CASES}
-SILENT_CASES = (
+SILENT_TO_ANOTHER_MEMBER = (
     "point-up-at-another-member",
     "asking-a-teammate-what-they-think",
     "two-members-settling-a-time",
     "thanking-the-other-member",
 )
+SILENT_BETWEEN_MEMBERS = (
+    "two-members-drawing-their-own-conclusion",
+    "a-remark-between-members-on-the-agents-answer",
+    "recorded-a-member-doubts-the-change-to-another",
+    "recorded-a-member-names-the-vision-model",
+)
+SILENT_AFTER_A_STOP = (
+    "question-the-agent-could-answer-after-a-stop",
+    "correction-of-the-agents-work-after-a-stop",
+    "sideways-talk-after-a-stop",
+    "recorded-a-correction-after-stop-ufo",
+    "recorded-a-question-to-a-member-after-stop-ufo",
+    "recorded-the-braille-thing-after-stop-ufo",
+)
+SILENT_CASES = (*SILENT_TO_ANOTHER_MEMBER, *SILENT_BETWEEN_MEMBERS, *SILENT_AFTER_A_STOP)
 ANSWER_CASES = (
     "unmentioned-challenge-to-the-agents-own-sentence",
     "unmentioned-followup-only-the-agent-can-answer",
     "member-answers-the-question-the-agent-asked",
     "member-calls-off-work-the-agent-committed-to",
     "a-decision-word-inside-a-message-for-the-agent",
+    "a-mention-after-a-stop-lifts-it",
+    "recorded-no-implement-it-after-a-mention-lifted-the-stop",
 )
+STOPS = ("actually nevermind, drop it", "stop ufo")
 DECISION_USAGE = Usage(input_tokens=609, output_tokens=6)
 DECISION_MICRO_USD = CORE_PRICING.micro_usd(DEFAULT_AMBIENT_REPLY_MODEL, DECISION_USAGE)
 
@@ -173,23 +197,61 @@ def test_the_thread_history_is_what_every_case_hands_the_decision() -> None:
 
 
 def test_the_suite_holds_both_halves_and_cannot_be_gamed_by_either() -> None:
-    assert len(CASES) == 9
+    assert len(CASES) == 21
     assert {case.name for case in CASES} == set(SILENT_CASES) | set(ANSWER_CASES)
     assert len({case.name for case in CASES}) == len(CASES)
+    assert len({case.message.text for case in CASES}) == len(CASES)
     assert {BY_NAME[name].expected for name in SILENT_CASES} == {"NO_REPLY"}
     assert {BY_NAME[name].expected for name in ANSWER_CASES} == {"REPLY"}
 
 
-def test_the_silence_cases_address_another_member_and_the_controls_address_nobody() -> None:
-    """The negative cases are the recorded shape — a mention of a different member, asking the agent
-    nothing. The controls carry no mention at all, which is what makes them controls: a gate that
-    learned "a message naming somebody else is not for me" still has to answer these."""
-    for name in SILENT_CASES:
+def test_only_the_recorded_shape_of_silence_names_another_member() -> None:
+    """The first silent group is the recorded shape — a mention of a different member, asking the
+    agent nothing. Every other case names nobody, which is what makes each a probe of its own rule:
+    a gate that learned "a message naming somebody else is not for me" still has to answer the
+    controls, and still has to stay out of an exchange between members that names no one."""
+    for name in SILENT_TO_ANOTHER_MEMBER:
         text = BY_NAME[name].message.text
         assert f"<@{ALEX}>" in text or f"<@{MARSHALL}>" in text, name
         assert f"<@{BOT_USER_ID}>" not in text, name
-    for name in ANSWER_CASES:
+    for name in (*SILENT_BETWEEN_MEMBERS, *SILENT_AFTER_A_STOP, *ANSWER_CASES):
         assert "<@" not in BY_NAME[name].message.text, name
+
+
+def test_a_stop_holds_until_a_message_names_the_agent() -> None:
+    """Each stop case carries the stop and the agent's own acknowledgement of it, then only traffic
+    naming somebody else — a question the agent could answer, a correction of its work, sideways
+    talk — so the stop is the one thing that can keep the decision silent. The control lifts the
+    stop the only way it lifts: a later message naming the agent, which the agent answered, so the
+    member's next reply is once again an answer to the agent's own question."""
+    for name in SILENT_AFTER_A_STOP:
+        history = BY_NAME[name].history
+        stopped = next(index for index, entry in enumerate(history) if entry.text in STOPS)
+        assert history[stopped + 1].own, name
+        assert all(f"<@{BOT_USER_ID}>" not in entry.text for entry in history[stopped:]), name
+    for name in (
+        "a-mention-after-a-stop-lifts-it",
+        "recorded-no-implement-it-after-a-mention-lifted-the-stop",
+    ):
+        lifted = BY_NAME[name].history
+        stopped = next(index for index, entry in enumerate(lifted) if entry.text in STOPS)
+        assert any(f"<@{BOT_USER_ID}>" in entry.text for entry in lifted[stopped:]), name
+        assert lifted[-1].own, name
+
+
+def test_the_recorded_thread_is_read_whole_and_its_stop_sits_inside_the_window() -> None:
+    """Every recorded case carries the whole thread before its message, so what the decision saw is
+    what the suite hands it. The third after-stop case has the stop eleven messages back, at the
+    edge of a twelve-message window and inside the twenty the surface reads."""
+    thread = [message for _, message in RECORDED_THREAD]
+    for name in (case.name for case in CASES if case.name.startswith("recorded-")):
+        case = BY_NAME[name]
+        position = thread.index(case.message)
+        assert case.history == tuple(thread[:position]), name
+    braille = BY_NAME["recorded-the-braille-thing-after-stop-ufo"]
+    stopped = next(index for index, entry in enumerate(braille.history) if entry.text == "stop ufo")
+    assert braille.history[stopped + 1].text == "Stopped."
+    assert 11 <= len(braille.history) - stopped <= AMBIENT_HISTORY_MESSAGES
 
 
 def test_the_recorded_threads_and_the_two_new_controls_are_the_ones_asked_for() -> None:
