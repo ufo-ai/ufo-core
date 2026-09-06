@@ -811,18 +811,6 @@ def _bounded(content: str) -> str:
     return clipped(content, MAX_TOOL_RESULT_CHARS)
 
 
-def _raised_text(tool_name: str, error: Exception) -> str:
-    """What a raising handler tells the model. An exception class carries the whole diagnostic
-    only when it was given a message; raised bare, `str()` is "" and the class name alone lands as
-    a trailing colon over nothing. The model cannot tell that from a message truncated to nothing,
-    so a bare raise says it is bare — the class stays, because which exception it was is the one
-    fact still available, and the notice says there is nothing further to read."""
-    detail = str(error).strip()
-    if detail:
-        return f"{type(error).__name__}: {detail}"
-    return BARE_RAISE_NOTICE.format(cls=type(error).__name__, tool=tool_name)
-
-
 def _speaker_hint(error: Exception, member_refs: Sequence[UUID]) -> str:
     """What a refusal for want of a member carries beyond its own text: the active member refs a
     retry may name. One refusal class earns it wherever the round can name a ref, so a handler's
@@ -831,6 +819,24 @@ def _speaker_hint(error: Exception, member_refs: Sequence[UUID]) -> str:
     if not isinstance(error, SpeakerRequired) or not member_refs:
         return ""
     return REQUESTED_BY_HINT.format(refs=", ".join(str(ref) for ref in member_refs))
+
+
+def _error_text(tool_name: str, error: Exception, member_refs: Sequence[UUID] = ()) -> str:
+    """What a failed call tells the model, on every path that turns an exception into tool text:
+    a raising handler, a rejected call, and the gates that refuse before the handler runs. An
+    exception class carries the whole diagnostic only when it was given a message; raised bare,
+    `str()` is "" and the class name alone lands as a trailing colon over nothing. The model cannot
+    tell that from a message truncated to nothing, so a bare raise says it is bare — the class
+    stays, because which exception it was is the one fact still available, and the notice says
+    there is nothing further to read. A refusal for want of a member then carries the refs a retry
+    can name, so one builder answers both questions on every path."""
+    detail = str(error).strip()
+    text = (
+        f"{type(error).__name__}: {detail}"
+        if detail
+        else BARE_RAISE_NOTICE.format(cls=type(error).__name__, tool=tool_name)
+    )
+    return text + _speaker_hint(error, member_refs)
 
 
 def _meter_dispatch(
@@ -3092,7 +3098,7 @@ class TurnEngine:
     ) -> _RejectedToolCall:
         return _RejectedToolCall(
             call=call,
-            text=f"{type(error).__name__}: {error}" + _speaker_hint(error, member_refs),
+            text=_error_text(call.name, error, member_refs),
             outcome="invalid_call" if isinstance(error, (ValueError, KeyError)) else "step_failed",
             error_class=type(error).__name__,
             dimensions={} if dimensions is None else dimensions,
@@ -3486,7 +3492,7 @@ class TurnEngine:
                     target,
                     result=DispatchResult(
                         tool_use_id=call.id,
-                        text=f"{type(error).__name__}: {error}",
+                        text=_error_text(call.name, error, bound.member_refs),
                         is_error=True,
                         activity=True,
                     ),
@@ -3501,7 +3507,7 @@ class TurnEngine:
                     target,
                     result=DispatchResult(
                         tool_use_id=call.id,
-                        text=f"{type(error).__name__}: {error}",
+                        text=_error_text(call.name, error, bound.member_refs),
                         is_error=True,
                         activity=True,
                     ),
@@ -3598,7 +3604,7 @@ class TurnEngine:
             raise parked from error
         except Exception as error:
             return _HandlerOutput(
-                _raised_text(bound.call.name, error) + _speaker_hint(error, bound.member_refs),
+                _error_text(bound.call.name, error, bound.member_refs),
                 True,
                 tool.untrusted or isinstance(error, UntrustedContentError),
                 (),

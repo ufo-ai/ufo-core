@@ -162,7 +162,7 @@ from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.runtime.subagents import subagent_system_prompt
-from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION, Agent, ToolIntent, Turn
@@ -1791,7 +1791,7 @@ async def test_application_worker_redeploy_uses_the_exact_parent_speaker(
         await _redeploy_homepage(ctx, args, bound, 40000)
 
     store.values[APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=parent_turn_id)] = str(uuid4())
-    with pytest.raises(RuntimeError, match="only a member speaking"):
+    with pytest.raises(SpeakerRequired, match="only a member speaking"):
         await _redeploy_homepage(ctx, args, bound, 40000)
 
 

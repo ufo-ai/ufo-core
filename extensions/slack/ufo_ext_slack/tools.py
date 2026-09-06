@@ -61,6 +61,7 @@ SLACK_SECRET_SLOTS = (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
 SLACK_CONNECT_ACTION = "slack_connect"
 SLACK_APP_MANIFEST_ACTION = "slack_app_manifest"
 SLACK_CHANNELS_ACTION = "slack_channels"
+CONNECT_ADMIN_ONLY = "only a workspace admin can connect Slack"
 
 BOT_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,34}$"
 
@@ -250,8 +251,8 @@ async def _derive_manifest_identity(
             missing=missing,
         )
     bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
-    if not await ctx.speaker_is_admin():
-        raise ValueError("only a workspace admin can connect Slack")
+    if not await ctx.speaking_admin(CONNECT_ADMIN_ONLY):
+        raise ValueError(CONNECT_ADMIN_ONLY)
     try:
         return await SlackIdentityResolver(ctx.blob, bot_token).resolve()
     except SlackIdentityError as error:

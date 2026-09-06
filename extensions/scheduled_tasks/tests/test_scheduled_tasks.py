@@ -62,7 +62,7 @@ from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.runtime.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
-from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
@@ -538,9 +538,12 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
 
 
 async def test_applied_task_requires_a_member_requester(db: None) -> None:
+    """The refusal is about who is asking, not about what they may do, so it is `SpeakerRequired`:
+    a `requested_by` ref binds a requester and the same call then stands. Raised as
+    `AdminRequired` the model reads an authority it cannot obtain and never retries."""
     workspace_id, agent_id, conversation_id = await _seed()
     with ws(workspace_id), agent(agent_id):
-        with pytest.raises(AdminRequired, match="member requester"):
+        with pytest.raises(SpeakerRequired, match="member requester"):
             await _dispatch(
                 _object_tool("object_apply"),
                 _tool_ctx(workspace_id, conversation_id, agent_id),

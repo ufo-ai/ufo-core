@@ -6519,6 +6519,31 @@ async def test_dispatch_names_the_class_when_a_handler_raises_it_bare(
     assert spoken.content == "ValueError: the port is taken"
 
 
+async def test_a_call_rejected_before_its_handler_reads_a_bare_raise_as_bare(
+    db: None, tmp_path: Path
+) -> None:
+    """The bind step turns an exception into tool text on a path of its own, so it answers the same
+    question the handler path answers: raised bare, the class name alone lands as a trailing colon
+    over nothing, and the model cannot tell that from a message cut to nothing."""
+
+    async def raise_bare(authority: ExecutionAuthority) -> SandboxSession:
+        raise PermissionError
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry((_fixed_result_tool("probe", "ok"),)),
+        sandbox_for=raise_bare,
+    )
+
+    bare = await _dispatch(
+        engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="probe", input={}), {}
+    )
+
+    assert bare.is_error
+    assert bare.content == BARE_RAISE_NOTICE.format(cls="PermissionError", tool="probe")
+
+
 async def test_dispatch_substitutes_a_notice_for_an_error_result_carrying_no_text(
     db: None, tmp_path: Path
 ) -> None:

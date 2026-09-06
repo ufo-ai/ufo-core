@@ -40,7 +40,7 @@ from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.context import SpeakerRequired, ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -427,7 +427,7 @@ async def test_a_rebuild_leaves_another_workspaces_entries_where_they_stand(db: 
     assert await _titles(other_id) == ["theirs"]
 
 
-def _tool_ctx(workspace_id: UUID, member_id: UUID, agent_id: UUID) -> ToolContext:
+def _tool_ctx(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> ToolContext:
     return ToolContext(
         sandbox=None,  # type: ignore[arg-type]
         blob=None,  # type: ignore[arg-type]
@@ -450,7 +450,7 @@ def _tool_ctx(workspace_id: UUID, member_id: UUID, agent_id: UUID) -> ToolContex
     )
 
 
-async def _run_rebuild(workspace_id: UUID, member_id: UUID, agent_id: UUID) -> str:
+async def _run_rebuild(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> str:
     (tool,) = manifest().tools
     result = await tool.handler(
         _tool_ctx(workspace_id, member_id, agent_id),
@@ -484,6 +484,22 @@ async def test_the_rebuild_tool_makes_the_window_due_for_an_admin_and_refuses_ev
         assert "— 1 report." in await _run_rebuild(workspace_id, member_id, agent_id)
         assert await _titles(workspace_id) == []
         assert await _run_rebuild(workspace_id, member_id, agent_id) == NOTHING_TO_REBUILD
+
+
+async def test_a_rebuild_nobody_asked_for_is_refused_for_want_of_a_speaker(db: None) -> None:
+    """A turn with no member bound to it holds no admin either, so an admin gate read alone tells a
+    call that merely omitted `requested_by` that only an admin may act — a repair the model cannot
+    make. Who is asking is answered first, and every entry stands."""
+    workspace_id, _member_id, agent_id, conversation_id = await _seed_workspace()
+    written, _ = await _seed_run(
+        workspace_id, agent_id, conversation_id, seq=1, fired=datetime.now(UTC)
+    )
+    await _entry(workspace_id, written, "inside the window")
+
+    with ws(workspace_id):
+        with pytest.raises(SpeakerRequired, match="requested_by"):
+            await _run_rebuild(workspace_id, None, agent_id)
+        assert await _titles(workspace_id) == ["inside the window"]
 
 
 def test_a_title_holding_two_findings_keeps_the_one_the_writer_ranked_first() -> None:

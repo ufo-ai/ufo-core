@@ -40,7 +40,10 @@ from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import (
+    BARE_RAISE_NOTICE,
     MAX_PARALLEL_TOOL_CALLS,
+    REQUESTED_BY_HINT,
+    ActiveMessage,
     TurnEngine,
     _RejectedToolCall,
 )
@@ -49,6 +52,7 @@ from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, ModifyO
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.objects import (
     ObjectActionInput,
+    ObjectActionTarget,
     ObjectDetail,
     ObjectListQuery,
     ObjectPage,
@@ -698,6 +702,60 @@ async def test_the_cross_agent_gate_refuses_every_lane_but_the_main_agents_live_
                     agent="helper",
                 ),
             )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_pre_handler_target_gate_carries_the_refs_a_retry_can_name(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cross-agent gate refuses before any handler runs, and it refuses for want of a member —
+    the one refusal a `requested_by` ref repairs. The gate is a `ValueError` catch one frame
+    earlier than the handler's, so its answer must carry the same active member refs the handler's
+    refusal carries, and a gate that raised bare must read as bare rather than as a class name over
+    a trailing colon."""
+    turn = await _seed_turn()
+    with ws(turn.workspace_id):
+        await _seed_agent(turn.workspace_id, "helper", visibility="workspace")
+        await _seed_widget()
+        engine = _engine(turn, _CallsModel(()), tmp_path)
+        member = await _seed_member(turn.workspace_id, admin=True)
+        requesters = {turn.id: ActiveMessage(member_id=member, rendered="polish it")}
+        call = ToolUseBlock(
+            id="gate",
+            name="object_action",
+            input={
+                "kind": sample.WIDGET_KIND,
+                "action": sample.POLISH_ACTION,
+                "name": "anvil",
+                "agent": "helper",
+            },
+        )
+
+        refused = await _dispatch(engine, _dispatch_context(engine), call, requesters)
+
+        assert refused.is_error
+        assert refused.content == (
+            "SpeakerRequired: targeting another agent requires an exact live member-requested call"
+            + REQUESTED_BY_HINT.format(refs=str(turn.id))
+        )
+
+        async def raise_bare(*args: object, **kwargs: object) -> ObjectActionTarget:
+            raise ValueError
+
+        monkeypatch.setattr(ObjectVerbs, "action_target", raise_bare)
+        bare = await _dispatch(engine, _dispatch_context(engine), call, requesters)
+
+        assert bare.content == BARE_RAISE_NOTICE.format(cls="ValueError", tool="object_action")
+
+
+async def _dispatch(
+    engine: TurnEngine,
+    context: ToolContext,
+    call: ToolUseBlock,
+    requesters: dict[UUID, ActiveMessage],
+) -> ToolResultBlock:
+    bound = await engine._bind_or_error(context, engine._resolve_call(call), requesters)
+    return await engine._dispatch(bound)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

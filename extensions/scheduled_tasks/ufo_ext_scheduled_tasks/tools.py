@@ -40,7 +40,7 @@ from ufo.sdk.objects import (
     owner_emails,
 )
 from ufo.sdk.subjects import subject_shared
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import SpeakerRequired, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
 from ufo_ext_scheduled_tasks.pauses import PauseStore
 from ufo_ext_scheduled_tasks.schedules import ListedTask, ScheduledTask, ScheduleStore
@@ -372,7 +372,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         validated_schedule = None if spec.schedule is None else validate_cron(spec.schedule)
         acting_member = authority_member_id(ctx.authority)
         if acting_member is None:
-            raise AdminRequired(SCHEDULE_REQUESTER_GATE)
+            raise SpeakerRequired(SCHEDULE_REQUESTER_GATE)
         found = await self._find(ctx.ext, name)
         existing = None if found is None else found.task
         scheduler = _require_scheduler(ctx.ext)

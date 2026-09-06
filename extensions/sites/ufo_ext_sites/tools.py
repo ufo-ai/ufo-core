@@ -57,6 +57,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.sdk.authority import authority_member_id
+from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import (
     WORKSPACE_DIR,
@@ -409,6 +410,8 @@ PUBLISH_WEBSITE_DESCRIPTION = (
     "any) from the sandbox, and host it at a permanent link. Returns site_url — the deliverable — "
     "beside the sandbox-local url. Static files come from dist_path."
 )
+NO_EXTENSION_CONTEXT = "the website tools dispatched without their ExtensionContext"
+SITE_NEEDS_AN_OWNER = "a hosted site needs an owner: no member is acting on this turn"
 VISIBILITY_NEEDS_A_SPEAKER = (
     "changing who can open a site is a disclosure act and needs a live member: re-deploy without a "
     "visibility argument, or have the member say what it should be"
@@ -846,13 +849,36 @@ async def _illustrate(ctx: ToolContext, name: str, port: int, conversation_id: U
     the site this deploy displaced from the port, so a turn that ends inside the external render has
     to find that row already moved. The picture therefore lands in a write of its own, which touches
     nothing but the preview columns."""
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    sites = HostedSites(ctx.ext.store.workspace_id, ctx.ext.transaction)
+    sites = _sites_registry(ctx)
     preview = await ctx.render_site_preview(name, port, PREVIEW_WIDTH, PREVIEW_HEIGHT)
     if preview is not None:
         await sites.set_preview(conversation_id, name, preview)
     await draw_from_page(ctx, sites, conversation_id, name, port)
+
+
+def _site_extension(ctx: ToolContext) -> ExtensionContext:
+    if ctx.ext is None:
+        raise RuntimeError(NO_EXTENSION_CONTEXT)
+    return ctx.ext
+
+
+def _site_actor(ctx: ToolContext, visibility: Visibility | None) -> tuple[ExtensionContext, UUID]:
+    """The extension context a hosted-site write runs through and the member the site is owned by,
+    with the refusals that precede any write: the context the tools were dispatched with, an owner
+    for the row, and a live speaker for a visibility argument. A missing owner is `SpeakerRequired`
+    because a `requested_by` ref repairs the call — nothing about the site is wrong, only who is
+    asking for it.
+
+    `_refuse_before_serving` and `_host` both call this, so the set is asked twice — once before
+    the serve kills the port and once at the write, where a concurrent deploy may have moved — and
+    written once."""
+    ext = _site_extension(ctx)
+    creator_member_id = authority_member_id(ctx.authority)
+    if creator_member_id is None:
+        raise SpeakerRequired(SITE_NEEDS_AN_OWNER)
+    if visibility is not None and ctx.speaker_member_id is None:
+        raise SpeakerRequired(VISIBILITY_NEEDS_A_SPEAKER)
+    return ext, creator_member_id
 
 
 async def _refuse_before_serving(
@@ -877,17 +903,11 @@ async def _refuse_before_serving(
     nobody asked to put there. Reading the child's own profile as authority would not work anyway:
     a scheduled fire holds `build_website`, so a timer would escalate through the child it
     spawns."""
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    creator_member_id = authority_member_id(ctx.authority)
-    if creator_member_id is None:
-        raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
-    if visibility is not None and ctx.speaker_member_id is None:
-        raise SpeakerRequired(VISIBILITY_NEEDS_A_SPEAKER)
-    workspace_id = ctx.ext.store.workspace_id
+    ext, creator_member_id = _site_actor(ctx, visibility)
+    workspace_id = ext.store.workspace_id
     name = site_name(raw_name)
     site_url(ctx.public_base_url, workspace_id, ctx.sandbox.conversation_id, name)
-    displaced = await HostedSites(workspace_id, ctx.ext.transaction).refuse_or_pass(
+    displaced = await HostedSites(workspace_id, ext.transaction).refuse_or_pass(
         ctx.sandbox.conversation_id,
         name,
         port,
@@ -916,18 +936,12 @@ async def _host(
     same. For a subagent they are not: it runs in the sandbox of the turn that spawned it, so the
     port it brings up is served by the member's sandbox and the link belongs to the member's
     conversation — where it outlives the child turn, and where a rebuild lands on the same link."""
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    creator_member_id = authority_member_id(ctx.authority)
-    if creator_member_id is None:
-        raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
-    if visibility is not None and ctx.speaker_member_id is None:
-        raise SpeakerRequired(VISIBILITY_NEEDS_A_SPEAKER)
-    workspace_id = ctx.ext.store.workspace_id
+    ext, creator_member_id = _site_actor(ctx, visibility)
+    workspace_id = ext.store.workspace_id
     name = site_name(raw_name)
     serving = ctx.sandbox.conversation_id
     link = site_url(ctx.public_base_url, workspace_id, serving, name)
-    site = await HostedSites(workspace_id, ctx.ext.transaction).register(
+    site = await HostedSites(workspace_id, ext.transaction).register(
         serving,
         name,
         port,
@@ -939,7 +953,7 @@ async def _host(
     )
     return {
         "site_name": site.name,
-        "visibility": effective_visibility(site, await ctx.ext.agent_visibilities()),
+        "visibility": effective_visibility(site, await ext.agent_visibilities()),
         "site": site_object_name(site.conversation_id, site.name),
         "site_url": link,
     }
@@ -1293,7 +1307,7 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
         await _require_current_application_qa(ctx)
     conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
-    bound = await _agent_homepage(ctx)
+    bound = await _sites_registry(ctx).homepage(ctx.turn.agent_id)
     slug = site_name(args.site_name)
     if (
         bound is not None
@@ -1349,16 +1363,9 @@ async def _served_directory(
     return page, await _source_listing(ctx, page)
 
 
-async def _agent_homepage(ctx: ToolContext) -> HostedSite | None:
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    return await _sites_registry(ctx).homepage(ctx.turn.agent_id)
-
-
 def _sites_registry(ctx: ToolContext) -> HostedSites:
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    return HostedSites(ctx.ext.store.workspace_id, ctx.ext.transaction)
+    ext = _site_extension(ctx)
+    return HostedSites(ext.store.workspace_id, ext.transaction)
 
 
 async def _redeploy_homepage(
@@ -1388,12 +1395,12 @@ async def _redeploy_homepage(
         )
         requested_by_speaker = requester == str(authority_member_id(ctx.authority))
     if not requested_by_speaker:
-        raise RuntimeError(HOMEPAGE_REDEPLOY_NEEDS_A_SPEAKER)
+        raise SpeakerRequired(HOMEPAGE_REDEPLOY_NEEDS_A_SPEAKER)
     if args.visibility is not None:
         raise ValueError(HOMEPAGE_KEEPS_THE_AGENTS_VISIBILITY)
     member_id = authority_member_id(ctx.authority)
     if member_id is None:
-        raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
+        raise SpeakerRequired(SITE_NEEDS_AN_OWNER)
     sites = _sites_registry(ctx)
     displaced = await sites.refuse_or_pass(
         ctx.sandbox.conversation_id,
@@ -1418,8 +1425,6 @@ async def _redeploy_homepage(
     if displaced is not None:
         await sites.unregister(displaced.conversation_id, displaced.name)
     drawn = await _pictured(ctx, bound.name, scratch_port, bound.conversation_id)
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
     return _json_result(
         {
             **served,
@@ -1428,7 +1433,7 @@ async def _redeploy_homepage(
             "site": site_object_name(updated.conversation_id, updated.name),
             "site_url": site_url(
                 ctx.public_base_url,
-                ctx.ext.store.workspace_id,
+                _site_extension(ctx).store.workspace_id,
                 updated.conversation_id,
                 updated.name,
             ),
@@ -1483,11 +1488,10 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     this same turn's agent, whose gate is the room's default rather than a choice anyone made —
     which is exactly the seed's deploy-and-bind shape, so seeding stays speakerless-safe while a
     scheduled turn can never re-gate what a member left standing."""
-    if ctx.ext is None:
-        raise RuntimeError("the website tools dispatched without their ExtensionContext")
+    ext = _site_extension(ctx)
     if ctx.target is None or ctx.target.name is None:
         raise RuntimeError("set_homepage dispatched without its agent target")
-    agent = await ctx.ext.agent_named(ctx.target.name)
+    agent = await ext.agent_named(ctx.target.name)
     if agent is None:
         raise ValueError(f"no live agent is named {ctx.target.name!r}")
     agent_id = agent.id
@@ -1495,8 +1499,8 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     owns = member_id is not None and agent.owner_member_id == member_id
     if agent_id != ctx.turn.agent_id and not owns and not await ctx.speaker_is_admin():
         raise ValueError(HOMEPAGE_NEEDS_THE_AGENTS_OWNER.format(agent=ctx.target.name))
-    workspace_id = ctx.ext.store.workspace_id
-    sites = HostedSites(workspace_id, ctx.ext.transaction)
+    workspace_id = ext.store.workspace_id
+    sites = HostedSites(workspace_id, ext.transaction)
     named = {site_object_name(site.conversation_id, site.name): site for site in await sites.all()}
     site = named.get(args.site)
     if site is None:
@@ -1522,7 +1526,7 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
             "site_url": site_url(
                 ctx.public_base_url, workspace_id, bound.conversation_id, bound.name
             ),
-            "visibility": (await ctx.ext.agent_visibilities())[agent_id],
+            "visibility": (await ext.agent_visibilities())[agent_id],
             "homepage_agent": str(agent_id),
         }
     )

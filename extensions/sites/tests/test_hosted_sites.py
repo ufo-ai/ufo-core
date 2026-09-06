@@ -1010,11 +1010,14 @@ async def test_a_site_in_another_conversation_keeps_its_own_name_and_link(db: No
 
 
 async def test_hosting_without_an_acting_member_fails_loud(db: None) -> None:
-    """A site needs an owner: the gate every visibility decision is made against."""
+    """A site needs an owner: the gate every visibility decision is made against. The refusal is
+    about who is asking rather than about the site, so it is `SpeakerRequired`: a `requested_by`
+    ref binds a member and the deploy then stands. Raised as a `RuntimeError` the engine meters a
+    policy refusal as a deploy fault and the model reads a failure it cannot repair."""
     workspace = await _seed_workspace()
     conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
 
-    with pytest.raises(RuntimeError, match="owner"):
+    with pytest.raises(SpeakerRequired, match="owner"):
         await _deploy(workspace, conversation_id, SHARED_AUDIENCE, None)
 
     assert await _stored(workspace) == ()
@@ -2530,7 +2533,7 @@ async def test_a_homepage_redeploy_refuses_speakerless_and_visibility_turns(db: 
         )
     chat_conversation = await _seed_conversation(workspace, audience, owner_id)
 
-    with pytest.raises(RuntimeError, match="only a member speaking"):
+    with pytest.raises(SpeakerRequired, match="only a member speaking"):
         await _deploy(workspace, chat_conversation, audience, None, site="home", blob=blob)
     with pytest.raises(ValueError, match="redeploy without a visibility argument"):
         await _deploy(

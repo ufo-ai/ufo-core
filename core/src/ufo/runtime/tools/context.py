@@ -339,6 +339,12 @@ class SpeakerRequired(ValueError):
     can retry with the ref; elsewhere there is nothing to correct and the message stands alone."""
 
 
+ADMIN_GATE_NEEDS_A_SPEAKER = (
+    "this call names no member, so name the member who is asking with `requested_by` — the act "
+    "then answers to its own gate: {gate}"
+)
+
+
 @dataclass(frozen=True)
 class SpawnResult:
     """The exact child and, once finished, its terminal and validated output — a profile child's
@@ -743,6 +749,16 @@ class ToolContext:
                 self.turn.workspace_id,
                 self.speaker_member_id,
             )
+
+    async def speaking_admin(self, gate: str) -> bool:
+        """The same answer, with the speaker question asked first. `speaker_is_admin` answers False
+        for a call nobody is bound to, so a gate that reads it alone tells a call that merely
+        omitted `requested_by` that only an admin may act — a refusal naming a repair the model
+        cannot make. Who is speaking is answered before what they may do, the order the object
+        kinds' gate keeps, and each gate still raises its own admin refusal on a False."""
+        if self.speaker_member_id is None:
+            raise SpeakerRequired(ADMIN_GATE_NEEDS_A_SPEAKER.format(gate=gate))
+        return await self.speaker_is_admin()
 
     async def agent_is_main(self) -> bool:
         async with workspace_tx() as connection:

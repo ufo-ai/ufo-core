@@ -55,7 +55,7 @@ async def rebuild_report_digest_handler(
     reports a tick."""
     if ctx.ext is None:
         raise RuntimeError("rebuild_report_digest dispatched without its ExtensionContext")
-    if not await ctx.speaker_is_admin():
+    if not await ctx.speaking_admin(REBUILD_ADMIN_ONLY):
         raise ValueError(REBUILD_ADMIN_ONLY)
     due = await DigestRebuild(ctx=ctx.ext).run()
     if not due:
