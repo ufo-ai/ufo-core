@@ -11,7 +11,7 @@ from dbos import DBOSClient
 
 from ufo.db import workspace_tx
 from ufo.runtime.ext.surface import Stopped
-from ufo.runtime.hub import Absorbed, Hub, Terminal
+from ufo.runtime.hub import Hub, Terminal
 from ufo.runtime.surfaces.admission import Admission
 from ufo.runtime.turns.cancellation import cancel_one_turn
 from ufo.schema import tables
@@ -25,11 +25,8 @@ class MemberStop:
     already terminal comes back untouched (`ended` False), so a stop racing the turn's own commit
     never disturbs it and a double press is a no-op.
 
-    The redispatched run's first hub frame names the arrival it was founded on: founding consumes
-    the row outside any drain, so no `Absorbed` would ever name it, and the surface holding that
-    message as pending would wait forever for the settle every absorbed message gets. The cancelled
-    terminal publishes last — it is what wakes the stopped turn's tails, and a tail that then asks
-    whether the conversation moved on must find the new turn already standing."""
+    The cancelled terminal publishes last — it is what wakes the stopped turn's tails, and a tail
+    that then asks whether the conversation moved on must find the new turn already standing."""
 
     client: DBOSClient
     hub: Hub
@@ -50,12 +47,6 @@ class MemberStop:
         frame = await cancel_one_turn(self.client, turn_id)
         if frame is None:
             return Stopped(ended=False, founded_turn_id=None)
-        founded = await self.admission.redispatch(workspace_id, conversation_id)
-        if founded is not None:
-            new_turn_id, arrival_id = founded
-            await self.hub.publish(new_turn_id, Absorbed(arrivals=(arrival_id,)))
+        founded = await self.admission.redispatch(workspace_id, conversation_id, turn_id)
         await self.hub.publish(turn_id, Terminal(frame=frame))
-        return Stopped(
-            ended=True,
-            founded_turn_id=None if founded is None else founded[0],
-        )
+        return Stopped(ended=True, founded_turn_id=founded)

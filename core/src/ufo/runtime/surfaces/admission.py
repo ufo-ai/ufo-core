@@ -65,7 +65,7 @@ from ufo.runtime.authority import (
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.runtime.ext.context import AgentArchived, MemberReach
 from ufo.runtime.ext.surface import Admitted, conversation_name
-from ufo.runtime.hub import ArrivalQueued, Hub, Reply
+from ufo.runtime.hub import Absorbed, ArrivalQueued, Hub, Reply
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws_current
@@ -220,16 +220,46 @@ class Admission:
         return admitted
 
     async def redispatch(
-        self, workspace_id: UUID, conversation_id: UUID
-    ) -> tuple[UUID, UUID] | None:
-        """Give a member message a cancelled turn left unconsumed its own run, now. The oldest
-        member-spoken pending arrival is re-admitted under its delivery key — the same admission a
-        resend rides, so a dead target founds a new turn on the message and a live one folds it —
-        and later pending rows join that turn's first drain. Returns `(turn_id, arrival_id)` when
-        this call founded a run on the arrival, None when nothing was pending or the message joined
-        an existing turn. A pending row without a key is stamped one first, so every path through
-        here is a re-admission and none can say a message twice."""
+        self, workspace_id: UUID, conversation_id: UUID, ended_turn_id: UUID
+    ) -> UUID | None:
+        """Re-admit the oldest arrival the ended turn left pending under its delivery key — the
+        same admission a resend rides, so a live successor folds it and an idle conversation founds
+        a turn on it. Every workflow exit and a member's stop pass here, so a message that reached
+        a turn which then failed or was cancelled is read by the next turn. Returns the founded
+        turn's id, None when nothing was pending or the message joined a live turn.
+
+        Only a row its sender waits on is re-admitted: a root turn's are the messages members
+        sent, a spawned turn's the ones its parent sent — unless the spawned turn was cancelled,
+        since a cancel ends the child's work and the parent that sent the follow-up is the one who
+        cancelled, or was cancelled with it. A child's result or an extension's prompt folded into
+        a root turn stays pending for the conversation's next turn, as the drain leaves it, so a
+        stop ends the work it stopped. Every row is re-admitted as work already accepted: its
+        sender was answered when it was first admitted, so no gate answers them again — a seat or
+        balance refusal holds the turn for the return that releases it rather than cancelling it
+        with a reason nobody reads, and a pin the live turn no longer matches folds under the live
+        one's. The row carries the ended turn's runtime
+        config, which its fold matched, and a speakerless row takes the ended turn's authority,
+        since it records none. A member's founded run is announced as its first `Absorbed` frame,
+        since founding consumes the row outside any drain. A keyless row is stamped a key first, so
+        every path here is a re-admission and none can say a message twice."""
         async with workspace_tx() as connection:
+            ended = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.status,
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.on_behalf_of_member_id,
+                        tables.turn.c.runtime_config,
+                        tables.turn.c.parent_turn_id,
+                    ).where(
+                        tables.turn.c.id == ended_turn_id,
+                        tables.turn.c.workspace_id == workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                    )
+                )
+            ).one()
+            if ended.parent_turn_id is not None and ended.status == CANCELLED:
+                return None
             row = (
                 await connection.execute(
                     sa.select(
@@ -243,7 +273,11 @@ class Admission:
                         tables.inbound_message.c.workspace_id == workspace_id,
                         tables.inbound_message.c.conversation_id == conversation_id,
                         tables.inbound_message.c.consumed_turn_id.is_(None),
-                        tables.inbound_message.c.speaker_member_id.is_not(None),
+                        (
+                            tables.inbound_message.c.admission_source == INTERNAL_ADMISSION
+                            if ended.parent_turn_id is not None
+                            else tables.inbound_message.c.speaker_member_id.is_not(None)
+                        ),
                     )
                     .order_by(tables.inbound_message.c.seq)
                     .limit(1)
@@ -260,15 +294,38 @@ class Admission:
                     .values(idempotency_key=idempotency_key)
                     .where(tables.inbound_message.c.id == row.id)
                 )
-        admitted = await self.admit_member(
-            workspace_id,
-            conversation_id,
-            row.body,
-            row.speaker_member_id,
-            idempotency_key=idempotency_key,
-            context=None if row.context is None else TurnContext.model_validate(row.context),
+        context = None if row.context is None else TurnContext.model_validate(row.context)
+        runtime_config = (
+            None
+            if ended.runtime_config is None
+            else TurnRuntimeConfig.model_validate(ended.runtime_config)
         )
-        return (admitted.turn_id, row.id) if admitted.opened_run else None
+        try:
+            admitted = await self._admit(
+                workspace_id,
+                conversation_id,
+                None,
+                row.body,
+                row.speaker_member_id,
+                idempotency_key,
+                context,
+                authority=(
+                    authority_from_member_id(row.speaker_member_id)
+                    if row.speaker_member_id is not None
+                    else turn_authority(ended.speaker_member_id, ended.on_behalf_of_member_id)
+                ),
+                member_admission=row.speaker_member_id is not None,
+                holds_work_already_done=True,
+                runtime_config=runtime_config,
+            )
+        except AgentArchived:
+            return None
+        await self._wake_live_turn(admitted)
+        if not admitted.opened_run:
+            return None
+        if row.speaker_member_id is not None and self.hub is not None:
+            await self.hub.publish(admitted.turn_id, Absorbed(arrivals=(row.id,)))
+        return admitted.turn_id
 
     async def invoke(
         self,
@@ -1103,8 +1160,12 @@ class Admission:
         member_admission: bool,
         holds_work_already_done: bool,
     ) -> tuple[TurnStatus, TerminalFrame | None] | None:
+        """An archived app admits no turn, whatever the work holds: an archive is not a cap the
+        dispatcher re-decides, so a turn held under it would sit until the sweep ran it on the
+        archived app. The seat and balance refusals hold work already accepted, since a seat or
+        credit returning is exactly what releases them."""
         if archived:
-            return _refused(holds_work_already_done, ARCHIVED_REFUSAL_MESSAGE)
+            return CANCELLED, TerminalFrame(status=CANCELLED, text=ARCHIVED_REFUSAL_MESSAGE)
         if authority_member_id(authority) is None and member_admission:
             return CANCELLED, TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE)
         if not await Seats(workspace_id).admits(connection, authority):
@@ -1245,6 +1306,9 @@ class AdmissionInvoker:
             unless_member_arrival_since=unless_member_arrival_since,
             runtime_config=runtime_config,
         )
+
+    async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None:
+        return await self.admission.redispatch(self.workspace_id, conversation_id, ended_turn_id)
 
     async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]:
         """The conversations an invoke reaches `member_id` through: on a surface this admission

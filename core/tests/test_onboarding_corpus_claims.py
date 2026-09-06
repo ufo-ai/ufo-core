@@ -675,7 +675,10 @@ CLAIMS = (
         phrase="it does not resume. A message the member already sent before stopping starts a"
         " new turn instead",
         source=STOP,
-        pattern=r"founded = await self\.admission\.redispatch\(workspace_id, conversation_id\)",
+        pattern=(
+            r"founded = await self\.admission\.redispatch\("
+            r"workspace_id, conversation_id, turn_id\)"
+        ),
     ),
     Claim(
         claim="sign-in from the invitation reaches a first-run setup before the agent answers,"

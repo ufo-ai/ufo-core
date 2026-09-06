@@ -840,21 +840,27 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
             status = "failed"
         await _deliver_to_parent(runtime, turn_uuid)
         if conversation_id is not None:
-            await _offer_next_turn(runtime, conversation_id)
+            await _offer_next_turn(runtime, workspace_uuid, conversation_id, turn_uuid)
         return status
 
 
-async def _offer_next_turn(runtime: Runtime, conversation_id: UUID) -> None:
-    """Hand the conversation to its next queued turn as this workflow ends — every exit passes
-    here, so the offer needs no per-path wiring. It swallows its own fault for the same reason
-    `_deliver_to_parent` does: the ended turn's terminal already stands, and the dispatcher
-    sweep re-offers within its grace whatever this call missed."""
+async def _offer_next_turn(
+    runtime: Runtime, workspace_id: UUID, conversation_id: UUID, turn_id: UUID
+) -> None:
+    """Hand the conversation on as this workflow ends — every exit passes here, so the handoff
+    needs no per-path wiring: its next queued turn is dispatched, then any arrival the ended turn
+    left pending is re-admitted, so a message folded into a turn that then failed or was cancelled
+    is read by the next one. It swallows its own fault for the same reason `_deliver_to_parent`
+    does: the ended turn's terminal already stands, and the dispatcher sweep re-offers within its
+    grace whatever this call missed."""
     try:
         await dispatch_next_turn(runtime.dbos, conversation_id)
+        await runtime.invoker_for(workspace_id).redispatch(conversation_id, turn_id)
     except Exception as error:
         log(
             "turn.offer_deferred",
             conversation_id=str(conversation_id),
+            turn_id=str(turn_id),
             error_class=type(error).__name__,
         )
 

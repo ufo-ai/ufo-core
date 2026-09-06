@@ -32,7 +32,9 @@ class _RecordingClient:
 
 def _stopper(client: _RecordingClient, hub: InProcessHub) -> MemberStop:
     return MemberStop(
-        client=client, hub=hub, admission=Admission(dbos=client, durable_surfaces=frozenset())
+        client=client,
+        hub=hub,
+        admission=Admission(dbos=client, durable_surfaces=frozenset(), hub=hub),
     )
 
 

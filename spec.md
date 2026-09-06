@@ -605,7 +605,8 @@ creates elsewhere can name where it was asked for; a message arriving while the 
 newest turn is still live lands on the conversation's inbound queue, which the engine drains into
 that turn at each round boundary as separate `<context>`-tagged messages — the terminal
 commit refuses to close over a non-empty queue, so one FIFO aggregate ends in one closing reply and
-one writeback across all speakers, and a turn answers a speaker before it ends by marking a span of
+one writeback across all speakers, and a turn that fails or is cancelled over one hands its
+pending arrivals to the next turn at its exit, and a turn answers a speaker before it ends by marking a span of
 a round's text with the `message_ref` it replies to: on a surface that implements `speak` (Slack)
 core delivers each marked span to that member as its own message, in the order the model wrote it,
 exactly once across a provider retry, a second replica and a replayed turn, and before the closing

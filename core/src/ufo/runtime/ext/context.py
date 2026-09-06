@@ -725,7 +725,8 @@ class TurnInvoker(Protocol):
     """The internal turn seam a background handler drives. It never consumes a member's pause;
     idempotency collapses a redelivered invocation to the turn already admitted. It also answers
     where an invoke reaches a member who is not in the invoking conversation: the durable-surface
-    conversations they speak in, which admission registers a writeback for."""
+    conversations they speak in, which admission registers a writeback for. `redispatch` re-admits
+    the oldest arrival an ended turn left pending and answers the turn it founded, if any."""
 
     async def invoke(
         self,
@@ -742,6 +743,8 @@ class TurnInvoker(Protocol):
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None: ...
+
+    async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None: ...
 
     async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]: ...
 

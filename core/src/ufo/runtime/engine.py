@@ -2579,7 +2579,7 @@ class TurnEngine:
 
     async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None:
         """Return stamped-but-unabsorbed arrivals (a drain whose step never recorded) to pending
-        on a failed or cancelled exit, so the next live turn drains them. Best-effort: these exits
+        on a failed or cancelled exit, so the exit handoff re-admits them. Best-effort: these exits
         must not stall, and the next admission's turn re-drains whatever a miss here left."""
         try:
             async with workspace_tx() as connection:

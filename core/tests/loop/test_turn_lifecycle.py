@@ -2733,6 +2733,86 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
     assert RoundTripOutput.model_validate_json(followup.text).echoed == FOLLOWUP_ECHO
 
 
+async def test_a_followup_left_pending_by_an_ended_child_runs_as_its_next_turn(
+    surface: Turns,
+) -> None:
+    """The exit handoff re-admits what the ended turn left pending: a follow-up folded into a child
+    whose turn ended without draining it — a failure or a cancel — becomes the child's next turn and
+    runs to its own terminal, so a correction never sits on a conversation nothing runs."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    parent_id = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent_id)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        parent_row = (
+            await connection.execute(
+                sa.select(tables.turn).where(tables.turn.c.id == UUID(parent_id))
+            )
+        ).one()
+        child = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.conversation_id).where(
+                    tables.turn.c.parent_turn_id == UUID(parent_id)
+                )
+            )
+        ).one()
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=parent_row.workspace_id,
+                conversation_id=child.conversation_id,
+                seq=sa.select(sa.func.coalesce(sa.func.max(tables.inbound_message.c.seq), 0) + 1)
+                .where(tables.inbound_message.c.conversation_id == child.conversation_id)
+                .scalar_subquery(),
+                body=FOLLOWUP_INBOUND,
+                admission_source="internal",
+                speaker_member_id=None,
+                idempotency_key="turn-1/message_spawn/call-1",
+                admitted_turn_id=child.id,
+                created_at=sa.func.now(),
+            )
+        )
+
+    await loop_queue._offer_next_turn(
+        runtime, parent_row.workspace_id, child.conversation_id, child.id
+    )
+
+    async with workspace_tx() as connection:
+        followup_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(
+                    tables.turn.c.conversation_id == child.conversation_id,
+                    tables.turn.c.seq == 2,
+                )
+            )
+        ).scalar_one()
+    parent = Turn(
+        id=parent_row.id,
+        workspace_id=parent_row.workspace_id,
+        conversation_id=parent_row.conversation_id,
+        agent_id=parent_row.agent_id,
+        seq=parent_row.seq,
+        status=parent_row.status,
+        inbound=parent_row.inbound,
+        speaker_member_id=parent_row.speaker_member_id,
+        on_behalf_of_member_id=parent_row.on_behalf_of_member_id,
+        created_at=parent_row.created_at,
+        terminal=TerminalFrame.model_validate(parent_row.terminal),
+    )
+    subagents = Subagents(
+        client=runtime.dbos,
+        registry=runtime.subagents,
+        parent=parent,
+        authority=parent.authority,
+        audience=conversation_audience(None),
+    )
+    (followup,) = await subagents.wait((followup_id,))
+    assert followup.status == "done"
+    assert RoundTripOutput.model_validate_json(followup.text).echoed == FOLLOWUP_ECHO
+
+
 async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: Turns) -> None:
     """Both ends of the profile-only seam through the real turn path: the main agent's registry
     never offers the tool, and the profile that names it still resolves it for its child turn."""

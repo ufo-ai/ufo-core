@@ -75,5 +75,8 @@ class RecordingInvoker:
         )
         return uuid4()
 
+    async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None:
+        return None
+
     async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]:
         return ()

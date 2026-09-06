@@ -1347,22 +1347,30 @@ async def _cancel_turn_row(turn_id: UUID) -> None:
 
 
 async def test_redispatch_founds_a_run_on_the_oldest_pending_member_arrival(db: None) -> None:
+    """The founded run keeps the pin the ended turn ran under: a fold already required the
+    follow-up to match it, and nothing else could restore it once core founds the turn."""
     workspace_id, member_id, _, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    pinned = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    first = await admission.admit_member(
+        workspace_id, conversation_id, "start", member_id, runtime_config=pinned
+    )
     followup = await admission.admit_member(
-        workspace_id, conversation_id, "follow up", member_id, idempotency_key="send-1"
+        workspace_id,
+        conversation_id,
+        "follow up",
+        member_id,
+        idempotency_key="send-1",
+        runtime_config=pinned,
     )
     assert not followup.opened_run
     assert followup.arrival_id is not None
     await _cancel_turn_row(first.turn_id)
 
-    founded = await admission.redispatch(workspace_id, conversation_id)
+    new_turn_id = await admission.redispatch(workspace_id, conversation_id, first.turn_id)
 
-    assert founded is not None
-    new_turn_id, arrival_id = founded
-    assert arrival_id == followup.arrival_id
+    assert new_turn_id is not None
     assert new_turn_id != first.turn_id
     status, _ = await _turn_row(new_turn_id)
     assert status == "queued"
@@ -1370,15 +1378,18 @@ async def test_redispatch_founds_a_run_on_the_oldest_pending_member_arrival(db: 
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(tables.turn.c.inbound, tables.turn.c.speaker_member_id).where(
-                    tables.turn.c.id == new_turn_id
-                )
+                sa.select(
+                    tables.turn.c.inbound,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.runtime_config,
+                ).where(tables.turn.c.id == new_turn_id)
             )
         ).one()
     assert row.inbound == "follow up"
     assert row.speaker_member_id == member_id
+    assert TurnRuntimeConfig.model_validate(row.runtime_config) == pinned
     assert await _queued_bodies(conversation_id) == []
-    assert await admission.redispatch(workspace_id, conversation_id) is None
+    assert await admission.redispatch(workspace_id, conversation_id, first.turn_id) is None
 
 
 async def test_redispatch_with_nothing_pending_is_none(db: None) -> None:
@@ -1386,7 +1397,167 @@ async def test_redispatch_with_nothing_pending_is_none(db: None) -> None:
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
     await _cancel_turn_row(first.turn_id)
-    assert await admission.redispatch(workspace_id, conversation_id) is None
+    assert await admission.redispatch(workspace_id, conversation_id, first.turn_id) is None
+
+
+@dataclass
+class _RecordingHub:
+    frames: list[tuple[UUID, object]] = field(default_factory=list)
+
+    async def publish(self, turn_id: UUID, frame: object) -> str:
+        self.frames.append((turn_id, frame))
+        return str(len(self.frames))
+
+
+async def test_redispatch_leaves_a_root_turns_internal_arrival_for_the_next_turn(
+    db: None,
+) -> None:
+    """A child's result folded into a root turn is nobody's pending message: re-founding a turn on
+    it after a stop would resume the work the member just stopped, so it waits for the
+    conversation's next turn, whose first drain claims it."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos, hub = StubDbos(), _RecordingHub()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset(), hub=hub)
+    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
+    await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "child result",
+        "subagent-result:child",
+        authority=MemberAuthority(member_id),
+    )
+    await _cancel_turn_row(first.turn_id)
+
+    assert await admission.redispatch(workspace_id, conversation_id, first.turn_id) is None
+
+    assert await _queued_bodies(conversation_id) == ["child result"]
+    assert dbos.enqueued == [str(first.turn_id)]
+    assert [(turn_id, type(frame)) for turn_id, frame in hub.frames] == [
+        (first.turn_id, ArrivalQueued)
+    ]
+
+
+async def _spawned_conversation(
+    workspace_id: UUID, member_id: UUID, agent_id: UUID, status: str
+) -> tuple[UUID, UUID, UUID, TurnRuntimeConfig]:
+    """A child conversation whose founding turn ended `status` with a parent's follow-up still
+    pending on it, as a fold followed by a failure or a cancel leaves things."""
+    child_conversation, child_id, parent_id = uuid4(), uuid4(), uuid4()
+    pinned = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=child_conversation,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="subagent",
+                queue_key=str(child_id),
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=child_id,
+                workspace_id=workspace_id,
+                conversation_id=child_conversation,
+                agent_id=agent_id,
+                seq=1,
+                status=status,
+                inbound="{}",
+                terminal=TerminalFrame(status=status, text="over").model_dump(mode="json"),
+                parent_turn_id=parent_id,
+                on_behalf_of_member_id=member_id,
+                subagent_profile="general-purpose",
+                runtime_config=pinned.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=child_conversation,
+                seq=1,
+                body="narrow it to staging",
+                admission_source="internal",
+                speaker_member_id=None,
+                idempotency_key="turn-1/message_spawn/call-1",
+                admitted_turn_id=child_id,
+                created_at=sa.func.now(),
+            )
+        )
+    return child_conversation, child_id, parent_id, pinned
+
+
+async def test_redispatch_readmits_a_failed_spawned_turns_followup_under_its_own_identity(
+    db: None,
+) -> None:
+    """A parent's follow-up folded into a child whose turn then failed is re-admitted as the
+    child's next turn: the row records no speaker, so it takes the ended turn's authority and
+    runtime config, inherits the spawn identity every founded turn on that conversation carries,
+    and announces no `Absorbed` frame, which names a member's own message."""
+    workspace_id, member_id, agent_id, _ = await _seed()
+    child_conversation, child_id, parent_id, pinned = await _spawned_conversation(
+        workspace_id, member_id, agent_id, "failed"
+    )
+    dbos, hub = StubDbos(), _RecordingHub()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset(), hub=hub)
+
+    founded = await admission.redispatch(workspace_id, child_conversation, child_id)
+
+    assert founded is not None
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.seq,
+                    tables.turn.c.status,
+                    tables.turn.c.inbound,
+                    tables.turn.c.idempotency_key,
+                    tables.turn.c.admission_source,
+                    tables.turn.c.subagent_profile,
+                    tables.turn.c.parent_turn_id,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.on_behalf_of_member_id,
+                    tables.turn.c.result_delivery,
+                    tables.turn.c.runtime_config,
+                ).where(tables.turn.c.id == founded)
+            )
+        ).one()
+    assert (row.seq, row.status, row.inbound) == (2, "queued", "narrow it to staging")
+    assert (row.idempotency_key, row.admission_source) == (
+        "turn-1/message_spawn/call-1",
+        "internal",
+    )
+    assert (row.subagent_profile, row.parent_turn_id) == ("general-purpose", parent_id)
+    assert (row.speaker_member_id, row.on_behalf_of_member_id) == (None, member_id)
+    assert row.result_delivery == "pending"
+    assert TurnRuntimeConfig.model_validate(row.runtime_config) == pinned
+    assert dbos.enqueued == [str(founded)]
+    assert await _queued_bodies(child_conversation) == []
+    assert hub.frames == []
+
+
+async def test_redispatch_leaves_a_cancelled_spawned_turns_followup_alone(db: None) -> None:
+    """A cancel ends the child's work: the parent that sent the follow-up cancelled it, or was
+    cancelled with it, so re-founding the child on the follow-up would run cancelled work."""
+    workspace_id, member_id, agent_id, _ = await _seed()
+    child_conversation, child_id, _, _ = await _spawned_conversation(
+        workspace_id, member_id, agent_id, "cancelled"
+    )
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+
+    assert await admission.redispatch(workspace_id, child_conversation, child_id) is None
+
+    assert await _turn_count(child_conversation) == 1
+    assert await _queued_bodies(child_conversation) == ["narrow it to staging"]
+    assert dbos.enqueued == []
 
 
 async def test_member_admission_stores_its_trace_for_the_turn_span(db: None, monkeypatch) -> None:
@@ -1447,6 +1618,8 @@ async def test_an_archived_app_refuses_a_member_and_raises_for_work_fired_by_a_c
 
 
 async def test_a_message_left_by_a_stop_is_refused_by_an_app_archived_under_it(db: None) -> None:
+    """A re-admission holds every refusal a return can release, but an archive releases nothing:
+    a turn held under it would run on the archived app at the next sweep, so this one cancels."""
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
@@ -1466,7 +1639,7 @@ async def test_a_message_left_by_a_stop_is_refused_by_an_app_archived_under_it(d
             .where(tables.agent.c.id == agent_id)
         )
 
-    founded = await admission.redispatch(workspace_id, conversation_id)
+    founded = await admission.redispatch(workspace_id, conversation_id, running.turn_id)
 
     assert founded is None
     async with workspace_tx() as connection:
@@ -1479,6 +1652,59 @@ async def test_a_message_left_by_a_stop_is_refused_by_an_app_archived_under_it(d
             )
         ).scalar_one()
     assert await _turn_row(newest) == ("cancelled", ARCHIVED_REFUSAL_MESSAGE)
+
+
+async def test_redispatch_folds_a_pinned_followup_under_a_live_sibling_rather_than_raising(
+    db: None,
+) -> None:
+    """A stop with a scheduled turn standing beside the stopped one: the member's pinned follow-up
+    cannot found a second turn and its pin no longer matches the live one's, so it folds under the
+    sibling's config — the mismatch is a refusal to the sender at admission, and nobody is there to
+    receive one at re-admission, least of all before the stop publishes its terminal."""
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos, hub = StubDbos(), _RecordingHub()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset(), hub=hub)
+    pinned = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    first = await admission.admit_member(
+        workspace_id, conversation_id, "start", member_id, runtime_config=pinned
+    )
+    await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "follow up",
+        member_id,
+        idempotency_key="send-1",
+        runtime_config=pinned,
+    )
+    scheduled = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "scheduled fire",
+        "fire-1",
+        authority=MemberAuthority(member_id),
+        as_scheduled=True,
+    )
+    await _cancel_turn_row(first.turn_id)
+
+    assert await admission.redispatch(workspace_id, conversation_id, first.turn_id) is None
+
+    assert await _turn_count(conversation_id) == 2
+    async with workspace_tx() as connection:
+        moved = (
+            await connection.execute(
+                sa.select(tables.inbound_message.c.admitted_turn_id).where(
+                    tables.inbound_message.c.conversation_id == conversation_id,
+                    tables.inbound_message.c.consumed_turn_id.is_(None),
+                )
+            )
+        ).scalars()
+    assert list(moved) == [scheduled]
+    assert [turn_id for turn_id, frame in hub.frames if isinstance(frame, ArrivalQueued)] == [
+        first.turn_id,
+        scheduled,
+    ]
 
 
 async def test_a_message_to_an_archived_app_is_refused_beside_a_live_turn_rather_than_folded(
