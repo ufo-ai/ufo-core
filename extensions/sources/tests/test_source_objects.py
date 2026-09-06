@@ -2919,3 +2919,35 @@ async def test_an_offer_names_a_bounded_number_of_resources(db: None) -> None:
     assert isinstance(offered, InjectContext)
     assert offered.text.count("call object_apply with this manifest:\n") == WATCH_OFFER_MAX
     assert f"pull/{WATCH_OFFER_MAX + 1} " not in offered.text
+
+
+async def test_a_link_is_read_out_of_markdown_and_out_of_an_encoded_payload(db: None) -> None:
+    """A coding child reports its pull request as a markdown link inside a JSON-encoded payload, so
+    the link the hook reads is followed by a closing parenthesis and an escaped newline written as
+    two characters, and a member's message wraps a link in angle brackets or ends it with a comma.
+    Each of those is the same one resource."""
+    state = await _workspace()
+    await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    payload = (
+        '{"result":"Pull request open: [metalcraftai/ufo #1684 \\u2014 test]'
+        f"({PR_URL}).\\n\\nBranch `ufo/0283725a-ci-test`, pushed to origin."
+        '"}'
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        offers = [
+            await _seen(
+                state,
+                PostToolUse(tool_name="spawn", tool_input=_SpawnInput(), output=payload),
+            ),
+            await _seen(state, UserPromptSubmit(text=f"see <{PR_URL}>, then merge")),
+            await _seen(
+                state, UserPromptSubmit(text=f"{PR_URL}, {PR_URL}/files and [it]({PR_URL})")
+            ),
+        ]
+
+    for offered in offers:
+        assert isinstance(offered, InjectContext)
+        assert offered.text.count("call object_apply with this manifest:\n") == 1
+        assert f"resource: {PR_URL}\n" in offered.text

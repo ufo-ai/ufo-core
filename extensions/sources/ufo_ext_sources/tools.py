@@ -117,8 +117,12 @@ WATCH_OFFER_MAX = 4
 list of things to watch, and every offer costs the turn context."""
 WATCH_OFFER_OPEN = "<watch_offer>"
 WATCH_OFFER_CLOSE = "</watch_offer>"
-LINK = re.compile(r"https://[^\s<>\"'`]+")
-LINK_TRAIL = ".,;:!?)]}*"
+LINK = re.compile(r"https://[^\s<>\"'`\\()\[\]{}]+")
+"""A link ends where prose or markup around it begins: whitespace, a quote, an angle bracket, a
+backtick, a bracket, a brace, a parenthesis or a backslash. A coding child reports its pull request
+as a markdown link inside a JSON-encoded payload, so the link there is followed by a closing
+parenthesis and an escaped newline written as two characters."""
+LINK_TRAIL = ".,;:!?*"
 CHANGE_LOG_DIR = "sources"
 DISPOSITIONS = ("added", "updated", "removed")
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
