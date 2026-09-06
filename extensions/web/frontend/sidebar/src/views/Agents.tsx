@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  IconBuildingStore,
+  IconApps,
   IconChevronDown,
+  IconCirclePlus,
   IconDots,
   IconPin,
   IconPinFilled,
@@ -31,6 +32,7 @@ import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { openAgents } from "@/lib/router";
+import { useSurfaces } from "@/lib/surfaces";
 import {
   AgentPane,
   SETTINGS_TABS,
@@ -38,7 +40,7 @@ import {
   SettingsTabItems,
   type SettingsTab,
 } from "@/views/AgentPane";
-import { AppBuilder, wizardKey } from "@/views/AppBuilder";
+import { APP_CREATOR_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import { APP_STORE_TITLE } from "@/views/Store";
@@ -231,9 +233,9 @@ function AppSettings({
   );
 }
 
-/** The apps index: the workspace's apps as the sidebar draws them, and the store that adds to them
- *  as the last row. What each app is doing comes from `appStatusStore`, which every reader of the
- *  rows shares.
+/** The apps index: the workspace's apps as the sidebar draws them, and as the last row the place
+ *  that adds to them — the store where the deploy offers it, App Creator where it does not yet.
+ *  What each app is doing comes from `appStatusStore`, which every reader of the rows shares.
  *
  *  The column is shared with the member's conversations, so the list states a run of itself and
  *  holds the rest behind the `More` row. It takes what the sidebar can spare and scrolls inside
@@ -252,6 +254,7 @@ export function AppsIndex({
   onPin,
   onOpen,
   onStore,
+  onBuild,
 }: {
   agents: Agent[];
   /** The agent whose pane the page is showing, or null when no app holds it. */
@@ -267,7 +270,10 @@ export function AppsIndex({
   onPin: (agentId: string) => void;
   onOpen: (agentId: string) => void;
   onStore: () => void;
+  onBuild: () => void;
 }) {
+  const mainAgent = useMainAgent();
+  const offered = useSurfaces();
   const { statuses } = useAppStatus();
   /** Where an app stands in time — what it last did, and nothing about what it is doing now. Work
    *  in flight lifts a row to the top of the list rather than moving it through this ladder: an app
@@ -300,19 +306,32 @@ export function AppsIndex({
               onOpen={() => onOpen(agent.id)}
             />
           ))}
-          {/* The store is the one act this list carries, and it stands under the apps rather than
-              over them: the column is read for the app a member is going to open, and the place
-              that adds one — the deploy's apps to install, and the wizard that builds a new one —
-              is what they reach when none of those is it. */}
-          <SidebarRow current={store}>
-            <SidebarPress
-              current={store}
-              collapsed={collapsed}
-              label={APP_STORE_TITLE}
-              glyph={<IconBuildingStore className="size-(--size-glyph) shrink-0" aria-hidden />}
-              onClick={onStore}
-            />
-          </SidebarRow>
+          {/* Adding an app is the one act this list carries, and it stands under the apps rather
+              than over them: the column is read for the app a member is going to open, and the place
+              that adds one is what they reach when none of those is it. Where the deploy offers the
+              store, that place is the store — the deploy's apps to install, and the wizard that
+              builds a new one. Where it does not yet, it is the wizard itself, which rides the main
+              agent's own chat, so a workspace with no main agent offers nothing to ride. */}
+          {offered["app-store"] ? (
+            <SidebarRow current={store}>
+              <SidebarPress
+                current={store}
+                collapsed={collapsed}
+                label={APP_STORE_TITLE}
+                glyph={<IconApps className="size-(--size-glyph) shrink-0" aria-hidden />}
+                onClick={onStore}
+              />
+            </SidebarRow>
+          ) : mainAgent ? (
+            <SidebarRow>
+              <SidebarPress
+                collapsed={collapsed}
+                label={APP_CREATOR_TITLE}
+                glyph={<IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />}
+                onClick={onBuild}
+              />
+            </SidebarRow>
+          ) : null}
         </ul>
       </div>
       {/* The rest of the workspace's apps, behind one row. It states what it does rather than how

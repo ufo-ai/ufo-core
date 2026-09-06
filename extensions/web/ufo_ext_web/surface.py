@@ -1304,14 +1304,18 @@ PORTAL_SURFACES = {
     "memory": "enable-memory-tab",
     "community-skills": "enable-community-skills",
     "installed-skills": "enable-installed-skills",
+    "app-store": "enable-app-store",
 }
+APP_STORE_FLAG = PORTAL_SURFACES["app-store"]
 # The flags that read closed. A flag withholding one of the portal's own screens reads open, so no
 # outage, no unseeded deploy and no key an operator has yet to create takes away what a member
 # already had. Every shipped app is the other case: it is listed where its flag says so and nowhere
 # else. That is the whole of what withholding one does — the workspace still holds the app, its
 # address still opens it, and its standing work keeps its clock — so the silences that must not take
-# a screen away are free to withhold an app, and offering one is a deliberate act.
-CLOSED_UNTIL_ANSWERED = frozenset(APP_FLAGS.values())
+# a screen away are free to withhold an app, and offering one is a deliberate act. The App Store is
+# a screen the product has not offered yet, so its flag reads the way an app's does: the sidebar
+# ends in App Creator, as it did, until somebody turns the store on.
+CLOSED_UNTIL_ANSWERED = frozenset([*APP_FLAGS.values(), APP_STORE_FLAG])
 
 
 def _visibility_flag(main: bool, provisioned_by: str | None) -> str | None:
@@ -1329,8 +1333,9 @@ async def _flag_reads(flags: Iterable[str | None]) -> dict[str, bool]:
     Each is read at the default its own feature ships in (`CLOSED_UNTIL_ANSWERED`). A flag
     withholding one of the portal's own screens reads open, so a deploy holding no flag service, one
     whose keys are unseeded, a key nobody has created and a Flagship outage all leave a member
-    exactly what they had; a shipped app's flag reads closed, so none of those four lists an app,
-    and a member sees one where somebody turned it on."""
+    exactly what they had; a shipped app's flag, and the flag over a screen never offered before,
+    read closed, so none of those four lists an app or the store, and a member sees one where
+    somebody turned it on."""
     keys = list(
         dict.fromkeys([*PORTAL_SURFACES.values(), *(flag for flag in flags if flag is not None)])
     )

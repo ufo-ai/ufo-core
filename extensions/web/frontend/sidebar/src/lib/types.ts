@@ -106,6 +106,9 @@ export type Surfaces = {
   memory: boolean;
   "community-skills": boolean;
   "installed-skills": boolean;
+  /** Whether the apps list ends in the App Store; withheld, it ends in App Creator, and the store
+   *  keeps its address. */
+  "app-store": boolean;
 };
 
 export type AgentsPayload = {

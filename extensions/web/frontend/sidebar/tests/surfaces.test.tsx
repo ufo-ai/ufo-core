@@ -25,6 +25,7 @@ const WITHHELD: Surfaces = {
   memory: false,
   "community-skills": false,
   "installed-skills": false,
+  "app-store": false,
 };
 
 /** An app the deploy withholds. The mark rides the boot read's own agent row, so the app is the

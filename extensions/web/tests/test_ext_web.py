@@ -1516,7 +1516,8 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             "admin": False,
             "workspace_id": str(workspace_id),
         },
-        "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True) | {"team": False},
+        "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True)
+        | {"app-store": False, "team": False},
         "archived": [],
         "agents": [
             {
@@ -1728,7 +1729,10 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
         await _seed_shipped_app(workspace_id, slug)
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     visibility, surfaces = await _app_visibility(client, token)
-    assert surfaces == dict.fromkeys(web_surface.PORTAL_SURFACES, True) | {"team": True}
+    assert surfaces == dict.fromkeys(web_surface.PORTAL_SURFACES, True) | {
+        "app-store": False,
+        "team": True,
+    }
     assert visibility == {None: False, **dict.fromkeys(web_surface.APP_FLAGS, True)}
 
 
@@ -10774,6 +10778,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
                 "enable-community-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-installed-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-memory-tab": InMemoryFlag(default_variant="on", variants=variants),
+                "enable-app-store": InMemoryFlag(default_variant="on", variants=variants),
                 "enable-wiki-app": InMemoryFlag(default_variant="off", variants=variants),
             }
         )
@@ -10787,6 +10792,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
         "memory": True,
         "community-skills": False,
         "installed-skills": False,
+        "app-store": True,
         "team": True,
     }
     assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [

@@ -320,6 +320,7 @@ export function App({
                   member={member}
                   mainAgent={mainAgent}
                   narrow={narrow}
+                  onBuild={startBuild}
                 />
               ) : null}
               <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
@@ -779,12 +780,15 @@ function WorkspaceSidebar({
   member,
   mainAgent,
   narrow,
+  onBuild,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
   narrow: boolean;
+  /** Raises the wizard from the apps list, where the deploy does not offer the store yet. */
+  onBuild: () => void;
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
@@ -890,6 +894,7 @@ function WorkspaceSidebar({
           }
           onOpen={openAgent}
           onStore={openStore}
+          onBuild={onBuild}
         />
         )}
       </div>
@@ -976,7 +981,8 @@ function RoutedPane({
   member: Member;
   mainAgent: Agent | null;
   onAgents: () => void;
-  /** A member's press on the store's App Creator row, which is the one way the wizard is raised. */
+  /** A member's press on the store's App Creator row, or on the apps list's where the deploy does
+   *  not offer the store yet. */
   onBuild: () => void;
   onExitBuilder: () => void;
   onForwardAgents: () => void;

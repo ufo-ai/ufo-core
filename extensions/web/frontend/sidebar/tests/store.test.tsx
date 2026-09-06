@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { ALL_SURFACES } from "@/lib/surfaces";
 
 import {
   AGENT,
@@ -224,6 +225,40 @@ test("the App Creator row raises the wizard from the store", async () => {
 
   const store = await openStore();
   await userEvent.click(within(store).getByRole("row", { name: /^App Creator/ }));
+
+  expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/builder");
+});
+
+/** The store is a screen the deploy offers by flag. Withheld, the apps list ends where it did — in
+ *  App Creator, raising the wizard — and the store keeps its address, as every withheld screen does,
+ *  so a member holding the link still lands on it. */
+test("a deploy that withholds the store ends the apps list in App Creator, and the store keeps its address", async () => {
+  wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Finances dash" }),
+    "/slots/tasks": () =>
+      json({ type: "tasks", title: "", tasks: [], total_count: 0, completed_count: 0, truncated: false }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/store";
+  render(
+    <App
+      agents={[AGENT, RADAR]}
+      archived={[WIKI]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, "app-store": false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  const store = await screen.findByRole("region", { name: "App Store" });
+  expect(listed(store)).toEqual(["Radar", "Wiki", "App Creator"]);
+
+  const index = await screen.findByRole("navigation", { name: "Apps" });
+  const unfold = screen.queryByRole("button", { name: "Expand sidebar" });
+  if (unfold) await userEvent.click(unfold);
+  expect(within(index).queryByRole("button", { name: "App Store" })).toBeNull();
+  await userEvent.click(within(index).getByRole("button", { name: "App Creator" }));
 
   expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
   expect(location.hash).toBe("#/agents/builder");
