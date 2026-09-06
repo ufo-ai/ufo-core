@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { heldArchivedChats } from "@/lib/rail";
 import type { Agent } from "@/lib/types";
 
 import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
@@ -530,47 +529,4 @@ test("a chat app with no page draws the conversation column", async () => {
   expect(await screen.findByRole("region", { name: "Chat" })).toBeTruthy();
   expect(document.querySelector("iframe")).toBeNull();
   expect(screen.queryByRole("button", { name: "History for Chat" })).toBeNull();
-});
-
-/** Both ends of the mark. The rail puts a thread away and draws it no more; the archive is the chat
- *  app's own screen, so the act that takes it back out is stated there and the shell writes it. The
- *  rail carries the row again, and the page hears the set it moved. */
-test("the page takes a thread back out of the archive, and the rail carries it again", async () => {
-  openChatApp("#/agents/" + CHAT_APP_ID);
-  const rail = within(await screen.findByRole("navigation", { name: "Workspace" }));
-  const row = (await rail.findByRole("button", { name: /Pick one thread/ })).closest("li")!;
-  await userEvent.click(within(row).getByRole("button", { name: "Thread options" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
-  await waitFor(() =>
-    expect(rail.queryByRole("button", { name: /Pick one thread/ })).toBeNull(),
-  );
-  expect(heldArchivedChats()).toEqual([CONVO_ID]);
-
-  const frame = (await screen.findByTitle("Chat homepage")) as HTMLIFrameElement;
-  const sent: unknown[] = [];
-  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
-    postMessage: (message: unknown) => void sent.push(message),
-  } as unknown as Window);
-  fireEvent(
-    window,
-    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
-  );
-  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
-    archived: string[];
-  };
-  expect(init.archived).toEqual([CONVO_ID]);
-
-  fireEvent(
-    window,
-    new MessageEvent("message", {
-      data: { ufo: "archive", conversation_id: CONVO_ID, archived: false },
-      source: frame.contentWindow,
-    }),
-  );
-
-  expect(await rail.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(heldArchivedChats()).toEqual([]);
-  await waitFor(() =>
-    expect(sent).toContainEqual({ ufo: "archived", archived: [] }),
-  );
 });

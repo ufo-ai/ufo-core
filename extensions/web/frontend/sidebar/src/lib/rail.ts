@@ -163,29 +163,6 @@ export function holdPinned(pinned: string[]): void {
   localStorage.setItem(HELD_PINNED, pinned.join("\n"));
 }
 
-const HELD_CHATS_PINNED = "pinned-chats";
-const HELD_CHATS_ARCHIVED = "archived-chats";
-
-/** The conversations the member pinned to the head of the rail, by id, newest pin first. A pin is a
- *  place the member put a thread, so it holds that place however long the thread has been quiet. */
-export function heldPinnedChats(): string[] {
-  return (localStorage.getItem(HELD_CHATS_PINNED) ?? "").split("\n").filter(Boolean);
-}
-
-export function holdPinnedChats(pinned: string[]): void {
-  localStorage.setItem(HELD_CHATS_PINNED, pinned.join("\n"));
-}
-
-/** The conversations the member put away, by id. An archived thread leaves the rail and is read in
- *  the archive, which is the same rail under one heading — it is put away, never deleted. */
-export function heldArchivedChats(): string[] {
-  return (localStorage.getItem(HELD_CHATS_ARCHIVED) ?? "").split("\n").filter(Boolean);
-}
-
-export function holdArchivedChats(archived: string[]): void {
-  localStorage.setItem(HELD_CHATS_ARCHIVED, archived.join("\n"));
-}
-
 /** The apps in the order the sidebar draws them: the pinned ones in the order the member pinned
  *  them, then the rest by the app that worked most recently, and last the apps that have never
  *  worked, by name. A pin is a place the member put a row, so it holds that place whatever the app
@@ -285,13 +262,6 @@ function admits(row: ChatRow, shown: RailShown): boolean {
 
 const OTHER_MEMBERS = "Other members";
 
-/** What the member did to the rail's own rows: the threads they pinned, and the ones they put
- *  away. Both are ids rather than rows, because a rail read answers the same conversation under a
- *  new title and a new moment while the member's mark on it stands. */
-export type RailMarks = { pinned: string[]; archived: string[] };
-
-export const NO_MARKS: RailMarks = { pinned: [], archived: [] };
-
 /** The rail's groups, in the order it draws them. The member's own conversations take the ladder
  *  the sort names — an app's name over each run, or, by recency, one unheaded run in the order the
  *  rows already stand in. A date the rail can state in the row's own words buys nothing as a
@@ -302,28 +272,11 @@ export const NO_MARKS: RailMarks = { pinned: [], archived: [] };
  *  a row.
  *
  *  The filter narrows the groups and never the rail itself: a permalink to a Slack thread opens it
- *  whether or not the rail is admitting Slack.
- *
- *  What the member marked governs before any sort does. The threads they pinned lead the column
- *  they already stand in rather than a column of their own: a pin says `keep this where I can
- *  reach it`, and the answer to that is the top of the list the member is reading, not a second
- *  heading to read past. The ones they put away leave the column altogether and are read in the
- *  chat app's own archive, so a member reaches them without the column carrying them. */
-export function railGroups(
-  rows: ChatRow[],
-  sort: RailSort,
-  shown: RailShown,
-  marks: RailMarks = NO_MARKS,
-): RailGroup[] {
+ *  whether or not the rail is admitting Slack. */
+export function railGroups(rows: ChatRow[], sort: RailSort, shown: RailShown): RailGroup[] {
   const admitted = rows.filter((row) => admits(row, shown));
-  const archived = new Set(marks.archived);
-  const live = admitted.filter((row) => !archived.has(row.conversation_id));
-  const pins = new Set(marks.pinned);
-  const led = live
-    .filter((row) => pins.has(row.conversation_id))
-    .concat(live.filter((row) => !pins.has(row.conversation_id)));
-  const own = led.filter((row) => row.mine);
-  const theirs = led.filter((row) => !row.mine);
+  const own = admitted.filter((row) => row.mine);
+  const theirs = admitted.filter((row) => !row.mine);
   const grouped =
     sort === "agent" ? groupChatsByAgent(own) : own.length ? [{ label: null, rows: own }] : [];
   return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;

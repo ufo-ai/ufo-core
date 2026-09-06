@@ -174,9 +174,9 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Chats options",
     "Connectors",
     "Workspace",
-    /* The member's own acts stand behind their pill, so the foot is one control and not a row of
-       marks. This member administers nothing, so no invite row stands under it. */
-    MEMBER.email,
+    "Channels",
+    "Theme",
+    "Sign out",
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
@@ -341,7 +341,9 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Chats options",
     "Connectors",
     "Workspace",
-    MEMBER.email,
+    "Channels",
+    "Theme",
+    "Sign out",
   ]);
 });
 
@@ -355,26 +357,17 @@ test("the sidebar's foot states who is signed in and offers the way back out", a
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
   expect(within(foot).getByText("Member")).toBeTruthy();
 
-  /* Every act on the member's own session stands behind their pill, so the foot draws no glyph row
-     beside the address. */
-  expect(within(foot).queryByRole("button", { name: "Sign out" })).toBeNull();
-  expect(within(foot).queryByRole("button", { name: "Theme" })).toBeNull();
-  expect(within(foot).queryByRole("button", { name: "Channels" })).toBeNull();
-
-  await userEvent.click(within(foot).getByRole("button", { name: MEMBER.email }));
-  expect(await screen.findByRole("menuitem", { name: "Channels" })).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("menuitem", { name: /Theme/ }));
-  expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();
-  expect(screen.getByRole("menuitemradio", { name: "Light" })).toBeTruthy();
-  expect(screen.getByRole("menuitemradio", { name: "Dark" })).toBeTruthy();
-
   // The sign-in door forwards a browser that already holds a session, so this is the act that
   // reaches the form: it clears the cookies on the host that bound them and lands there.
   const went: string[] = [];
   vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
-  await userEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+  await userEvent.click(within(foot).getByRole("button", { name: "Sign out" }));
   expect(went).toEqual([SIGN_OUT_PATH]);
+
+  await userEvent.click(within(foot).getByRole("button", { name: "Theme" }));
+  expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();
+  expect(screen.getByRole("menuitemradio", { name: "Light" })).toBeTruthy();
+  expect(screen.getByRole("menuitemradio", { name: "Dark" })).toBeTruthy();
 });
 
 test("a boot whose body is not json states the network fault, not a 200 error", async () => {

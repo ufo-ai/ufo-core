@@ -130,53 +130,9 @@ test("ready is answered with the member's own init payload", async () => {
     agentId: AGENT_ID,
     banded: false,
     place: {},
-    archived: [],
     crumb: undefined,
     portal: location.origin,
   });
-});
-
-/** The marks on the member's own threads are the portal's, so a page that reads an archive is
- *  handed the set rather than holding one of its own: on `init` for a frame that mounts, and as its
- *  own message for one already standing. */
-test("init carries the put-away threads, and a later mark crosses on its own", async () => {
-  const { iframe, posted } = fakeFrame();
-  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID, archived: ["one"] });
-  deliver({ ufo: "ready" }, iframe.contentWindow);
-  await vi.waitFor(() => expect(posted).toHaveLength(1));
-  expect(posted[0]).toMatchObject({ ufo: "init", archived: ["one"] });
-
-  bridge.archived(["one", "two"]);
-  await vi.waitFor(() => expect(posted).toHaveLength(2));
-  expect(posted[1]).toEqual({ ufo: "archived", archived: ["one", "two"] });
-});
-
-/** The archive is drawn in a page, so the act that takes a thread back out is stated there and the
- *  shell writes the mark. A message naming no thread, or stating no answer, moves nothing. */
-test("a page's archive message moves the mark the shell holds", async () => {
-  const marks: [string, boolean][] = [];
-  const { iframe } = fakeFrame();
-  bridge = attachBridge({
-    iframe,
-    member: MEMBER,
-    agentId: AGENT_ID,
-    archived: [CONVERSATION_ID],
-    onArchive: (conversationId, archived) => marks.push([conversationId, archived]),
-  });
-
-  deliver(
-    { ufo: "archive", conversation_id: CONVERSATION_ID, archived: false },
-    iframe.contentWindow,
-  );
-  deliver({ ufo: "archive", conversation_id: CONVERSATION_ID }, iframe.contentWindow);
-  deliver({ ufo: "archive", archived: true }, iframe.contentWindow);
-  deliver({ ufo: "archive", conversation_id: CONVERSATION_ID, archived: true }, iframe.contentWindow);
-
-  await vi.waitFor(() => expect(marks).toHaveLength(2));
-  expect(marks).toEqual([
-    [CONVERSATION_ID, false],
-    [CONVERSATION_ID, true],
-  ]);
 });
 
 /** The page holds a place the way a portal tab does, so every key of it crosses the frame. A

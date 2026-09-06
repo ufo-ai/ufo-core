@@ -31,9 +31,6 @@ export type AppInit = {
   /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
    *  reads its screen off the address the member arrived with rather than off one field of it. */
   place: WorkspacePlace;
-  /** The conversations the member put away, by id. The marks are the portal's own, so a page that
-   *  reads an archive is handed the set rather than holding one of its own. */
-  archived?: string[];
   /** Where this page stands in the portal, as the shell's own trail names it: the label and the
    *  address it stands at. The page's band draws it as its crumb whenever that band names something
    *  deeper than the page — a report, a member's page — so where the member is reads the same inside
@@ -69,7 +66,6 @@ let counter = 0;
 const CALLS = new Map<string, (reply: DataReply) => void>();
 const STREAMS = new Map<string, StreamHandlers>();
 const PLACE_LISTENERS = new Set<(place: WorkspacePlace) => void>();
-const ARCHIVED_LISTENERS = new Set<(archived: string[]) => void>();
 let init: AppInit | null = null;
 let announce: ((init: AppInit) => void) | null = null;
 
@@ -104,11 +100,6 @@ window.addEventListener("message", (event: MessageEvent) => {
     case "place": {
       const place = (event.data as { place?: WorkspacePlace }).place ?? {};
       for (const listener of PLACE_LISTENERS) listener(place);
-      return;
-    }
-    case "archived": {
-      const archived = (event.data as { archived?: string[] }).archived ?? [];
-      for (const listener of ARCHIVED_LISTENERS) listener(archived);
       return;
     }
     case "opened":
@@ -185,28 +176,12 @@ export function founded(agentId: string, conversationId: string, title: string):
   send({ ufo: "founded", agent_id: agentId, conversation_id: conversationId, title });
 }
 
-/** Put a conversation away, or take it back out. The mark is the portal's own — the rail reads it
- *  too — so the page states the act and the shell writes it, and the new set comes back to every
- *  page holding it, this one included. */
-export function archive(conversationId: string, archived: boolean): void {
-  send({ ufo: "archive", conversation_id: conversationId, archived });
-}
-
 /** The pane's place as it changes while the page stands — the live half of `init`'s `place`. Returns
  *  the unsubscribe. */
 export function onPlaced(listener: (place: WorkspacePlace) => void): () => void {
   PLACE_LISTENERS.add(listener);
   return () => {
     PLACE_LISTENERS.delete(listener);
-  };
-}
-
-/** The conversations the member put away, as the set changes while the page stands — the live half
- *  of `init`'s `archived`. Returns the unsubscribe. */
-export function onArchived(listener: (archived: string[]) => void): () => void {
-  ARCHIVED_LISTENERS.add(listener);
-  return () => {
-    ARCHIVED_LISTENERS.delete(listener);
   };
 }
 

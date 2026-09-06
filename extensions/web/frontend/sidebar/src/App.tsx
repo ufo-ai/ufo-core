@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconBrandSlack,
@@ -15,11 +15,7 @@ import {
   IconMoon,
   IconPlug,
   IconSun,
-  IconDots,
-  IconPin,
-  IconPinFilled,
   IconTerminal2,
-  IconUserPlus,
   IconUsers,
   IconX,
 } from "@tabler/icons-react";
@@ -34,7 +30,6 @@ import {
 } from "@/components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
 import {
   Collapsible,
   CollapsibleContent,
@@ -43,14 +38,7 @@ import {
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AgentSetup } from "@/views/AgentSetup";
 
 import { Agents, AppsIndex } from "@/views/Agents";
@@ -80,18 +68,11 @@ import {
   surfaceWord,
   useViewer,
 } from "@/lib/audience";
-import { postKindAction, SIGN_OUT_PATH } from "@/lib/api";
+import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
-import {
-  Loading,
-  OutcomeNotice,
-  QUIET,
-  outcomeNotice,
-  usePanelRead,
-  type NoticeState,
-} from "@/kernel/panel";
+import { Loading, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
@@ -105,21 +86,13 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso, type RailGroup } from "@/lib/rail";
 import {
-  RAIL_SHOWN_OPTIONS,
-  railGroups,
-  railShut,
-  stampIso,
-  type RailGroup,
-} from "@/lib/rail";
-import {
-  archiveChat,
   foldSidebar,
   pickAppsExpanded,
   pickPinned,
@@ -127,7 +100,6 @@ import {
   pickRailShown,
   pickRailShut,
   pickRailSort,
-  pinChat,
   quietRail,
   railActivity,
   railFounded,
@@ -155,7 +127,6 @@ import {
   useRoute,
 } from "@/lib/router";
 import {
-  ARCHIVE_SCOPE,
   COMPOSE,
   COMPOSING,
   standing,
@@ -538,10 +509,6 @@ function AccountMenu({ member }: { member: Member }) {
 
 const APPS = "Apps";
 const CHATS = "Chats";
-
-/** The way to the threads the member put away, and the place key that opens the chat app on them.
- *  The archive is that app's own screen, so the sidebar names the act and the app draws the read. */
-const OPEN_ARCHIVE = "Open Archive";
 const CHANNELS = "Channels";
 const NEW_CHAT = "New chat";
 
@@ -645,26 +612,39 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
   return <IconDeviceDesktop className={GLYPH} aria-hidden />;
 }
 
-const INVITE = "Invite people";
+function SchemePick({ collapsed }: { collapsed: boolean }) {
+  const scheme = useScheme();
+  return (
+    <DropdownMenu>
+      <SidebarTooltip collapsed={collapsed} label="Theme">
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Theme"
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
+          >
+            <SchemeGlyph scheme={scheme} />
+          </button>
+        </DropdownMenuTrigger>
+      </SidebarTooltip>
+      <DropdownMenuContent align="end">
+        <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
+          {SCHEME_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
-/** The member at the foot of the sidebar, and everything the workspace lets them do from it: the
- *  colleague an admin invites, the channels they reach the workspace from, the palette it is drawn
- *  in, and the way back out. They stand behind the pill rather than beside it as a row of marks — a
- *  member reads one name they recognise, their own, and finds the acts under it, instead of
- *  scanning glyphs for the one they meant.
- *
- *  The invite stands in this menu rather than as a row of its own under the pill: it is an act the
- *  member takes from their own account, and the foot of the sidebar holds one control.
- *
- *  Only an admin is drawn it. `add_member` is an admin's act and the kind refuses anyone else, so a
- *  control offered to every member would be a control that mostly fails; the roster on the workspace
- *  screen is where a member reads who is here.
- *
- *  The dot on the avatar states that a channel this deploy offers is still unconnected, because a
- *  fact worth acting on cannot wait behind a press. The channels read stands at the shell's own
- *  cadence and is taken again when the dialog closes, which is when a connect made inside it has
- *  landed. A row this deploy does not offer is no missing channel. */
-function MemberMenu({
+/** The channels a member reaches the workspace from, held behind the foot of the sidebar: the dot
+ *  states that one of the three is still unconnected, and the dialog is where they connect it. The
+ *  read stands at the shell's own cadence and is taken again when the dialog closes, which is when
+ *  a connect made inside it has landed. A row this deploy does not offer is no missing channel. */
+function ChannelsPick({
   collapsed,
   agent,
   member,
@@ -673,10 +653,7 @@ function MemberMenu({
   agent: Agent | null;
   member: Member;
 }) {
-  const scheme = useScheme();
-  const host = useDrawerHost();
   const [open, setOpen] = useState(false);
-  const [inviting, setInviting] = useState(false);
   const [toast, setToast] = useState(SILENT);
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<SurfacesPayload>(SURFACES_READ, reloads);
@@ -686,83 +663,22 @@ function MemberMenu({
     state.payload.surfaces.some((row) => row.offered && !row.connected);
   return (
     <>
-      <DropdownMenu>
-        <SidebarTooltip collapsed={collapsed} label={member.email}>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label={member.email}
-              className={cn(
-                "flex min-h-(--size-row) w-full items-center gap-sm rounded-row border-0 px-sm",
-                "bg-transparent text-left text-inherit hover:bg-fill data-[state=open]:bg-fill",
-                collapsed && "w-auto justify-center px-2xs",
-              )}
-            >
-              <span className="relative shrink-0">
-                <Avatar>
-                  <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-                </Avatar>
-                {missing ? (
-                  <span
-                    aria-hidden
-                    className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
-                  />
-                ) : null}
-              </span>
-              <span className={cn("flex min-w-0 flex-1 flex-col", collapsed && "hidden")}>
-                <span className="truncate text-label">{member.email}</span>
-                <span className="text-small text-ink-soft">
-                  {member.admin ? "Admin" : "Member"}
-                </span>
-              </span>
-            </button>
-          </DropdownMenuTrigger>
-        </SidebarTooltip>
-        <DropdownMenuContent side="top" align="start" container={host}>
-          {member.admin && agent ? (
-            <DropdownMenuItem onSelect={() => setInviting(true)}>
-              <span className="flex items-center gap-sm">
-                <IconUserPlus className={GLYPH} aria-hidden />
-                {INVITE}
-              </span>
-            </DropdownMenuItem>
+      <SidebarTooltip collapsed={collapsed} label={CHANNELS}>
+        <button
+          type="button"
+          aria-label={CHANNELS}
+          onClick={() => setOpen(true)}
+          className="relative rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
+        >
+          <IconBroadcast className={GLYPH} aria-hidden />
+          {missing ? (
+            <span
+              aria-hidden
+              className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
+            />
           ) : null}
-          <DropdownMenuItem onSelect={() => setOpen(true)}>
-            <span className="flex items-center gap-sm">
-              <IconBroadcast className={GLYPH} aria-hidden />
-              {CHANNELS}
-            </span>
-            {missing ? (
-              <span aria-hidden className="size-sm shrink-0 rounded-full bg-attention-ink" />
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger
-              value={SCHEME_OPTIONS.find((option) => option.scheme === scheme)?.label}
-            >
-              <span className="flex items-center gap-sm">
-                <SchemeGlyph scheme={scheme} />
-                Theme
-              </span>
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
-                {SCHEME_OPTIONS.map((option) => (
-                  <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
-                    {option.label}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuItem onSelect={signOut}>
-            <span className="flex items-center gap-sm">
-              <IconLogout className={GLYPH} aria-hidden />
-              Sign out
-            </span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+        </button>
+      </SidebarTooltip>
       {open && agent ? (
           <Dialog
             open
@@ -789,81 +705,8 @@ function MemberMenu({
           </DialogContent>
         </Dialog>
       ) : null}
-      {agent ? (
-        <Dialog open={inviting} onOpenChange={setInviting}>
-          {inviting ? <InviteDialog agent={agent} /> : null}
-        </Dialog>
-      ) : null}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>
-  );
-}
-
-/** The invite itself: one field, one tick, one act. The dialog carries the outcome the lane
- *  answered in the member's own words — the address landed, or why it did not — and holds open
- *  after a landed invite with the field cleared, because the reason a workspace invites one person
- *  is usually that it is inviting three. */
-function InviteDialog({ agent }: { agent: Agent }) {
-  const [email, setEmail] = useState("");
-  const [admin, setAdmin] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
-
-  async function invite(event: FormEvent) {
-    event.preventDefault();
-    const address = email.trim();
-    if (busy || !address) return;
-    setBusy(true);
-    const outcome = await postKindAction(agent.id, "member", "add_member", {
-      email: address,
-      admin,
-    });
-    setBusy(false);
-    setNotice(outcomeNotice(outcome));
-    if (outcome.applied) setEmail("");
-  }
-
-  return (
-    <DialogContent aria-label={INVITE}>
-      <DialogHeader>
-        <DialogTitle>{INVITE}</DialogTitle>
-        <DialogDescription>
-          The address is sent a way in, and that person works in this workspace.
-        </DialogDescription>
-      </DialogHeader>
-      <OutcomeNotice state={notice} />
-      <form id="invite-member" onSubmit={invite} className="flex flex-col items-start gap-sm">
-        <Input
-          autoFocus
-          type="email"
-          required
-          aria-label="Email"
-          placeholder="email@work.com"
-          className="w-full max-w-none"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-        />
-        <label className="flex items-center gap-xs text-ui">
-          <input
-            type="checkbox"
-            checked={admin}
-            onChange={(event) => setAdmin(event.target.checked)}
-          />
-          Admin
-        </label>
-      </form>
-      <DialogFooter>
-        <Button
-          type="submit"
-          form="invite-member"
-          variant="send"
-          busy={busy}
-          disabled={!email.trim()}
-        >
-          Send invite
-        </Button>
-      </DialogFooter>
-    </DialogContent>
   );
 }
 
@@ -1055,11 +898,7 @@ function WorkspaceSidebar({
           hair below its heading in both. Only the rows scroll — a heading that scrolled away would
           leave the filter it carries unreachable at the foot of a long rail. */}
       <div className={cn("flex min-h-0 flex-1 flex-col gap-px px-sm", collapsed && "hidden")}>
-        <RailSettingsFlyout
-          shut={chatsShut}
-          chatApp={chatApp}
-          onShut={(shut) => pickSectionShut(CHATS, shut)}
-        />
+        <RailSettingsFlyout shut={chatsShut} onShut={(shut) => pickSectionShut(CHATS, shut)} />
         {chatsShut ? null : (
           <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
             <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
@@ -1082,16 +921,33 @@ function WorkspaceSidebar({
           onClick={() => placeWorkspace(tabs[0], {}, "push")}
         />
       </ul>
-      {/* The foot is the member. The pill holds every act they take from their own account — the
-          invite an admin sends, the channels, the palette and the way out — so the column ends on
-          one control rather than on a stack of them. */}
       <footer
         className={cn(
-          "flex shrink-0 flex-col gap-px px-sm",
-          collapsed && "items-center justify-center",
+          "flex shrink-0 items-center gap-sm px-lg",
+          collapsed && "flex-col justify-center px-sm",
         )}
       >
-        <MemberMenu collapsed={collapsed} agent={mainAgent} member={member} />
+        <SidebarTooltip collapsed={collapsed} label={member.email}>
+          <Avatar>
+            <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
+          </Avatar>
+        </SidebarTooltip>
+        <span className={cn("flex min-w-0 flex-1 flex-col", collapsed && "hidden")}>
+          <span className="truncate text-label">{member.email}</span>
+          <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
+        </span>
+        <ChannelsPick collapsed={collapsed} agent={mainAgent} member={member} />
+        <SchemePick collapsed={collapsed} />
+        <SidebarTooltip collapsed={collapsed} label="Sign out">
+          <button
+            type="button"
+            aria-label="Sign out"
+            onClick={signOut}
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
+          >
+            <IconLogout className={GLYPH} aria-hidden />
+          </button>
+        </SidebarTooltip>
       </footer>
     </nav>,
   );
@@ -1428,22 +1284,8 @@ function NotShared() {
  *  header carries, so the two sections read and act as one system. A sort is a pick
  *  between ladders and a surface is a choice turned on and off, which is why one shuts the menu and
  *  the other leaves it standing — the surfaces are read as a set, and the rail adjusts behind the
- *  menu while the member reads what each tick did.
- *
- *  The archive is not read here. This menu narrows the column the member is standing in, and the
- *  threads they put away are a screen of their own — so the menu offers the way to that screen and
- *  the chat app draws it, with its own pick between the two. That way out stands at the foot behind
- *  a rule, parted from the items that adjust the column in place. A deploy shipping no chat app
- *  draws no such act: a control that opens nothing is a control that lies. */
-function RailSettingsFlyout({
-  shut,
-  chatApp,
-  onShut,
-}: {
-  shut: boolean;
-  chatApp: Agent | null;
-  onShut: (shut: boolean) => void;
-}) {
+ *  menu while the member reads what each tick did. */
+function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: boolean) => void }) {
   const { sort, shown } = useRail();
   const host = useDrawerHost();
   return (
@@ -1471,14 +1313,6 @@ function RailSettingsFlyout({
             {option.label}
           </DropdownMenuCheckboxItem>
         ))}
-        {chatApp ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => openAgentPlace(chatApp.id, { scope: ARCHIVE_SCOPE })}>
-              {OPEN_ARCHIVE}
-            </DropdownMenuItem>
-          </>
-        ) : null}
       </DropdownMenuContent>
     </SectionHead>
   );
@@ -1571,8 +1405,7 @@ function RailList({
   chatApp: Agent | null;
 }) {
   const rail = useRail();
-  const marks = { pinned: rail.chatsPinned, archived: rail.chatsArchived };
-  const groups = railGroups(rail.rows, rail.sort, rail.shown, marks);
+  const groups = railGroups(rail.rows, rail.sort, rail.shown);
   const folded = railShut(
     rail.shut,
     groups.map((group) => group.label),
@@ -1586,7 +1419,6 @@ function RailList({
           isPortalChat(row.surface) ? null : origin(row),
           mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
         ].filter((fact): fact is string => fact !== null);
-        const pinned = rail.chatsPinned.includes(row.conversation_id);
         return (
           <RailRow
             key={row.conversation_id}
@@ -1594,9 +1426,6 @@ function RailList({
             facts={facts.length ? facts.join(" · ") : null}
             title={row.title}
             surface={row.surface}
-            pinned={pinned}
-            onPin={() => pinChat(row.conversation_id, !pinned)}
-            onArchive={chatApp ? () => archiveChat(row.conversation_id, true) : null}
             onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
           />
         );
@@ -1659,10 +1488,6 @@ function RailList({
  *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. The
  *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read.
  *
- *  The whole row holds the pointer, not the title alone. The title ends where the pin and the row's
- *  menu begin, so a tooltip set beside the title stands over those two controls; set beside the row
- *  it clears the sidebar's edge, and the member reads the fact with the pin still in reach.
- *
  *  The title itself is the other half of that bargain. The rail is one column wide and a
  *  conversation is named in a sentence, so the row states as much of the title as it holds and
  *  ellipses the rest — until the member puts the pointer or the keyboard on it, when the title
@@ -1681,19 +1506,12 @@ function RailRow({
   facts,
   title,
   surface,
-  pinned,
-  onPin,
-  onArchive,
   onClick,
 }: {
   current: boolean;
   facts: string | null;
   title: string;
   surface: string;
-  pinned: boolean;
-  onPin: () => void;
-  /** Putting the thread away, or `null` where the deploy draws no archive to take it back out of. */
-  onArchive: (() => void) | null;
   onClick: () => void;
 }) {
   const [asks, setAsks] = useState(0);
@@ -1714,101 +1532,17 @@ function RailRow({
       <SurfaceGlyph surface={surface} />
     </SidebarPress>
   );
-  const row = (
+  return (
     <SidebarRow current={current}>
-      {button}
-      <div className={ROW_ACTS}>
-        <ThreadPin pinned={pinned} onPin={onPin} />
-        {onArchive ? <RailRowActs onArchive={onArchive} /> : null}
-      </div>
-    </SidebarRow>
-  );
-  if (!facts) return row;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{row}</TooltipTrigger>
-      <TooltipContent>{facts}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-/** The box the row's own acts stand in. It takes no width until the pointer is on the row, the
- *  keyboard reaches it, or the menu inside it stands open — so a title runs the whole width of the
- *  rail while nobody is acting on it, and gives up as much of that width as the marks need only
- *  while they are drawn. The controls stay in the tree at every width, so the keyboard reaches them
- *  and the menu holds its trigger while it is open. */
-const ROW_ACTS = cn(
-  "flex w-0 shrink-0 items-center overflow-hidden",
-  "group-hover/row:w-auto group-has-[:focus-visible]/row:w-auto has-[[data-state=open]]:w-auto",
-);
-
-/** The pin at a conversation's row end, drawn as the pin at an app's row end is: the same mark, the
- *  same box, the same rest until the pointer is on the row or the keyboard reaches it. Pinning is
- *  one act, so it is one press rather than an item in a menu — and a member who pins a thread and
- *  an app does the same thing in the same place twice.
- *
- *  It is named for the act alone, as the row's menu beside it is: the thread is the row this
- *  control stands in, and a name that repeated it would read every title out twice. What the pin
- *  did is read off the column's order, which is the thing it changed. */
-function ThreadPin({ pinned, onPin }: { pinned: boolean; onPin: () => void }) {
-  return (
-    <button
-      type="button"
-      aria-label={pinned ? "Unpin" : "Pin"}
-      aria-pressed={pinned}
-      onClick={onPin}
-      className={cn(
-        "shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-        "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-      )}
-    >
-      {pinned ? (
-        <IconPinFilled className="size-icon" aria-hidden />
+      {facts ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent>{facts}</TooltipContent>
+        </Tooltip>
       ) : (
-        <IconPin className="size-icon" aria-hidden />
+        button
       )}
-    </button>
-  );
-}
-
-/** The name the row's last control is read by. It states the act rather than the thread, because
- *  the thread is the row this control stands in and a name that repeated it would be read out with
- *  every title twice. */
-const THREAD_ACTS = "Thread options";
-
-/** Putting a conversation away. It stands behind a mark rather than as a second press, because the
- *  pin beside it is the act a member does often and archiving is the one they do once — two presses
- *  of equal weight at a row's end would read as a toolbar.
- *
- *  Taking it back out is the archive's own act, drawn beside the row there: the rail draws no
- *  put-away thread, so an item that took one back out would stand on a row the rail never has. The
- *  archive is the chat app's screen, so a deploy shipping no chat app draws this menu on no row —
- *  the same gate `Open Archive` stands behind — because a thread put away with no screen to take it
- *  back out of is a thread lost.
- *
- *  The mark rests until the pointer is on the row, the row is reached by keyboard, or the menu
- *  stands open. */
-function RailRowActs({ onArchive }: { onArchive: () => void }) {
-  const host = useDrawerHost();
-  return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={THREAD_ACTS}
-          className={cn(
-            "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-            "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-            "data-[state=open]:bg-fill data-[state=open]:opacity-100",
-          )}
-        >
-          <IconDots className="size-icon" aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent side="right" align="start" container={host}>
-        <DropdownMenuItem onSelect={onArchive}>Archive</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    </SidebarRow>
   );
 }
 

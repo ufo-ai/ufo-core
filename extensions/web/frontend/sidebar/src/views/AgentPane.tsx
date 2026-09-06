@@ -44,7 +44,6 @@ import {
   type PlaceStep,
   type WorkspacePlace,
 } from "@/lib/route";
-import { archiveChat, useRail } from "@/lib/railStore";
 import { navigate } from "@/lib/router";
 import { agentCrumb } from "@/lib/title";
 import type { Agent, Conversation, Homepage, Member } from "@/lib/types";
@@ -435,10 +434,6 @@ export function AgentPane({
   const framedRef = useRef(framed);
   framedRef.current = framed;
   const framedAt = serializePlace(framed);
-  const archived = useRail().chatsArchived;
-  const archivedRef = useRef(archived);
-  archivedRef.current = archived;
-  const putAway = archived.join("\n");
   // The frames the pane is holding: the page showing, and — through a redeploy — the copy arriving
   // under the new generation. Reconciled in render rather than an effect so the arriving frame
   // mounts in the same commit that moves the bridge's dependencies, which is what points `frameRef`
@@ -490,11 +485,9 @@ export function AgentPane({
       agentId: agent.id,
       banded: false,
       place: framedRef.current,
-      archived: archivedRef.current,
       chatSurface: agent.app === CHAT_SURFACE,
       onCreated: (agentId, conversationId, title) =>
         foundedRef.current(agentId, conversationId, title),
-      onArchive: archiveChat,
       onSessionEnded: () => {
         sessionEnded.current = true;
         if (document.hasFocus()) refreshEndedSession();
@@ -509,12 +502,6 @@ export function AgentPane({
   useEffect(() => {
     bridgeRef.current?.place(framedRef.current);
   }, [framedAt]);
-  // The marks are the portal's own and the frame is another origin, so a page that reads the
-  // archive is handed the set: on `init` for a frame that mounts, and as its own message for one
-  // already standing when the member puts another thread away.
-  useEffect(() => {
-    bridgeRef.current?.archived(archivedRef.current);
-  }, [putAway]);
 
   /** The conversation, whole. Its own band is drawn where the conversation is the screen; standing
    *  in a lane, the lane's header already states the name and draws the way out, and a second band
