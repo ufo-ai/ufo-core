@@ -828,14 +828,18 @@ class AgentSummary(BaseModel):
 
 class ArchivedAgent(BaseModel):
     """One archived app as a surface lists it for restore: the name it held, and `object_name`,
-    the durable name its agent object answers to — what a restore targets."""
+    the durable name its agent object answers to — what a restore targets. `provisioned_by` names
+    the extension that shipped it, so a listing tells a shipped app a member removed from one they
+    built and archived."""
 
     id: UUID
     name: str
     object_name: str
     icon: TablerIcon
+    purpose: str | None = None
     archived_at: datetime
     owner_member_id: UUID | None = None
+    provisioned_by: str | None = None
 
 
 class InstallationSummary(BaseModel):
@@ -2927,8 +2931,10 @@ class SurfaceContext:
                         member_name.label("name"),
                         tables.agent.c.name.label("object_name"),
                         tables.agent.c.icon,
+                        tables.agent.c.purpose,
                         tables.agent.c.archived_at,
                         tables.agent.c.owner_member_id,
+                        tables.agent.c.provisioned_by,
                     )
                     .where(
                         tables.agent.c.workspace_id == self.workspace_id,
@@ -2943,8 +2949,10 @@ class SurfaceContext:
                 name=row.name,
                 object_name=row.object_name,
                 icon=row.icon,
+                purpose=row.purpose,
                 archived_at=row.archived_at,
                 owner_member_id=row.owner_member_id,
+                provisioned_by=row.provisioned_by,
             )
             for row in rows
         )

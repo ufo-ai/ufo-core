@@ -10381,6 +10381,79 @@ async def test_an_admin_archives_a_shipped_app_from_settings_and_restores_it(
     ]
 
 
+async def _seed_archived_app(
+    workspace_id: UUID, name: str, *, provisioned_by: str | None, purpose: str | None
+) -> UUID:
+    app_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=app_id,
+                workspace_id=workspace_id,
+                name=f"~archived-{app_id}",
+                archived_name=name,
+                prompt=f"be the {name}",
+                purpose=purpose,
+                model="claude-opus-4-8",
+                icon="book",
+                visibility="workspace",
+                provisioned_by=provisioned_by,
+                provisioned_name=name if provisioned_by else None,
+                provisioned_version="0.1.0" if provisioned_by else None,
+                archived_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return app_id
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_boot_read_lists_an_archived_shipped_app_under_its_own_flag(
+    web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
+) -> None:
+    """An archived row states what a live one states about the app it was: the slug its extension
+    shipped it under, the purpose the store draws beside its name, and whether the deploy withholds
+    it. The store lists a shipped app the workspace removed as one to install, and a withheld one
+    nowhere — the flag is the deploy's word on the app, live or archived — while an app a member
+    built and archived carries no slug and stays the Apps tab's to restore."""
+    client, workspace_id, _agent_id = web
+    wiki = await _seed_archived_app(
+        workspace_id, "wiki", provisioned_by="app_wiki", purpose="Keeps the workspace's pages."
+    )
+    invoice = await _seed_archived_app(
+        workspace_id, "invoice-intake", provisioned_by="app_invoice", purpose="Reads invoices."
+    )
+    own = await _seed_archived_app(workspace_id, "scratch", provisioned_by=None, purpose=None)
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    init_flags(None)
+    silent = (await client.get("/surface/web/api/agents", headers=cookie)).json()["archived"]
+    assert {row["id"]: (row["app"], row["purpose"], row["hidden"]) for row in silent} == {
+        str(wiki): ("wiki", "Keeps the workspace's pages.", True),
+        str(invoice): ("invoice", "Reads invoices.", False),
+        str(own): (None, None, False),
+    }
+
+    init_flags(
+        InMemoryProvider(
+            {
+                web_surface.APP_FLAGS["wiki"]: InMemoryFlag(
+                    default_variant="on", variants={"on": SERVED_TRUE, "off": SERVED_FALSE}
+                )
+            }
+        )
+    )
+    offered = (await client.get("/surface/web/api/agents", headers=cookie)).json()["archived"]
+    assert {row["id"]: row["hidden"] for row in offered} == {
+        str(wiki): False,
+        str(invoice): False,
+        str(own): False,
+    }
+
+
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_homepage_sweep_settles_an_archived_app_without_a_turn(db: None) -> None:

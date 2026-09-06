@@ -9,6 +9,7 @@ import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import {
   AGENTS_HASH,
   BUILDER_HASH,
+  STORE_HASH,
   FIRST_RUN_HASH,
   agentHash,
   artifactTarget,
@@ -219,6 +220,7 @@ test("a conversation slot has a builder, and it writes the address its own read 
 test("a screen that carries no place is read whatever the address arrived holding", () => {
   expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({ kind: "agents" });
   expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "agents", build: true });
+  expect(parseHash(STORE_HASH + "?x=1")).toEqual({ kind: "store" });
   expect(parseHash(FIRST_RUN_HASH + "?x=1")).toEqual({ kind: "first-run" });
   expect(parseHash("")).toEqual({ kind: "home" });
   expect(parseHash("#")).toEqual({ kind: "home" });

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  IconBuildingStore,
   IconChevronDown,
-  IconCirclePlus,
   IconDots,
   IconPin,
   IconPinFilled,
@@ -38,9 +38,10 @@ import {
   SettingsTabItems,
   type SettingsTab,
 } from "@/views/AgentPane";
-import { APP_CREATOR_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
+import { AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
+import { APP_STORE_TITLE } from "@/views/Store";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import { appOrder, appRun, type ChatRow } from "@/lib/rail";
 import type { Agent, Member } from "@/lib/types";
@@ -230,9 +231,9 @@ function AppSettings({
   );
 }
 
-/** The apps index: the workspace's apps as the sidebar draws them, the wizard's run in flight at
- *  the head while one is live. What each app is doing comes from `appStatusStore`, which every
- *  reader of the rows shares.
+/** The apps index: the workspace's apps as the sidebar draws them, and the store that adds to them
+ *  as the last row. What each app is doing comes from `appStatusStore`, which every reader of the
+ *  rows shares.
  *
  *  The column is shared with the member's conversations, so the list states a run of itself and
  *  holds the rest behind the `More` row. It takes what the sidebar can spare and scrolls inside
@@ -243,20 +244,20 @@ function AppSettings({
 export function AppsIndex({
   agents,
   openId,
-  building,
+  store,
   pinned,
   expanded,
   collapsed,
   onExpand,
   onPin,
   onOpen,
-  onBuild,
+  onStore,
 }: {
   agents: Agent[];
   /** The agent whose pane the page is showing, or null when no app holds it. */
   openId: string | null;
-  /** Whether the wizard holds the pane, which draws its row as the place the member already is. */
-  building: boolean;
+  /** Whether the store holds the pane, which draws its row as the place the member already is. */
+  store: boolean;
   pinned: string[];
   /** Whether the member has opened the list past the run it draws on its own. */
   expanded: boolean;
@@ -265,9 +266,8 @@ export function AppsIndex({
   onExpand: (expanded: boolean) => void;
   onPin: (agentId: string) => void;
   onOpen: (agentId: string) => void;
-  onBuild: () => void;
+  onStore: () => void;
 }) {
-  const mainAgent = useMainAgent();
   const { statuses } = useAppStatus();
   /** Where an app stands in time — what it last did, and nothing about what it is doing now. Work
    *  in flight lifts a row to the top of the list rather than moving it through this ladder: an app
@@ -293,29 +293,26 @@ export function AppsIndex({
               key={agent.id}
               agent={agent}
               status={statuses[agent.id]}
-              open={!building && agent.id === openId}
+              open={agent.id === openId}
               pinned={pinned.includes(agent.id)}
               collapsed={collapsed}
               onPin={() => onPin(agent.id)}
               onOpen={() => onOpen(agent.id)}
             />
           ))}
-          {/* Building an app is the one act this list carries, and it stands under the apps rather
-              than over them: the column is read for the app a member is going to open, and the act
-              that makes a new one is what they reach when none of those is it. Every member is
-              offered it — the `agent` kind admits a create from any speaking member and stamps them
-              the owner — and the wizard rides the main agent's own chat, so a workspace with no main
-              agent offers nothing to ride. */}
-          {mainAgent ? (
-            <SidebarRow>
-              <SidebarPress
-                collapsed={collapsed}
-                label={APP_CREATOR_TITLE}
-                glyph={<IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />}
-                onClick={onBuild}
-              />
-            </SidebarRow>
-          ) : null}
+          {/* The store is the one act this list carries, and it stands under the apps rather than
+              over them: the column is read for the app a member is going to open, and the place
+              that adds one — the deploy's apps to install, and the wizard that builds a new one —
+              is what they reach when none of those is it. */}
+          <SidebarRow current={store}>
+            <SidebarPress
+              current={store}
+              collapsed={collapsed}
+              label={APP_STORE_TITLE}
+              glyph={<IconBuildingStore className="size-(--size-glyph) shrink-0" aria-hidden />}
+              onClick={onStore}
+            />
+          </SidebarRow>
         </ul>
       </div>
       {/* The rest of the workspace's apps, behind one row. It states what it does rather than how

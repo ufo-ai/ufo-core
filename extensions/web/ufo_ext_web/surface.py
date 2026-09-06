@@ -29,7 +29,7 @@ import os
 import re
 from binascii import Error as Base64Error
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -1232,16 +1232,17 @@ PORTAL_SURFACES = {
 CLOSED_UNTIL_ANSWERED = frozenset(APP_FLAGS.values())
 
 
-def _visibility_flag(agent: AgentSummary) -> str | None:
-    """The flag deciding whether the portal lists this agent, or None for one it always lists."""
-    if agent.main:
+def _visibility_flag(main: bool, provisioned_by: str | None) -> str | None:
+    """The flag deciding whether the portal lists this agent, or None for one it always lists. One
+    answer for a live row and an archived one: the deploy withholds an app, not a state of it."""
+    if main:
         return MAIN_AGENT_FLAG
-    return APP_FLAGS.get(shipped_app_slug(agent.provisioned_by) or "")
+    return APP_FLAGS.get(shipped_app_slug(provisioned_by) or "")
 
 
-async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]:
+async def _flag_reads(flags: Iterable[str | None]) -> dict[str, bool]:
     """Every flag the boot read consults, answered in one round: the portal's own screens and the
-    visibility of each agent listed.
+    visibility of each agent listed, live or archived.
 
     Each is read at the default its own feature ships in (`CLOSED_UNTIL_ANSWERED`). A flag
     withholding one of the portal's own screens reads open, so a deploy holding no flag service, one
@@ -1249,12 +1250,7 @@ async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]:
     exactly what they had; a shipped app's flag reads closed, so none of those four lists an app,
     and a member sees one where somebody turned it on."""
     keys = list(
-        dict.fromkeys(
-            [
-                *PORTAL_SURFACES.values(),
-                *(flag for agent in agents if (flag := _visibility_flag(agent)) is not None),
-            ]
-        )
+        dict.fromkeys([*PORTAL_SURFACES.values(), *(flag for flag in flags if flag is not None)])
     )
     answers = await asyncio.gather(
         *(flag_enabled(key, default=key not in CLOSED_UNTIL_ANSWERED) for key in keys)
@@ -1285,12 +1281,15 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     own screens: each flag is read at the default its own feature ships in, so a deploy whose flag
     service answers nothing draws the portal's own screens as it drew them before, and lists no
     shipped app, and `team` is answered by this reader's admin standing rather than by a flag —
-    the roster is an admin's screen. A withheld screen keeps its address either way.
+    the roster is an admin's screen. A withheld screen keeps its address either way. `archived`
+    contains the apps this member may restore, each carrying the slug and flag state a live row
+    carries, so the store lists a shipped app the workspace removed as one to install and lists a
+    withheld one nowhere.
 
     The create act draws nothing from this read:
     it is a conversation the `create-application` skill runs, and the screen offers it to every
     signed-in member, because the `agent` kind admits a create from any speaking member and stamps
-    them the owner. `archived` contains the apps this member may restore.
+    them the owner.
 
     `setup_due` says an app is installed and a required setup row is not settled. It rides this
     read rather than the status poll beside it: each answer costs a transaction, up to three
@@ -1355,12 +1354,17 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
         for app in await ctx.list_archived_agents()
         if audience.admin or app.owner_member_id == member_id
     ]
-    flags = await _flag_reads(audience.agents)
-    hidden = {
-        agent.id
-        for agent in audience.agents
-        if (key := _visibility_flag(agent)) is not None and not flags[key]
-    }
+    flags = await _flag_reads(
+        [
+            *(_visibility_flag(agent.main, agent.provisioned_by) for agent in audience.agents),
+            *(_visibility_flag(False, app.provisioned_by) for app in archived),
+        ]
+    )
+
+    def withheld(main: bool, provisioned_by: str | None) -> bool:
+        key = _visibility_flag(main, provisioned_by)
+        return key is not None and not flags[key]
+
     return JSONResponse(
         {
             "member": {
@@ -1378,6 +1382,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "name": app.name,
                     "object": app.object_name,
                     "icon": app.icon,
+                    "purpose": app.purpose,
+                    "app": shipped_app_slug(app.provisioned_by),
+                    "hidden": withheld(False, app.provisioned_by),
                     "archived_at": app.archived_at.isoformat(),
                 }
                 for app in archived
@@ -1392,7 +1399,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "purpose": agent.purpose,
                     "app": shipped_app_slug(agent.provisioned_by),
                     "mine": agent.owner_member_id == member_id,
-                    "hidden": agent.id in hidden,
+                    "hidden": withheld(agent.main, agent.provisioned_by),
                     "homepage": homepages[agent.id],
                     "setup_due": agent.id in due,
                     "stands_on_setup": agent.id in on_setup,

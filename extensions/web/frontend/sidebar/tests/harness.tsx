@@ -411,9 +411,16 @@ export async function expandApps(): Promise<void> {
   if (more) await userEvent.click(more);
 }
 
-/** The act that builds an app, which stands as the last row of the apps list. */
+/** The store, which stands as the last row of the apps list. */
+export async function openStore(): Promise<HTMLElement> {
+  await userEvent.click(await screen.findByRole("button", { name: "App Store" }));
+  return screen.findByRole("region", { name: "App Store" });
+}
+
+/** The act that builds an app, which is the store's own last row. */
 export async function openNewApplication(): Promise<void> {
-  await userEvent.click(await screen.findByRole("button", { name: "App Creator" }));
+  const store = await openStore();
+  await userEvent.click(within(store).getByRole("row", { name: /^App Creator/ }));
 }
 
 /** What the app pane's conversation half is headed by before a conversation names it. */

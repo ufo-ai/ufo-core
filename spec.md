@@ -743,7 +743,13 @@ verb and terminates — so an overdrawn workspace cannot spend against it, and n
 exempt.
 
 The agents screen lists every app and its live status. An agent's route shows that agent's pane
-whole. A pin places an app row in the sidebar. The pane is the agent's homepage — a hosted-site
+whole. A pin places an app row in the sidebar. The list ends in the **App Store**: every app the
+deploy ships, by name, as installed — its row opens it, and an admin's `Remove` is the archive
+below — or as removed, where an admin's `Install` is the `restore_application` the Apps tab's
+archived filter posts, under the name the app held; a withheld app is listed in neither state, the
+chat app in neither (it is the main agent's row), and App Creator is the store's last row. The
+boot read's `archived` rows carry the slug and flag state its live rows do, so the store draws
+from the read every other apps screen draws from. The pane is the agent's homepage — a hosted-site
 binding admitted through the sites surface's per-visit agent-visibility gate, or a deploy-wide app
 page whose public immutable code is routed to a workspace-specific origin — inside the portal's
 sandboxed iframe, with its settings and a chat toggle that opens the conversation beside the page.
@@ -947,7 +953,8 @@ the kind's refusal, the turn is the audit record, and the conversation's dispatc
 member's intents one at a time in order. A connect intent leaves the same private OAuth handoff
 chat's connect_account does: the URL rides the turn's terminal and is minted per speaking member
 at stream time, never in a transcript or an intent response. The Agents screen creates an agent
-through no form and no lane of its own: the act opens a conversation with the main agent in the
+through no form and no lane of its own: App Creator, the App Store's last row, opens a
+conversation with the main agent in the
 screen's own pane, the `create-application` skill interviews the member, and the agent lands the
 app with its own `object_apply` create — the same gate, which admits a create from any speaking
 member and stamps them the owner, so the screen offers the act to every member it draws for. The

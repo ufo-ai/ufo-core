@@ -50,6 +50,7 @@ export type Route =
     }
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents"; build?: boolean }
+  | { kind: "store" }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
@@ -195,6 +196,10 @@ export const AGENTS_HASH = "#/agents";
 /** The app-building wizard's own address, so any screen can raise it by navigation. */
 export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
+/** The app store's own address: the deploy's apps and the act that builds one, under the apps
+ *  prefix because it is the apps list's own last row. */
+export const STORE_HASH = AGENTS_HASH + "/store";
+
 /** The first run's own address. It is a place, not a boot flag: a member can return to it, and
  *  send a teammate to it, exactly as they can to any other screen. The bare address is the welcome;
  *  a step the run is on rides as one segment under it, so a reload lands on the same step. */
@@ -282,6 +287,13 @@ const BUILDER = row(
   bare(BUILDER_HASH),
   () => ({ kind: "agents", build: true }),
   () => BUILDER_HASH,
+);
+
+const STORE = row(
+  "store",
+  bare(STORE_HASH),
+  () => ({ kind: "store" }),
+  () => STORE_HASH,
 );
 
 const CHAT = row(
@@ -404,6 +416,7 @@ const ROUTES: readonly RouteReader[] = [
   HOME,
   FIRST_RUN,
   BUILDER,
+  STORE,
   AGENTS,
   CHAT,
   CONVERSATION_SLOT,
@@ -454,6 +467,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   home: false,
   "first-run": false,
   agents: false,
+  store: false,
   chat: true,
   "conversation-slot": false,
   "new-chat": true,
@@ -504,6 +518,7 @@ function stands(route: Route): Stand[] {
     case "section":
       return [`section:${route.section}`];
     case "agents":
+    case "store":
     case "first-run":
     case "bad-link":
       return [];

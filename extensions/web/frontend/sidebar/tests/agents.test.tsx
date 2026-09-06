@@ -37,6 +37,7 @@ import {
   openAgentSettings,
   openNewApplication,
   openRow,
+  openStore,
   owned,
   saying,
   useStreamFake,
@@ -449,9 +450,10 @@ test("the app the last phase creates reaches the rail when the turn settles", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-/** The rows are the section's own list, and the act that adds to it is the section head's: the
- *  index states apps, and what to do about apps is behind the name it stands under. */
-test("the act that builds an app stands as the apps list's last row", async () => {
+/** The rows are the section's own list, and the place that adds to it is the list's last row: the
+ *  index states apps, and the store — the deploy's apps to install, and the act that builds one —
+ *  is where the member goes when none of those is it. */
+test("the store stands as the apps list's last row, and holds the act that builds an app", async () => {
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
@@ -466,7 +468,19 @@ test("the act that builds an app stands as the apps list's last row", async () =
   const rows = within(index)
     .getAllByRole("button")
     .map((row) => row.getAttribute("aria-label") ?? row.textContent);
-  expect(rows.at(-1)).toBe("App Creator");
+  expect(rows.at(-1)).toBe("App Store");
+  expect(within(index).queryByRole("button", { name: "App Creator" })).toBeNull();
+
+  const store = await openStore();
+  expect(location.hash).toBe("#/agents/store");
+  expect(within(index).getByRole("button", { name: "App Store" }).getAttribute("aria-current")).toBe(
+    "true",
+  );
+  const listed = within(store)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("cell")[0].textContent);
+  expect(listed.at(-1)).toBe("App Creator");
 });
 
 test("pressing a section's band folds it away, and the fold holds across a reload", async () => {
@@ -631,8 +645,8 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
 
   await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
-  const index = await shownIndex();
-  await userEvent.click(within(index).getByRole("button", { name: "App Creator" }));
+  await shownIndex();
+  await openNewApplication();
 
   const wizard = await screen.findByRole("region", { name: "App Creator" });
   expect(await within(wizard).findByText(saying(OPENING))).toBeTruthy();
@@ -661,8 +675,8 @@ test("an app row leaves the run standing, and App Creator returns to it", async 
   await shownIndex();
   await openAgentRow("Research");
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
-  const index = await shownIndex();
-  await userEvent.click(within(index).getByRole("button", { name: "App Creator" }));
+  await shownIndex();
+  await openNewApplication();
   expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });

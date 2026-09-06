@@ -24,6 +24,15 @@ type AppsState = {
 
 const AppsContext = createContext<AppsState | null>(null);
 
+/** The workspace's apps as the boot read stated them — the live ones the portal lists, the archived
+ *  ones this member may restore — and the re-read that follows a change to either. The Apps tab and
+ *  the store both draw from it, so one read answers every screen that lists apps. */
+export function useApps(): AppsState {
+  const state = useContext(AppsContext);
+  if (!state) throw new Error("AppsProvider is required");
+  return state;
+}
+
 export function AppsProvider({
   agents,
   archived,
@@ -54,9 +63,7 @@ export function Apps({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  const state = useContext(AppsContext);
-  if (!state) throw new Error("AppsProvider is required");
-  const { agents, archived, onRestored } = state;
+  const { agents, archived, onRestored } = useApps();
   const picked = place.chip ?? "";
   const bar = (
     <Filter

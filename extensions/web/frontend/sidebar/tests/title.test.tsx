@@ -43,6 +43,7 @@ test("every page names where the member is, innermost first, then the product", 
   expect(titled({ kind: "home" })).toBe("New conversation · Assistant · ufo");
   expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · Second · ufo");
   expect(titled({ kind: "agents" })).toBe("Apps · ufo");
+  expect(titled({ kind: "store" })).toBe("App Store · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBe("Assistant · ufo");
   expect(titled({ kind: "workspace", view: "team", ...PLACE })).toBe("Team · Workspace · ufo");
   expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(
@@ -86,6 +87,7 @@ test("the crumb is the step the tab title names after the page", () => {
   });
   expect(crumbed({ kind: "workspace", view: "team", ...PLACE })).toEqual({ label: "Workspace" });
   expect(crumbed({ kind: "agents" })).toBeUndefined();
+  expect(crumbed({ kind: "store" })).toBeUndefined();
   expect(crumbed({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBeUndefined();
 });
 

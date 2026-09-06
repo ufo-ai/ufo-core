@@ -86,6 +86,13 @@ export type ArchivedApp = {
   /** The durable name the archived agent object answers to — what a restore targets. */
   object: string;
   icon: string;
+  purpose?: string | null;
+  /** The slug the `app_*` extension shipped this agent under, as on a live `Agent`, or absent for an
+   *  app a member built: the store lists a shipped app the workspace removed as one to install. */
+  app?: string | null;
+  /** Whether the deploy withholds this app, as on a live `Agent` — the flag is the deploy's word on
+   *  the app whatever state its row is in. */
+  hidden?: boolean;
   archived_at: string;
 };
 

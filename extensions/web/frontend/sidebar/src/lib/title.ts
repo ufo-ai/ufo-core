@@ -4,6 +4,7 @@ import type { ChatRow } from "@/lib/rail";
 import { agentHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { APP_STORE_TITLE } from "@/views/Store";
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";
@@ -112,6 +113,8 @@ function where(
       return [{ label: route.slot }, named(route.agentId)];
     case "agents":
       return [{ label: APPS }];
+    case "store":
+      return [{ label: APP_STORE_TITLE }];
     case "agent":
       return [named(route.agentId)];
     case "agent-setup":

@@ -49,6 +49,7 @@ import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { FirstRun } from "@/views/FirstRun";
 import { SignIn } from "@/views/SignIn";
+import { Store } from "@/views/Store";
 import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
 import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
@@ -117,6 +118,7 @@ import {
   openHome,
   openNewChat,
   openSlot,
+  openStore,
   placeAgent,
   placeFirstRun,
   placeSection,
@@ -318,7 +320,6 @@ export function App({
                   member={member}
                   mainAgent={mainAgent}
                   narrow={narrow}
-                  onBuild={startBuild}
                 />
               ) : null}
               <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
@@ -328,6 +329,7 @@ export function App({
                   member={member}
                   mainAgent={mainAgent}
                   onAgents={onAgents}
+                  onBuild={startBuild}
                   onExitBuilder={exitBuild}
                   onForwardAgents={forwardBuild}
                   buildWanted={wantedBuild}
@@ -777,14 +779,12 @@ function WorkspaceSidebar({
   member,
   mainAgent,
   narrow,
-  onBuild,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
   narrow: boolean;
-  onBuild: () => void;
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
@@ -876,7 +876,7 @@ function WorkspaceSidebar({
         <AppsIndex
           agents={agents}
           openId={route.kind === "agent" ? route.agentId : null}
-          building={route.kind === "agents" && route.build === true}
+          store={route.kind === "store"}
           pinned={pinned}
           expanded={rail.appsExpanded}
           collapsed={collapsed}
@@ -889,7 +889,7 @@ function WorkspaceSidebar({
             )
           }
           onOpen={openAgent}
-          onBuild={onBuild}
+          onStore={openStore}
         />
         )}
       </div>
@@ -966,6 +966,7 @@ function RoutedPane({
   member,
   mainAgent,
   onAgents,
+  onBuild,
   onExitBuilder,
   onForwardAgents,
   buildWanted,
@@ -975,6 +976,8 @@ function RoutedPane({
   member: Member;
   mainAgent: Agent | null;
   onAgents: () => void;
+  /** A member's press on the store's App Creator row, which is the one way the wizard is raised. */
+  onBuild: () => void;
   onExitBuilder: () => void;
   onForwardAgents: () => void;
   buildWanted: boolean;
@@ -1002,6 +1005,8 @@ function RoutedPane({
     }
     case "bad-link":
       return <PaneNote>This link is not valid.</PaneNote>;
+    case "store":
+      return <Store member={member} onBuild={onBuild} />;
     case "workspace":
       return (
         <TabbedPane

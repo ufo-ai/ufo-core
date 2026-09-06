@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import {
   AGENTS_HASH,
   BUILDER_HASH,
+  STORE_HASH,
   HOME_HASH,
   agentHash,
   artifactTarget,
@@ -232,6 +233,10 @@ export function forwardAgents(): void {
 
 export function openBuilder(): void {
   navigate(BUILDER_HASH);
+}
+
+export function openStore(): void {
+  navigate(STORE_HASH);
 }
 
 export function openAgent(agentId: string): void {
