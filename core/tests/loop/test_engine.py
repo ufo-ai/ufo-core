@@ -188,6 +188,8 @@ from ufo.runtime.skills.runtime import (
 )
 from ufo.runtime.tools.bridge import ToolBridgeIntent
 from ufo.runtime.tools.context import (
+    ADMIN_GATE_NEEDS_A_SPEAKER,
+    CALL_NEEDS_A_SPEAKER,
     ImageContent,
     SpawnResult,
     SpeakerRequired,
@@ -1622,6 +1624,158 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
         )
         assert result.is_error
         assert result.content == expected
+
+
+async def test_the_speaker_helper_refuses_a_memberless_call_with_the_refs_a_retry_names(
+    db: None, tmp_path: Path
+) -> None:
+    """`require_speaker` is the one thing a handler asks for a bound member, and what it raises is
+    the resubmittable class: the refusal reaches the model naming the active member messages, so
+    the same call stands once it carries `requested_by`. A gate names what the member is being
+    asked for; without one the refusal asks for the ref alone."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def bare(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        return ToolResult(content=(TextContent(text=str(ctx.require_speaker())),))
+
+    async def gated(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        return ToolResult(content=(TextContent(text=str(ctx.require_speaker("only an owner"))),))
+
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
+    engine = replace(
+        _engine(shared, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(name="bare_gate", description="d", input_model=StrictInput, handler=bare),
+                ToolDef(name="named_gate", description="d", input_model=StrictInput, handler=gated),
+            )
+        ),
+        turn=shared.model_copy(update={"speaker_member_id": speaker}),
+    )
+    requesters = {shared.id: ActiveMessage(member_id=speaker, rendered="mine")}
+    hint = REQUESTED_BY_HINT.format(refs=str(shared.id))
+    cases = (
+        ("bare_gate", f"SpeakerRequired: {CALL_NEEDS_A_SPEAKER}" + hint),
+        (
+            "named_gate",
+            "SpeakerRequired: " + ADMIN_GATE_NEEDS_A_SPEAKER.format(gate="only an owner") + hint,
+        ),
+    )
+    for tool_name, expected in cases:
+        result = await _dispatch(
+            engine,
+            replace(_dispatch_context(engine), speaker_member_id=None),
+            ToolUseBlock(id=tool_name, name=tool_name, input={}),
+            requesters,
+        )
+        assert result.is_error
+        assert result.content == expected
+
+    bound = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(id="bound", name="bare_gate", input={"requested_by": str(shared.id)}),
+        requesters,
+    )
+    assert not bound.is_error
+    assert bound.content == str(speaker)
+
+
+async def test_a_hand_raised_no_speaker_value_error_is_normalized_at_the_wrapper(
+    db: None, tmp_path: Path
+) -> None:
+    """An extension that writes the no-speaker refusal as a plain `ValueError` still exits the
+    wrapper as `SpeakerRequired`, so the retry path holds for a hand-raised refusal: the words the
+    handler wrote stand, and the active member refs are named beside them. Every other
+    `ValueError` keeps its own class, so nothing but a stated no-speaker condition is renamed."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def hand_raised(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        raise ValueError("this act requires a speaking member")
+
+    async def unrelated(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        raise ValueError("the port is already taken")
+
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
+    engine = replace(
+        _engine(shared, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="hand_raised",
+                    description="d",
+                    input_model=StrictInput,
+                    handler=hand_raised,
+                ),
+                ToolDef(
+                    name="unrelated", description="d", input_model=StrictInput, handler=unrelated
+                ),
+            )
+        ),
+        turn=shared.model_copy(update={"speaker_member_id": speaker}),
+    )
+    requesters = {shared.id: ActiveMessage(member_id=speaker, rendered="mine")}
+    context = replace(_dispatch_context(engine), speaker_member_id=None)
+
+    normalized = await _dispatch(
+        engine, context, ToolUseBlock(id="hand", name="hand_raised", input={}), requesters
+    )
+    plain = await _dispatch(
+        engine, context, ToolUseBlock(id="other", name="unrelated", input={}), requesters
+    )
+
+    assert normalized.is_error
+    assert normalized.content == (
+        "SpeakerRequired: this act requires a speaking member"
+        + REQUESTED_BY_HINT.format(refs=str(shared.id))
+    )
+    assert plain.is_error
+    assert plain.content == "ValueError: the port is already taken"
+
+
+async def test_a_normalized_refusal_with_nothing_bound_stays_a_plain_refusal(
+    db: None, tmp_path: Path
+) -> None:
+    """Fail-closed: a background turn binds no member and offers no ref, so the same hand-raised
+    refusal is still a refusal and carries no hint. Normalizing the class never admits the call and
+    never names a member the round cannot name."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def hand_raised(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        raise ValueError("this act requires a speaking member")
+
+    background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    engine = replace(
+        _engine(background, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="hand_raised",
+                    description="d",
+                    input_model=StrictInput,
+                    handler=hand_raised,
+                ),
+            )
+        ),
+    )
+
+    result = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(id="hand", name="hand_raised", input={}),
+        {},
+    )
+
+    assert result.is_error
+    assert result.content == "SpeakerRequired: this act requires a speaking member"
 
 
 async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:

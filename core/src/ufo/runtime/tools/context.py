@@ -344,6 +344,10 @@ ADMIN_GATE_NEEDS_A_SPEAKER = (
     "then answers to its own gate: {gate}"
 )
 
+CALL_NEEDS_A_SPEAKER = (
+    "this call names no member, so name the member who is asking with `requested_by`"
+)
+
 
 @dataclass(frozen=True)
 class SpawnResult:
@@ -750,14 +754,31 @@ class ToolContext:
                 self.speaker_member_id,
             )
 
+    def require_speaker(self, gate: str = "") -> UUID:
+        """The member this call is bound to, or the refusal that names the repair. A handler that
+        needs a speaker asks for one thing and receives the id, so the gate is written once here
+        rather than as a null test and a hand-raised error in every extension that has one. Naming
+        a `gate` states what the member is being asked for; omitted, the refusal asks for the ref
+        alone.
+
+        The class is the point: `SpeakerRequired` is what tells the engine to name the active
+        member messages, so the model can resubmit the same call carrying `requested_by`."""
+        if self.speaker_member_id is None:
+            raise SpeakerRequired(
+                ADMIN_GATE_NEEDS_A_SPEAKER.format(gate=gate) if gate else CALL_NEEDS_A_SPEAKER
+            )
+        return self.speaker_member_id
+
     async def speaking_admin(self, gate: str) -> bool:
         """The same answer, with the speaker question asked first. `speaker_is_admin` answers False
         for a call nobody is bound to, so a gate that reads it alone tells a call that merely
         omitted `requested_by` that only an admin may act — a refusal naming a repair the model
         cannot make. Who is speaking is answered before what they may do, the order the object
-        kinds' gate keeps, and each gate still raises its own admin refusal on a False."""
-        if self.speaker_member_id is None:
-            raise SpeakerRequired(ADMIN_GATE_NEEDS_A_SPEAKER.format(gate=gate))
+        kinds' gate keeps, and each gate still raises its own admin refusal on a False.
+
+        `require_speaker` raises that first refusal, so an extension gating on a speaker alone and
+        one gating on an admin ask the same helper and read the same words back."""
+        self.require_speaker(gate)
         return await self.speaker_is_admin()
 
     async def agent_is_main(self) -> bool:
