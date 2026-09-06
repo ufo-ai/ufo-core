@@ -28,26 +28,36 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("an activity frame states its complete description on the line", async () => {
+test("an activity frame decodes its complete description", async () => {
   const stream = await streaming();
   const label = "Reading the calendar."
   stream.emit("activity", { text: label });
-  const line = await screen.findByText(label, { selector: "[data-slot=marker-content]" });
-  expect(line.textContent).toBe(label);
+  // The line reads the step out to a screen reader, and draws it as the cipher decoding into it.
+  const dock = await screen.findByText(label, { selector: ".sr-only" });
+  const decoded = dock.parentElement!.querySelector("[data-slot=decode-text]")!;
+  expect(decoded.textContent).toHaveLength(label.length);
+  expect(decoded.textContent).not.toBe(label);
+  expect(decoded.textContent?.replaceAll(" ", "")).not.toMatch(/[A-Za-z]/);
+  // A space is a break between words rather than a cell, so it is the only character without one.
+  expect(decoded.querySelectorAll("[data-slot=decode-cell]")).toHaveLength(
+    label.replaceAll(" ", "").length,
+  );
+  expect(decoded.querySelector("[data-slot=decode-cell]")?.className).toContain(
+    "w-(--size-decode-cell)",
+  );
+  // A cell is one character wide, so the cipher is set in the face that gives every glyph that
+  // width rather than in the proportional face the line around it reads in.
+  expect(decoded.className).toContain("font-mono");
 
   stream.emit("activity", { text: "Listing the workspace." });
-  expect(
-    await screen.findByText("Listing the workspace.", { selector: "[data-slot=marker-content]" }),
-  ).toBeTruthy();
+  expect(await screen.findByText("Listing the workspace.", { selector: ".sr-only" })).toBeTruthy();
 });
 
 test("an activity frame names the guidance being loaded", async () => {
   const stream = await streaming();
   stream.emit("activity", { text: "Loading calendar guidance." });
   expect(
-    await screen.findByText("Loading calendar guidance.", {
-      selector: "[data-slot=marker-content]",
-    }),
+    await screen.findByText("Loading calendar guidance.", { selector: ".sr-only" }),
   ).toBeTruthy();
 });
 

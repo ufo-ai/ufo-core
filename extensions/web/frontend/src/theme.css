@@ -752,8 +752,22 @@
 @layer base {
   :root {
     color-scheme: light dark;
+    /* One cell of a decoding line. The cipher is set in the mono face, so a character's own width is
+       a column every glyph on the line shares. */
+    --size-decode-cell: 1ch;
+
     /* How long a glyph takes to swap for the one replacing it. */
     --duration-glyph: 200ms;
+
+    /* The two channels a decoding line is drawn in. Ripple is the cool tone nearly every cell takes,
+       a wave travelling along the words; pulse is the warm one the few accent cells breathe on. Each
+       is a pair the cell mixes between by how far along its own wave it sits, and both ends are the
+       palette laid over the pane — so a scheme still turns on the seven declarations alone. Ember
+       stays a handful of points on a cool line, never a warm line. */
+    --ripple-lo: color-mix(in srgb, var(--text-secondary) 55%, var(--bkgd-100));
+    --ripple-hi: var(--text-secondary);
+    --pulse-lo: color-mix(in srgb, var(--accent-secondary) 25%, var(--text-secondary));
+    --pulse-hi: color-mix(in srgb, var(--accent-secondary) 55%, var(--text-secondary));
   }
 
   /* The appearance control writes one of these onto the root, and `light-dark()` reads it. A member
@@ -854,6 +868,25 @@
    declared with `@utility` rather than as a rule in a layer: Tailwind compiles a variant form —
    `data-autoscrolling:scrollbar-quiet` — only for a name it knows is a utility, and a hand-written
    class under the same name silently compiles nothing at all behind a variant. */
+
+/* The mono face carries neither braille nor the accents, so both come out of a fallback — and there
+   the braille is a small dot pattern while the accents are drawn to full cap height. Left alone the
+   ember reads as a symbol stamped over the line rather than one more cell of the same cipher, so an
+   accent is held to the optical size of the dots beside it. */
+[data-slot="decode-cell"][data-accent] {
+  font-size: 0.72em;
+}
+
+/* A decoding cell mixes the two ends of its channel by how far along its wave it sits. `--f` is
+   written per cell, so the mix has to resolve on the cell — a custom property declared at the root
+   would substitute the root's `--f`, which is nothing at all. */
+@utility decode-ripple {
+  color: color-mix(in srgb, var(--ripple-hi) calc(var(--f) * 1%), var(--ripple-lo));
+}
+
+@utility decode-pulse {
+  color: color-mix(in srgb, var(--pulse-hi) calc(var(--f) * 1%), var(--pulse-lo));
+}
 
 /* The line an app prints while its work is moving: a band of the reading tone travelling along
    words otherwise set in the resting one. shadcn draws its `shimmer` as a gradient clipped to the
@@ -1025,6 +1058,233 @@
     justify-content: center;
     color: var(--color-ink-soft);
     animation: glyph-out var(--duration-glyph) var(--ease-control) var(--delay-glyph) both;
+  }
+
+  /* The working mark: three lights on one ellipse seen nearly edge-on. `x` swings wide, `y`
+     barely moves, and depth is scale + blur + brightness, so it reads as far-away lights turning,
+     not a pinwheel. The lights run 3, 4 and 5 laps in one 11s cycle — they spread out of the ∵
+     triangle, gather back onto its vertices, hold a beat, and set off again. Every length is a
+     fraction of `--s`, whose default matches the cap height of a `text-small` mono line, so one
+     set of keyframes serves any size. The lights are the warm accent laid over the primary text
+     tone, which flips with the scheme: pale embers on a dark ground, deep ones on a light one. */
+  [data-slot="orbit"] {
+    --s: var(--size-glyph);
+    --orbit-core: color-mix(in srgb, var(--accent-secondary) 20%, var(--text-primary));
+    --orbit-mid: color-mix(in srgb, var(--accent-secondary) 40%, var(--text-primary));
+
+    position: relative;
+    display: inline-block;
+    width: var(--s);
+    height: calc(var(--s) * 0.55);
+    vertical-align: middle;
+  }
+
+  [data-slot="orbit"] > span {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    /* A light is a quarter of the mark and holds its colour most of the way out. At the cap height
+       this sits at, the earlier eighth faded to nothing before it covered a whole pixel, so three
+       lights beside a line of type read as dirt on the screen rather than as a mark. */
+    width: calc(var(--s) * 0.24);
+    height: calc(var(--s) * 0.24);
+    margin: calc(var(--s) * -0.12) 0 0 calc(var(--s) * -0.12);
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--orbit-core) 0%, var(--orbit-mid) 62%, transparent 88%);
+    filter: brightness(1.1);
+    /* Longhands, because the name is granted below and a shorthand carrying everything but the name
+       means `animation: none` — which a minifier is right to collapse to exactly that, taking the
+       duration with it. Written that way the mark animates under the dev server and stands still in
+       the built sheet, which is the one place it ships. */
+    animation-duration: 11s;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+
+  /* Each light's static pose is its keyframes' 0% — parked on its ∵ vertex. The global
+     reduced-motion rule only shortens durations, and a shorter infinite loop still moves, so the
+     travel is granted by name only where motion is welcome, and the parked triangle is what a
+     reduced-motion member sees. */
+  [data-slot="orbit"] > span:nth-child(1) {
+    transform: translate(calc(var(--s) * -0.28), calc(var(--s) * -0.15));
+  }
+
+  [data-slot="orbit"] > span:nth-child(2) {
+    transform: translate(calc(var(--s) * 0.28), calc(var(--s) * -0.15));
+  }
+
+  [data-slot="orbit"] > span:nth-child(3) {
+    transform: translate(0, calc(var(--s) * 0.19));
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    [data-slot="orbit"] > span:nth-child(1) {
+      animation-name: ufo-orbit-0;
+    }
+
+    [data-slot="orbit"] > span:nth-child(2) {
+      animation-name: ufo-orbit-1;
+    }
+
+    [data-slot="orbit"] > span:nth-child(3) {
+      animation-name: ufo-orbit-2;
+    }
+  }
+
+  @keyframes ufo-orbit-0 {
+    0.00% { transform: translate(calc(var(--s) * -0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    2.08% { transform: translate(calc(var(--s) * -0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    4.17% { transform: translate(calc(var(--s) * -0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    6.25% { transform: translate(calc(var(--s) * -0.2529), calc(var(--s) * -0.1417)) scale(1.004); filter: blur(calc(var(--s) * 0.0007)) brightness(1.10); }
+    8.33% { transform: translate(calc(var(--s) * -0.1089), calc(var(--s) * -0.1111)) scale(0.990); filter: blur(calc(var(--s) * 0.0065)) brightness(1.05); }
+    10.42% { transform: translate(calc(var(--s) * 0.0749), calc(var(--s) * -0.0893)) scale(0.904); filter: blur(calc(var(--s) * 0.0194)) brightness(0.92); }
+    12.50% { transform: translate(calc(var(--s) * 0.1830), calc(var(--s) * -0.0891)) scale(0.763); filter: blur(calc(var(--s) * 0.0360)) brightness(0.73); }
+    14.58% { transform: translate(calc(var(--s) * 0.1433), calc(var(--s) * -0.1019)) scale(0.648); filter: blur(calc(var(--s) * 0.0479)) brightness(0.58); }
+    16.67% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * -0.1100)) scale(0.620); filter: blur(calc(var(--s) * 0.0500)) brightness(0.55); }
+    18.75% { transform: translate(calc(var(--s) * -0.1454), calc(var(--s) * -0.1016)) scale(0.646); filter: blur(calc(var(--s) * 0.0481)) brightness(0.58); }
+    20.83% { transform: translate(calc(var(--s) * -0.2687), calc(var(--s) * -0.0778)) scale(0.720); filter: blur(calc(var(--s) * 0.0427)) brightness(0.66); }
+    22.92% { transform: translate(calc(var(--s) * -0.3511), calc(var(--s) * -0.0421)) scale(0.830); filter: blur(calc(var(--s) * 0.0346)) brightness(0.78); }
+    25.00% { transform: translate(calc(var(--s) * -0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    27.08% { transform: translate(calc(var(--s) * -0.3511), calc(var(--s) * 0.0421)) scale(1.090); filter: blur(calc(var(--s) * 0.0154)) brightness(1.07); }
+    29.17% { transform: translate(calc(var(--s) * -0.2687), calc(var(--s) * 0.0778)) scale(1.200); filter: blur(calc(var(--s) * 0.0073)) brightness(1.19); }
+    31.25% { transform: translate(calc(var(--s) * -0.1454), calc(var(--s) * 0.1016)) scale(1.274); filter: blur(calc(var(--s) * 0.0019)) brightness(1.27); }
+    33.33% { transform: translate(calc(var(--s) * -0.0000), calc(var(--s) * 0.1100)) scale(1.300); filter: blur(calc(var(--s) * 0.0000)) brightness(1.30); }
+    35.42% { transform: translate(calc(var(--s) * 0.1454), calc(var(--s) * 0.1016)) scale(1.274); filter: blur(calc(var(--s) * 0.0019)) brightness(1.27); }
+    37.50% { transform: translate(calc(var(--s) * 0.2687), calc(var(--s) * 0.0778)) scale(1.200); filter: blur(calc(var(--s) * 0.0073)) brightness(1.19); }
+    39.58% { transform: translate(calc(var(--s) * 0.3511), calc(var(--s) * 0.0421)) scale(1.090); filter: blur(calc(var(--s) * 0.0154)) brightness(1.07); }
+    41.67% { transform: translate(calc(var(--s) * 0.3800), calc(var(--s) * 0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.93); }
+    43.75% { transform: translate(calc(var(--s) * 0.3511), calc(var(--s) * -0.0421)) scale(0.830); filter: blur(calc(var(--s) * 0.0346)) brightness(0.78); }
+    45.83% { transform: translate(calc(var(--s) * 0.2687), calc(var(--s) * -0.0778)) scale(0.720); filter: blur(calc(var(--s) * 0.0427)) brightness(0.66); }
+    47.92% { transform: translate(calc(var(--s) * 0.1454), calc(var(--s) * -0.1016)) scale(0.646); filter: blur(calc(var(--s) * 0.0481)) brightness(0.58); }
+    50.00% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * -0.1100)) scale(0.620); filter: blur(calc(var(--s) * 0.0500)) brightness(0.55); }
+    52.08% { transform: translate(calc(var(--s) * -0.1454), calc(var(--s) * -0.1016)) scale(0.646); filter: blur(calc(var(--s) * 0.0481)) brightness(0.58); }
+    54.17% { transform: translate(calc(var(--s) * -0.2687), calc(var(--s) * -0.0778)) scale(0.720); filter: blur(calc(var(--s) * 0.0427)) brightness(0.66); }
+    56.25% { transform: translate(calc(var(--s) * -0.3511), calc(var(--s) * -0.0421)) scale(0.830); filter: blur(calc(var(--s) * 0.0346)) brightness(0.78); }
+    58.33% { transform: translate(calc(var(--s) * -0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    60.42% { transform: translate(calc(var(--s) * -0.3511), calc(var(--s) * 0.0421)) scale(1.090); filter: blur(calc(var(--s) * 0.0154)) brightness(1.07); }
+    62.50% { transform: translate(calc(var(--s) * -0.2687), calc(var(--s) * 0.0778)) scale(1.200); filter: blur(calc(var(--s) * 0.0073)) brightness(1.19); }
+    64.58% { transform: translate(calc(var(--s) * -0.1454), calc(var(--s) * 0.1016)) scale(1.274); filter: blur(calc(var(--s) * 0.0019)) brightness(1.27); }
+    66.67% { transform: translate(calc(var(--s) * -0.0000), calc(var(--s) * 0.1100)) scale(1.300); filter: blur(calc(var(--s) * 0.0000)) brightness(1.30); }
+    68.75% { transform: translate(calc(var(--s) * 0.1454), calc(var(--s) * 0.1016)) scale(1.274); filter: blur(calc(var(--s) * 0.0019)) brightness(1.27); }
+    70.83% { transform: translate(calc(var(--s) * 0.2687), calc(var(--s) * 0.0778)) scale(1.200); filter: blur(calc(var(--s) * 0.0073)) brightness(1.19); }
+    72.92% { transform: translate(calc(var(--s) * 0.3511), calc(var(--s) * 0.0421)) scale(1.090); filter: blur(calc(var(--s) * 0.0154)) brightness(1.07); }
+    75.00% { transform: translate(calc(var(--s) * 0.3800), calc(var(--s) * 0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.93); }
+    77.08% { transform: translate(calc(var(--s) * 0.3511), calc(var(--s) * -0.0421)) scale(0.830); filter: blur(calc(var(--s) * 0.0346)) brightness(0.78); }
+    79.17% { transform: translate(calc(var(--s) * 0.2687), calc(var(--s) * -0.0778)) scale(0.720); filter: blur(calc(var(--s) * 0.0427)) brightness(0.66); }
+    81.25% { transform: translate(calc(var(--s) * 0.1454), calc(var(--s) * -0.1016)) scale(0.646); filter: blur(calc(var(--s) * 0.0481)) brightness(0.58); }
+    83.33% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * -0.1100)) scale(0.620); filter: blur(calc(var(--s) * 0.0500)) brightness(0.55); }
+    85.42% { transform: translate(calc(var(--s) * -0.1528), calc(var(--s) * -0.1043)) scale(0.665); filter: blur(calc(var(--s) * 0.0455)) brightness(0.61); }
+    87.50% { transform: translate(calc(var(--s) * -0.2719), calc(var(--s) * -0.0981)) scale(0.799); filter: blur(calc(var(--s) * 0.0307)) brightness(0.78); }
+    89.58% { transform: translate(calc(var(--s) * -0.3093), calc(var(--s) * -0.1054)) scale(0.930); filter: blur(calc(var(--s) * 0.0143)) brightness(0.97); }
+    91.67% { transform: translate(calc(var(--s) * -0.2938), calc(var(--s) * -0.1293)) scale(0.994); filter: blur(calc(var(--s) * 0.0034)) brightness(1.08); }
+    93.75% { transform: translate(calc(var(--s) * -0.2801), calc(var(--s) * -0.1496)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    95.83% { transform: translate(calc(var(--s) * -0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    97.92% { transform: translate(calc(var(--s) * -0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    100.00% { transform: translate(calc(var(--s) * -0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+  }
+
+  @keyframes ufo-orbit-1 {
+    0.00% { transform: translate(calc(var(--s) * 0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    2.08% { transform: translate(calc(var(--s) * 0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    4.17% { transform: translate(calc(var(--s) * 0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    6.25% { transform: translate(calc(var(--s) * 0.2843), calc(var(--s) * -0.1436)) scale(0.998); filter: blur(calc(var(--s) * 0.0011)) brightness(1.09); }
+    8.33% { transform: translate(calc(var(--s) * 0.2927), calc(var(--s) * -0.1254)) scale(0.946); filter: blur(calc(var(--s) * 0.0097)) brightness(1.01); }
+    10.42% { transform: translate(calc(var(--s) * 0.2294), calc(var(--s) * -0.1192)) scale(0.812); filter: blur(calc(var(--s) * 0.0262)) brightness(0.82); }
+    12.50% { transform: translate(calc(var(--s) * 0.0438), calc(var(--s) * -0.1163)) scale(0.679); filter: blur(calc(var(--s) * 0.0422)) brightness(0.64); }
+    14.58% { transform: translate(calc(var(--s) * -0.1876), calc(var(--s) * -0.0955)) scale(0.667); filter: blur(calc(var(--s) * 0.0464)) brightness(0.60); }
+    16.67% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    18.75% { transform: translate(calc(var(--s) * -0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    20.83% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    22.92% { transform: translate(calc(var(--s) * -0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    25.00% { transform: translate(calc(var(--s) * -0.0000), calc(var(--s) * 0.1100)) scale(1.300); filter: blur(calc(var(--s) * 0.0000)) brightness(1.30); }
+    27.08% { transform: translate(calc(var(--s) * 0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    29.17% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    31.25% { transform: translate(calc(var(--s) * 0.3800), calc(var(--s) * 0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.93); }
+    33.33% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    35.42% { transform: translate(calc(var(--s) * 0.1900), calc(var(--s) * -0.0953)) scale(0.666); filter: blur(calc(var(--s) * 0.0467)) brightness(0.60); }
+    37.50% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * -0.1100)) scale(0.620); filter: blur(calc(var(--s) * 0.0500)) brightness(0.55); }
+    39.58% { transform: translate(calc(var(--s) * -0.1900), calc(var(--s) * -0.0953)) scale(0.666); filter: blur(calc(var(--s) * 0.0467)) brightness(0.60); }
+    41.67% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    43.75% { transform: translate(calc(var(--s) * -0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    45.83% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    47.92% { transform: translate(calc(var(--s) * -0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    50.00% { transform: translate(calc(var(--s) * -0.0000), calc(var(--s) * 0.1100)) scale(1.300); filter: blur(calc(var(--s) * 0.0000)) brightness(1.30); }
+    52.08% { transform: translate(calc(var(--s) * 0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    54.17% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    56.25% { transform: translate(calc(var(--s) * 0.3800), calc(var(--s) * 0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.93); }
+    58.33% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    60.42% { transform: translate(calc(var(--s) * 0.1900), calc(var(--s) * -0.0953)) scale(0.666); filter: blur(calc(var(--s) * 0.0467)) brightness(0.60); }
+    62.50% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * -0.1100)) scale(0.620); filter: blur(calc(var(--s) * 0.0500)) brightness(0.55); }
+    64.58% { transform: translate(calc(var(--s) * -0.1900), calc(var(--s) * -0.0953)) scale(0.666); filter: blur(calc(var(--s) * 0.0467)) brightness(0.60); }
+    66.67% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    68.75% { transform: translate(calc(var(--s) * -0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    70.83% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    72.92% { transform: translate(calc(var(--s) * -0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    75.00% { transform: translate(calc(var(--s) * -0.0000), calc(var(--s) * 0.1100)) scale(1.300); filter: blur(calc(var(--s) * 0.0000)) brightness(1.30); }
+    77.08% { transform: translate(calc(var(--s) * 0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    79.17% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    81.25% { transform: translate(calc(var(--s) * 0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    83.33% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    85.42% { transform: translate(calc(var(--s) * 0.1949), calc(var(--s) * -0.0982)) scale(0.684); filter: blur(calc(var(--s) * 0.0441)) brightness(0.63); }
+    87.50% { transform: translate(calc(var(--s) * 0.0789), calc(var(--s) * -0.1213)) scale(0.727); filter: blur(calc(var(--s) * 0.0359)) brightness(0.70); }
+    89.58% { transform: translate(calc(var(--s) * 0.0859), calc(var(--s) * -0.1274)) scale(0.862); filter: blur(calc(var(--s) * 0.0193)) brightness(0.89); }
+    91.67% { transform: translate(calc(var(--s) * 0.1960), calc(var(--s) * -0.1369)) scale(0.971); filter: blur(calc(var(--s) * 0.0052)) brightness(1.05); }
+    93.75% { transform: translate(calc(var(--s) * 0.2788), calc(var(--s) * -0.1497)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    95.83% { transform: translate(calc(var(--s) * 0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    97.92% { transform: translate(calc(var(--s) * 0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    100.00% { transform: translate(calc(var(--s) * 0.2800), calc(var(--s) * -0.1500)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+  }
+
+  @keyframes ufo-orbit-2 {
+    0.00% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * 0.1900)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    2.08% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * 0.1900)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    4.17% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * 0.1900)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    6.25% { transform: translate(calc(var(--s) * 0.0151), calc(var(--s) * 0.1800)) scale(0.993); filter: blur(calc(var(--s) * 0.0015)) brightness(1.09); }
+    8.33% { transform: translate(calc(var(--s) * 0.0493), calc(var(--s) * 0.1160)) scale(0.913); filter: blur(calc(var(--s) * 0.0121)) brightness(0.97); }
+    10.42% { transform: translate(calc(var(--s) * -0.0279), calc(var(--s) * 0.0218)) scale(0.788); filter: blur(calc(var(--s) * 0.0280)) brightness(0.79); }
+    12.50% { transform: translate(calc(var(--s) * -0.2267), calc(var(--s) * -0.0359)) scale(0.763); filter: blur(calc(var(--s) * 0.0360)) brightness(0.73); }
+    14.58% { transform: translate(calc(var(--s) * -0.3748), calc(var(--s) * -0.0133)) scale(0.916); filter: blur(calc(var(--s) * 0.0281)) brightness(0.88); }
+    16.67% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    18.75% { transform: translate(calc(var(--s) * -0.1454), calc(var(--s) * 0.1016)) scale(1.274); filter: blur(calc(var(--s) * 0.0019)) brightness(1.27); }
+    20.83% { transform: translate(calc(var(--s) * 0.0984), calc(var(--s) * 0.1063)) scale(1.288); filter: blur(calc(var(--s) * 0.0009)) brightness(1.29); }
+    22.92% { transform: translate(calc(var(--s) * 0.3015), calc(var(--s) * 0.0670)) scale(1.167); filter: blur(calc(var(--s) * 0.0098)) brightness(1.15); }
+    25.00% { transform: translate(calc(var(--s) * 0.3800), calc(var(--s) * 0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.93); }
+    27.08% { transform: translate(calc(var(--s) * 0.3015), calc(var(--s) * -0.0670)) scale(0.753); filter: blur(calc(var(--s) * 0.0402)) brightness(0.70); }
+    29.17% { transform: translate(calc(var(--s) * 0.0984), calc(var(--s) * -0.1063)) scale(0.632); filter: blur(calc(var(--s) * 0.0491)) brightness(0.56); }
+    31.25% { transform: translate(calc(var(--s) * -0.1454), calc(var(--s) * -0.1016)) scale(0.646); filter: blur(calc(var(--s) * 0.0481)) brightness(0.58); }
+    33.33% { transform: translate(calc(var(--s) * -0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    35.42% { transform: translate(calc(var(--s) * -0.3767), calc(var(--s) * 0.0144)) scale(1.004); filter: blur(calc(var(--s) * 0.0217)) brightness(0.97); }
+    37.50% { transform: translate(calc(var(--s) * -0.2687), calc(var(--s) * 0.0778)) scale(1.200); filter: blur(calc(var(--s) * 0.0073)) brightness(1.19); }
+    39.58% { transform: translate(calc(var(--s) * -0.0496), calc(var(--s) * 0.1091)) scale(1.297); filter: blur(calc(var(--s) * 0.0002)) brightness(1.30); }
+    41.67% { transform: translate(calc(var(--s) * 0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    43.75% { transform: translate(calc(var(--s) * 0.3511), calc(var(--s) * 0.0421)) scale(1.090); filter: blur(calc(var(--s) * 0.0154)) brightness(1.07); }
+    45.83% { transform: translate(calc(var(--s) * 0.3671), calc(var(--s) * -0.0285)) scale(0.872); filter: blur(calc(var(--s) * 0.0315)) brightness(0.83); }
+    47.92% { transform: translate(calc(var(--s) * 0.2313), calc(var(--s) * -0.0873)) scale(0.690); filter: blur(calc(var(--s) * 0.0448)) brightness(0.63); }
+    50.00% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * -0.1100)) scale(0.620); filter: blur(calc(var(--s) * 0.0500)) brightness(0.55); }
+    52.08% { transform: translate(calc(var(--s) * -0.2313), calc(var(--s) * -0.0873)) scale(0.690); filter: blur(calc(var(--s) * 0.0448)) brightness(0.63); }
+    54.17% { transform: translate(calc(var(--s) * -0.3671), calc(var(--s) * -0.0285)) scale(0.872); filter: blur(calc(var(--s) * 0.0315)) brightness(0.83); }
+    56.25% { transform: translate(calc(var(--s) * -0.3511), calc(var(--s) * 0.0421)) scale(1.090); filter: blur(calc(var(--s) * 0.0154)) brightness(1.07); }
+    58.33% { transform: translate(calc(var(--s) * -0.1900), calc(var(--s) * 0.0953)) scale(1.254); filter: blur(calc(var(--s) * 0.0033)) brightness(1.25); }
+    60.42% { transform: translate(calc(var(--s) * 0.0496), calc(var(--s) * 0.1091)) scale(1.297); filter: blur(calc(var(--s) * 0.0002)) brightness(1.30); }
+    62.50% { transform: translate(calc(var(--s) * 0.2687), calc(var(--s) * 0.0778)) scale(1.200); filter: blur(calc(var(--s) * 0.0073)) brightness(1.19); }
+    64.58% { transform: translate(calc(var(--s) * 0.3767), calc(var(--s) * 0.0144)) scale(1.004); filter: blur(calc(var(--s) * 0.0217)) brightness(0.97); }
+    66.67% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * -0.0550)) scale(0.790); filter: blur(calc(var(--s) * 0.0375)) brightness(0.74); }
+    68.75% { transform: translate(calc(var(--s) * 0.1454), calc(var(--s) * -0.1016)) scale(0.646); filter: blur(calc(var(--s) * 0.0481)) brightness(0.58); }
+    70.83% { transform: translate(calc(var(--s) * -0.0984), calc(var(--s) * -0.1063)) scale(0.632); filter: blur(calc(var(--s) * 0.0491)) brightness(0.56); }
+    72.92% { transform: translate(calc(var(--s) * -0.3015), calc(var(--s) * -0.0670)) scale(0.753); filter: blur(calc(var(--s) * 0.0402)) brightness(0.70); }
+    75.00% { transform: translate(calc(var(--s) * -0.3800), calc(var(--s) * -0.0000)) scale(0.960); filter: blur(calc(var(--s) * 0.0250)) brightness(0.92); }
+    77.08% { transform: translate(calc(var(--s) * -0.3015), calc(var(--s) * 0.0670)) scale(1.167); filter: blur(calc(var(--s) * 0.0098)) brightness(1.15); }
+    79.17% { transform: translate(calc(var(--s) * -0.0984), calc(var(--s) * 0.1063)) scale(1.288); filter: blur(calc(var(--s) * 0.0009)) brightness(1.29); }
+    81.25% { transform: translate(calc(var(--s) * 0.1454), calc(var(--s) * 0.1016)) scale(1.274); filter: blur(calc(var(--s) * 0.0019)) brightness(1.27); }
+    83.33% { transform: translate(calc(var(--s) * 0.3291), calc(var(--s) * 0.0550)) scale(1.130); filter: blur(calc(var(--s) * 0.0125)) brightness(1.11); }
+    85.42% { transform: translate(calc(var(--s) * 0.3562), calc(var(--s) * -0.0032)) scale(0.920); filter: blur(calc(var(--s) * 0.0267)) brightness(0.89); }
+    87.50% { transform: translate(calc(var(--s) * 0.1930), calc(var(--s) * -0.0023)) scale(0.799); filter: blur(calc(var(--s) * 0.0307)) brightness(0.78); }
+    89.58% { transform: translate(calc(var(--s) * 0.0205), calc(var(--s) * 0.0665)) scale(0.844); filter: blur(calc(var(--s) * 0.0206)) brightness(0.87); }
+    91.67% { transform: translate(calc(var(--s) * -0.0262), calc(var(--s) * 0.1507)) scale(0.954); filter: blur(calc(var(--s) * 0.0064)) brightness(1.03); }
+    93.75% { transform: translate(calc(var(--s) * -0.0006), calc(var(--s) * 0.1896)) scale(1.000); filter: blur(calc(var(--s) * 0.0001)) brightness(1.10); }
+    95.83% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * 0.1900)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    97.92% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * 0.1900)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
+    100.00% { transform: translate(calc(var(--s) * 0.0000), calc(var(--s) * 0.1900)) scale(1.000); filter: blur(calc(var(--s) * 0.0000)) brightness(1.10); }
   }
 
   /* The foot of a pane that has more below it, faded into the surface so the last line does not

@@ -250,7 +250,7 @@ test("the working line is not taken down when the turn's first step lands", asyn
   const opening = await screen.findByText("Thinking…");
   // The wait states itself with a glyph. Nothing stands behind the line yet, so no chevron opens it.
   const waiting = opening.closest("[data-slot=marker]")!;
-  expect(waiting.querySelector("svg")).toBeTruthy();
+  expect(waiting.querySelector("[data-slot=orbit]")).toBeTruthy();
   expect(waiting.querySelector("svg.size-icon")).toBeNull();
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
@@ -269,7 +269,7 @@ test("a running turn keeps its calls behind the line until the member opens them
 
   const summary = await screen.findByText("Loading coding guidance.");
   expect(screen.queryByText("Reviewing the pull request.")).toBeNull();
-  expect(document.querySelector("[data-slot=marker] svg.animate-working")).toBeTruthy();
+  expect(document.querySelector("[data-slot=marker] [data-slot=orbit]")).toBeTruthy();
 
   await userEvent.click(summary);
   expect(screen.getByText("Reviewing the pull request.")).toBeTruthy();
@@ -283,7 +283,7 @@ test("a running turn keeps its calls behind the line until the member opens them
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
   expect(screen.getByText("Completed 2 steps")).toBeTruthy();
-  expect(document.querySelector("[data-slot=marker] svg.animate-working")).toBeNull();
+  expect(document.querySelector("[data-slot=marker] [data-slot=orbit]")).toBeNull();
 });
 
 test("a live subagent run nests under the reply it produced", async () => {
