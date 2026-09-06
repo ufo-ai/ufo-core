@@ -29,10 +29,10 @@ from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, Tool
 from ufo.sdk.untrusted import wall
 from ufo_ext_app_notification.drain import DRAIN_BATCH
 from ufo_ext_app_notification.store import (
+    NOTIFICATION_FLAG,
     NOTIFICATION_KIND,
     NotificationStore,
     inbox_agent_id,
-    notifications_enabled,
 )
 
 DELIVER_ACTION_NAME = "deliver"
@@ -54,7 +54,6 @@ DELIVER_DESCRIPTION = (
 NOT_THE_NOTIFICATION_AGENT = (
     "deliver is the Notification app's own verb; this agent is not that app's provision"
 )
-NOTIFICATIONS_OFF = "notifications are switched off in this workspace, so nothing is delivered"
 ONE_DELIVERY_PER_TURN = (
     "this turn already delivered one message; a member who hears from you twice in one batch "
     "stops reading you"
@@ -111,8 +110,6 @@ def _names(refs: tuple[str, ...]) -> tuple[str, ...]:
 async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
     ext = _require_ext(ctx.ext)
     await _require_notification_agent(ext, ctx)
-    if not await notifications_enabled():
-        return _refusal(NOTIFICATIONS_OFF)
     member_id = authority_member_id(ctx.authority)
     if member_id is None:
         return _refusal(NOTHING_TO_DELIVER)
@@ -151,4 +148,5 @@ DELIVER = ToolDef(
     profile_only=True,
     side_effecting=True,
     bound=ObjectBinding(kind=NOTIFICATION_KIND, binding="collection"),
+    flag=NOTIFICATION_FLAG,
 )

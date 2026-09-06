@@ -77,6 +77,10 @@ class ActionPresentation:
 
 @dataclass(frozen=True)
 class ToolDef[ModelT: BaseModel]:
+    """A callable a turn may hold. `flag` names the feature flag that offers it: where that flag
+    reads off for the turn's workspace, or nothing answers, the tool is absent from the catalog the
+    model sees and the action is absent from the grants the turn holds — withheld, never refused."""
+
     name: str
     description: str
     input_model: type[ModelT]
@@ -90,6 +94,7 @@ class ToolDef[ModelT: BaseModel]:
     agent_targetable: bool = False
     final_act_model: type[BaseModel] | None = None
     presentation: ActionPresentation | None = None
+    flag: str | None = None
 
     @property
     def canonical_id(self) -> str:

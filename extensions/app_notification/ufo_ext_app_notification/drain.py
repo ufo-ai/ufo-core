@@ -24,14 +24,15 @@ from dataclasses import dataclass
 
 from ufo.sdk.authority import authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext
+from ufo.sdk.flags import flag_enabled
 from ufo.sdk.untrusted import wall
 from ufo_ext_app_notification.store import (
+    NOTIFICATION_FLAG,
     NOTIFICATION_KIND,
     Lane,
     Notification,
     NotificationStore,
     inbox_agent_id,
-    notifications_enabled,
 )
 
 DRAIN_COOLDOWN_SECONDS = 300
@@ -50,7 +51,11 @@ class InboxDrain:
     ctx: ExtensionContext
 
     async def run(self) -> None:
-        if not await notifications_enabled():
+        """One tick over the bound workspace. The flag that offers `notify` and `deliver` is read
+        here too, for the one actor that holds no tool — the clock — so an environment that
+        withholds the feature wakes nobody; it reads closed where nothing answers, and a stack that
+        wants the feature without a flag service selects the `open` backend."""
+        if not await flag_enabled(NOTIFICATION_FLAG, default=False):
             return
         inbox = await inbox_agent_id(self.ctx)
         if inbox is None:

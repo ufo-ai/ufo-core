@@ -155,7 +155,7 @@ page-revision rule, applied to a message.
 
 | Fence | Mechanism |
 |---|---|
-| environment | `enable-notification-app`, read at `notify`, the drain and `deliver`: off or unanswered, nothing is written, woken or pushed; a dev or eval stack selects the `open` flag backend |
+| environment | `enable-notification-app`, named on `notify` and `deliver` and read by the drain: off or unanswered, neither tool is in any catalog and nothing is woken; a dev or eval stack selects the `open` flag backend |
 | fold | the unique index on the subject: 400 changed pages under `source/<name>` is one row saying 400 |
 | altitude | more than `NOTIFY_SUBJECTS_PER_TURN` (8) distinct subjects in one turn is refused with the reason |
 | loop | a turn recorded in `delivered_turn_id` cannot post; the producing agent cannot post to its own inbox |

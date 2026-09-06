@@ -10,10 +10,11 @@ the platform bound. A `run` tool is the one addition a document makes: its imple
 command inside the turn's own sandbox, which grants nothing the sandbox's shell does not already
 grant."""
 
+import asyncio
 import copy
 import json
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
@@ -21,6 +22,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, create_model
 
 from ufo.blob import WorkspaceBlobStore
+from ufo.flags import flag_enabled
 from ufo.harness.o11y import span
 from ufo.host.environment import (
     EnvironmentDocument,
@@ -55,7 +57,7 @@ from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
-from ufo.runtime.objects import ObjectVerbs
+from ufo.runtime.objects import BoundAction, ObjectVerbs
 from ufo.runtime.prompts.render import (
     OBJECT_KINDS_SECTION,
     WORKSPACE_FACTS_SECTION,
@@ -138,6 +140,8 @@ class HostEnvironment:
                 else WORKSPACE_AUTHORITY
             ),
         )
+        withheld = await flags_reading_off(all_tools, verbs.actions)
+        all_tools = tuple(tool for tool in all_tools if tool.flag not in withheld)
         hooks = self.hooks(audience=request.audience)
         member_cards: tuple[SkillCard, ...] = ()
         materialize_member: SkillMaterializer = _without_workspace_skills
@@ -160,8 +164,12 @@ class HostEnvironment:
         preload: tuple[LoadedSkill, ...] = ()
         view: MemberVisibility | None = None
         if profile is None:
-            granted_actions = _agent_actions(
-                verbs.actions, agent.tools, turn.admission_source, turn.speaker_member_id
+            granted_actions = granted_without_flagged(
+                _agent_actions(
+                    verbs.actions, agent.tools, turn.admission_source, turn.speaker_member_id
+                ),
+                verbs.actions,
+                withheld,
             )
             selected = _with_action_verbs(
                 _agent_tools(all_tools, agent.tools, turn.admission_source, turn.speaker_member_id),
@@ -196,7 +204,9 @@ class HostEnvironment:
                     preload=preload,
                 )
             )
-            granted_actions = _subagent_actions(verbs.actions, profile, profile_grants)
+            granted_actions = granted_without_flagged(
+                _subagent_actions(verbs.actions, profile, profile_grants), verbs.actions, withheld
+            )
             selected = _with_action_verbs(
                 _subagent_tools(all_tools, profile, profile_grants),
                 all_tools,
@@ -503,3 +513,37 @@ def _run_command(run: str, payload: BaseModel) -> str:
         pairs.append(f"INPUT_{name.upper()}={shlex.quote(text)}")
     quoted = shlex.quote(run)
     return f"env {' '.join(pairs)} sh -c {quoted}" if pairs else f"sh -c {quoted}"
+
+
+async def flags_reading_off(
+    tools: tuple[ToolDef, ...], actions: Mapping[str, Mapping[str, BoundAction]]
+) -> frozenset[str]:
+    """The flags the catalog's tools and actions name that read off for the bound workspace. A
+    flagged tool is offered by its flag, so a read of off — or no answer — takes it out of the
+    catalog the model sees and out of the grants the turn holds, the way a flag hides a screen: the
+    model never meets a verb it cannot use, and nothing is refused."""
+    declared = sorted(
+        {
+            flag
+            for flag in (
+                *(tool.flag for tool in tools),
+                *(bound.action.flag for held in actions.values() for bound in held.values()),
+            )
+            if flag is not None
+        }
+    )
+    reads = await asyncio.gather(*(flag_enabled(flag, default=False) for flag in declared))
+    return frozenset(flag for flag, on in zip(declared, reads, strict=True) if not on)
+
+
+def granted_without_flagged(
+    granted: frozenset[str],
+    actions: Mapping[str, Mapping[str, BoundAction]],
+    withheld: frozenset[str],
+) -> frozenset[str]:
+    flag_of = {
+        bound.action.canonical_id: bound.action.flag
+        for held in actions.values()
+        for bound in held.values()
+    }
+    return frozenset(action for action in granted if flag_of.get(action) not in withheld)

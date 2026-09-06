@@ -11,14 +11,13 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from ufo_ext_app_notification.deliver import (
+    DELIVER,
     DELIVER_ACTION_ID,
     DELIVERED,
     DELIVERED_TO_PORTAL_ONLY,
     NOT_THE_NOTIFICATION_AGENT,
     NOTHING_TO_DELIVER,
-    NOTIFICATIONS_OFF,
     ONE_DELIVERY_PER_TURN,
     PORTAL_ONLY,
     RELAY_INSTRUCTION,
@@ -43,7 +42,6 @@ from ufo_ext_app_notification.store import (
 from ufo_ext_app_notification.store import notification as notification_table
 
 from ufo.db import workspace_tx
-from ufo.flags import SERVED_FALSE, init_flags
 from ufo.harness.untrusted import UNTRUSTED_CLOSE
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.agent_scope import agent
@@ -522,38 +520,8 @@ async def test_deliver_refuses_unknown_refs_and_agents_that_are_not_the_app(db: 
     assert nothing.content[0].text == NOTHING_TO_DELIVER
 
 
-async def test_deliver_pushes_nothing_where_the_flag_reads_off(db: None) -> None:
-    workspace_id, member_id, main_id, inbox_id = await _seed()
-    dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
-    dbos = StubDbos()
-    ext = _ext(workspace_id, dbos)
-    try:
-        with ws(workspace_id), agent(inbox_id):
-            triage_turn, refs = await _raise_and_drain(
-                ext, inbox_id, member_id, main_id, "source/crm"
-            )
-            init_flags(
-                InMemoryProvider(
-                    {
-                        NOTIFICATION_FLAG: InMemoryFlag(
-                            default_variant="off", variants={"off": SERVED_FALSE}
-                        )
-                    }
-                )
-            )
-            result = await deliver(
-                _tool_ctx(ext, workspace_id, inbox_id, member_id, turn_id=triage_turn),
-                DeliverInput(refs=refs, text="Acme CRM changed"),
-            )
-            relays = await _turns(workspace_id, dm)
-            [row] = await _rows(workspace_id)
-    finally:
-        init_flags(InMemoryProvider({}))
-
-    assert result.is_error is True
-    assert result.content[0].text == NOTIFICATIONS_OFF
-    assert len(relays) == 1
-    assert row["delivered_surface"] is None
+def test_deliver_is_offered_by_the_apps_flag() -> None:
+    assert DELIVER.flag == NOTIFICATION_FLAG
 
 
 def test_only_the_notification_agents_allowlist_reaches_deliver() -> None:
