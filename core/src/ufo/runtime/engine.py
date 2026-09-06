@@ -3408,18 +3408,20 @@ class TurnEngine:
         counter by leaving the body rather than by a call site remembering to name it — a raise past
         the handler (an image's blob put, a cancellation) is `step_failed` with its class, never an
         unrecorded call whose handler already ran. Every end but `ok` is also a warning record
-        naming the turn, the call, the outcome, and the class — never the error text, which is a
-        handler's own message and may echo a sandbox command's stderr — so a failed call is found
-        from logs alone rather than inferred from a counter. A gating hook that fails closed denies
-        the call like a policy Deny and counts as `hook_failed`, so an extension hook that crashes
-        or hangs is not read as policy. Inside the step is where it counts: the recorded result
-        replays on a crash-recovery re-run without re-entering the body, so a replayed turn
-        re-counts nothing."""
+        naming the turn, the call, the outcome, the class, and the error result's text as
+        `error_text` — what the model reads, under a name `log` keeps and with any credential's
+        shape scrubbed by value — so a failed call is found from logs alone rather than inferred
+        from a counter. A gating hook that fails closed denies the call like a policy Deny and
+        counts as `hook_failed`, so an extension hook that crashes or hangs is not read as
+        policy. Inside the step is where it counts: the recorded result replays on a
+        crash-recovery re-run without re-entering the body, so a replayed turn re-counts
+        nothing."""
         call = bound.call
         self._live_dispatches.add(call.id)
         find_usages: list[Usage] = []
         started = time.monotonic()
         outcome, error_class = "ok", None
+        result: DispatchResult | None = None
         semantic = (
             bound.dimensions
             if isinstance(bound, _RejectedToolCall)
@@ -3430,22 +3432,21 @@ class TurnEngine:
             try:
                 if isinstance(bound, _RejectedToolCall):
                     outcome, error_class = bound.outcome, bound.error_class
-                    return DispatchResult(
-                        tool_use_id=call.id,
-                        text=bound.text,
-                        is_error=True,
-                    )
+                    result = DispatchResult(tool_use_id=call.id, text=bound.text, is_error=True)
+                    return result
                 gate = await self._prepare_dispatch(bound, target)
                 target = gate.target
                 if gate.result is not None:
                     outcome, error_class = gate.outcome, gate.error_class
-                    return gate.result
+                    result = gate.result
+                    return result
                 ready = gate.ready
                 if ready is None:
                     raise RuntimeError("dispatch gate returned no result or ready call")
                 handled = await self._invoke_dispatch(bound, ready, find_usages)
                 outcome, error_class = handled.outcome, handled.error_class
-                return await self._finish_dispatch(ready, handled, find_usages)
+                result = await self._finish_dispatch(ready, handled, find_usages)
+                return result
             except asyncio.CancelledError:
                 outcome, error_class = "step_failed", "CancelledError"
                 return DispatchResult(
@@ -3473,6 +3474,7 @@ class TurnEngine:
                         outcome=outcome,
                         error_class=error_class,
                         profile=self.profile,
+                        error_text=result.text if result is not None and result.is_error else None,
                     )
 
     async def _prepare_dispatch(

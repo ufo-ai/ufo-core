@@ -84,6 +84,33 @@ def test_log_carries_redacted_fields(caplog):
     assert record.ufo == {"turn_id": "abc"}
 
 
+def test_log_scrubs_a_credential_by_its_shape_inside_a_value(caplog):
+    """A field name says nothing about what a value carries: a sandbox command's stderr echoes the
+    proxy URL whose userinfo is the turn's run token, and a verbose client prints the header it
+    sent. Both shapes are scrubbed wherever a string sits in the record; a URL without userinfo
+    and an `@` past the authority are untouched."""
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        o11y.log(
+            "tool.dispatch_failed",
+            error_text=(
+                "curl: (56) CONNECT https://run-token-abc:ufo@proxy.example:8443 refused\n"
+                "> Proxy-Authorization: Basic cnVuLXRva2VuLWFiYzp1Zm8=\n"
+                "> authorization: Bearer sk-live-123\n"
+                "see https://docs.example/path?ref=a@b"
+            ),
+            nested={"lines": ["http://tok:ufo@127.0.0.1:3128"]},
+        )
+    assert caplog.records[-1].ufo == {
+        "error_text": (
+            "curl: (56) CONNECT https://[redacted]@proxy.example:8443 refused\n"
+            "> Proxy-Authorization: [redacted]\n"
+            "> authorization: [redacted]\n"
+            "see https://docs.example/path?ref=a@b"
+        ),
+        "nested": {"lines": ["http://[redacted]@127.0.0.1:3128"]},
+    }
+
+
 def _check_formatted_stack_names_the_raising_call():
     def wedged():
         raise TimeoutError

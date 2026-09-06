@@ -6753,9 +6753,8 @@ async def test_every_dispatch_that_does_not_end_ok_is_a_warning_record(
     db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A tool result the model has to recover from is found from logs alone: the counter says how
-    many, the record says which turn, which call, and how it ended. It carries the class and never
-    the error text — a handler's message is text this process never wrote, and `log` redacts by
-    field name, never by value. A call that ended ok writes nothing."""
+    many, the record says which turn, which call, how it ended, and what the model read — the
+    error result's text. A call that ended ok writes nothing."""
     turn = await _seed_turn("queued", None)
     engine = replace(
         _engine(turn, EchoModel(), tmp_path),
@@ -6769,9 +6768,14 @@ async def test_every_dispatch_that_does_not_end_ok_is_a_warning_record(
     )
     context = _dispatch_context(engine)
 
+    results: list[ToolResultBlock] = []
     with caplog.at_level(logging.WARNING, logger="ufo"):
         for index, name in enumerate(("errored", "raised", "fine", "unknown")):
-            await _dispatch(engine, context, ToolUseBlock(id=f"c{index}", name=name, input={}), {})
+            results.append(
+                await _dispatch(
+                    engine, context, ToolUseBlock(id=f"c{index}", name=name, input={}), {}
+                )
+            )
 
     records = [r for r in caplog.records if r.getMessage() == "tool.dispatch_failed"]
     assert [r.levelno for r in records] == [logging.WARNING] * 3
@@ -6794,7 +6798,38 @@ async def test_every_dispatch_that_does_not_end_ok_is_a_warning_record(
         },
     ]
     assert all(r.ufo["turn_id"] == str(turn.id) and r.ufo["profile"] == "main" for r in records)
-    assert all("the port is taken" not in str(r.ufo) for r in records)
+    assert [r.ufo["error_text"] for r in records] == [r.content for r in results if r.is_error]
+    assert all("the port is taken" in r.ufo["error_text"] for r in records[:2])
+
+
+async def test_the_dispatch_warning_scrubs_a_credential_the_model_still_reads(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The model reads its own sandbox's proxy URL, run token and all — that is its environment.
+    The record an operator reads carries the same text with the userinfo scrubbed, because `log`
+    knows a credential's shape even under a field name it keeps."""
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                _fixed_result_tool(
+                    "probe",
+                    "CONNECT https://run-token-abc:ufo@proxy.example:8443 refused",
+                    is_error=True,
+                ),
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _dispatch(
+            engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="probe", input={}), {}
+        )
+
+    record = next(r for r in caplog.records if r.getMessage() == "tool.dispatch_failed")
+    assert result.content == "CONNECT https://run-token-abc:ufo@proxy.example:8443 refused"
+    assert record.ufo["error_text"] == "CONNECT https://[redacted]@proxy.example:8443 refused"
 
 
 async def test_dispatch_substitutes_a_notice_for_an_error_result_carrying_no_text(

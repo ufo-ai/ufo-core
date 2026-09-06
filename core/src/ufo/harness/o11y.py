@@ -1,6 +1,7 @@
 """Tracing, metrics, and redacting structured logs; OTel SDK with OTLP export at init."""
 
 import logging
+import re
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -269,6 +270,12 @@ SENSITIVE_FIELD_KEYS = frozenset(
     }
 )
 
+REDACTED = "[redacted]"
+CREDENTIAL_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?<=://)[^/\s@]+@"), f"{REDACTED}@"),
+    (re.compile(r"((?:proxy-)?authorization:)[^\r\n]*", re.IGNORECASE), rf"\1 {REDACTED}"),
+)
+
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 _counters: dict[str, Counter] = {}
@@ -527,10 +534,17 @@ def redact_payload(fields: Mapping[str, object]) -> dict[str, JsonValue]:
 
 
 def redact_value(value: object) -> JsonValue:
-    """Pass JSON scalars through, recurse into containers, stringify everything else."""
+    """Pass JSON scalars through — a string with a credential's shape in it (a URL's userinfo, an
+    Authorization header's value) scrubbed by value, since a field's name says nothing about
+    what text it carries — recurse into containers, stringify everything else."""
     match value:
-        case None | bool() | int() | float() | str():
+        case None | bool() | int() | float():
             return value
+        case str():
+            text = value
+            for shape, replacement in CREDENTIAL_SHAPES:
+                text = shape.sub(replacement, text)
+            return text
         case Mapping():
             return redact_payload({str(key): item for key, item in value.items()})
         case Sequence() if not isinstance(value, str | bytes | bytearray):
@@ -565,7 +579,8 @@ def formatted_stack(error: BaseException) -> str:
     Carries no exception message. A message is operator-controlled text this process never wrote:
     a sandbox command's stderr reaches here as `RuntimeError`, and the sandbox's own environment
     echoes the turn's run token in `HTTP_PROXY`. A stack that formatted them would be that export
-    through a field name redaction does not match.
+    in whatever form the message gave it, and the value scrub knows a credential's shapes, not
+    every form a message can take.
 
     A `raise ... from None` severs its context deliberately, and that severing is honoured: the
     exception it was raised inside names neither its class nor its frames here.
