@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import type { EarlierMessages } from "@/lib/earlier";
-import { conversationSlotHash } from "@/lib/route";
+import { chatHash, conversationSlotHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
 import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
@@ -2047,6 +2047,81 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
 
 /** The reload half of the same fact: the transcript states files on the reply that shared them,
  *  so a conversation read back draws an earlier reply's image where it was, not nowhere. */
+test("a write-up the reply carried opens as the detailed report above the attachments", async () => {
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Move the event-driven jobs onto a queue.",
+          files: [
+            {
+              filename: "nightly-runner-queue.md",
+              url: "/dl/nightly-runner-queue.md",
+              size_bytes: 2048,
+              preview_url: null,
+              media_type: "text/markdown",
+              role: "details",
+            },
+            {
+              filename: "report.csv",
+              url: "/dl/report.csv",
+              size_bytes: 2048,
+              preview_url: null,
+              media_type: "text/csv",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  expect(await screen.findByText(saying("Move the event-driven jobs onto a queue."))).toBeTruthy();
+  const opener = screen.getByRole("button", { name: "Open detailed report" });
+  const card = screen.getByRole("button", { name: "report.csv" });
+  expect(opener.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "nightly-runner-queue.md" })).toBeNull();
+
+  await userEvent.click(opener);
+  const sheet = await screen.findByRole("dialog", { name: "nightly-runner-queue.md" });
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/dl/nightly-runner-queue.md",
+  );
+});
+
+test("a chat address naming a report opens that write-up on arrival", async () => {
+  const REPORT = "77777777-7777-4777-8777-777777777777";
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Move the event-driven jobs onto a queue.",
+          files: [
+            {
+              id: REPORT,
+              filename: "nightly-runner-queue.md",
+              url: "/dl/nightly-runner-queue.md",
+              size_bytes: 2048,
+              preview_url: null,
+              media_type: "text/markdown",
+              role: "details",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  location.hash = chatHash(CONVO_ID, undefined, REPORT);
+  open();
+
+  const sheet = await screen.findByRole("dialog", { name: "nightly-runner-queue.md" });
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/dl/nightly-runner-queue.md",
+  );
+});
+
 test("a reloaded conversation draws files on the earlier reply that shared them", async () => {
   wire(
     transcript({

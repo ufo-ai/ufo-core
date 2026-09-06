@@ -41,7 +41,7 @@ export type WorkspacePlace = {
 
 export type Route =
   | { kind: "home"; place: WorkspacePlace }
-  | { kind: "chat"; conversationId: string; slot?: string }
+  | { kind: "chat"; conversationId: string; slot?: string; report?: string }
   | {
       kind: "conversation-slot";
       agentId: string;
@@ -265,6 +265,8 @@ const WORKSPACE_PREFIX = "#/workspace/";
 const CONVERSATIONS_PART = "/conversations/";
 const SLOTS_PART = "/slots/";
 const SLOT_PARAM = "slot";
+/** The file a chat address opens on arrival, so a link from another surface lands on the write-up. */
+const REPORT_PARAM = "report";
 const ROOT_PARAM = "root";
 const CHAT_TARGET_PARAM = "c";
 const FIRST_RUN_PARAM = "first";
@@ -281,6 +283,7 @@ const TAB_NAME = "[\\w-]+";
 const PLACE_TAIL = "(?:\\?(.*))?$";
 const SETUP_SEGMENT = "/setup";
 const SLOT_ONLY = new RegExp("^" + SLOT_NAME + "$");
+const UUID_ONLY = new RegExp("^" + UUID + "$");
 
 /** A route with no parts to carry reads its own path, and reads it whatever query the address
  *  arrived holding: a member sent `#/first-run?ref=mail` asked for the first run, not for whatever
@@ -353,17 +356,23 @@ const CHAT = row(
   "chat",
   new RegExp(`^${CHAT_PREFIX}(${UUID})${PLACE_TAIL}`),
   (match) => {
-    const slot = new URLSearchParams(match[2]).get(SLOT_PARAM);
+    const place = new URLSearchParams(match[2]);
+    const slot = place.get(SLOT_PARAM);
+    const report = place.get(REPORT_PARAM);
     return {
       kind: "chat",
       conversationId: match[1],
       ...(slot && SLOT_ONLY.test(slot) ? { slot } : {}),
+      ...(report && UUID_ONLY.test(report) ? { report } : {}),
     };
   },
-  (conversationId: string, slot?: string) =>
-    CHAT_PREFIX +
-    conversationId +
-    (slot ? "?" + SLOT_PARAM + "=" + encodeURIComponent(slot) : ""),
+  (conversationId: string, slot?: string, report?: string) => {
+    const place = new URLSearchParams();
+    if (slot) place.set(SLOT_PARAM, slot);
+    if (report) place.set(REPORT_PARAM, report);
+    const tail = place.toString();
+    return CHAT_PREFIX + conversationId + (tail ? "?" + tail : "");
+  },
 );
 
 const CONVERSATION_SLOT = row(

@@ -3,9 +3,9 @@ from pathlib import Path
 from evals.harness.capability import CapabilityOutput, SharedArtifact, ToolInvocation
 from evals.suites.response_register import (
     CASES,
+    carried_report_scorer,
     conversational_scorer,
     shared_report_scorer,
-    written_report_scorer,
 )
 
 OBSERVED_RESPONSE = (
@@ -18,36 +18,55 @@ OBSERVED_RESPONSE = (
     "myself."
 )
 PLAIN_RESPONSE = (
-    "GitHub access is still broken on my side. I wrote the full change to "
-    "glm-provider-routing.md, with the environment value, client parsing, and checks. The report "
-    "is ready but was not sent."
+    "GitHub access is still broken on my side. Set the environment value for both models, parse "
+    "the provider object on the client, and run the two checks before opening the PR."
+)
+CARRIED_REPORT = (
+    b"# Provider routing\n\nEnvironment value and client parsing.\n\n## Tests\n\nRun both checks.\n"
 )
 
 
-def _report_output(tmp_path: Path, response: str) -> CapabilityOutput:
-    (tmp_path / "glm-provider-routing.md").write_text(
-        "# Provider routing\n\nEnvironment value and client parsing.\n\n"
-        "## Tests\n\nRun both checks."
+def _carried_output(response: str) -> CapabilityOutput:
+    return CapabilityOutput(
+        response=response,
+        calls=(),
+        artifacts=(SharedArtifact("glm-provider-routing.md", CARRIED_REPORT, "details"),),
     )
-    return CapabilityOutput(response=response, calls=(), workspace_dir=tmp_path)
 
 
-async def test_written_report_rejects_the_observed_workspace_link(tmp_path: Path) -> None:
-    grader = written_report_scorer(1, 100, 5, 1, 2)
+async def test_carried_report_rejects_the_observed_workspace_link() -> None:
+    grader = carried_report_scorer(1, 100, 5, 1, 2)
 
-    verdict = await grader(_report_output(tmp_path, OBSERVED_RESPONSE))
+    verdict = await grader(_carried_output(OBSERVED_RESPONSE))
 
     assert not verdict.passed
     assert verdict.evidence["unreachableMarkdownTargets"] == ["/workspace/glm-provider-routing.md"]
     assert verdict.evidence["workspacePaths"] == ["/workspace/glm-provider-routing.md"]
 
 
-async def test_written_report_accepts_the_report_name_as_plain_text(tmp_path: Path) -> None:
-    grader = written_report_scorer(1, 100, 5, 1, 2)
+async def test_carried_report_accepts_a_plain_summary_beside_its_artifact() -> None:
+    grader = carried_report_scorer(1, 100, 5, 1, 2, expected_name="glm-provider-routing.md")
 
-    verdict = await grader(_report_output(tmp_path, PLAIN_RESPONSE))
+    verdict = await grader(_carried_output(PLAIN_RESPONSE))
 
     assert verdict.passed, verdict.reason
+    assert verdict.evidence["carriedArtifacts"] == 1
+
+
+async def test_carried_report_fails_a_reply_that_sent_a_file_or_carried_none() -> None:
+    grader = carried_report_scorer(1, 100, 5, 1, 2)
+
+    bare = await grader(CapabilityOutput(response=PLAIN_RESPONSE, calls=()))
+    sent = await grader(
+        CapabilityOutput(
+            response=PLAIN_RESPONSE,
+            calls=(),
+            artifacts=(SharedArtifact("glm-provider-routing.md", CARRIED_REPORT, "file"),),
+        )
+    )
+
+    assert not bare.passed and "carried 0 artifacts" in bare.reason
+    assert not sent.passed and "shared 1 files" in sent.reason
 
 
 async def test_chat_reply_accepts_an_https_markdown_link() -> None:

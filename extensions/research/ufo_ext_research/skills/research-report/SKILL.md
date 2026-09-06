@@ -8,15 +8,14 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 
 ### Where the report goes
 
-**Always write the report to a file with a `.md` extension. Share that file only when the user asked
-for a file or a format, or when they ask for proof, evidence, or a fuller explanation.**
+**The report rides the closing message as its artifact tag, `<artifact name="<topic>.md">` to
+`</artifact>`. Share it with `share_file` only when the user asked for a file, a document, or a
+format.**
 
 - Derive the filename from the query topic: `<topic>.md`
 - Use lowercase kebab-case for filenames
-- Write the file to the workspace directory using the file writing tool
-- Do not share the file by default — tell the user the full write-up is written and can be sent
+- The chat response carries a brief summary — the full report lives in the tag
 - When a file is asked for, share it so the user can view the rendered report
-- The chat response should contain a brief summary — the full report lives in the `.md` file
 
 ### Content Format
 
@@ -285,8 +284,8 @@ Adapt structure to what the query actually requires—do not force a template on
 
 ### Quality Checklist
 
-- [ ] Report written to a `<topic>.md` file, named in the chat response, and shared only when the
-      user asked for a file or asked for proof or a fuller explanation
+- [ ] Report carried in the closing message's `<artifact name="<topic>.md">` tag, and shared only
+      when the user asked for a file, a document, or a format
 - [ ] Valid GFM syntax, appropriate heading hierarchy
 - [ ] Markdown tables for comparisons and structured data
 - [ ] No MMD syntax — plain GFM only (LaTeX math allowed per `<mathematical_expressions>`)

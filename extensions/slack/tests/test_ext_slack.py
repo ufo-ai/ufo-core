@@ -3504,11 +3504,13 @@ async def _seed_shared_files(
     turn_id: UUID,
     blob,
     files: Sequence[tuple[str, str | None]],
+    role: str = "file",
+    shared_at: datetime | None = None,
 ) -> None:
     """One turn's share of several files, seeded in share order with the bytes they stream. Each row
     is shared a second after the one before it while the keys descend, so a delivery that reads the
     files in share order cannot be a delivery that read them by key."""
-    shared_at = datetime.now(UTC)
+    shared_at = shared_at or datetime.now(UTC)
     for index, (filename, subject) in enumerate(files):
         blob_key = f"artifacts/{turn_id}/{len(files) - index:03d}-{filename}"
         content = f"{filename}-CONTENT".encode()
@@ -3524,6 +3526,7 @@ async def _seed_shared_files(
                     subject=subject,
                     media_type="text/plain",
                     size_bytes=len(content),
+                    role=role,
                     created_at=shared_at + timedelta(seconds=index),
                     updated_at=shared_at + timedelta(seconds=index),
                 )
@@ -3621,6 +3624,52 @@ async def test_an_oversize_file_is_linked_while_the_rest_ride_the_one_message(
         if str(r.url) == slack.SLACK_FILES_GET_UPLOAD_URL
     ]
     assert reserved == ["first.txt", "second.txt"]
+
+
+async def test_a_file_the_reply_carried_is_a_link_under_the_answer_and_no_upload(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The write-up a closing reply carried is a link right under the answer and never an upload, so
+    the thread gains no second message for it, and the message posts with unfurling off so the link
+    grows no card. This rig installs no portal, so the link is the TTL download the terminal prints;
+    a file the turn shared alongside still rides the one attachment message."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "the answer", blob, artifact=False)
+    shared_at = datetime.now(UTC)
+    await _seed_shared_files(
+        workspace_id, turn_id, blob, (("plan.md", None),), role="details", shared_at=shared_at
+    )
+    await _seed_shared_files(
+        workspace_id,
+        turn_id,
+        blob,
+        (("data.csv", None),),
+        shared_at=shared_at + timedelta(seconds=5),
+    )
+
+    await app.state.writeback_poller.drain()
+
+    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
+    assert len(posts) == 1
+    body = json.loads(posts[0].content)
+    assert slack.SLACK_OVERSIZE_HEADING not in body["text"]
+    match = re.match(
+        rf"the answer\n\n\[{re.escape(slack.DETAILS_LINK_TEXT)}\]\((https://[^)]+)\)$", body["text"]
+    )
+    assert match is not None, body["text"]
+    assert match.group(1).startswith(f"{PUBLIC_BASE_URL}/artifacts/")
+    assert body["unfurl_links"] is False and body["unfurl_media"] is False
+    assert [block["type"] for block in body["blocks"] if block["type"] == "actions"] == []
+    assert body["blocks"][-1]["type"] == "context"
+    assert _shared_files(recorder) == [[{"id": _file_id("data.csv"), "title": "data.csv"}]]
+    reserved = [
+        parse_qs(r.content.decode())["filename"][0]
+        for r in recorder
+        if str(r.url) == slack.SLACK_FILES_GET_UPLOAD_URL
+    ]
+    assert reserved == ["data.csv"]
 
 
 async def test_a_share_past_the_per_message_cap_takes_the_fewest_messages(

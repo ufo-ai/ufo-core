@@ -1818,6 +1818,7 @@ async def _shared_artifact_row(
     size_bytes: int,
     *,
     attached_by_member: bool = False,
+    role: str = "file",
 ) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1830,6 +1831,7 @@ async def _shared_artifact_row(
                 media_type="application/octet-stream",
                 size_bytes=size_bytes,
                 attached_by_member=attached_by_member,
+                role=role,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1983,6 +1985,40 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
     assert [row["name"] for row in newest_first["objects"]] == [beta, alpha, compose, blob]
     assert {row["name"] for row in documents["objects"]} == {alpha, beta, compose}
     assert [row["name"] for row in others["objects"]] == [blob]
+
+
+async def test_a_file_a_reply_carried_is_no_artifact_object(db: None, tmp_path: Path) -> None:
+    """A `details` row is the write-up a closing reply delivered beside itself: the kind lists no
+    object for it, names none for it, and a get by the name it would have had finds nothing — while
+    a `file` share of the same name in the same conversation is the object, unsuffixed."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        await _shared_artifact_row(
+            turn, f"artifacts/{uuid4()}/plan.md", "plan.md", 3, role="details"
+        )
+        name = f"{turn.conversation_id.hex[:8]}-plan-md"
+
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
+        assert listing["objects"] == []
+        with pytest.raises(UnknownObject):
+            await _agent_text(
+                turn.agent_id, tools, "object_get", ctx, ref=f"{ARTIFACT_KIND}/{name}"
+            )
+
+        await ctx.sandbox.bash("printf 'the plan' > plan.md")
+        shared = json.loads(
+            await _text(tools, "share_file", ctx, files=[{"file_path": "plan.md"}])
+        )[0]
+        assert shared["artifact"] == name
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
+        assert [row["name"] for row in listing["objects"]] == [name]
 
 
 async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_back(

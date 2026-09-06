@@ -1,33 +1,55 @@
-"""The reply spans a round marks for a member, and the redaction that keeps their markup off every
-surface.
+"""The spans a round marks — `<reply-to message="…">` replies spoken mid-turn and the
+`<artifact name="…">` write-up a closing answer carries — and the redaction that keeps their markup
+off every surface.
 
-A turn speaks before it ends by tagging content in its intermediate output:
-
-    <reply-to message="a532d68a-6724-5bd3-b34f-3ec90a57db80">
-    Filed the launch issue as metalcraftai/ufo#1801.
-    </reply-to>
-
-`marked_replies` reads those spans out of a completed round's text and returns the text the window
-keeps — the same words with the markup gone, so the round records what it said without inviting the
-model to say it again. `ReplyRedaction` does that job incrementally over the live delta stream,
-where a chunk boundary falls anywhere: it withholds a span, publishes everything else, and releases
-a `<` the following characters prove to be prose.
-
-Malformed markup reaches no member by construction. A stray closer and a nested opener are stripped
-rather than delivered, and an opener no closer answered delivers nothing at all — the words a member
-reads are only the ones the model closed."""
+`marked_replies` reads the reply spans out of a completed round's text and returns the text the
+window keeps, the same words with the markup gone. `marked_artifacts` reads the artifact spans out
+of a closing answer and returns the answer without them: a body is a file beside the reply, never
+words in it. `SpanRedaction` does both incrementally over the live delta stream, where a chunk
+boundary falls anywhere. Malformed markup reaches no member: a stray closer and a nested opener are
+stripped, and an opener no closer answered delivers nothing."""
 
 import re
 from dataclasses import dataclass, field
 from uuid import UUID
+
+from ufo.harness.containment import contained_leaf
 
 REPLY_TAG = "reply-to"
 REPLY_CLOSER = f"</{REPLY_TAG}>"
 REPLY_OPENER = re.compile(rf'<{REPLY_TAG}\s+message="([^"<>]*)"\s*>')
 REPLY_SPAN = re.compile(f"{REPLY_OPENER.pattern}(.*?){re.escape(REPLY_CLOSER)}", re.DOTALL)
 REPLY_MARKUP = re.compile(rf"<{REPLY_TAG}(?:\s[^<>]*)?>|{re.escape(REPLY_CLOSER)}")
-OPENER_HEAD = f"<{REPLY_TAG}"
-PARTIAL_OPENER = re.compile(rf"<{REPLY_TAG}\s[^<>]*")
+
+ARTIFACT_TAG = "artifact"
+ARTIFACT_CLOSER = f"</{ARTIFACT_TAG}>"
+ARTIFACT_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+name="([^"<>]*)"\s*>')
+ARTIFACT_SPAN = re.compile(
+    rf"\s*{ARTIFACT_OPENER.pattern}(.*?){re.escape(ARTIFACT_CLOSER)}", re.DOTALL
+)
+ARTIFACT_MARKUP = re.compile(rf"<{ARTIFACT_TAG}(?:\s[^<>]*)?>|{re.escape(ARTIFACT_CLOSER)}")
+ARTIFACT_FALLBACK_NAME = "artifact"
+ARTIFACT_DEFAULT_SUFFIX = ".md"
+
+
+@dataclass(frozen=True)
+class _Tag:
+    opener: re.Pattern[str]
+    closer: str
+    head: str
+    partial: re.Pattern[str]
+
+
+SPAN_TAGS = (
+    _Tag(REPLY_OPENER, REPLY_CLOSER, f"<{REPLY_TAG}", re.compile(rf"<{REPLY_TAG}\s[^<>]*")),
+    _Tag(
+        ARTIFACT_OPENER,
+        ARTIFACT_CLOSER,
+        f"<{ARTIFACT_TAG}",
+        re.compile(rf"<{ARTIFACT_TAG}\s[^<>]*"),
+    ),
+)
+SPAN_MARKUP = re.compile(f"{REPLY_MARKUP.pattern}|{ARTIFACT_MARKUP.pattern}")
 
 
 @dataclass(frozen=True)
@@ -37,6 +59,15 @@ class MarkedReply:
 
     message_ref: UUID | None
     text: str
+
+
+@dataclass(frozen=True)
+class MarkedArtifact:
+    """One artifact a closing answer carried: the download name its tag gave it and its body, the
+    file's whole text."""
+
+    name: str
+    body: str
 
 
 def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
@@ -51,6 +82,19 @@ def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
     return tuple(replies), REPLY_MARKUP.sub("", text)
 
 
+def marked_artifacts(text: str) -> tuple[tuple[MarkedArtifact, ...], str]:
+    """The answer's closed artifact spans in the order the model wrote them, and the answer with
+    every span and every trace of the markup removed — the whitespace that led into a span goes
+    with it. A span with nothing in it carries no file. A name is its last path segment, `artifact`
+    when the tag named none, and a name with no extension is a Markdown file."""
+    artifacts: list[MarkedArtifact] = []
+    for match in ARTIFACT_SPAN.finditer(text):
+        body = match.group(2).strip()
+        if body:
+            artifacts.append(MarkedArtifact(name=_artifact_name(match.group(1)), body=body + "\n"))
+    return tuple(artifacts), ARTIFACT_MARKUP.sub("", ARTIFACT_SPAN.sub("", text))
+
+
 def _named_message(named: str) -> UUID | None:
     try:
         return UUID(named.strip())
@@ -58,45 +102,53 @@ def _named_message(named: str) -> UUID | None:
         return None
 
 
-@dataclass
-class ReplyRedaction:
-    """One round's live text minus its reply spans, chunk by chunk.
+def _artifact_name(named: str) -> str:
+    name = contained_leaf(named.strip(), ARTIFACT_FALLBACK_NAME)
+    return name if "." in name else name + ARTIFACT_DEFAULT_SUFFIX
 
-    A span is delivered as its own member-visible reply once the round completes, so the live stream
-    must not carry it as narration too — and must never carry its markup, which is the one thing no
-    member may read. `feed` returns what is safe to publish now: text before an opener, text after
-    a closer, and a `<` the following characters prove to be prose. Everything from an opener to its
-    closer is withheld, and so is the tail that could still be growing into a tag. What is still
-    withheld when the round ends is dropped with the redaction: an unclosed span, or the head of a
-    tag the model never finished. The window keeps the round's whole text either way, so the stream
-    loses a preview of those characters and no member loses words."""
+
+@dataclass
+class SpanRedaction:
+    """One round's live text minus its marked spans, chunk by chunk: a reply span is delivered on
+    its own and an artifact span becomes a file, so neither streams as narration and their markup
+    never reaches a member. `feed` publishes text before an opener, text after a closer, and a `<`
+    the following characters prove to be prose; a span and a tail still growing into a tag are
+    withheld, and whatever is withheld when the round ends is dropped — the window keeps the whole
+    text."""
 
     held: str = field(default="")
-    inside: bool = field(default=False)
+    closer: str | None = field(default=None)
 
     def feed(self, chunk: str) -> str:
         self.held += chunk
         published: list[str] = []
         while True:
-            if self.inside:
-                cut = self.held.find(REPLY_CLOSER)
+            if self.closer is not None:
+                cut = self.held.find(self.closer)
                 if cut == -1:
-                    self.held = _growing_suffix(self.held, REPLY_CLOSER)
+                    self.held = _growing_suffix(self.held, self.closer)
                     break
-                self.held = self.held[cut + len(REPLY_CLOSER) :]
-                self.inside = False
+                self.held = self.held[cut + len(self.closer) :]
+                self.closer = None
                 continue
-            opener = REPLY_OPENER.search(self.held)
-            if opener is not None:
-                published.append(self.held[: opener.start()])
-                self.held = self.held[opener.end() :]
-                self.inside = True
+            opened = _first_opener(self.held)
+            if opened is not None:
+                match, tag = opened
+                published.append(self.held[: match.start()])
+                self.held = self.held[match.end() :]
+                self.closer = tag.closer
                 continue
             settled = _settled_chars(self.held)
             published.append(self.held[:settled])
             self.held = self.held[settled:]
             break
-        return REPLY_MARKUP.sub("", "".join(published))
+        return SPAN_MARKUP.sub("", "".join(published))
+
+
+def _first_opener(text: str) -> tuple[re.Match[str], _Tag] | None:
+    """The earliest opener of any span tag in `text`, with the tag it opens."""
+    found = [(match, tag) for tag in SPAN_TAGS if (match := tag.opener.search(text)) is not None]
+    return min(found, key=lambda pair: pair[0].start(), default=None)
 
 
 def _growing_suffix(text: str, token: str) -> str:
@@ -109,11 +161,12 @@ def _growing_suffix(text: str, token: str) -> str:
 
 def _settled_chars(text: str) -> int:
     """How much of `text` can be published now: everything up to a trailing `<` that could still be
-    growing into a reply tag, and all of it when the last `<` cannot be one."""
+    growing into a span tag, and all of it when the last `<` cannot be one."""
     cut = text.rfind("<")
     if cut == -1:
         return len(text)
     tail = text[cut:]
-    if OPENER_HEAD.startswith(tail) or REPLY_CLOSER.startswith(tail):
-        return cut
-    return cut if PARTIAL_OPENER.fullmatch(tail) else len(text)
+    for tag in SPAN_TAGS:
+        if tag.head.startswith(tail) or tag.closer.startswith(tail) or tag.partial.fullmatch(tail):
+            return cut
+    return len(text)

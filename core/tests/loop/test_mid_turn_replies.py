@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -55,7 +55,7 @@ from ufo.harness.models.interface import (
     ToolCallStart,
     Usage,
 )
-from ufo.harness.replies import MarkedReply
+from ufo.harness.replies import MarkedReply, marked_artifacts
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.billing.balance import balance_park_message, credit, set_reserve
 from ufo.runtime.engine import FORCE_FINAL_PROMPT
@@ -73,6 +73,7 @@ from ufo.runtime.ext.surface import (
     writeback_workspaces,
 )
 from ufo.runtime.hub import Reply
+from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission
 from ufo.runtime.workspace import ws
@@ -432,6 +433,154 @@ async def test_the_forced_closing_round_carries_its_span_as_the_answer(
     assert frame is not None
     assert "reply-to" not in frame.text
     assert SPAN_TEXT in frame.text
+    assert rows == []
+
+
+REPORT_NAME = "nightly-runner-queue.md"
+REPORT_BODY = (
+    "# Nightly runner\n\nMove the event-driven jobs onto a queue.\n\n## Costs\n\nOne service."
+)
+CARRYING_ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
+
+
+def _carried(answer: str, name: str = REPORT_NAME, body: str = REPORT_BODY) -> str:
+    return f'{answer}\n\n<artifact name="{name}">\n{body}\n</artifact>\n'
+
+
+@dataclass
+class CarryingModel:
+    """Closes the turn with an answer that carries its write-up in an artifact tag, streamed in
+    chunks that split the tag's markup."""
+
+    text: str = _carried(CARRYING_ANSWER)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        for start in range(0, len(self.text), 7):
+            yield TextDelta(text=self.text[start : start + 7])
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def _shared(turn_id: UUID) -> list[sa.Row]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(tables.shared_artifact)
+                    .where(tables.shared_artifact.c.turn_id == turn_id)
+                    .order_by(tables.shared_artifact.c.created_at)
+                )
+            ).all()
+        )
+
+
+async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_beside_the_reply(
+    db: None, tmp_path: Path
+) -> None:
+    """The tag's body is a `details` share of the turn, the terminal reply is the answer without
+    it, the live stream never carried the body or the markup, and the window keeps the answer as
+    written so a later ask for the file finds its words."""
+    turn = await _seed_turn("queued", None)
+    with ws(turn.workspace_id):
+        hub = RecordingHub()
+        engine = replace(_engine(turn, CarryingModel(), tmp_path), hub=hub)
+        frame = await engine.run()
+        rows = await _shared(turn.id)
+        stored = await engine.transcript.read()
+        bytes_stored = await engine.blob.get(rows[0].blob_key) if rows else b""
+
+    assert frame is not None
+    assert (frame.status, frame.text) == ("done", CARRYING_ANSWER + "\n")
+    assert [(row.filename, row.role, row.media_type, row.size_bytes) for row in rows] == [
+        (REPORT_NAME, "details", "text/markdown", len(REPORT_BODY) + 1)
+    ]
+    assert bytes_stored == (REPORT_BODY + "\n").encode()
+    streamed = "".join(f.text for f in hub.frames if isinstance(f, TextDelta))
+    assert streamed == CARRYING_ANSWER + "\n\n\n"
+    assert stored is not None
+    said = [
+        message.content if isinstance(message.content, str) else message.content[0].text
+        for message in stored.messages
+        if message.role == "assistant"
+    ]
+    assert any(f'<artifact name="{REPORT_NAME}">' in text and REPORT_BODY in text for text in said)
+
+
+async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_once(
+    db: None, tmp_path: Path
+) -> None:
+    """The carried file's row lands in the commit that makes the turn terminal, never beside it: an
+    answer refused for a pending arrival leaves no row and no bytes, and the close that follows
+    lands exactly one of each, so a writeback claimed the instant the turn is terminal reads it."""
+    turn = await _seed_turn("queued", None)
+    member = await _conversation_member(turn.conversation_id)
+    with ws(turn.workspace_id):
+        model = CarryingArrivingModel(turn=turn, member_id=member)
+        engine = _engine(turn, model, tmp_path, member_id=member)
+        frame = await engine.run()
+        rows = await _shared(turn.id)
+        keys = sorted(entry.key for entry in await engine.blob.list(ARTIFACT_KEY_PREFIX))
+
+    assert frame is not None and frame.status == "done"
+    assert [(row.filename, row.role) for row in rows] == [(REPORT_NAME, "details")]
+    assert keys == [rows[0].blob_key]
+
+
+@dataclass
+class CarryingArrivingModel:
+    """Carries a write-up on a first answer a member message interrupts, then carries it again on
+    the close that lands."""
+
+    turn: Turn
+    member_id: UUID
+    rounds: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.rounds += 1
+        if self.rounds == 1:
+            await _queue_arrival(self.turn, "one more thing", self.member_id)
+        yield TextDelta(text=_carried("first" if self.rounds == 1 else CARRYING_ANSWER))
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_replayed_terminal_keeps_the_bytes_its_landed_rows_point_at(
+    db: None, tmp_path: Path
+) -> None:
+    """The same attempt reaching the terminal write twice — a lost acknowledgement, a recovery that
+    adopted it — stages the same keys and finds the turn already terminal; the bytes the first
+    write's rows point at stay, because a row is what keeps them."""
+    turn = await _seed_turn("queued", None)
+    with ws(turn.workspace_id):
+        engine = _engine(turn, CarryingModel(), tmp_path)
+        frame = await engine.run()
+        rows = await _shared(turn.id)
+        carried, _delivered = marked_artifacts(_carried(CARRYING_ANSWER))
+        staged = await engine._stage_carried_artifacts(carried)
+        replayed, committed = await engine._commit_once(
+            "done", [], CARRYING_ANSWER, None, None, None, None, (), False, (), None, staged
+        )
+        kept = await engine.blob.get(rows[0].blob_key)
+        after = await _shared(turn.id)
+
+    assert frame is not None and replayed is not None and committed is False
+    assert [file.key for file in staged] == [rows[0].blob_key]
+    assert kept == (REPORT_BODY + "\n").encode()
+    assert [row.blob_key for row in after] == [rows[0].blob_key]
+
+
+async def test_a_child_answer_keeps_its_artifact_tag_as_text_for_its_parent(
+    db: None, tmp_path: Path
+) -> None:
+    """A child's answer is text its parent reads, whether the child ran a profile or is a workspace
+    agent spawned as a target: the tag stays in the answer as written and no file lands, so a child
+    cannot deliver to a member it does not have."""
+    turn = (await _seed_turn("queued", None)).model_copy(update={"parent_turn_id": uuid4()})
+    with ws(turn.workspace_id):
+        engine = _engine(turn, CarryingModel(), tmp_path)
+        frame = await engine.run()
+        rows = await _shared(turn.id)
+
+    assert frame is not None
+    assert frame.text == _carried(CARRYING_ANSWER)
     assert rows == []
 
 

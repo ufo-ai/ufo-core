@@ -189,5 +189,5 @@ short line, a headline, or a quick tighten for yourself.
 6. Deliver the full draft plus a short `What changed` section. When the draft is long enough to be an
    artifact, keep the inline message to the conclusion and what changed, and share the file only when
    the ask carries a share trigger from the delivery register: the user asked for a file, a document,
-   or a format, asked for the draft itself, or asked for proof, evidence, or a fuller explanation.
+   or a format, or for a copy of the draft or a new revision of a file you already shared.
    Length is not a trigger, and neither is "send" or "give me" on its own.

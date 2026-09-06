@@ -15,6 +15,7 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { useEarlierMessages, type EarlierMessages } from "@/lib/earlier";
+import { useRoute } from "@/lib/router";
 import type { ActionView, Agent, Conversation, Message, Transcript } from "@/lib/types";
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
@@ -202,12 +203,17 @@ export function ConversationTranscript({
   messages: Message[];
   earlier?: EarlierMessages;
 }) {
+  const route = useRoute();
   return (
     <Section title={title}>
       {messages.length ? (
         <TranscriptScroll>
           <OpenedAtTheFoot>
-            <MessageLog messages={messages} earlier={earlier} />
+            <MessageLog
+              messages={messages}
+              earlier={earlier}
+              report={route.kind === "chat" ? (route.report ?? null) : null}
+            />
           </OpenedAtTheFoot>
         </TranscriptScroll>
       ) : (

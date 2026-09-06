@@ -1,12 +1,22 @@
-"""What a round's reply tags mean: which spans a member is owed, what the window keeps, and what a
-live stream is allowed to publish while the tag is still arriving."""
+"""What a round's span tags mean: which spans a member is owed, what the window keeps, what a
+closing answer carries as a file, and what a live stream is allowed to publish while a tag is
+still arriving."""
 
 from uuid import UUID
 
-from ufo.harness.replies import MarkedReply, ReplyRedaction, marked_replies
+from ufo.harness.replies import (
+    MarkedArtifact,
+    MarkedReply,
+    SpanRedaction,
+    marked_artifacts,
+    marked_replies,
+)
 
 MESSAGE = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
 OTHER = UUID("b6f0c2de-0d7a-5a2f-9f5e-8f6b2ad1c4e7")
+REPORT = "# Nightly runner\n\nMove the event-driven jobs onto a queue.\n\n## Costs\n\nOne service."
+ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
+CARRIED = f'{ANSWER}\n\n<artifact name="nightly-runner-queue.md">\n{REPORT}\n</artifact>\n'
 
 
 def _span(message: str, body: str) -> str:
@@ -49,25 +59,96 @@ def test_nested_markup_is_stripped_and_invalid_refs_remain_deliverable() -> None
     assert replies == (MarkedReply(message_ref=None, text="here it is"),)
 
 
+def test_reply_markup_leaves_an_artifact_tag_in_the_window() -> None:
+    replies, window = marked_replies(f"{_span(str(MESSAGE), 'hi')}{CARRIED}")
+    assert [reply.text for reply in replies] == ["hi"]
+    assert window == f"\nhi\n{CARRIED}"
+
+
+def test_a_closing_answer_yields_its_artifact_and_the_words_without_it() -> None:
+    artifacts, delivered = marked_artifacts(CARRIED)
+    assert artifacts == (MarkedArtifact(name="nightly-runner-queue.md", body=REPORT + "\n"),)
+    assert delivered == ANSWER + "\n"
+
+
+def test_artifacts_keep_their_order_and_an_empty_one_carries_nothing() -> None:
+    text = (
+        '<artifact name="a.md">first</artifact>'
+        '<artifact name="b.md">  </artifact>'
+        '<artifact name="c.csv">x,y</artifact> done'
+    )
+    artifacts, delivered = marked_artifacts(text)
+    assert [(artifact.name, artifact.body) for artifact in artifacts] == [
+        ("a.md", "first\n"),
+        ("c.csv", "x,y\n"),
+    ]
+    assert delivered == " done"
+
+
+def test_an_artifact_name_is_its_leaf_and_defaults_to_markdown() -> None:
+    text = (
+        '<artifact name="/workspace/reports/q3.md">a</artifact>'
+        '<artifact name="plan">b</artifact>'
+        '<artifact name="">c</artifact>'
+        '<artifact name="..">d</artifact>'
+    )
+    artifacts, _ = marked_artifacts(text)
+    assert [artifact.name for artifact in artifacts] == [
+        "q3.md",
+        "plan.md",
+        "artifact.md",
+        "artifact.md",
+    ]
+
+
+def test_stray_artifact_markup_is_stripped_and_an_unclosed_span_stays_prose() -> None:
+    artifacts, delivered = marked_artifacts('Done.</artifact> <artifact name="x.md">half a report')
+    assert artifacts == ()
+    assert delivered == "Done. half a report"
+
+
 def test_a_stream_publishes_narration_at_every_chunk_size_and_never_the_span() -> None:
     text = f"before {_span(str(MESSAGE), 'the reply')} after"
     for size in (1, 3, 7, 512):
-        redaction = ReplyRedaction()
+        redaction = SpanRedaction()
         published = "".join(
             redaction.feed(text[start : start + size]) for start in range(0, len(text), size)
         )
         assert published == "before  after"
 
 
+def test_a_stream_withholds_an_artifact_span_at_every_chunk_size() -> None:
+    for size in (1, 5, 7, 512):
+        redaction = SpanRedaction()
+        published = "".join(
+            redaction.feed(CARRIED[start : start + size]) for start in range(0, len(CARRIED), size)
+        )
+        assert published == ANSWER + "\n\n\n"
+        assert "artifact" not in published
+        assert "Nightly" not in published
+
+
+def test_a_stream_redacts_a_reply_and_an_artifact_in_one_round() -> None:
+    text = (
+        f'Working. {_span(str(MESSAGE), "spoken")} then <artifact name="x.md">body</artifact> end'
+    )
+    redaction = SpanRedaction()
+    published = "".join(redaction.feed(char) for char in text)
+    assert published == "Working.  then  end"
+
+
 def test_stream_redaction_handles_partial_unclosed_and_stray_markup() -> None:
-    partial = ReplyRedaction()
+    partial = SpanRedaction()
     assert partial.feed("compare <re") == "compare "
     assert partial.feed("play> to <reply") == "<replay> to "
     assert partial.feed(" it") == "<reply it"
 
-    unclosed = ReplyRedaction()
+    unclosed = SpanRedaction()
     assert unclosed.feed(f'here <reply-to message="{MESSAGE}">unfinished') == "here "
     assert unclosed.feed(" still going") == ""
 
-    assert ReplyRedaction().feed("done <reply-to") == "done "
-    assert ReplyRedaction().feed("text</reply-to>more") == "textmore"
+    assert SpanRedaction().feed("done <reply-to") == "done "
+    assert SpanRedaction().feed("text</reply-to>more") == "textmore"
+    assert SpanRedaction().feed("a <b> c <artifice> d") == "a <b> c <artifice> d"
+    assert SpanRedaction().feed("done <artifact") == "done "
+    assert SpanRedaction().feed("text</artifact>more") == "textmore"

@@ -686,7 +686,21 @@ reads it only under `member_context_read`.
   sealed handoff gated per slot by `credential_prompt_pending`, and the turn's shared files
   deliver as TTL `artifact_link` downloads read off `shared_artifacts`. Each committed share
   publishes an `ArtifactsChanged` frame, so the live surface reads and draws the file before the
-  terminal frame; the terminal read remains the durable recovery path. The held stream is also
+  terminal frame; the terminal read remains the durable recovery path. A shared file carries a
+  `role`. A `file` came through `share_file`: a surface that can attach attaches it, and it is an
+  `artifact` object. A `details` file is the write-up the closing reply carried in an
+  `<artifact name="…">` tag — the engine stages its bytes, lands the `details` row in the
+  transaction that commits the terminal, and delivers the reply without the tag — so every surface offers
+  it beside the reply as an Open detailed report link under the answer and above the attachments,
+  none attaches it, and no artifacts listing names it. In the portal the link opens the report in
+  the side sheet; from Slack and iMessage it is the portal address of the conversation carrying the
+  file's id (`#/c/<conversation>?report=<artifact id>`), read under the presser's own session and
+  posted with unfurling off, falling back to the TTL download where the deploy has no portal or
+  the conversation is a room the portal shows nobody; the terminal prints its link line. The
+  model's window keeps the answer with its tag, so a later ask for the file has the words; every
+  surface reads the transcript through `read_transcript`, which drops the spans. A child turn's
+  answer keeps its tag as text for the parent that reads it. A subagent's answer keeps
+  its tag as text for its parent. The held stream is also
   where a `client`-carrier turn reaches the member's machine: the same connection that tails the
   turn's frames also carries each sandbox op down as one directive and takes its result back as the
   client's next request — the rendezvous the carrier awaits (§Sandboxing), gated so only the member
@@ -913,7 +927,8 @@ signed TTL link a delivery would and paging by the same shared cursor, `shared_a
 breaking a tie two files one turn shared in one instant would otherwise leave unbroken. The
 Artifacts app lists a file when a member-admitted turn already stood in its conversation when it
 was shared, while a scheduled file from a machine lane stays on its Radar run. A member entering
-the conversation later does not move its earlier files into Artifacts. Opening one pins a viewer
+the conversation later does not move its earlier files into Artifacts. A `details` file is never
+listed: it belongs to the reply that carried it. Opening one pins a viewer
 over the listing that renders what the page honestly can — a validated raster preview inline, text
 up to a bounded read, and a plain refusal to preview anything else — leaving the download an
 explicit act rather than the click's default. A raw SVG is never drawn in the member's page.
@@ -1028,7 +1043,8 @@ owning extension's data, so neither reaches a core internal nor the other extens
 Two-way attachments cross under explicit bounds at every hop: an inbound Slack file streams from
 `url_private` in bounded chunks into the conversation's workspace before the turn runs; a shared
 file (`share_file` → a `shared_artifact` record) streams from the blob store to Slack's chunked
-external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts).
+external-upload API, into the conversation's thread (Slack forbids threading on a reply's ts); a
+`details` file is an Open detailed report link under the answer and never an upload.
 iMessage downloads and uploads through Spectrum's gRPC attachment service under the same workspace
 and payload bounds. The
 web composer's inbound files are refused unless the request declares a length the server frames

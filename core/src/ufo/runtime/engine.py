@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from html import escape
 from io import BytesIO
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -117,7 +117,13 @@ from ufo.harness.o11y import (
     turn_profile,
     warn,
 )
-from ufo.harness.replies import MarkedReply, ReplyRedaction
+from ufo.harness.replies import (
+    ARTIFACT_TAG,
+    MarkedArtifact,
+    MarkedReply,
+    SpanRedaction,
+    marked_artifacts,
+)
 from ufo.harness.rounds import ModelRoundRunner, RoundEventTypes
 from ufo.harness.sandbox.session import (
     TOOL_OUTPUT_DIRNAME,
@@ -171,6 +177,7 @@ from ufo.runtime.hub import (
     SubagentActivity,
     Terminal,
 )
+from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.memory import MemorySearch
 from ufo.runtime.object_name import ObjectRef
@@ -183,6 +190,7 @@ from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedRef, LoadedSki
 from ufo.runtime.tools.bridge import ToolBridgeIntent
 from ufo.runtime.tools.context import (
     RESULT_CUT_MARKER,
+    SHARED_BYTES_LIMIT,
     ImageContent,
     Spawn,
     SpeakerRequired,
@@ -1673,6 +1681,15 @@ class RunLineage:
     name: str
 
 
+@dataclass(frozen=True)
+class _CarriedFile:
+    """A carried artifact staged in the blob store, waiting on the commit that lands its row."""
+
+    key: str
+    filename: str
+    size_bytes: int
+
+
 @dataclass(frozen=True, repr=False)
 class TurnEngine:
     turn: Turn
@@ -1837,6 +1854,8 @@ class TurnEngine:
                     change_paths,
                     created,
                 )
+                carried, delivered = self._carried_artifacts(answer)
+                staged = await self._stage_carried_artifacts(carried)
                 await self.hooks.fire(
                     "stop",
                     Stop(answer=answer),
@@ -1848,13 +1867,14 @@ class TurnEngine:
                     "done",
                     usage_events,
                     meter,
-                    answer=answer,
+                    answer=delivered,
                     question=question,
                     credential_request=credential_request,
                     connect_request=connect_request,
                     created=tuple(created),
                     unless_arrivals=True,
                     absorbed=tuple(absorbed_ids),
+                    carried=staged,
                 )
                 if frame is None:
                     log(
@@ -2471,6 +2491,69 @@ class TurnEngine:
         for reply in spoken:
             await self._publish(TextDelta(text=reply.text))
 
+    def _carried_artifacts(self, answer: str) -> tuple[tuple[MarkedArtifact, ...], str]:
+        """The artifact spans a closing answer carries for a member, and the answer without them —
+        the words the terminal frame delivers. A child turn's answer — a spawned profile's or a
+        workspace agent's — is text its parent reads, so its tags stay in place and nothing is
+        carried."""
+        if self.turn.parent_turn_id is not None:
+            return (), answer
+        return marked_artifacts(answer)
+
+    async def _stage_carried_artifacts(
+        self, carried: tuple[MarkedArtifact, ...]
+    ) -> tuple[_CarriedFile, ...]:
+        """Put each carried artifact's bytes in the blob store ahead of the commit that lands its
+        `details` row: the row lands in the commit's own transaction, so a writeback claimed the
+        instant the turn is terminal finds it. The key is the turn, attempt and span position, as a
+        spoken reply's identity is, so a replayed run puts the same bytes under the same key and
+        the rows it already landed keep them."""
+        staged = []
+        for index, artifact in enumerate(carried):
+            data = artifact.body.encode()
+            if len(data) > SHARED_BYTES_LIMIT:
+                raise ValueError(
+                    f"carried artifact {artifact.name!r} exceeds {SHARED_BYTES_LIMIT} bytes"
+                )
+            artifact_id = uuid5(
+                NAMESPACE_URL, f"{self.turn.id}/{self.attempt}/{ARTIFACT_TAG}/{index}"
+            )
+            key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{artifact.name}"
+            await self.blob.put(key, data)
+            staged.append(_CarriedFile(key=key, filename=artifact.name, size_bytes=len(data)))
+        return tuple(staged)
+
+    async def _discard_unreferenced(
+        self, connection: AsyncConnection, staged: tuple[_CarriedFile, ...]
+    ) -> None:
+        """Drop the staged bytes no `shared_artifact` row of this turn points at. A replay of the
+        same attempt stages the keys the first execution already landed rows for — a commit whose
+        acknowledgement was lost, a recovery that adopted the attempt — and those bytes are the
+        member's report, so a row is what keeps them."""
+        if not staged:
+            return
+        referenced = set(
+            (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.blob_key).where(
+                        tables.shared_artifact.c.turn_id == self.turn.id,
+                        tables.shared_artifact.c.blob_key.in_([file.key for file in staged]),
+                    )
+                )
+            ).scalars()
+        )
+        for file in staged:
+            if file.key in referenced:
+                continue
+            try:
+                await self.blob.delete(file.key)
+            except Exception as error:
+                log(
+                    "turn.carried_discard_failed",
+                    blob_key=file.key,
+                    error_class=type(error).__name__,
+                )
+
     async def _render_arrival(
         self,
         message_id: UUID,
@@ -2905,7 +2988,7 @@ class TurnEngine:
                         monotonic=time.monotonic,
                     )
                 )
-                result = await runner.run(request, ReplyRedaction())
+                result = await runner.run(request, SpanRedaction())
                 mark_span_outcome(round_span, result.error_class, result.error_message)
         finally:
             emit_up_down_metric("model_round_active", -1, **active_dimensions)
@@ -3772,6 +3855,7 @@ class TurnEngine:
         created: tuple[ObjectRef, ...] = (),
         unless_arrivals: bool = False,
         absorbed: tuple[UUID, ...] = (),
+        carried: tuple[_CarriedFile, ...] = (),
     ) -> TerminalFrame | None:
         """Retries until the terminal state is durable: a client's wait always ends,
         so a database outage delays the commit rather than losing it. With unless_arrivals the
@@ -3798,6 +3882,7 @@ class TurnEngine:
                     unless_arrivals,
                     absorbed,
                     meter.incomplete_reason,
+                    carried,
                 )
                 break
             except Exception as commit_error:
@@ -3866,7 +3951,12 @@ class TurnEngine:
         unless_arrivals: bool,
         absorbed: tuple[UUID, ...],
         incomplete_reason: IncompleteReason | None,
+        carried: tuple[_CarriedFile, ...] = (),
     ) -> tuple[TerminalFrame | None, bool]:
+        """One attempt at the terminal write. The `details` rows for the files the answer carried
+        land in this same transaction, so the row that makes the turn deliverable and the rows a
+        delivery reads are one commit. A refused or lost commit discards the staged bytes no row of
+        this turn points at — a replayed attempt finds its own rows and keeps them."""
         async with workspace_tx() as connection:
             if unless_arrivals:
                 await connection.execute(
@@ -3889,6 +3979,7 @@ class TurnEngine:
                         pending=pending,
                         absorbed=len(absorbed),
                     )
+                    await self._discard_unreferenced(connection, carried)
                     return None, False
             try:
                 await self._record_usage(connection, usage_events)
@@ -3952,7 +4043,34 @@ class TurnEngine:
                         sa.select(tables.turn.c.terminal).where(tables.turn.c.id == self.turn.id)
                     )
                 ).one()
+                await self._discard_unreferenced(connection, carried)
                 return TerminalFrame.model_validate(row.terminal), False
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            landed = datetime.now(UTC)
+            for index, file in enumerate(carried):
+                stamp = landed + timedelta(microseconds=index)
+                await connection.execute(
+                    insert(tables.shared_artifact)
+                    .values(
+                        id=uuid5(NAMESPACE_URL, file.key),
+                        turn_id=self.turn.id,
+                        blob_key=file.key,
+                        workspace_id=self.turn.workspace_id,
+                        filename=file.filename,
+                        subject=None,
+                        media_type=artifact_media_type(file.filename),
+                        size_bytes=file.size_bytes,
+                        role="details",
+                        created_at=stamp,
+                        updated_at=stamp,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            tables.shared_artifact.c.turn_id,
+                            tables.shared_artifact.c.blob_key,
+                        ]
+                    )
+                )
         return frame, True
 
     async def _park(

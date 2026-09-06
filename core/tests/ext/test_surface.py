@@ -1858,6 +1858,59 @@ def test_home_url_addresses_the_browser_portal_at_cores_own_mount_path(tmp_path)
     assert replace(context, _home_surface=None).home_url("#/workspace/credentials") is None
 
 
+async def test_the_report_link_opens_only_a_conversation_the_portal_shows(
+    db: None, tmp_path: Path
+) -> None:
+    """The link into the portal at a carried report is minted for a member's own conversation and
+    withheld for a room, whose roster the portal cannot check — the surface then hands the download
+    instead — and withheld everywhere when the deploy has no portal."""
+    workspace_id, _agent_id, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    own_turn = await _seed_turn(
+        workspace_id,
+        "own:1",
+        "done",
+        "hi",
+        member_id=member_id,
+        audience=str(conversation_audience(member_id)),
+    )
+    room_turn = await _seed_turn(
+        workspace_id, "room:1", "done", "hi", audience=str(room_audience(SURFACE, "C1"))
+    )
+    async with workspace_tx() as connection:
+        conversations = dict(
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.id, tables.turn.c.conversation_id).where(
+                        tables.turn.c.id.in_([own_turn, room_turn])
+                    )
+                )
+            ).all()
+        )
+    report_id = uuid4()
+    report = SharedArtifact(
+        id=report_id,
+        blob_key=f"artifacts/{report_id}/plan.md",
+        filename="plan.md",
+        subject=None,
+        media_type="text/markdown",
+        size_bytes=3,
+        role="details",
+    )
+    with ws(workspace_id):
+        own = await context.report_url(conversations[own_turn], report)
+        room = await context.report_url(conversations[room_turn], report)
+        unhosted = await replace(context, _home_surface=None).report_url(
+            conversations[own_turn], report
+        )
+    assert own == (
+        f"https://ufo.example.test/surface/web#/c/{conversations[own_turn]}?report={report_id}"
+    )
+    assert room is None
+    assert unhosted is None
+
+
 def test_ingress_url_addresses_the_site_the_ingress_resolves(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1972,11 +2025,13 @@ async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_
     blob = FilesystemBlobStore(root=tmp_path)
     await blob.put("artifacts/x/report.pdf", b"PDF")
     artifact = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/x/report.pdf",
         filename="report.pdf",
         subject=None,
         media_type="application/pdf",
         size_bytes=3,
+        role="file",
     )
     turn_id = await _seed_turn(workspace_id, "C5:2.0", "done", "hi there", artifacts=(artifact,))
     poller, surface = _poller(workspace_id, RecordingSurface(ref="C5:9.9"), blob)
@@ -2006,19 +2061,23 @@ async def test_poller_does_not_re_deliver_a_member_attachment(db: None, tmp_path
     await blob.put("artifacts/x/shared.pdf", b"PDF")
     await blob.put("artifacts/y/mine.pdf", b"PDF")
     shared = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/x/shared.pdf",
         filename="shared.pdf",
         subject=None,
         media_type="application/pdf",
         size_bytes=3,
+        role="file",
     )
     mine = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/y/mine.pdf",
         filename="mine.pdf",
         subject=None,
         media_type="application/pdf",
         size_bytes=3,
         attached_by_member=True,
+        role="file",
     )
     turn_id = await _seed_turn(workspace_id, "C5:2.0", "done", "hi there", artifacts=(shared, mine))
     poller, surface = _poller(workspace_id, RecordingSurface(ref="C5:9.9"), blob)
@@ -2028,11 +2087,13 @@ async def test_poller_does_not_re_deliver_a_member_attachment(db: None, tmp_path
 
 def _shared_page(name: str) -> SharedArtifact:
     return SharedArtifact(
+        id=uuid4(),
         blob_key=f"artifacts/{name}/report.md",
         filename="report.md",
         subject=None,
         media_type="text/markdown",
         size_bytes=6,
+        role="file",
     )
 
 
@@ -2048,13 +2109,16 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(db: N
     member_id = await _seed_member_row(workspace_id, "m@example.com")
     other_id = await _seed_member_row(workspace_id, "n@example.com")
     chart = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/x/chart.png",
         filename="chart.png",
         subject="the chart",
         media_type="image/png",
         size_bytes=3,
+        role="file",
     )
     brief = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/x/brief.pdf",
         filename="brief.pdf",
         subject=None,
@@ -2063,6 +2127,7 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(db: N
         preview_blob_key="artifacts/x/brief.png",
         preview_media_type="image/png",
         preview_size_bytes=4,
+        role="file",
     )
     shared_run = await _seed_turn(
         workspace_id,
@@ -2201,11 +2266,13 @@ async def test_poller_resumes_attachments_from_a_recorded_ref_without_reposting(
 ) -> None:
     workspace_id, _, _ = await _seed()
     artifact = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/x/resume.txt",
         filename="resume.txt",
         subject=None,
         media_type="text/plain",
         size_bytes=6,
+        role="file",
     )
     turn_id = await _seed_turn(
         workspace_id, "C7:1.0", "done", "already sent", artifacts=(artifact,)
@@ -2230,11 +2297,13 @@ async def test_poller_resumes_attachments_from_a_recorded_ref_without_reposting(
 async def test_attachment_failure_retries_from_the_recorded_reply(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     artifact = SharedArtifact(
+        id=uuid4(),
         blob_key="artifacts/x/retry.txt",
         filename="retry.txt",
         subject=None,
         media_type="text/plain",
         size_bytes=5,
+        role="file",
     )
     turn_id = await _seed_turn(workspace_id, "C8:1.0", "done", "sent once", artifacts=(artifact,))
     surface = RecordingSurface(fail_attach_attempts=1)

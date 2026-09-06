@@ -5045,6 +5045,87 @@ async def test_transcript_reply_keeps_its_files_after_a_later_turn(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_artifacts_slot(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A `details` file is drawn under the reply that carried it, wearing its role so the chat draws
+    it as the report link, the reply reads without the span the window keeps, and the conversation's
+    Artifacts slot lists the shared file alone."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Move the jobs onto a queue."),
+    )
+    async with workspace_tx() as connection:
+        for filename, media_type, role in (
+            ("plan.md", "text/markdown", "details"),
+            ("data.csv", "text/csv", "file"),
+        ):
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn_id,
+                    blob_key=f"artifacts/{uuid4()}/{filename}",
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject=None,
+                    media_type=media_type,
+                    size_bytes=3,
+                    role=role,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nshould we move?",
+                ),
+                Message(
+                    role="assistant",
+                    content=(
+                        "Move the jobs onto a queue.\n\n"
+                        '<artifact name="plan.md">\n# Plan\n\n'
+                        "Move the event-driven jobs.\n</artifact>\n"
+                    ),
+                ),
+            ),
+        ),
+    )
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=headers,
+    )
+    (reply,) = [m for m in loaded.json()["messages"] if m["role"] == "assistant"]
+    assert reply["text"] == "Move the jobs onto a queue."
+    assert sorted((f["filename"], f["role"]) for f in reply["files"]) == [
+        ("data.csv", "file"),
+        ("plan.md", "details"),
+    ]
+    assert all(f["url"].startswith("https://web/artifacts/") for f in reply["files"])
+
+    slot = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots/artifacts",
+        headers=headers,
+    )
+    assert slot.status_code == 200
+    assert [entry["filename"] for entry in slot.json()["artifacts"]] == ["data.csv"]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_composer_files_land_in_the_workspace_before_the_turn(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -5181,11 +5262,20 @@ def test_a_member_bubble_older_than_the_row_reads_its_files_off_the_note() -> No
         "role": "user",
         "text": "what are these",
         "files": [
-            {"filename": "lights.gif", "url": None, "media_type": "image/gif", "preview_url": None},
             {
+                "id": None,
+                "filename": "lights.gif",
+                "url": None,
+                "media_type": "image/gif",
+                "role": "file",
+                "preview_url": None,
+            },
+            {
+                "id": None,
                 "filename": "paper.pdf",
                 "url": None,
                 "media_type": "application/octet-stream",
+                "role": "file",
                 "preview_url": None,
             },
         ],

@@ -679,9 +679,11 @@ shared_artifact = sa.Table(
         nullable=False,
         server_default=sa.false(),
     ),
+    sa.Column("role", sa.Text, nullable=False, server_default="file"),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("size_bytes >= 0", name="shared_artifact_size"),
+    sa.CheckConstraint("role in ('file', 'details')", name="shared_artifact_role"),
     sa.CheckConstraint(
         "(preview_blob_key IS NULL) = (preview_media_type IS NULL) "
         "AND (preview_blob_key IS NULL) = (preview_size_bytes IS NULL) "

@@ -1702,7 +1702,9 @@ def _note_card(path: str) -> dict[str, object]:
     return {
         "filename": name,
         "url": None,
+        "id": None,
         "media_type": raster_image_media_type(name) or "application/octet-stream",
+        "role": "file",
         "preview_url": None,
     }
 
@@ -3572,7 +3574,7 @@ async def _project_slot_context(
         )
     if extension == "web" and content is ArtifactsSlotPayload:
         listed_artifacts = await ctx.list_conversation_artifacts(
-            slot_context.conversation_id, limit=CONVERSATION_ARTIFACTS_MAX + 1
+            slot_context.conversation_id, limit=CONVERSATION_ARTIFACTS_MAX + 1, role="file"
         )
         truncated = len(listed_artifacts) > CONVERSATION_ARTIFACTS_MAX
         artifacts: list[ConversationArtifact] = []
@@ -4494,12 +4496,15 @@ def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, ob
     picture — the chat draws those inline in the reply. Both links carry their base: the
     chat is drawn by the portal and by an app page framed on its own origin, so a picture named
     without one resolves against whichever origin happens to draw it. `media_type` is how the chat
-    knows which cards the artifacts sidebar can draw as a document."""
+    knows which cards the artifacts sidebar can draw as a document, and `role` which files it draws
+    as cards and which as the download buttons under the reply that carried them."""
     return {
+        "id": str(artifact.id),
         "filename": artifact.filename,
         "subject": artifact.subject,
         "media_type": artifact.media_type,
         "size_bytes": artifact.size_bytes,
+        "role": artifact.role,
         "url": ctx.artifact_link(artifact),
         "preview_url": ctx.artifact_preview_link(artifact),
     }

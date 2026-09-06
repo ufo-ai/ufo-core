@@ -714,6 +714,7 @@ class ToolContext:
                         subject=subject,
                         media_type=artifact_media_type(filename),
                         size_bytes=len(data),
+                        role="file",
                         preview_blob_key=None if preview is None else preview.blob_key,
                         preview_media_type=preview_media_type,
                         preview_size_bytes=None if preview is None else preview.size_bytes,

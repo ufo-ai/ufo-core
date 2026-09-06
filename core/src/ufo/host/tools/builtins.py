@@ -948,7 +948,10 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                             tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
                         )
                     )
-                    .where(tables.shared_artifact.c.workspace_id == ctx.turn.workspace_id)
+                    .where(
+                        tables.shared_artifact.c.workspace_id == ctx.turn.workspace_id,
+                        tables.shared_artifact.c.role == "file",
+                    )
                     .distinct()
                 )
             ).all()

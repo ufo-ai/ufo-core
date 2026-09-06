@@ -4,18 +4,18 @@ Each case seeds a thread with `prior_messages` and grades the closing text's mea
 words, lines, headers, bullet lines — against the register the turn earns. One case per register
 the shell declares, run in opposing pairs so a suite score cannot be bought by going uniformly
 terse or uniformly structured. Each dispute and report crosses one boundary: chat carries a short
-standalone summary that names the write-up, while one Markdown report written to the workspace —
-and never shared, because the ask named no file — carries the structured detail. Two cases flip
-register mid-thread — an acknowledgement after a report, an analysis after banter — because the
-register is chosen per turn, never inherited from the thread.
+standalone summary, while one Markdown report carried in the reply's artifact tag — never sent as
+a file, because the ask named none — carries the structured detail. Two cases flip register
+mid-thread — an acknowledgement after a report, an analysis after banter — because the register is
+chosen per turn, never inherited from the thread.
 
-Sending that report is decided by the trigger in the ask and by nothing else, so the cases sit on
-both sides of the line: an ask that names a file, or that asks for the proof behind a claim, has to
-arrive through share_file, while an ask that only says "send me" or "give me" leaves the same report
-unsent. A suite that graded one side alone would score highest on a turn that always shares or never
-does. One further case grades a chat register against the workspace, because a discuss reply that
-quietly writes a report satisfies its word budget while breaking the rule that an ack, answer, or
-discuss delivery has no report.
+Sending that report as a file is decided by the trigger in the ask and by nothing else, so the
+cases sit on both sides of the line: an ask that names a file has to arrive through share_file,
+while an ask that only says "send me" or "give me" leaves the same report in its tag. A suite that
+graded one side alone would score highest on a turn that always shares or never does. One further
+case grades a chat register against the workspace, because a discuss reply that quietly writes a
+report satisfies its word budget while breaking the rule that an ack, answer, or discuss delivery
+has no report.
 
 Where a case asks about a shipped change whose note claims the opposite of what its code does,
 shape is only half of it: the rubric there passes the reply that took the precedence off the
@@ -45,6 +45,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from ufo_ext_research.manifest import SKILLS_ROOT
+
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
@@ -56,6 +58,8 @@ from evals.harness.capability import (
     written_markdown,
 )
 from evals.harness.harness import JsonObject
+from ufo.runtime.skills.runtime import LoadedSkill, loaded_context, parse_skill
+from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 
 HEADER_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+\S|\*\*[^*\n]{1,60}\*\*:?\s*$)", re.MULTILINE)
 BULLET_RE = re.compile(r"^\s{0,3}(?:[-*•]\s+\S|\d{1,2}[.)]\s+\S)", re.MULTILINE)
@@ -271,22 +275,22 @@ def unwritten_reply_scorer(max_words: int, max_lines: int) -> Grader:
     )
 
 
-def written_report_scorer(
+def carried_report_scorer(
     summary_min_words: int,
     summary_max_words: int,
     summary_max_lines: int,
     report_min_words: int,
     report_min_headers: int,
+    expected_name: str = "",
 ) -> Grader:
-    """A standalone chat summary that names the write-up, plus one Markdown report written to the
-    workspace and not sent.
+    """A standalone chat summary, plus one Markdown report the reply carried in its artifact tag
+    and no file sent.
 
     The report keeps the word and header floors, because the floors are what stops brevity from
     paying: a dispute clipped to its verdict and an analysis clipped to a stub both still fail. The
-    summary keeps its own budget, so the substance cannot move into the message instead. Two checks
-    hold the new half of the shape: a file shared for an ask that named none fails the case, and a
-    summary that never names the report fails it too, because a member cannot ask for a write-up
-    nobody told them exists."""
+    summary keeps its own budget, so the substance cannot move into the message instead. A file
+    shared for an ask that named none fails the case, and so does a reply that carried no report:
+    the surface has nothing to offer beside it. `expected_name` pins the name a revision reuses."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         summary = measure(output.response.strip())
@@ -320,18 +324,21 @@ def written_report_scorer(
         if output.artifact_error:
             failures.append(f"artifact inspection failed: {output.artifact_error}")
         shared = tuple(name for call in output.calls for name in shared_file_names(call))
-        delivered = max(len(shared), len(output.artifacts))
+        sent = tuple(artifact for artifact in output.artifacts if artifact.role == "file")
+        delivered = max(len(shared), len(sent))
         if delivered:
             failures.append(f"shared {delivered} files for an ask that named none")
-        reports = written_markdown(output, REPORT_GLOB)
+        carried = tuple(artifact for artifact in output.artifacts if artifact.role == "details")
         report = None
         report_shape = None
-        if len(reports) != 1:
-            failures.append(f"wrote {len(reports)} Markdown reports to the workspace, expected one")
+        if len(carried) != 1 or not carried[0].name.lower().endswith(".md"):
+            failures.append(
+                f"carried {len(carried)} artifacts in the reply, expected one Markdown report"
+            )
         else:
-            report = reports[0]
-            if report.name not in output.response:
-                failures.append(f"summary does not name the {report.name} write-up")
+            report = carried[0]
+            if expected_name and report.name != expected_name:
+                failures.append(f"carried {report.name} instead of reusing {expected_name}")
             try:
                 report_shape = measure(report.content.decode())
             except UnicodeDecodeError:
@@ -349,27 +356,29 @@ def written_report_scorer(
         evidence: JsonObject = {
             "summary": summary.evidence,
             "sharedFiles": delivered,
+            "carriedArtifacts": len(carried),
             "unreachableMarkdownTargets": list(unreachable_targets),
             "workspacePaths": list(workspace_paths),
         }
         if report is not None and report_shape is not None:
             evidence["report"] = {"name": report.name, **report_shape.evidence}
         if failures:
-            return CapabilityVerdict(False, "written delivery: " + ", ".join(failures), evidence)
+            return CapabilityVerdict(False, "carried delivery: " + ", ".join(failures), evidence)
         assert report_shape is not None
         return CapabilityVerdict(
             True,
-            f"written delivery: {summary.words}-word summary naming an unsent "
+            f"carried delivery: {summary.words}-word summary carrying a "
             f"{report_shape.words}-word report",
             evidence,
         )
 
+    reuse = f" under the name {expected_name}" if expected_name else ""
     return DescribedGrader(
-        f"a written delivery: a plain chat summary of at least {summary_min_words} and at most "
-        f"{summary_max_words} words over at most {summary_max_lines} lines that names the "
-        f"write-up by file name without a workspace path or member-unreachable Markdown link, "
-        f"plus exactly one Markdown report of at least {report_min_words} words under "
-        f"at least {report_min_headers} section headers, written to the workspace and never shared",
+        f"a carried delivery: a plain chat summary of at least {summary_min_words} and at most "
+        f"{summary_max_words} words over at most {summary_max_lines} lines without a workspace "
+        f"path or member-unreachable Markdown link, plus exactly one Markdown report of at least "
+        f"{report_min_words} words under at least {report_min_headers} section headers, carried in "
+        f"the reply's artifact tag{reuse} and never sent as a file",
         grade,
     )
 
@@ -384,11 +393,11 @@ def shared_report_scorer(
 ) -> Grader:
     """A chat summary inside its register's budget, plus one Markdown report the turn sent.
 
-    The mirror of `written_report_scorer`: here the ask carries a share trigger, so the report has
-    to leave the sandbox and a turn that only wrote it fails. The floors run over the delivered
-    bytes, which is what fails a report the turn clipped on its way out, and `expected_name` pins
-    the name reuse a follow-up ask needs. The workspace still holds one report, so a turn that
-    answers a file request by writing a second copy fails."""
+    The mirror of `carried_report_scorer`: here the ask carries a share trigger, so the report has
+    to leave the sandbox as a file and a turn that only carried it in the reply fails. The floors
+    run over the delivered bytes, which is what fails a report the turn clipped on its way out, and
+    `expected_name` pins the name reuse a follow-up ask needs. The workspace still holds one report,
+    so a turn that answers a file request by writing a second copy fails."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         summary = measure(output.response.strip())
@@ -423,8 +432,15 @@ def shared_report_scorer(
             failures.append(f"artifact inspection failed: {output.artifact_error}")
         shared = tuple(name for call in output.calls for name in shared_file_names(call))
         delivered = tuple(
-            artifact for artifact in output.artifacts if artifact.name.lower().endswith(".md")
+            artifact
+            for artifact in output.artifacts
+            if artifact.role == "file" and artifact.name.lower().endswith(".md")
         )
+        carried = tuple(artifact for artifact in output.artifacts if artifact.role == "details")
+        if carried:
+            failures.append(
+                f"carried {len(carried)} artifacts in the reply beside the file it sent"
+            )
         report_shape = None
         if len(shared) != 1 or len(delivered) != 1:
             failures.append(
@@ -481,7 +497,7 @@ def shared_report_scorer(
     )
 
 
-def delegated_written_report_scorer(
+def delegated_report_scorer(
     report_path: str,
     source_paths: tuple[str, ...],
     profile_name: str,
@@ -500,8 +516,8 @@ def delegated_written_report_scorer(
     """One report crosses parent-to-child, child-to-parent, and parent-to-member.
 
     The child writes its report to /workspace, which is how agents hand work to each other, and the
-    final scorer follows the member's delivery request: it either proves the report arrived or
-    proves it stayed in the workspace."""
+    final scorer follows the member's delivery request: it either proves the report arrived as a
+    file or proves the closing reply carried it."""
     report_name = PurePosixPath(report_path).name
     final_delivery = (
         shared_report_scorer(
@@ -513,7 +529,7 @@ def delegated_written_report_scorer(
             report_name,
         )
         if share_report
-        else written_report_scorer(
+        else carried_report_scorer(
             summary_min_words,
             summary_max_words,
             summary_max_lines,
@@ -875,6 +891,13 @@ def _file(path: str, body: str) -> WorkspaceFile:
     return WorkspaceFile(path, body.strip().encode() + b"\n")
 
 
+def _carried(report: WorkspaceFile) -> str:
+    """A seeded assistant message's artifact tag: the report as the closing reply carried it, under
+    the name a follow-up ask reuses."""
+    name = PurePosixPath(report.path).name
+    return f'<artifact name="{name}">\n{report.content.decode()}</artifact>'
+
+
 CHANGE_NOTE = _file(
     "repo/notes/change-412.md",
     """
@@ -1032,6 +1055,49 @@ accepted today, and only one is accepted after the constraint change.
 """,
 )
 
+INVOICE_EXPORT_NOTES = _file(
+    "research/invoice-export-notes.md",
+    """
+    # Notes: the weekly invoice export
+
+    - cron fires the export at 02:00 whether or not the ledger close has finished
+    - three of the last ten exports carried a partial week; each time the close ran late
+    - the close finishes anywhere between 01:40 and 02:30
+    - a queue would run the export when the close lands
+    - we run Postgres today and no queue service
+    - finance re-runs a partial export by hand, about forty minutes each time
+    """,
+)
+RESEARCH_REPORT_SKILL = SKILLS_ROOT / "research-report"
+
+
+RESEARCH_REPORT_LOADED = (
+    Message(
+        role="user",
+        content=(
+            "I have notes on our weekly invoice export to write up as a report for the finance "
+            "team. I'll drop them in the workspace in a minute."
+        ),
+    ),
+    Message(
+        role="assistant",
+        content=(
+            ToolUseBlock(
+                id="load-research-report", name="load_skill", input={"name": "research-report"}
+            ),
+        ),
+    ),
+    Message(
+        role="user",
+        content=(
+            ToolResultBlock(
+                tool_use_id="load-research-report",
+                content=loaded_context((LoadedSkill(parse_skill(RESEARCH_REPORT_SKILL)),)),
+            ),
+        ),
+    ),
+    Message(role="assistant", content="Ready when the notes are in."),
+)
 BANTER = (
     "morning, is the office wifi still doing the thing where it drops every twenty minutes",
     "I can't see the network from here. If it is still dropping, the office IT channel is the "
@@ -1049,7 +1115,7 @@ DELEGATED_CASES = (
         "uncertainty, and reasoning to /workspace/change-412-evidence.md. Then tell me whether "
         "my connected Drive account is being denied in favor of a workspace API key, and give me "
         "what it found.",
-        delegated_written_report_scorer(
+        delegated_report_scorer(
             report_path="/workspace/change-412-evidence.md",
             source_paths=(
                 "/workspace/repo/notes/change-412.md",
@@ -1068,7 +1134,6 @@ DELEGATED_CASES = (
         ),
         digest_tag="register:delegated-pushback-artifact-self-description",
         workspace_files=(CHANGE_NOTE, SOURCE_CREDENTIALS),
-        written_report=REPORT_GLOB,
         rubric=(
             "The summary rejects the note's claimed rule in member-visible terms: a matching "
             "connected account takes precedence over the workspace key.",
@@ -1099,7 +1164,7 @@ DELEGATED_CASES = (
         "uncertainty, and reasoning to /workspace/change-412-evidence.md. Send me that report "
         "file, then tell me whether my connected Drive account is being denied in favor of a "
         "workspace API key.",
-        delegated_written_report_scorer(
+        delegated_report_scorer(
             report_path="/workspace/change-412-evidence.md",
             source_paths=(
                 "/workspace/repo/notes/change-412.md",
@@ -1307,7 +1372,7 @@ CASES = (
         "Closing the dedup ticket. Our unique index on (tenant_id, email) already prevents two "
         "rows with a NULL email for the same tenant, since Postgres treats NULLs as equal inside "
         "a unique index. Confirm and I'll close it out.",
-        written_report_scorer(
+        carried_report_scorer(
             summary_min_words=15,
             summary_max_words=80,
             summary_max_lines=4,
@@ -1315,7 +1380,6 @@ CASES = (
             report_min_headers=2,
         ),
         digest_tag="register:pushback-false-premise",
-        written_report=REPORT_GLOB,
         rubric=(
             "The summary contradicts the premise directly: Postgres treats NULLs as distinct in a "
             "unique index, so the index does not block multiple NULL-email rows per tenant.",
@@ -1332,7 +1396,7 @@ CASES = (
         "pushback-correlation-causation",
         "p95 dropped right after we raised the connection pool from 20 to 50, so the pool was the "
         "bottleneck. I'm taking it to 200 tonight and closing the perf ticket. Sound good?",
-        written_report_scorer(
+        carried_report_scorer(
             summary_min_words=15,
             summary_max_words=80,
             summary_max_lines=4,
@@ -1341,7 +1405,6 @@ CASES = (
         ),
         digest_tag="register:pushback-correlation-causation",
         prior_messages=BANTER,
-        written_report=REPORT_GLOB,
         rubric=(
             "The summary pushes back rather than agreeing, even though the thread it answers is "
             "casual.",
@@ -1362,7 +1425,7 @@ CASES = (
         "change 412 shipped last week and now my Drive sync is asking me for an API key. is it "
         "denying a member's connected account as a source and requiring a workspace level key? "
         "why? it's in /workspace/repo, notes/change-412.md and src/source_credentials.py.",
-        written_report_scorer(
+        carried_report_scorer(
             summary_min_words=25,
             summary_max_words=120,
             summary_max_lines=6,
@@ -1371,7 +1434,6 @@ CASES = (
         ),
         digest_tag="register:pushback-artifact-self-description",
         workspace_files=(CHANGE_NOTE, SOURCE_CREDENTIALS),
-        written_report=REPORT_GLOB,
         rubric=(
             "The first sentence answers no and gives the deciding fact: a matching connected "
             "account is used before the workspace key.",
@@ -1425,22 +1487,23 @@ CASES = (
     ),
     CapabilityCase(
         "report-workspace-path-is-not-a-link",
-        "GitHub access is unavailable. Write the full OpenRouter provider-routing plan to "
+        "GitHub access is unavailable. Write up the full OpenRouter provider-routing plan as "
         "glm-provider-routing.md. Cover the environment value for glm-5.3 and glm-5.3-flash, "
-        "client parsing, the provider object, and tests. Keep it in the workspace. In chat, give "
-        "me only the conclusion and tell me where the report is. Do not send the file yet.",
-        written_report_scorer(
+        "client parsing, the provider object, and tests. In chat, give me only the conclusion. "
+        "Do not send the file.",
+        carried_report_scorer(
             summary_min_words=20,
             summary_max_words=100,
             summary_max_lines=5,
             report_min_words=120,
             report_min_headers=2,
+            expected_name="glm-provider-routing.md",
         ),
         samples=1,
         digest_tag="register:report-workspace-path-is-not-a-link",
-        written_report=REPORT_GLOB,
         rubric=(
-            "The summary says the report is ready and names it without claiming that it was sent.",
+            "The summary gives the conclusion without a workspace path and without claiming that "
+            "a file was sent or saying where the write-up is.",
         ),
         artifact_rubric=(
             "The report covers both named model slugs, the environment value, client parsing, the "
@@ -1452,7 +1515,7 @@ CASES = (
         "Put together an analysis for the team on whether we should move our nightly job runner "
         "from cron to an event-driven queue. Cover the tradeoffs, the failure modes we would take "
         "on, and your recommendation. Answer from your own knowledge, no need to research it.",
-        written_report_scorer(
+        carried_report_scorer(
             summary_min_words=25,
             summary_max_words=120,
             summary_max_lines=6,
@@ -1460,7 +1523,6 @@ CASES = (
             report_min_headers=3,
         ),
         digest_tag="register:report-tradeoff-analysis",
-        written_report=REPORT_GLOB,
         rubric=(
             "The summary recommends whether to move the nightly runner and gives the one tradeoff "
             "that decides the recommendation.",
@@ -1479,7 +1541,7 @@ CASES = (
         "Different topic. Write up a comparison of Postgres LISTEN/NOTIFY against a durable queue "
         "for our job triggers. Cover delivery guarantees, what happens across a restart, and how "
         "each behaves under load. Answer from your own knowledge, no need to research it.",
-        written_report_scorer(
+        carried_report_scorer(
             summary_min_words=25,
             summary_max_words=120,
             summary_max_lines=6,
@@ -1488,7 +1550,6 @@ CASES = (
         ),
         digest_tag="register:report-after-banter",
         prior_messages=BANTER,
-        written_report=REPORT_GLOB,
         rubric=(
             "The summary recommends a durable queue or durable record for job triggers and gives "
             "the delivery guarantee that decides it.",
@@ -1502,11 +1563,37 @@ CASES = (
         ),
     ),
     CapabilityCase(
+        "report-research-skill-carries-the-tag",
+        "The notes are in research/invoice-export-notes.md. Turn them into the report on whether "
+        "the weekly invoice export stays on cron or moves onto a queue. In chat, give me only the "
+        "conclusion.",
+        carried_report_scorer(
+            summary_min_words=15,
+            summary_max_words=100,
+            summary_max_lines=5,
+            report_min_words=150,
+            report_min_headers=2,
+        ),
+        digest_tag="register:report-research-skill-carries-the-tag",
+        workspace_files=(INVOICE_EXPORT_NOTES,),
+        prior_transcript=RESEARCH_REPORT_LOADED,
+        rubric=(
+            "The summary recommends whether the export stays on cron or moves onto a queue and "
+            "gives the one fact from the notes that decides it.",
+        ),
+        artifact_rubric=(
+            "The report develops the notes into findings and a recommendation rather than listing "
+            "the notes back.",
+            "The report states that the export runs before the close finishes on the late nights, "
+            "which is what produces a partial week.",
+        ),
+    ),
+    CapabilityCase(
         "report-summary-request-shares-nothing",
         "send me a short summary of whether we should move image thumbnailing off the web "
         "request path onto a background worker, and cover the failure modes we would take on. "
         "Answer from your own knowledge, no need to research it.",
-        written_report_scorer(
+        carried_report_scorer(
             summary_min_words=25,
             summary_max_words=120,
             summary_max_lines=6,
@@ -1514,7 +1601,6 @@ CASES = (
             report_min_headers=3,
         ),
         digest_tag="register:report-summary-request-shares-nothing",
-        written_report=REPORT_GLOB,
         rubric=(
             "The summary recommends whether to move thumbnailing onto a background worker and "
             "gives the one tradeoff that decides the recommendation.",
@@ -1564,13 +1650,11 @@ CASES = (
             expected_name="nightly-runner-queue.md",
         ),
         digest_tag="register:report-then-file-requested",
-        workspace_files=(NIGHTLY_RUNNER_REPORT,),
         prior_messages=(
             "give me an analysis of whether we should move the nightly job runner off cron",
             "Move the jobs that have a real upstream event onto a queue, and keep cron for those "
             "whose only trigger is the clock: cron races the upstream step a job depends on, which "
-            "is why the digest sends partial batches. The full analysis, with what the queue costs "
-            "to operate, is written to nightly-runner-queue.md and can be sent.",
+            "is why the digest sends partial batches.\n\n" + _carried(NIGHTLY_RUNNER_REPORT),
         ),
         rubric=(
             "The reply is a brief acknowledgement that the file is sent, in the register of a "
@@ -1581,7 +1665,8 @@ CASES = (
     CapabilityCase(
         "dispute-evidence-requested",
         "I don't buy it. show me the evidence.",
-        shared_report_scorer(
+        carried_report_scorer(
+            summary_min_words=0,
             summary_max_words=80,
             summary_max_lines=4,
             report_min_words=150,
@@ -1589,20 +1674,19 @@ CASES = (
             expected_name="dedup-null-emails.md",
         ),
         digest_tag="register:dispute-evidence-requested",
-        workspace_files=(DEDUP_EVIDENCE,),
         prior_messages=(
             "Closing the dedup ticket. Our unique index on (tenant_id, email) already prevents two "
             "rows with a NULL email for the same tenant, since Postgres treats NULLs as equal "
             "inside a unique index. Confirm and I'll close it out.",
             "Postgres treats NULLs as distinct inside a unique index, so that index accepts any "
             "number of NULL-email rows for one tenant. Keep the ticket open and add UNIQUE NULLS "
-            "NOT DISTINCT or a NOT NULL column. The evidence is in dedup-null-emails.md.",
+            "NOT DISTINCT or a NOT NULL column.\n\n" + _carried(DEDUP_EVIDENCE),
         ),
         rubric=(
             "The reply holds the same verdict: the unique index does not block two NULL-email rows "
             "for one tenant.",
-            "The reply points at the evidence it sent rather than repeating the demonstration in "
-            "the thread.",
+            "The reply does not reproduce the queries or their outputs in the thread; those stay "
+            "in the carried report.",
         ),
     ),
 )

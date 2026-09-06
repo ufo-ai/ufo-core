@@ -18,7 +18,7 @@ from evals.harness.harness import (
     is_transient_fault,
     provider_owned_error,
 )
-from evals.harness.target import CapabilityTarget, TargetResult
+from evals.harness.target import CapabilityTarget, TargetResult, capability_output
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message
 
@@ -249,3 +249,24 @@ async def test_a_judge_fault_of_our_own_still_raises() -> None:
 
     with pytest.raises(ValueError, match="malformed"):
         await harness_capability.sample_capability(case, target)
+
+
+def test_the_rebuilt_answer_drops_the_artifact_span_the_window_keeps() -> None:
+    """The transcript keeps the closing answer with its artifact tag, so a later ask for the file
+    has the words; the member read the answer without it, and the engine landed the body as a file
+    beside the reply — so the grader-visible answer is the text without the span."""
+    messages = (
+        Message(role="user", content="should we move?"),
+        Message(
+            role="assistant",
+            content=(
+                "Move the jobs onto a queue.\n\n"
+                '<artifact name="plan.md">\n# Plan\n\nMove the event-driven jobs.\n</artifact>\n'
+            ),
+        ),
+    )
+
+    output = capability_output(messages)
+
+    assert output.response == "Move the jobs onto a queue.\n"
+    assert output.calls == ()

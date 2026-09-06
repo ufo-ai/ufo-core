@@ -41,12 +41,12 @@ name = "artifact-says-it-once"
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = """
-artifact in the inline delivery, and never duplicate its body inline. Write that artifact to
+duplicate its body inline. For a member, the artifact is a tag at the end of the closing message
 """
 new = """
-artifact in the inline delivery, and never duplicate its body inline. The artifact carries each
-finding once: it does not copy back a source its reader already holds, and a later section
-restating an earlier one in other words is that finding twice. Write that artifact to
+duplicate its body inline. The artifact carries each finding once: it does not copy back a source
+its reader already holds, and a later section restating an earlier one in other words is that
+finding twice. For a member, the artifact is a tag at the end of the closing message
 """
 
 # Six rounds to read two files the task named by path. Each round is paid for before anything is

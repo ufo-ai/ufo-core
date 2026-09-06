@@ -30,7 +30,7 @@ from ufo_ext_slack.surface import (
     SLACK_SIGNING_SECRET_SLOT,
     URL_VERIFIED_BLOB_KEY,
     _reply_text,
-    _reply_with_oversize_links,
+    _reply_with_links,
     bot_token_fingerprint,
     signing_secret_fingerprint,
 )
@@ -78,6 +78,7 @@ from ufo.sdk.objects import ObjectActionTarget
 from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequest,
+    SharedArtifact,
     TerminalFrame,
     Writeback,
 )
@@ -805,8 +806,50 @@ class _PortalCtx:
     def home_url(self, fragment: str = "") -> str | None:
         return None if self.base is None else f"{self.base}{fragment}"
 
+    async def report_url(self, conversation_id: UUID, artifact: SharedArtifact) -> str | None:
+        return self.home_url(f"#/c/{conversation_id}?report={artifact.id}")
 
-def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
+    def artifact_link(self, artifact: SharedArtifact) -> str:
+        return f"https://ufo.example.test/artifacts/{artifact.id}/{artifact.filename}"
+
+
+async def test_the_carried_report_links_the_portal_and_falls_back_to_the_download() -> None:
+    """The report link opens the conversation in the portal at that file, under the answer and ahead
+    of everything else the reply carries; a deploy with no portal hands the download link instead,
+    under the same words."""
+    conversation_id, artifact_id = uuid4(), uuid4()
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=conversation_id,
+        agent_id=uuid4(),
+        queue_key="C1:1.0",
+        terminal=TerminalFrame(status="done", text="Move the jobs onto a queue."),
+        artifacts=(
+            SharedArtifact(
+                id=artifact_id,
+                blob_key=f"artifacts/{artifact_id}/plan.md",
+                filename="plan.md",
+                subject=None,
+                media_type="text/markdown",
+                size_bytes=3,
+                role="details",
+            ),
+        ),
+    )
+    linked = await _reply_with_links(_PortalCtx("https://ufo.example.test/surface/web"), writeback)
+    assert linked == (
+        "Move the jobs onto a queue.\n\n[Open detailed report]"
+        f"(https://ufo.example.test/surface/web#/c/{conversation_id}?report={artifact_id})"
+    )
+
+    unlinked = await _reply_with_links(_PortalCtx(None), writeback)
+    assert unlinked == (
+        "Move the jobs onto a queue.\n\n[Open detailed report]"
+        f"(https://ufo.example.test/artifacts/{artifact_id}/plan.md)"
+    )
+
+
+async def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
     """Slack collects no secret, so it hands the member a link to the one screen that fills a slot
     whatever raised it. The link is Markdown, matching the oversize-artifact lines this same text
     carries, because the reply rides a Block Kit `markdown` block — Slack's `<url|label>` form
@@ -829,9 +872,7 @@ def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
         ),
         artifacts=(),
     )
-    linked = _reply_with_oversize_links(
-        _PortalCtx("https://ufo.example.test/surface/web"), writeback
-    )
+    linked = await _reply_with_links(_PortalCtx("https://ufo.example.test/surface/web"), writeback)
     assert "connecting Slack" in linked
     assert (
         "[Workspace → Credentials]"
@@ -842,7 +883,7 @@ def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
     assert "secrets never pass through chat" in linked
     assert "terminal" not in linked and "`ufo`" not in linked
 
-    unlinked = _reply_with_oversize_links(_PortalCtx(None), writeback)
+    unlinked = await _reply_with_links(_PortalCtx(None), writeback)
     assert "the ufo portal, under Workspace → Credentials" in unlinked
     assert "http" not in unlinked and "[" not in unlinked
 

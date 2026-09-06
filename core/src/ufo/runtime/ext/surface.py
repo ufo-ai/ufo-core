@@ -61,8 +61,9 @@ from ufo.blob import BlobNotFound, FleetBlobStore, S3BlobStore, WorkspaceBlobSto
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.auth.token_signing import sign_detached, verify_detached
 from ufo.harness.containment import contained_leaf
-from ufo.harness.models.interface import Message, ModelRequest
+from ufo.harness.models.interface import Message, ModelRequest, TextBlock
 from ufo.harness.o11y import emit_metric, log, warn
+from ufo.harness.replies import marked_artifacts
 from ufo.harness.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
@@ -138,6 +139,7 @@ from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillB
 from ufo.runtime.sources.backend import ConnectorSourceConfig, binding_name
 from ufo.runtime.turns.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
 from ufo.runtime.turns.audience import (
+    SHARED_AUDIENCE,
     Audience,
     audience_member,
     conversation_audience,
@@ -176,6 +178,7 @@ from ufo.schema.records import (
     WRITEBACK_FAILED,
     WRITEBACK_PENDING,
     AgentVisibility,
+    ArtifactRole,
     ReasoningEffort,
     RuntimeIdentity,
     SandboxSize,
@@ -585,6 +588,11 @@ class SharedArtifact:
     to stream from, the download name, an optional human caption (`subject`), and its media type and
     size — the size lets a chunked-upload API reserve the exact length up front.
 
+    `role` is how a surface delivers it: a `file` came through `share_file`, is attached where the
+    surface can attach, and is an `artifact` object; a `details` file is the write-up the closing
+    reply carried, offered as an Open detailed report link under the answer, never attached or
+    listed. `id` is the row a link into the portal names to open the file's sheet.
+
     `preview_*` names a second blob holding the rendered picture of a file that is not itself one —
     a document's first page, rasterized at share time. A file that is already an image carries none:
     it is its own preview, minted off `blob_key`.
@@ -593,15 +601,43 @@ class SharedArtifact:
     member attached it to the words that opened the turn. A transcript draws each under the one who
     put it there, so the distinction is the row's to carry rather than a reader's to infer."""
 
+    id: UUID
     blob_key: str
     filename: str
     subject: str | None
     media_type: str
     size_bytes: int
+    role: ArtifactRole
     preview_blob_key: str | None = None
     preview_media_type: str | None = None
     preview_size_bytes: int | None = None
     attached_by_member: bool = False
+
+
+def _without_carried(conversation: Conversation) -> Conversation:
+    """The transcript with every artifact span removed from its assistant messages."""
+    messages = []
+    for message in conversation.messages:
+        if message.role != "assistant":
+            messages.append(message)
+        elif isinstance(message.content, str):
+            messages.append(
+                message.model_copy(update={"content": marked_artifacts(message.content)[1]})
+            )
+        else:
+            messages.append(
+                message.model_copy(
+                    update={
+                        "content": tuple(
+                            block.model_copy(update={"text": marked_artifacts(block.text)[1]})
+                            if isinstance(block, TextBlock)
+                            else block
+                            for block in message.content
+                        )
+                    }
+                )
+            )
+    return conversation.model_copy(update={"messages": tuple(messages)})
 
 
 def shared_artifact_link(
@@ -729,11 +765,13 @@ async def scheduled_runs(
     for file in files:
         shared.setdefault(file.turn_id, []).append(
             SharedArtifact(
+                id=file.id,
                 blob_key=file.blob_key,
                 filename=file.filename,
                 subject=file.subject,
                 media_type=file.media_type,
                 size_bytes=file.size_bytes,
+                role=file.role,
                 preview_blob_key=file.preview_blob_key,
                 preview_media_type=file.preview_media_type,
                 preview_size_bytes=file.preview_size_bytes,
@@ -2137,6 +2175,30 @@ class SurfaceContext:
             return None
         return f"{self._public_base_url.rstrip('/')}/surface/{self._home_surface}{fragment}"
 
+    async def report_url(self, conversation_id: UUID, artifact: SharedArtifact) -> str | None:
+        """A link into the portal that opens `conversation_id` at `artifact`, or None when this
+        deploy has no portal or the portal shows nobody that conversation — a room or an externally
+        shared channel, whose roster is the peer surface's alone (`readable_conversation`). The
+        presser reads under their own session; the link grants nothing."""
+        portal = self.home_url(f"#/c/{conversation_id}?report={artifact.id}")
+        if portal is None:
+            return None
+        async with workspace_tx() as connection:
+            audience = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.audience).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if audience is None:
+            return None
+        parsed = parse_audience(audience)
+        if parsed != SHARED_AUDIENCE and audience_member(parsed) is None:
+            return None
+        return portal
+
     async def shared_artifacts(self, turn_id: UUID) -> tuple[SharedArtifact, ...]:
         """The files a turn shared, in share order (key-tiebroken within one timestamp) — the rows
         the writeback poller hands a durable surface's `attach`, read directly by a live surface
@@ -2145,11 +2207,13 @@ class SurfaceContext:
             rows = (
                 await connection.execute(
                     sa.select(
+                        tables.shared_artifact.c.id,
                         tables.shared_artifact.c.blob_key,
                         tables.shared_artifact.c.filename,
                         tables.shared_artifact.c.subject,
                         tables.shared_artifact.c.media_type,
                         tables.shared_artifact.c.size_bytes,
+                        tables.shared_artifact.c.role,
                         tables.shared_artifact.c.preview_blob_key,
                         tables.shared_artifact.c.preview_media_type,
                         tables.shared_artifact.c.preview_size_bytes,
@@ -2166,11 +2230,13 @@ class SurfaceContext:
             ).all()
         return tuple(
             SharedArtifact(
+                id=row.id,
                 blob_key=row.blob_key,
                 filename=row.filename,
                 subject=row.subject,
                 media_type=row.media_type,
                 size_bytes=row.size_bytes,
+                role=row.role,
                 preview_blob_key=row.preview_blob_key,
                 preview_media_type=row.preview_media_type,
                 preview_size_bytes=row.preview_size_bytes,
@@ -3629,11 +3695,13 @@ class SurfaceContext:
         )
 
     async def list_conversation_artifacts(
-        self, conversation_id: UUID, *, limit: int
+        self, conversation_id: UUID, *, limit: int, role: ArtifactRole | None = None
     ) -> tuple[ListedArtifact, ...]:
-        """A bounded newest-first projection of the durable files shared by one conversation.
-        Authorization remains the calling surface's responsibility; this seam fixes the workspace
-        and conversation predicates and never widens to another conversation's rows."""
+        """A bounded newest-first projection of the durable files shared by one conversation, every
+        role or one — a listing of the conversation's artifacts reads `file` rows alone, since a
+        `details` file belongs beside the reply that carried it. Authorization remains the calling
+        surface's responsibility; this seam fixes the workspace and conversation predicates and
+        never widens to another conversation's rows."""
         query = (
             sa.select(
                 tables.shared_artifact.c.id,
@@ -3642,6 +3710,7 @@ class SurfaceContext:
                 tables.shared_artifact.c.subject,
                 tables.shared_artifact.c.media_type,
                 tables.shared_artifact.c.size_bytes,
+                tables.shared_artifact.c.role,
                 tables.shared_artifact.c.preview_blob_key,
                 tables.shared_artifact.c.preview_media_type,
                 tables.shared_artifact.c.preview_size_bytes,
@@ -3672,6 +3741,8 @@ class SurfaceContext:
             )
             .limit(limit)
         )
+        if role is not None:
+            query = query.where(tables.shared_artifact.c.role == role)
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         found = await ConversationDirectory(self.workspace_id).sources((conversation_id,))
@@ -3680,11 +3751,13 @@ class SurfaceContext:
             ListedArtifact(
                 id=row.id,
                 artifact=SharedArtifact(
+                    id=row.id,
                     blob_key=row.blob_key,
                     filename=row.filename,
                     subject=row.subject,
                     media_type=row.media_type,
                     size_bytes=row.size_bytes,
+                    role=row.role,
                     preview_blob_key=row.preview_blob_key,
                     preview_media_type=row.preview_media_type,
                     preview_size_bytes=row.preview_size_bytes,
@@ -4495,14 +4568,16 @@ class SurfaceContext:
         """The conversation's durable message transcript — assistant text and tool_use/tool_result
         blocks — or None when the conversation is not this workspace's or has no transcript yet.
         The ownership gate runs first because the blob store is unscoped: a foreign conversation id
-        must yield nothing, never another tenant's transcript."""
+        must yield nothing, never another tenant's transcript. An assistant message reads as the
+        member read it: the artifact spans a closing answer carried stay in the model's window and
+        leave here, since their files stand beside the reply as the turn's `details` rows."""
         if not await self._owned_conversation(conversation_id):
             return None
         try:
             body = await self.blob.get(transcript_key(conversation_id))
         except BlobNotFound:
             return None
-        return decode(body)
+        return _without_carried(decode(body))
 
     async def list_compactions(self, conversation_id: UUID) -> tuple[int, ...]:
         """The indices of the conversation's persisted compaction records, ascending — each one
@@ -5577,11 +5652,13 @@ class WritebackPoller:
             artifacts = (
                 await connection.execute(
                     sa.select(
+                        tables.shared_artifact.c.id,
                         tables.shared_artifact.c.blob_key,
                         tables.shared_artifact.c.filename,
                         tables.shared_artifact.c.subject,
                         tables.shared_artifact.c.media_type,
                         tables.shared_artifact.c.size_bytes,
+                        tables.shared_artifact.c.role,
                     )
                     .where(
                         tables.shared_artifact.c.turn_id == turn_id,
@@ -5600,11 +5677,13 @@ class WritebackPoller:
             terminal=TerminalFrame.model_validate(row.terminal),
             artifacts=tuple(
                 SharedArtifact(
+                    id=artifact.id,
                     blob_key=artifact.blob_key,
                     filename=artifact.filename,
                     subject=artifact.subject,
                     media_type=artifact.media_type,
                     size_bytes=artifact.size_bytes,
+                    role=artifact.role,
                 )
                 for artifact in artifacts
             ),

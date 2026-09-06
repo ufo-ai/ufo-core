@@ -25,6 +25,7 @@ from ufo.runtime.object_name import ObjectRef
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
 IncompleteReason = Literal["round_budget"]
+ArtifactRole = Literal["file", "details"]
 TurnAdmissionSource = Literal["member", "internal", "scheduled", "intent"]
 ReasoningEffort = Literal["auto", "off", "low", "medium", "high"]
 DEFAULT_REASONING_EFFORT: ReasoningEffort = "auto"

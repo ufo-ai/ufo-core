@@ -37,6 +37,7 @@ IMESSAGE_INBOX_DIR = "inbox/imessage"
 CLAIM_PREFIX = "phone-claim:"
 RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+DETAILS_LINK_TEXT = "Open detailed report"
 LIVE_BUFFER_FRAMES = 1_000
 CONNECTED_TEXT = "Connected. Send your request."
 CODE_UNKNOWN_TEXT = "That code does not match. Check the chat and send the code again."
@@ -450,11 +451,12 @@ class ImessageSurface:
         )
 
     async def attach(self, ctx: SurfaceContext, writeback: Writeback, _reply_ref: str) -> None:
-        """Upload each shared file that fits the provider's bounded attachment request."""
+        """Upload each shared file that fits the provider's bounded attachment request. A file the
+        closing reply carried is a link in that reply, never an attachment."""
         provider = self.provider(ctx.public_base_url)
         conversation_id = conversation_from_queue(writeback.queue_key).id
         for index, artifact in enumerate(writeback.artifacts):
-            if artifact.size_bytes > MAX_ATTACHMENT_BYTES:
+            if artifact.role != "file" or artifact.size_bytes > MAX_ATTACHMENT_BYTES:
                 continue
             await provider.send_attachment(
                 conversation_id,
@@ -480,10 +482,14 @@ class ImessageSurface:
         if writeback.terminal.credential_request is not None:
             parts.append(ctx.home_url() or "Open the member portal to continue.")
         for artifact in writeback.artifacts:
-            if artifact.size_bytes <= MAX_ATTACHMENT_BYTES:
+            if artifact.role == "file" and artifact.size_bytes <= MAX_ATTACHMENT_BYTES:
                 continue
-            link = ctx.artifact_link(artifact)
-            parts.append(f"{artifact.filename}: {link}" if link else artifact.filename)
+            link = None
+            if artifact.role == "details":
+                link = await ctx.report_url(writeback.conversation_id, artifact)
+            link = link or ctx.artifact_link(artifact)
+            label = DETAILS_LINK_TEXT if artifact.role == "details" else artifact.filename
+            parts.append(f"{label}: {link}" if link else artifact.filename)
         text = "\n\n".join(part for part in parts if part)
         return text or f"The turn ended with status: {writeback.terminal.status}."
 

@@ -1,20 +1,21 @@
 """The core-registered `artifact` object kind: files shared out of turns as workspace objects.
 
 `share_file` is the sole producer — each share lands a `shared_artifact` row and its bytes in the
-blob store — and the kind is the read/delete surface over those rows, one object per conversation
-and filename: re-sharing a filename in the same conversation is a new version of the same object
-(get, status, and the workspace copy reflect the latest share), while the same filename shared
-from another conversation is a different file and a different object. Names carry both halves of
-that identity — `<conversation-prefix>-<filename-slug>` (`3f2a9c1b-report-txt`, carried in the
-share result), so one session's artifacts cluster together in a listing; a short digest suffix
-appears only when distinct shares still collide on one name. Get renders the latest share and,
-through status, copies its bytes back into the conversation workspace so a turn can reuse a file
-an earlier turn produced; status also mints a fresh TTL download link. Create and update raise
-`VerbNotSupported` naming `share_file`; delete removes every version's row and blob, after which
-already-minted links stop serving (the download route 404s an absent blob). A signed-in member
-reads shares made after a member entered their conversation in the portal, under the same two
-scopes — the selected agent and the subjects their own conversation carries — while agent reads
-stay whole and the bytes stay behind the turn."""
+blob store — and the kind is the read/delete surface over those `file` rows (a `details` row is the
+write-up a closing reply carried, delivered beside that reply and never an object), one object per
+conversation and filename: re-sharing a filename in the same conversation is a new version of the
+same object (get, status, and the workspace copy reflect the latest share), while the same filename
+shared from another conversation is a different file and a different object. Names carry both
+halves of that identity — `<conversation-prefix>-<filename-slug>` (`3f2a9c1b-report-txt`, carried
+in the share result), so one session's artifacts cluster together in a listing; a short digest
+suffix appears only when distinct shares still collide on one name. Get renders the latest share
+and, through status, copies its bytes back into the conversation workspace so a turn can reuse a
+file an earlier turn produced; status also mints a fresh TTL download link. Create and update
+raise `VerbNotSupported` naming `share_file`; delete removes every version's row and blob, after
+which already-minted links stop serving (the download route 404s an absent blob). A signed-in
+member reads shares made after a member entered their conversation in the portal, under the same
+two scopes — the selected agent and the subjects their own conversation carries — while agent
+reads stay whole and the bytes stay behind the turn."""
 
 import hashlib
 import re
@@ -444,6 +445,7 @@ class ArtifactObjects:
             )
             .where(
                 tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                tables.shared_artifact.c.role == "file",
                 tables.turn.c.agent_id == object_agent_id(),
                 tables.conversation.c.audience.in_(subjects),
             )
@@ -485,6 +487,7 @@ class ArtifactObjects:
             )
             .where(
                 tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                tables.shared_artifact.c.role == "file",
                 tables.turn.c.agent_id == object_agent_id(),
                 tables.conversation.c.audience.in_(subjects),
             )

@@ -59,7 +59,7 @@ import { useEarlierMessages } from "@/lib/earlier";
 import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import { newChatHash, sectionHash } from "@/lib/route";
-import { navigate } from "@/lib/router";
+import { navigate, useRoute } from "@/lib/router";
 import { uploadAttachment, type UploadRef } from "@/lib/api";
 import {
   answerQuestions,
@@ -114,6 +114,7 @@ export function Chat({
   const chatKey = conversationId ?? foundingKey ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
   const state = useChat(chatKey);
+  const route = useRoute();
   const composer = useRef<HTMLTextAreaElement>(null);
   const wasBusy = useRef(state.busy);
   const target: ChatTarget = {
@@ -185,6 +186,11 @@ export function Chat({
             messages={messages ?? []}
             earlier={earlier}
             live={state.live}
+            report={
+              route.kind === "chat" && route.conversationId === conversationId
+                ? (route.report ?? null)
+                : null
+            }
             className={cn(COLUMN, "p-2xl")}
             question={(question) => (
               <Question

@@ -43,6 +43,7 @@ from evals.harness.judge import JudgeLeg
 from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.harness.replies import marked_artifacts
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import ConversationProbes
 from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL
@@ -1149,9 +1150,9 @@ class InProcessTarget:
         return frame.error_class or "", frame.error_message or ""
 
     async def _shared_artifacts(self, turn_ids: tuple[UUID, ...]) -> ArtifactCollection:
-        """Artifacts the run shared, from the evaluated turn and every delegated descendant — a
-        child's share_file records against the child turn, and its file must be as visible to a
-        scorer as the call that shared it."""
+        """Artifacts the run shared or its replies carried, from the evaluated turn and every
+        delegated descendant — a child's share_file records against the child turn, and its file
+        must be as visible to a scorer as the call that shared it."""
         blob = self.blob
         if blob is None:
             raise RuntimeError("artifact collection requires a blob store")
@@ -1162,6 +1163,7 @@ class InProcessTarget:
                         tables.shared_artifact.c.filename,
                         tables.shared_artifact.c.blob_key,
                         tables.shared_artifact.c.size_bytes,
+                        tables.shared_artifact.c.role,
                     )
                     .where(tables.shared_artifact.c.turn_id.in_(list(turn_ids)))
                     .order_by(tables.shared_artifact.c.created_at)
@@ -1201,7 +1203,7 @@ class InProcessTarget:
                     references=references,
                     error=f"artifact {row.filename!r} size does not match its row",
                 )
-            artifacts.append(SharedArtifact(row.filename, content))
+            artifacts.append(SharedArtifact(row.filename, content, row.role))
         return ArtifactCollection(tuple(artifacts), references)
 
     async def _artifact_references(
@@ -1322,8 +1324,9 @@ def _terminal_text(terminal: Json) -> str:
 
 def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
     """Rebuild the grader-visible output from the transcript: the final answer (the last assistant
-    text), the ordered tool calls (each tool_use joined to its tool_result by id), and the error
-    text of any call that failed."""
+    text, without the artifact spans the window keeps and the member never reads — the engine lands
+    those as files beside the reply), the ordered tool calls (each tool_use joined to its
+    tool_result by id), and the error text of any call that failed."""
     private_results, private_values = _private_handoffs(messages)
     result_by_id: dict[str, ToolResultBlock] = {}
     for message in messages:
@@ -1358,9 +1361,8 @@ def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
                 )
                 if result is not None and result.is_error:
                     errors.append(result_text)
-    return CapabilityOutput(
-        _redact_text(_final_answer(messages), private_values), tuple(calls), tuple(errors)
-    )
+    _carried, answer = marked_artifacts(_final_answer(messages))
+    return CapabilityOutput(_redact_text(answer, private_values), tuple(calls), tuple(errors))
 
 
 def _private_handoffs(messages: tuple[Message, ...]) -> tuple[frozenset[str], tuple[str, ...]]:

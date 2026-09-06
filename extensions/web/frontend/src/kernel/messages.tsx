@@ -253,6 +253,7 @@ export function MessageLog({
   question,
   className,
   children,
+  report = null,
 }: {
   messages: Spoken[];
   /** The compacted-away pages above `messages`, for a conversation that has them: the loaded ones
@@ -266,8 +267,20 @@ export function MessageLog({
    *  in the middle of the screen beside the words instead of at the side of the window. */
   className?: string;
   children?: ReactNode;
+  /** The file a link from another surface named, opened once it is on screen and once only. */
+  report?: string | null;
 }) {
   const [opened, setOpened] = useState<Opened | null>(null);
+  const openedReport = useRef<string | null>(null);
+  useEffect(() => {
+    if (!report || openedReport.current === report) return;
+    const file = [...messages.flatMap((message) => message.files ?? []), ...(live?.files ?? [])].find(
+      (candidate) => candidate.id === report,
+    );
+    if (!file) return;
+    openedReport.current = report;
+    setOpened({ files: [file], at: 0 });
+  }, [report, messages, live]);
   const waiting = messages.findIndex(
     (message) => message.arrival_id !== undefined || message.queued === true,
   );
@@ -431,18 +444,28 @@ const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-
 
 /** What a reply's turn shared, under the words that shared it. Images with a preview come first:
  *  one is drawn as part of the answer, and several stand in share order on one snapping row. Every
- *  other file follows in a card grid, including documents whose first page has a preview and images
- *  no preview was rendered for — only a drawable image belongs in the image carousel. Pressing an
- *  preview goes to `onOpen`, as does every file card. */
+ *  other shared file follows in a card grid, including documents whose first page has a preview and
+ *  images no preview was rendered for — only a drawable image belongs in the image carousel.
+ *  Pressing a preview goes to `onOpen`, as does every file card. The write-up the reply carried
+ *  comes first, as the link that opens it: it belongs to the answer, the attachments to the turn. */
 function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (opened: Opened) => void }) {
-  const images = files.filter(
+  const shared = files.filter((file) => file.role !== "details");
+  const carried = files.filter((file) => file.role === "details");
+  const images = shared.filter(
     (file) => file.media_type.startsWith("image/") && file.preview_url !== null,
   );
-  const documents = files.filter(
+  const documents = shared.filter(
     (file) => !file.media_type.startsWith("image/") || file.preview_url === null,
   );
   return (
     <>
+      {carried.map((file, index) => (
+        <CarriedReport
+          key={file.filename + String(index)}
+          file={file}
+          onOpen={() => onOpen({ files: [file], at: 0 })}
+        />
+      ))}
       {images.length === 1 ? (
         <Picture file={images[0]} onOpen={() => onOpen({ files: images, at: 0 })} />
       ) : null}
@@ -473,6 +496,27 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (opened: Opened) 
         </div>
       ) : null}
     </>
+  );
+}
+
+/** The write-up a reply carried, as the link that opens it in the sheet a file card opens: a link in
+ *  dress and a button in kind. A file with no url has nothing to open and is named in plain text. */
+function CarriedReport({ file, onOpen }: { file: ChatFile; onOpen: () => void }) {
+  if (!file.url) {
+    return <span className="mt-2xs font-mono text-small text-ink-soft">{file.filename}</span>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={file.filename}
+      className={cn(
+        "mt-2xs cursor-pointer self-start border-0 bg-transparent p-0 text-left text-link underline",
+        TAP_FLOOR,
+      )}
+    >
+      Open detailed report
+    </button>
   );
 }
 

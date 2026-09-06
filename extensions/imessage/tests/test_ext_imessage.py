@@ -67,6 +67,7 @@ from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import ScopedStore, context_for
 from ufo.runtime.ext.surface import (
+    SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
     SurfaceListenerContext,
@@ -665,6 +666,80 @@ async def test_direct_writeback_mints_the_requesting_members_connect_url() -> No
 
     assert await surface.post(Context(), writeback) == "message"
     assert sent == ["https://ufo.example.test/connect"]
+
+
+async def test_a_file_the_reply_carried_is_a_link_in_the_reply_and_no_attachment() -> None:
+    """A `details` file rides the reply as a link the way an over-cap file does, and `attach` sends
+    only the files the turn shared."""
+    sent: list[str] = []
+    attached: list[str] = []
+
+    class Provider:
+        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
+            sent.append(text)
+            return "message"
+
+        async def send_attachment(
+            self, _conversation_id: str, filename: str, _data: bytes, _idempotency_key: str
+        ) -> str:
+            attached.append(filename)
+            return "attachment"
+
+    class Blob:
+        async def get_stream(self, _blob_key: str) -> AsyncGenerator[bytes, None]:
+            yield b"csv"
+
+    class Context:
+        public_base_url = "https://ufo.example.test"
+        blob = Blob()
+
+        def artifact_link(self, artifact: SharedArtifact) -> str:
+            return f"https://ufo.example.test/artifacts/{artifact.filename}"
+
+        async def report_url(self, conversation_id: UUID, artifact: SharedArtifact) -> str:
+            return f"https://ufo.example.test/surface/web#/c/{conversation_id}?report={artifact.id}"
+
+        def home_url(self) -> str:
+            return "https://ufo.example.test"
+
+    provider = Provider()
+    surface = ImessageSurface(provider=lambda _base: provider)
+    report_id = uuid4()
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        queue_key=queue_key("direct-chat", direct=True),
+        terminal=TerminalFrame(status="done", text="The answer."),
+        artifacts=(
+            SharedArtifact(
+                id=report_id,
+                blob_key="artifacts/a/plan.md",
+                filename="plan.md",
+                subject=None,
+                media_type="text/markdown",
+                size_bytes=3,
+                role="details",
+            ),
+            SharedArtifact(
+                id=uuid4(),
+                blob_key="artifacts/b/data.csv",
+                filename="data.csv",
+                subject=None,
+                media_type="text/csv",
+                size_bytes=3,
+                role="file",
+            ),
+        ),
+    )
+
+    assert await surface.post(Context(), writeback) == "message"
+    await surface.attach(Context(), writeback, "message")
+    assert sent == [
+        "The answer.\n\nOpen detailed report: https://ufo.example.test/surface/web#/c/"
+        f"{writeback.conversation_id}?report={report_id}"
+    ]
+    assert attached == ["data.csv"]
 
 
 async def test_spectrum_invalid_payload_is_an_external_provider_error() -> None:

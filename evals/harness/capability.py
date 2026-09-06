@@ -146,10 +146,13 @@ def shared_file_names(call: ToolInvocation) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class SharedArtifact:
-    """One artifact durably attached to the evaluated turn."""
+    """One artifact durably attached to the evaluated turn: a `file` the turn shared, or the
+    `details` its closing reply carried in an artifact tag. A workspace file read for judging is a
+    `file`."""
 
     name: str
     content: bytes
+    role: str = "file"
 
 
 @dataclass(frozen=True)
@@ -357,8 +360,9 @@ class CapabilityCase:
     `followup_turns` bounds the admitted followup turns.
     `rubric` judges the answer text — with `answer_spans_artifacts`, the Markdown the turn shared
     joins that answer, for a case whose reply is expected to carry its detail in a shared file
-    rather than inline; `artifact_rubric` judges the Markdown files the turn shared, or, when
-    `written_report` names a workspace glob, the Markdown the turn wrote there without sharing;
+    rather than inline; `artifact_rubric` judges the Markdown files the turn shared or its reply
+    carried, or, when `written_report` names a workspace glob, the Markdown the turn wrote there
+    without sharing;
     `visual_rubric` judges its rendered page images. Each requires a judge model on the task and
     runs after the deterministic grader passes, or after a failure when
     `judge_on_deterministic_failure` is set. `seed`, when set, receives

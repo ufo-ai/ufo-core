@@ -844,6 +844,7 @@ ASK_SUBMITTED_LINE = "✅ *{question}* — {answer}"
 ASK_UNANSWERED_LINE = "*{question}* — no answer"
 ASK_SUBMITTED_BY_LINE = "Submitted by <@{user}>"
 CONNECT_ACTION_ID = "connect"
+DETAILS_LINK_TEXT = "Open detailed report"
 MAX_ANSWER_OPTIONS = 10
 """Slack's own ceiling on a radio button or checkbox group; a wider question renders as prose."""
 MIN_ANSWER_OPTIONS = 2
@@ -1240,6 +1241,7 @@ def slack_reply_body(
     blocks: bool = True,
     actions: list[dict[str, object]] | None = None,
     sections: bool = False,
+    unfurl: bool = True,
 ) -> bytes:
     """The chat.postMessage body for one bounded reply part: a Block Kit `markdown` block, the
     rendered ask and connect handoff when present, and an optional final accounting context block.
@@ -1248,7 +1250,8 @@ def slack_reply_body(
 
     A body carrying more than one link posts with unfurling off: Slack previews every link it finds,
     so a reply that cites its sources arrives buried under a stack of cards taller than the answer.
-    One link keeps its preview, which is the case where the card is the content.
+    One link keeps its preview, which is the case where the card is the content — except the link
+    to a carried report (`unfurl=False`), a portal page whose card would only repeat the answer.
 
     Blank lines above a markdown header are dropped before the text is chunked. Slack renders each
     one as an empty paragraph, leaving a header floating a full line below the prose it heads, and
@@ -1267,7 +1270,7 @@ def slack_reply_body(
         }
     if thread_ts is not None:
         base["thread_ts"] = thread_ts
-    if _link_count(text) > MAX_UNFURLED_LINKS:
+    if not unfurl or _link_count(text) > MAX_UNFURLED_LINKS:
         base["unfurl_links"] = False
         base["unfurl_media"] = False
     if blocks:
@@ -4036,10 +4039,14 @@ def _reply_text(writeback: Writeback) -> str:
     return writeback.terminal.text or SLACK_EMPTY_REPLY_TEXT
 
 
-def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str:
-    """The reply text, plus the portal hint when the turn asked for credentials, plus a link block
-    for any shared file too large to upload inline — a TTL download link so an over-cap artifact is
-    delivered rather than silently dropped.
+async def _reply_with_links(ctx: SurfaceContext, writeback: Writeback) -> str:
+    """The reply text, then the link that opens the write-up the reply carried, then the portal hint
+    when the turn asked for credentials, then a link block for any shared file too large to upload
+    inline — a TTL download link so an over-cap artifact is delivered rather than silently dropped.
+
+    The write-up's link sits right under the words it stands behind: part of the answer, never an
+    upload or a second message. It opens the conversation in the portal at that report; a deploy
+    with no portal, or a room the portal shows nobody, hands the TTL download instead.
 
     Slack cannot collect a secret, so it is the surface that has to name one that can. The prompt
     this turn raised belongs to this thread's conversation and no other, so it is not waiting in
@@ -4052,6 +4059,13 @@ def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str
     `markdown` block `slack_reply_body` builds, which reads standard Markdown, so Slack's own
     `<url|label>` form would print verbatim."""
     text = _reply_text(writeback)
+    carried = [
+        await _details_link_line(ctx, writeback.conversation_id, artifact)
+        for artifact in writeback.artifacts
+        if artifact.role == "details"
+    ]
+    if carried:
+        text = f"{text}\n\n" + "\n".join(carried)
     if writeback.terminal.credential_request is not None:
         reason = writeback.terminal.credential_request.reason
         link = ctx.home_url(CREDENTIALS_FRAGMENT)
@@ -4061,11 +4075,20 @@ def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str
             else "the ufo portal, under Workspace → Credentials"
         )
         text = f"{text}\n\n:lock: {reason} — set it in {where}; secrets never pass through chat."
-    oversized = tuple(a for a in writeback.artifacts if a.size_bytes > SLACK_UPLOAD_MAX_BYTES)
+    oversized = tuple(
+        a for a in writeback.artifacts if a.role == "file" and a.size_bytes > SLACK_UPLOAD_MAX_BYTES
+    )
     if not oversized:
         return text
     lines = "\n".join(_oversize_link_line(ctx, artifact) for artifact in oversized)
     return f"{text}\n\n{SLACK_OVERSIZE_HEADING}\n{lines}"
+
+
+async def _details_link_line(
+    ctx: SurfaceContext, conversation_id: UUID, artifact: SharedArtifact
+) -> str:
+    url = await ctx.report_url(conversation_id, artifact) or ctx.artifact_link(artifact)
+    return f"[{DETAILS_LINK_TEXT}]({url})" if url else artifact.filename
 
 
 def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:
@@ -4380,8 +4403,9 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
     accounting and the model it ran on, so a reply split across messages ends with exactly one. An
     `invalid_blocks` rejection is deterministic, so the reply re-posts once — as conservative
     section blocks when it carries an ask or connect handoff (the affordance survives the markdown
-    blocks Slack rejected), as plain text otherwise — rather than the poller retrying the identical
-    Block Kit body until it ages out. Each accepted part is checkpointed in the extension store.
+    blocks Slack rejected), as plain text otherwise — rather
+    than the poller retrying the identical Block Kit body until it ages out. Each accepted part is
+    checkpointed in the extension store.
     Before an uncertain request, its delivery ID is attached as Slack message metadata; a retry
     reads that marker back before deciding whether to post, covering a response lost after Slack
     accepted the message. The completed checkpoint survives until `attach`, after core has durably
@@ -4407,11 +4431,12 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         if not progress.deliveries:
             raise SlackApiError("Completed Slack reply has no deliveries")
         return f"{channel}:{progress.deliveries[0].ts}"
+    linked = await _reply_with_links(ctx, writeback)
     progress, stored, text = await _reply_mentions_mapped(
         ctx,
         bot_token,
         channel,
-        _reply_with_oversize_links(ctx, writeback),
+        linked,
         store,
         progress_key,
         progress,
@@ -4421,6 +4446,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         *(slack_ask_blocks(writeback.terminal.question) or ()),
         *(slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id) or ()),
     ] or None
+    unfurl = not any(artifact.role == "details" for artifact in writeback.artifacts)
     model = writeback.terminal.model or "no-model"
     params = (
         f"-[{writeback.terminal.reasoning}]" if writeback.terminal.reasoning is not None else ""
@@ -4466,6 +4492,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
                 part_metadata,
                 delivery_id=delivery_id,
                 actions=part_actions,
+                unfurl=unfurl,
             )
             progress, stored, payload = await _deliver_slack_reply(
                 client,
@@ -4500,6 +4527,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
                     delivery_id=delivery_id,
                     actions=part_actions,
                     sections=True,
+                    unfurl=unfurl,
                 )
                 progress, stored, payload = await _deliver_slack_reply(
                     client,
@@ -4716,7 +4744,8 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     """Stream every shared file that fits the upload cap into the conversation, all at once on the
     event loop, then share them as one message holding every file in share order — a turn that
     shared four files posts one message with four attachments, never four messages. An over-cap
-    file is delivered as a link in `post`, not here. The message lands in the same thread the reply
+    file is delivered as a link in `post`, not here, and so is the write-up the closing reply
+    carried. The message lands in the same thread the reply
     did — the member's own message, never the bot reply's ts, which Slack forbids as a parent. Best
     effort: a file Slack refuses is logged and left out of the share, so the rest still arrive
     together, and an upload never re-posts the reply or blocks its siblings.
@@ -4727,7 +4756,11 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     store = ScopedStore(SLACK_EXTENSION)
     thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
     await _drop_turn_reply_records(store, writeback.turn_id)
-    inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
+    inline = tuple(
+        a
+        for a in writeback.artifacts
+        if a.role == "file" and a.size_bytes <= SLACK_UPLOAD_MAX_BYTES
+    )
     if not inline:
         return
     channel = writeback.queue_key.partition(":")[0]

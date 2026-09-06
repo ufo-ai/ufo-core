@@ -119,13 +119,17 @@ export type AgentsPayload = {
  *  route serving it. `media_type` says which cards the artifacts sidebar can draw as a document, so
  *  pressing one opens it there instead of downloading, and which picture wears a badge naming the
  *  document it came from. A file the member attached lives in the conversation's
- *  workspace rather than the artifact store, so it carries neither a download `url` nor a size. */
+ *  workspace rather than the artifact store, so it carries neither a download `url` nor a size.
+ *  A `details` role marks the write-up the reply carried, drawn as the link that opens it rather
+ *  than a card; `id` is the artifact row a chat address names to open the file on arrival. */
 export type ChatFile = {
+  id?: string | null;
   filename: string;
   url: string | null;
   size_bytes?: number;
   preview_url: string | null;
   media_type: string;
+  role?: "file" | "details";
 };
 
 /** One application a reply's turn created, as the card that opens it draws it: the app's own mark
