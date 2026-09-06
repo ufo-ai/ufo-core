@@ -27,7 +27,6 @@ import {
 } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { cn } from "@/lib/cn";
-import { setPendingAsk } from "@/lib/pendingAsk";
 import {
   AGENTS_HASH,
   HOME_HASH,
@@ -181,23 +180,8 @@ export function Spotlight({
         run: () => take(newChatHash(named.id)),
       }
     : null;
-  /** The term as something to say rather than something to find: the agent it is said to, then
-   *  the words themselves, the way a chat row names its own subject. It lands in the composer of a
-   *  new chat, so the member reads what will be sent and sends it themselves. */
-  const asked =
-    named && wanted
-      ? {
-          value: "ask",
-          primary: named.name + ": " + wanted,
-          icon: IconMessage,
-          run: () => {
-            setPendingAsk(named.id, wanted, true);
-            take(newChatHash(named.id));
-          },
-        }
-      : null;
   const lowered = wanted.toLowerCase();
-  const actions = [asked, !wanted || "new chat".includes(lowered) ? started : null].filter(
+  const actions = [!wanted || "new chat".includes(lowered) ? started : null].filter(
     (action) => action !== null,
   );
   const reachable = places(tabs[0]).filter((place) =>

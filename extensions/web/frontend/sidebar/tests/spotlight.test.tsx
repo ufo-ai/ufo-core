@@ -4,14 +4,12 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, TASK_KIND, TRIGGER_KIND, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "";
   useStreamFake();
 });
-
-const FOUNDED_ID = "77777777-7777-4777-8777-777777777777";
 
 const FOUND_CONVERSATION = {
   id: CONVO_ID,
@@ -137,7 +135,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Threads", "Artifacts", "Tasks"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
@@ -155,7 +153,7 @@ test("an agent matches from the payload the shell holds, under its own heading",
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: "Second opus" })).toBeTruthy();
-  expect(headings().slice(0, 2)).toEqual(["Actions", "Apps"]);
+  expect(headings()[0]).toBe("Apps");
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });
 
@@ -247,7 +245,7 @@ test("a term nothing answers says so once, not once per kind", async () => {
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByText("Nothing matches this search.")).toBeTruthy();
-  expect(headings()).toEqual(["Actions"]);
+  expect(headings()).toEqual([]);
 });
 
 /** The fan-out rests before it fires, so a term states that it is being read rather than standing
@@ -290,7 +288,7 @@ test("a kind stands as soon as it answers, while a slower kind is still being re
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]),
+    expect(headings()).toEqual(["Threads", "Artifacts", "Tasks"]),
   );
 });
 
@@ -355,98 +353,4 @@ test("the arrow keys move the cursor and Enter takes the row under it", async ()
 
   expect(location.hash).toBe("#/");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-
-/** The words are the member's own and they pressed Enter on them, so the row says them: it lands on
- *  a new chat with the term already sent, not with the box filled and waiting for a second press.
- *  The conversation is founded by the composer on the screen, so it is theirs like any other. */
-test("the term is said to the agent, by the composer on the screen it lands on", async () => {
-  wire({
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "deploy" }),
-    "/slots": () => json({ slots: [] }),
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
-    "/objects/artifact": () => json({ objects: [] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
-    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
-    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
-    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
-  const composer = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
-  expect(composer.value).toBe("");
-});
-
-/** The row says the term to the agent the palette names, which is the main one, from any screen —
- *  including the start screen of another agent. One pane stands for every start screen, so the route
- *  renames the agent of the composer already on the screen rather than mounting a second one, and
- *  the words must be read under that new name. Left unread they would be said into a later chat. */
-test("the term is said to the agent the row names, from another agent's start screen", async () => {
-  const { calls } = wire({
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-    "/slots": () => json({ slots: [] }),
-    "/objects/artifact": () => json({ objects: [] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
-    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
-    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
-    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/new/" + SECOND_ID;
-  portal();
-  await screen.findByLabelText("Ask UFO");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const said = calls.filter((url) => url.includes("/chat?conversation="));
-  expect(said).toHaveLength(1);
-  expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
-  expect(said[0]).not.toContain(SECOND_ID);
-  expect(location.hash).toBe("#/c/" + FOUNDED_ID);
-  const composer = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
-  expect(composer.value).toBe("");
-});
-
-/** The words go to the agent's new chat. A conversation the member is reading belongs to that same
- *  agent and its composer is the one mounted, so an ask taken by the agent alone would be said
- *  there — into the thread they were leaving, over the draft they left in it. */
-test("the term founds a new conversation, though the member was reading another", async () => {
-  const { calls } = wire({
-    ...chatsOnWire([CHAT_ROW]),
-    "/slots": () => json({ slots: [] }),
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-    "/objects/artifact": () => json({ objects: [] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
-    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
-    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
-    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/c/" + CONVO_ID;
-  portal();
-  await screen.findByLabelText("Ask UFO");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const said = calls.filter((url) => url.includes("/chat?conversation="));
-  expect(said).toHaveLength(1);
-  expect(said[0]).toContain("conversation=new");
-  expect(said[0]).not.toContain(CONVO_ID);
-  expect(location.hash).toBe("#/c/" + FOUNDED_ID);
 });
