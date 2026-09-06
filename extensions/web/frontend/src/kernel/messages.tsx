@@ -290,7 +290,11 @@ export function MessageLog({
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
           {message.role === "user" ? (
-            <Attached files={message.files ?? []} picked={message.attached ?? []} />
+            <Attached
+              files={message.files ?? []}
+              picked={message.attached ?? []}
+              onOpen={setOpened}
+            />
           ) : null}
           {message.role === "user" ? null : (
             <Activity events={message.events ?? []} runs={message.subagents ?? []} live={false} />
@@ -548,18 +552,30 @@ function Apps({ apps }: { apps: ChatApp[] }) {
  *  A file this page is still sending is drawn off the file in hand — the conversation's workspace,
  *  which every later read draws it from, does not hold it yet — and one a read stated is drawn off
  *  the link that read carried. */
-function Attached({ files, picked }: { files: ChatFile[]; picked: File[] }) {
+function Attached({
+  files,
+  picked,
+  onOpen,
+}: {
+  files: ChatFile[];
+  picked: File[];
+  onOpen: (opened: Opened) => void;
+}) {
   if (!picked.length && !files.length) return null;
   return (
     <AttachmentGroup className="mb-2xs justify-end">
       {picked.length
         ? picked.map((file, at) => <PickedThumbnail key={file.name + String(at)} file={file} />)
-        : files.map((file) => (
-            <AttachmentThumbnail
+        : files.map((file, at) => (
+            <button
               key={file.filename}
-              filename={file.filename}
-              previewUrl={file.preview_url}
-            />
+              type="button"
+              onClick={() => onOpen({ files, at })}
+              aria-label={`Open ${file.filename}`}
+              className="cursor-pointer border-0 bg-transparent p-0"
+            >
+              <AttachmentThumbnail filename={file.filename} previewUrl={file.preview_url} />
+            </button>
           ))}
     </AttachmentGroup>
   );
@@ -576,24 +592,29 @@ function Picture({
   onOpen: () => void;
   grouped?: boolean;
 }) {
+  const [failed, setFailed] = useState<string | null>(null);
   const badge = attachmentBadgeFor(file.filename);
   const className = cn(
     "w-fit",
     grouped ? "max-w-full shrink-0 snap-start" : "mt-2xs",
   );
-  const drawn = (
-    <span className="relative block w-fit">
-      <img
-        loading="lazy"
-        alt={file.filename}
-        src={file.preview_url ?? undefined}
-        className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
-      />
-      {badge === null ? null : (
-        <AttachmentBadge className="absolute bottom-0 left-0 m-sm">{badge}</AttachmentBadge>
-      )}
-    </span>
-  );
+  const drawn =
+    failed === file.preview_url ? (
+      <AttachmentThumbnail filename={file.filename} previewUrl={null} />
+    ) : (
+      <span className="relative block w-fit">
+        <img
+          loading="lazy"
+          alt={file.filename}
+          src={file.preview_url ?? undefined}
+          onError={() => setFailed(file.preview_url)}
+          className="max-h-(--media-card) max-w-full rounded-panel border border-edge object-contain"
+        />
+        {badge === null ? null : (
+          <AttachmentBadge className="absolute bottom-0 left-0 m-sm">{badge}</AttachmentBadge>
+        )}
+      </span>
+    );
   return (
     <button
       type="button"

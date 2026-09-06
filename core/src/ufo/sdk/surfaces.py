@@ -31,6 +31,9 @@ from ufo.runtime.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT as AMBIENT_CONTEXT_ELEMENT,
 )
 from ufo.runtime.ext.surface import (
+    ATTACHED_COVER_BUDGET_SECONDS as ATTACHED_COVER_BUDGET_SECONDS,
+)
+from ufo.runtime.ext.surface import (
     ATTACHMENTS_ELEMENT as ATTACHMENTS_ELEMENT,
 )
 from ufo.runtime.ext.surface import (

@@ -1811,7 +1811,14 @@ async def _workspace_context(
     return ctx, workspace_dir
 
 
-async def _shared_artifact_row(turn: Turn, blob_key: str, filename: str, size_bytes: int) -> None:
+async def _shared_artifact_row(
+    turn: Turn,
+    blob_key: str,
+    filename: str,
+    size_bytes: int,
+    *,
+    attached_by_member: bool = False,
+) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.shared_artifact).values(
@@ -1822,6 +1829,7 @@ async def _shared_artifact_row(turn: Turn, blob_key: str, filename: str, size_by
                 subject=None,
                 media_type="application/octet-stream",
                 size_bytes=size_bytes,
+                attached_by_member=attached_by_member,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2389,6 +2397,41 @@ async def test_artifact_reads_reach_every_version(db: None, tmp_path: Path) -> N
         assert deleted["spec"]["filename"] == "report.txt"
         for blob_key in report_keys:
             assert not await ctx.blob.exists(blob_key)
+
+
+async def test_the_shelf_narrows_to_what_a_member_attached(db: None) -> None:
+    """A file reaches a conversation two ways, and which of them a member wants is its own question:
+    the shelf narrows to what they attached without narrowing by what is in the file, so the deck
+    they sent is found beside the spreadsheet they sent rather than under one of them. Every row
+    says which it is, so a reader that draws them apart needs no second read."""
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        await _shared_artifact_row(
+            turn, f"artifacts/{uuid4()}/sent.pdf", "sent.pdf", 9, attached_by_member=True
+        )
+        await _shared_artifact_row(turn, f"artifacts/{uuid4()}/made.pdf", "made.pdf", 9)
+        ctx = _tool_context(workspace_id)
+        every = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
+        attached = json.loads(
+            await _agent_text(
+                turn.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                filters={"attachment": True},
+            )
+        )
+    assert {row["filename"] for row in every["objects"]} == {"sent.pdf", "made.pdf"}
+    assert [row["filename"] for row in attached["objects"]] == ["sent.pdf"]
+    assert {row["filename"]: row["attachment"] for row in every["objects"]} == {
+        "sent.pdf": True,
+        "made.pdf": False,
+    }
 
 
 async def test_artifact_over_the_copy_bound_reports_no_workspace_path(db: None) -> None:

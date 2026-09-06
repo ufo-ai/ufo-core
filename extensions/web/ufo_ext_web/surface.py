@@ -29,14 +29,13 @@ import os
 import re
 from binascii import Error as Base64Error
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import partial
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -90,7 +89,7 @@ from ufo.sdk.manifest import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_AUTOMATIONS_MAX,
     CONVERSATION_SITES_MAX,
-    IMAGE_PREVIEW_MAX_BYTES,
+    PREVIEW_KINDS,
     ArtifactsSlotPayload,
     AutomationsSlotPayload,
     ConversationArtifact,
@@ -99,12 +98,9 @@ from ufo.sdk.manifest import (
     ConversationSlotPayload,
     ConversationSlotProvider,
     ImagePreview,
-    ImagePreviewGrant,
-    InvalidImagePreview,
     SitesSlotPayload,
     WorkspaceChanges,
     raster_image_media_type,
-    validated_image_preview,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import (
@@ -130,7 +126,7 @@ from ufo.sdk.objects import (
     ObjectRef,
     ObjectRow,
 )
-from ufo.sdk.sandbox import ContainmentError, contained_relative, shipped_app_slug
+from ufo.sdk.sandbox import shipped_app_slug
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
     WORKSPACE_WRITE_MAX_BYTES,
@@ -222,10 +218,6 @@ MAX_REQUEST_BYTES = 25 * 1024 * 1024
 MAX_FORM_BYTES = 64 * 1024
 MAX_SECRET_BYTES = 4_096
 UPLOAD_CHUNK_BYTES = 65_536
-UPLOAD_PUT_TTL_SECONDS = 900
-"""How long one minted upload URL stays good. Long enough for a browser to PUT a large file over
-a slow link; short enough that a leaked URL buys hours, not days."""
-UPLOAD_KEY_ROOT = "web-inbox-uploads"
 MAX_INBOUND_FILES = 10
 """How many files one send carries. A presigned attachment costs the body nothing, so the framing
 cap bounds it no longer: this is what keeps one request from reading the store without end and
@@ -233,12 +225,6 @@ writing it all into one workspace."""
 WEB_INBOX_DIR = "web-inbox"
 FILES_NOTE = "[Attached files, saved in the workspace: {paths}]"
 FILES_NOTE_RE = re.compile(r"\[Attached files, saved in the workspace: (?P<paths>[^]\n]+)\]\Z")
-ATTACHMENT_MEDIA_TYPES = {".pdf": "application/pdf"}
-ATTACHMENT_FALLBACK_MEDIA_TYPE = "application/octet-stream"
-ATTACHMENT_PREVIEW_HEADERS = {
-    "x-content-type-options": "nosniff",
-    "cache-control": "private, no-store",
-}
 ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 TIMEZONE_HEADER = "x-ufo-timezone"
@@ -1585,23 +1571,23 @@ async def _bounded_body(request: Request, limit: int) -> bytes | Response:
 
 async def _parse_inbound(
     request: Request,
-) -> tuple[str, tuple[UploadFile, ...], tuple[str, ...]] | Response:
-    """The composer's message text, attached files, and the blob keys a presigned upload already
-    landed. A plain body is read under a hard byte cap, so what bounds it is the bytes consumed
-    rather than a declared length, and it must decode as UTF-8 — bytes that don't are refused,
-    never rewritten. A multipart submit must declare a length and must not be chunked — the parse
-    buffers each part whole (in memory up to starlette's spool threshold, a temp file past it), so
-    it runs only under a length the server itself frames the body by; its `message` text arrives
-    already decoded by that parser (UTF-8, falling back to latin-1), so the strict-UTF-8 refusal
-    is the plain path's — the decoded text is admitted as received. A urlencoded body is not a
-    shape the composer sends, so it is refused.
+) -> tuple[str, tuple[UploadFile, ...], tuple[tuple[str, str], ...]] | Response:
+    """The composer's message text, attached files, and the (key, signature) pairs a presigned
+    upload already landed. A plain body is read under a hard byte cap, so what bounds it is the
+    bytes consumed rather than a declared length, and it must decode as UTF-8 — bytes that don't are
+    refused, never rewritten. A multipart submit must declare a length and must not be chunked — the
+    parse buffers each part whole (in memory up to starlette's spool threshold, a temp file past
+    it), so it runs only under a length the server itself frames the body by; its `message` text
+    arrives already decoded by that parser (UTF-8, falling back to latin-1), so the strict-UTF-8
+    refusal is the plain path's — the decoded text is admitted as received. A urlencoded body is not
+    a shape the composer sends, so it is refused.
 
     A body carrying `uploaded_key` parts carries no file bytes for those attachments — the browser
-    already PUT them to the blob store, so the framing bound applies to text and any inline
-    fallback files only, never to what the key names. Every such key must be one this surface
-    minted, so what a send can reach out of the store is what the member just uploaded, and one
-    send carries at most `MAX_INBOUND_FILES` attachments of both kinds together — the bytes a key
-    names cost the body nothing, so the count is what bounds what one request moves."""
+    already PUT them to the blob store — so the framing bound applies to text and any inline
+    fallback files only, never to what a key names. Each key rides with the signature this deploy
+    struck for it; the send admits it only on that signature, verified against the caller's own
+    workspace. One send carries at most `MAX_INBOUND_FILES` attachments of both kinds together — the
+    bytes a key names cost the body nothing, so the count is what bounds what one request moves."""
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("application/x-www-form-urlencoded"):
         return Response("unsupported body type", status_code=415)
@@ -1628,39 +1614,27 @@ async def _parse_inbound(
         for upload in form.getlist("file")
         if isinstance(upload, UploadFile) and upload.filename
     )
-    uploaded_keys = []
-    for raw in form.getlist("uploaded_key"):
-        key = _uploaded_key(raw) if isinstance(raw, str) else None
-        if key is None:
-            return Response("unknown upload key", status_code=403)
-        uploaded_keys.append(key)
-    if len(uploads) + len(uploaded_keys) > MAX_INBOUND_FILES:
+    keys, signatures = form.getlist("uploaded_key"), form.getlist("uploaded_sig")
+    if len(keys) != len(signatures) or any(
+        not isinstance(part, str) for part in (*keys, *signatures)
+    ):
+        return Response("malformed upload reference", status_code=400)
+    presigned = tuple(
+        (str(key), str(signature)) for key, signature in zip(keys, signatures, strict=True)
+    )
+    if len(uploads) + len(presigned) > MAX_INBOUND_FILES:
         return Response(f"a send carries at most {MAX_INBOUND_FILES} files", status_code=413)
-    return text, uploads, tuple(uploaded_keys)
+    return text, uploads, presigned
 
 
-def _uploaded_key(raw: str) -> str | None:
-    """The stored object one `uploaded_key` part names, or None for a string `upload_start` never
-    minted. A key sits plainly under one prefix of its own, so a send names what the member just
-    uploaded and nothing else the workspace store holds — a conversation's transcript, an artifact
-    its audience hides — whose bytes would otherwise land in the caller's own workspace."""
-    try:
-        resolved = contained_relative(f"/{raw}", f"/{UPLOAD_KEY_ROOT}")
-    except ContainmentError:
-        return None
-    return raw if resolved == f"/{raw}" else None
-
-
-def _inbox_paths(
-    uploads: tuple[UploadFile, ...], uploaded_keys: tuple[str, ...]
-) -> tuple[str, ...]:
+def _inbox_paths(uploads: tuple[UploadFile, ...], keys: tuple[str, ...]) -> tuple[str, ...]:
     """Where each attachment lands in the conversation's workspace, inline files first. An uploaded
     key is named by the member's own file too, so both kinds arrive under the same safe leaf and a
     name taken twice in one send is numbered rather than overwritten."""
     used: set[str] = set()
     names = (
         *(upload.filename or "file" for upload in uploads),
-        *(PurePosixPath(key).name for key in uploaded_keys),
+        *(PurePosixPath(key).name for key in keys),
     )
     return tuple(f"{WEB_INBOX_DIR}/{inbox_name(name, used)}" for name in names)
 
@@ -1669,29 +1643,30 @@ async def _deliver_uploads(
     ctx: SurfaceContext,
     conversation_id: UUID,
     uploads: tuple[UploadFile, ...],
-    uploaded_keys: tuple[str, ...],
-    paths: tuple[str, ...],
-) -> None:
-    """Stream each attached file into the conversation's `web-inbox/` before the turn runs, so the
-    sandbox mounts them already present under the paths the admitted text names. An inline file
-    streams out of the parsed body and a presigned one out of the blob store it was PUT to; both
-    land under the same bound the carrier holds every workspace write to."""
-    inline, presigned = paths[: len(uploads)], paths[len(uploads) :]
-    for upload, path in zip(uploads, inline, strict=True):
-        await ctx.write_workspace_file(conversation_id, path, _upload_chunks(upload))
-    for key, path in zip(uploaded_keys, presigned, strict=True):
-        await ctx.write_workspace_file(conversation_id, path, ctx.blob.get_stream(key))
+    presigned_keys: tuple[str, ...],
+    rels: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Land every attachment in the conversation's `web-inbox/` before the turn runs and answer the
+    artifact key each sits under, in the order the message names them.
+
+    A presigned attachment already sits under its artifact key — the browser PUT it there. An inline
+    one reaches this process in the body (a dev deploy that signs no upload, or an upload that
+    failed): it is streamed to the store here so it becomes an artifact like any other. Then the
+    sandbox fetches each key into the workspace itself, so no attachment's bytes cross this process
+    on the way in."""
+    keys: list[str] = []
+    for upload, rel in zip(uploads, rels[: len(uploads)], strict=True):
+        keys.append(await ctx.store_inbound_file(PurePosixPath(rel).name, _upload_chunks(upload)))
+    keys.extend(presigned_keys)
+    for key, rel in zip(keys, rels, strict=True):
+        await ctx.deliver_attachment(conversation_id, key, rel)
+    return tuple(keys)
 
 
 def _files_note(text: str, paths: tuple[str, ...]) -> str:
     """The admitted text naming the saved paths it carries."""
     note = FILES_NOTE.format(paths=", ".join(paths))
     return f"{text}\n\n{note}" if text.strip() else note
-
-
-Attach = Callable[[str], str | None]
-"""Where a projection gets the picture of one attached workspace path, or None for a file the
-portal has no picture of."""
 
 
 def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]:
@@ -1705,46 +1680,31 @@ def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]:
     return said[: found.start()].rstrip(), paths
 
 
-def _attachment_preview(
-    public_base_url: str | None, agent_id: UUID, conversation_id: UUID, path: str
-) -> str | None:
-    """The link the chat draws one attached file's picture from, or None for a type the attachment
-    route does not serve and for a deploy that names no public base. The link carries that base
-    because an app page draws the chat framed on its own origin, where a picture named without one
-    resolves against the site rather than the route serving it."""
-    if raster_image_media_type(path) is None or not public_base_url:
-        return None
-    return (
-        f"{public_base_url.rstrip('/')}{PORTAL_PATH}"
-        f"/agents/{agent_id}/conversations/{conversation_id}/attachments/{quote(path)}"
-    )
-
-
-def _attachment_payload(path: str, preview_url: str | None) -> dict[str, object]:
-    """One file the member attached, as the chat draws it. The bytes live in the conversation's
-    workspace rather than the artifact store, so the payload names no download link — a member's own
-    attachment is a file they already hold — and a type with no picture of its own draws as a card
-    naming it. `media_type` is how the portal knows a PDF card wears a PDF badge."""
-    media_type = raster_image_media_type(path) or ATTACHMENT_MEDIA_TYPES.get(
-        PurePosixPath(path).suffix.lower(), ATTACHMENT_FALLBACK_MEDIA_TYPE
-    )
-    return {
-        "filename": PurePosixPath(path).name,
-        "url": None,
-        "media_type": media_type,
-        "preview_url": preview_url,
-    }
-
-
-def _member_bubble(said: str, attach: Attach | None) -> dict[str, object]:
-    """One bubble of the member's own words, carrying what they attached to them as files."""
+def _member_bubble(said: str, attached: Mapping[str, dict[str, object]]) -> dict[str, object]:
+    """One bubble of the member's own words, carrying the files its own note names. Admission wrote
+    the note at the foot of the words and it addresses the model, so the words read clean; each file
+    the note names is drawn from the turn artifact the member's send recorded, matched by name, or
+    named as a plain card when no row carries it — a turn admitted before member attachments became
+    artifacts, or one whose row a same-named file in the same turn already took."""
     words, paths = _member_attachments(said)
     bubble: dict[str, object] = {"role": "user", "text": words}
     if paths:
         bubble["files"] = [
-            _attachment_payload(path, None if attach is None else attach(path)) for path in paths
+            attached.get(PurePosixPath(path).name) or _note_card(path) for path in paths
         ]
     return bubble
+
+
+def _note_card(path: str) -> dict[str, object]:
+    """One file a member attached before the row that carries it existed, named from the note with
+    no link and no picture: the bytes were the workspace copy, gone once the sandbox is."""
+    name = PurePosixPath(path).name
+    return {
+        "filename": name,
+        "url": None,
+        "media_type": raster_image_media_type(name) or "application/octet-stream",
+        "preview_url": None,
+    }
 
 
 async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
@@ -1791,7 +1751,7 @@ def _stop_header(request: Request) -> UUID | None | Response:
 class _ChatInbound:
     text: str
     uploads: tuple[UploadFile, ...]
-    uploaded_keys: tuple[str, ...]
+    presigned_keys: tuple[str, ...]
     paths: tuple[str, ...]
     body: str
     stop: UUID | None
@@ -1812,22 +1772,26 @@ async def _chat_inbound(ctx: SurfaceContext, request: Request) -> _ChatInbound |
     parsed = await _parse_inbound(request)
     if isinstance(parsed, Response):
         return parsed
-    text, uploads, uploaded_keys = parsed
-    if stop is not None and (text or uploads or uploaded_keys):
+    text, uploads, presigned = parsed
+    if stop is not None and (text or uploads or presigned):
         return Response("a stop admits no message", status_code=400)
-    if stop is None and not text.strip() and not uploads and not uploaded_keys:
+    if stop is None and not text.strip() and not uploads and not presigned:
         return Response("empty message", status_code=400)
-    for uploaded in uploaded_keys:
-        if not await ctx.blob.exists(uploaded):
+    keys: list[str] = []
+    for key, signature in presigned:
+        if not ctx.verify_upload_grant(key, signature):
+            return Response("unknown upload key", status_code=403)
+        if not await ctx.blob.exists(key):
             return Response("upload not found", status_code=404)
-    paths = _inbox_paths(uploads, uploaded_keys)
+        keys.append(key)
+    paths = _inbox_paths(uploads, tuple(keys))
     body = _files_note(text, paths) if paths else text
     if len(body) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
     answer = _answer_headers(request)
     if isinstance(answer, Response):
         return answer
-    return _ChatInbound(text, uploads, uploaded_keys, paths, body, stop, answer)
+    return _ChatInbound(text, uploads, tuple(keys), paths, body, stop, answer)
 
 
 async def _new_chat_target(
@@ -1945,11 +1909,11 @@ async def _admit_chat(
         if inbound.answer is None
         else _answer_key(target.conversation_id, inbound.answer[0], inbound.answer[1])
     )
-    await _deliver_uploads(
+    blob_keys = await _deliver_uploads(
         ctx,
         target.conversation_id,
         inbound.uploads,
-        inbound.uploaded_keys,
+        inbound.presigned_keys,
         inbound.paths,
     )
     admitted = await ctx.admit(
@@ -1962,6 +1926,7 @@ async def _admit_chat(
         speaker_member_id=member_id,
         comment=target.comment,
     )
+    await ctx.attach_member_files(admitted.turn_id, blob_keys)
     payload: dict[str, str | bool | None] = {
         "turn_id": str(admitted.turn_id),
         "conversation_id": str(target.conversation_id),
@@ -2220,7 +2185,7 @@ class _TranscriptRenderer:
     files: Mapping[str, list[dict[str, object]]]
     apps: Mapping[str, list[dict[str, object]]]
     connects: Mapping[str, dict[str, object]]
-    attach: Attach | None
+    attached: Mapping[str, Mapping[str, dict[str, object]]]
     answers: frozenset[str]
 
     def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
@@ -2283,7 +2248,7 @@ class _TranscriptRenderer:
             state = self._flush(state, rendered, include_subagents=False)
         if turn_id in self.agent_origin or turn_id in self.answers:
             return state
-        bubble = _member_bubble(member_message_text(text), self.attach)
+        bubble = _member_bubble(member_message_text(text), self.attached.get(turn_id or "", {}))
         label = None if self.speakers is None or turn_id is None else self.speakers.get(turn_id)
         if label is not None:
             bubble["speaker"] = label
@@ -2344,7 +2309,7 @@ def _rendered_messages(
     files: Mapping[str, list[dict[str, object]]] | None = None,
     apps: Mapping[str, list[dict[str, object]]] | None = None,
     connects: Mapping[str, dict[str, object]] | None = None,
-    attach: Attach | None = None,
+    attached: Mapping[str, Mapping[str, dict[str, object]]] | None = None,
     answers: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
@@ -2405,7 +2370,7 @@ def _rendered_messages(
         files=files or {},
         apps=apps or {},
         connects=connects or {},
-        attach=attach,
+        attached=attached or {},
         answers=answers,
     )
     return renderer.render(messages)
@@ -2479,7 +2444,7 @@ class _TranscriptAids:
     files: dict[str, list[dict[str, object]]]
     apps: dict[str, list[dict[str, object]]]
     connects: dict[str, dict[str, object]]
-    attach: Attach
+    attached: dict[str, dict[str, dict[str, object]]]
     run_conversation: bool
 
     def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
@@ -2494,7 +2459,7 @@ class _TranscriptAids:
             self.files,
             self.apps,
             self.connects,
-            self.attach,
+            self.attached,
             self.asks.stated,
         )
         if self.run_conversation:
@@ -2521,8 +2486,14 @@ async def _transcript_aids(
         ctx.keyed_admissions(conversation_id),
     )
     files: dict[str, list[dict[str, object]]] = {}
+    attached: dict[str, dict[str, dict[str, object]]] = {}
     for entry in reversed(shared):
-        files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
+        if entry.artifact.attached_by_member:
+            attached.setdefault(str(entry.turn_id), {})[entry.artifact.filename] = _file_payload(
+                ctx, entry.artifact
+            )
+        else:
+            files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
     drawn = await _created_apps(
         ctx,
         {
@@ -2554,7 +2525,7 @@ async def _transcript_aids(
         files=files,
         apps=drawn,
         connects=await _connect_controls(ctx, conversation_id, turns, viewer),
-        attach=partial(_attachment_preview, ctx.public_base_url, agent_id, conversation_id),
+        attached=attached,
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
     )
 
@@ -2674,7 +2645,6 @@ async def _conversation_messages(
     }
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
-    attach = partial(_attachment_preview, ctx.public_base_url, agent_id, conversation_id)
     if recorded is None:
         rendered: list[dict[str, object]] = []
         earlier = 0
@@ -2690,12 +2660,20 @@ async def _conversation_messages(
         stated = aids.asks.stated
     if detail is None:
         return rendered, None, earlier
+    # A message folded into the live turn shares its turn id, so one read of the turn's attachments
+    # serves the message that opened it and every arrival that joined it, each drawing the ones its
+    # own note names, matched by filename.
+    member_rows = {
+        artifact.filename: _file_payload(ctx, artifact)
+        for artifact in await ctx.shared_artifacts(detail.turn.id)
+        if artifact.attached_by_member
+    }
     if (
         detail.turn.terminal is None
         and str(detail.turn.id) not in agent_origin
         and str(detail.turn.id) not in stated
     ):
-        prompt = _member_bubble(member_message_text(detail.turn.inbound), attach)
+        prompt = _member_bubble(member_message_text(detail.turn.inbound), member_rows)
         if (
             detail.turn.context is not None
             and detail.turn.context.sender is not None
@@ -2709,7 +2687,7 @@ async def _conversation_messages(
     for arrival in await ctx.queued_arrivals(conversation_id, draining):
         if str(arrival.id) in agent_origin or str(arrival.id) in stated:
             continue
-        bubble = _member_bubble(member_message_text(arrival.inbound), attach)
+        bubble = _member_bubble(member_message_text(arrival.inbound), member_rows)
         label = speakers.get(str(arrival.id))
         if label is not None:
             bubble["speaker"] = label
@@ -3514,63 +3492,6 @@ async def _conversation_history(ctx: SurfaceContext, request: Request, cursor: s
     if above:
         payload["earlier_cursor"] = above
     return JSONResponse(payload)
-
-
-def _inbox_attachment(path: str) -> bool:
-    """Whether a path names one file the composer saved — a plain name directly under the inbox
-    directory. Nothing else is addressable: the route serves what a member attached to their own
-    message, never the rest of the conversation's workspace."""
-    directory, separator, name = path.partition("/")
-    return (
-        directory == WEB_INBOX_DIR
-        and bool(separator)
-        and bool(name)
-        and "/" not in name
-        and name not in (".", "..")
-    )
-
-
-async def conversation_attachment(ctx: SurfaceContext, request: Request) -> Response:
-    """One file the member attached to a message, served as the picture the bubble draws it as.
-
-    Gated as exactly the union of the two reads that advertise the bubble — the conversation content
-    read, or the member's own chat transcript — so a picture answers precisely where the message
-    naming it answers. The bytes come from the conversation's live workspace, where the composer put
-    them and the agent reads them, and they serve inline only after proving to be the raster type
-    the filename declares at the size the workspace lists: the same validated-preview shape the
-    signed artifact preview serves member bytes under. A type that is no raster — a PDF, an SVG,
-    anything HTML-ish — is never served here, so nothing that could execute reaches the page; the
-    bubble cards those by name. A conversation whose sandbox is asleep or whose file has moved
-    answers 404, and the bubble falls back to that same card."""
-    authorized = await _readable_conversation(ctx, request)
-    if isinstance(authorized, Response):
-        authorized = await _member_chat_page(ctx, request)
-    if isinstance(authorized, Response):
-        return authorized
-    _agent_id, conversation_id, _viewer = authorized
-    path = request.path_params["path"]
-    media_type = raster_image_media_type(path)
-    if media_type is None or not _inbox_attachment(path):
-        return Response("no such attachment", status_code=404)
-    listed = {
-        entry.path: entry.size_bytes for entry in await ctx.list_workspace_files(conversation_id)
-    }
-    size_bytes = listed.get(path)
-    if size_bytes is None:
-        return Response("no such attachment", status_code=404)
-    if size_bytes > IMAGE_PREVIEW_MAX_BYTES:
-        return Response("attachment is too large to draw", status_code=415)
-    stream = await ctx.read_workspace_file(conversation_id, path)
-    if stream is None:
-        return Response("no such attachment", status_code=404)
-    try:
-        drawn = await validated_image_preview(
-            stream, ImagePreviewGrant(media_type=media_type, size_bytes=size_bytes)
-        )
-    except InvalidImagePreview as invalid:
-        log("web.attachment_preview_refused", path=path, detail=str(invalid))
-        return Response("attachment is not the picture its name claims", status_code=415)
-    return Response(content=drawn, media_type=media_type, headers=ATTACHMENT_PREVIEW_HEADERS)
 
 
 @dataclass(frozen=True)
@@ -4637,9 +4558,9 @@ async def _events(
         async for cursor, frame in frames:
             if isinstance(frame, ArtifactsChanged):
                 artifacts = await ctx.shared_artifacts(turn_id)
-                shared_keys = tuple(artifact.blob_key for artifact in artifacts)
-                files = [_file_payload(ctx, artifact) for artifact in artifacts]
-                yield _event("files", {"files": files}, cursor)
+                shared = [a for a in artifacts if not a.attached_by_member]
+                shared_keys = tuple(artifact.blob_key for artifact in shared)
+                yield _event("files", {"files": [_file_payload(ctx, a) for a in shared]}, cursor)
                 continue
             if isinstance(frame, Terminal):
                 detail = await ctx.turn_detail(turn_id)
@@ -4666,11 +4587,10 @@ async def _events(
                     if prompts is not None:
                         yield _event("credentials", prompts)
                 artifacts = await ctx.shared_artifacts(turn_id)
-                keys = tuple(artifact.blob_key for artifact in artifacts)
-                if artifacts and keys != shared_keys:
-                    yield _event(
-                        "files", {"files": [_file_payload(ctx, artifact) for artifact in artifacts]}
-                    )
+                shared = [a for a in artifacts if not a.attached_by_member]
+                keys = tuple(artifact.blob_key for artifact in shared)
+                if shared and keys != shared_keys:
+                    yield _event("files", {"files": [_file_payload(ctx, a) for a in shared]})
                 if frame.frame.created:
                     audience = await web_audience(ctx, web_extension(), email)
                     apps = await _created_apps(
@@ -5331,19 +5251,6 @@ def _homepage_state(
     return {"state": "none"}
 
 
-PREVIEW_KINDS = {
-    ".pdf": "pdf",
-    ".docx": "docx",
-    ".xlsx": "xlsx",
-    ".pptx": "pptx",
-    ".csv": "csv",
-    ".md": "md",
-    ".svg": "svg",
-    ".mp4": "mp4",
-    ".mov": "mov",
-    ".webm": "webm",
-    ".mkv": "mkv",
-}
 # The most pages one render answers with. A caller names how many it draws and is held to this
 # ceiling here, so a long document costs one batch of pages rather than all of them and a card
 # drawing a cover costs one page rather than a batch.
@@ -5421,12 +5328,15 @@ async def upload_start(ctx: SurfaceContext, request: Request) -> Response:
     directly, and the send names the key they already sit under — the composer body then carries
     text and references only, so the 25 MB framing bounds the message rather than the attachment.
 
-    The URL is measured: the size and the checksum ride the signature, so S3 stores exactly the
-    file the member picked and nothing else — the same bound `_store_artifact` holds a sandbox to,
-    and the reason a browser may hold the URL at all. The size is capped at what the write into the
-    conversation's workspace accepts, since bytes the send cannot deliver are bytes the store would
-    keep for nothing. A filesystem dev store signs nothing and says so: dev deploys stream
-    attachments through the composer body, under the framings `_parse_inbound` already bounds."""
+    The key is the artifact key the file keeps: nothing is copied later, the row the send records
+    points at these bytes, and the preview service draws the cover from them where they lie. The URL
+    is measured — the size and the checksum ride the signature, so S3 stores exactly the file the
+    member picked — and a detached signature over the key comes back with it, which the send
+    presents so the deploy admits only a key it minted rather than any artifact the store holds. The
+    size is capped at what a workspace write accepts, since bytes the send cannot deliver are bytes
+    the store would keep for nothing. A filesystem dev store signs nothing and says so: dev deploys
+    stream attachments through the composer body, under the framings `_parse_inbound` already
+    bounds."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -5446,12 +5356,10 @@ async def upload_start(ctx: SurfaceContext, request: Request) -> Response:
         return Response(
             f"an attachment is capped at {WORKSPACE_WRITE_MAX_BYTES} bytes", status_code=413
         )
-    key = f"{UPLOAD_KEY_ROOT}/{uuid4()}/{inbox_name(name, set())}"
-    try:
-        url = await ctx.blob.presigned_put(key, size_bytes, checksum_sha256, UPLOAD_PUT_TTL_SECONDS)
-    except TypeError:
+    grant = await ctx.mint_upload(name, size_bytes, checksum_sha256)
+    if grant is None:
         return Response("presigned upload requires the s3 blob store", status_code=409)
-    return JSONResponse({"key": key, "put_url": url})
+    return JSONResponse({"key": grant.blob_key, "put_url": grant.put_url, "sig": grant.signature})
 
 
 ROUTES = (
@@ -5491,11 +5399,6 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript",
         handler=conversation_transcript,
-    ),
-    SurfaceRoute(
-        method="GET",
-        path="agents/{agent_id}/conversations/{conversation_id}/attachments/{path:path}",
-        handler=conversation_attachment,
     ),
     SurfaceRoute(
         method="GET",

@@ -393,7 +393,7 @@ CASES = (
         fenced(
             SYNC_THREAD_DIGEST,
             f"<@{BOT_USER_ID}> the numbers behind tonight's run are in the file, what stands out?",
-            files_note(DownloadedFiles(delivered=("run.txt",), skipped=())),
+            files_note(DownloadedFiles(delivered=("run.txt",), keys=(), skipped=())),
         ),
         (
             "The reply is grounded in the attached file's contents — it names at least one vendor "

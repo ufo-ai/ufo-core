@@ -249,6 +249,9 @@ from ufo.runtime.media.image_previews import (
 from ufo.runtime.media.image_previews import (
     validated_image_preview as validated_image_preview,
 )
+from ufo.runtime.media.preview_renderer import (
+    PREVIEW_KINDS as PREVIEW_KINDS,
+)
 from ufo.runtime.turns.workspace_changes import (
     WORKSPACE_CHANGE_PATCH_MAX_CHARS as WORKSPACE_CHANGE_PATCH_MAX_CHARS,
 )

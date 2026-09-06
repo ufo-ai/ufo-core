@@ -53,24 +53,31 @@ const SITE_KIND = "site";
 
 const NOT_FOUND = 404;
 const SITE_FAMILY = "Sites";
+/** Files a member attached to their own message rather than files an agent shared. */
+const ATTACHMENT_FAMILY = "Attachments";
 const MEDIA: Record<string, string> = {
   Images: "image",
   Documents: "document",
   Other: "other",
 };
 
-/** Every narrowing the shelf offers, by the axis a member thinks in. A site and a shared file are
- *  read from different places and share no facts, so which of the two a member wants is its own
- *  question — asked once, above the file types, rather than as a fourth entry in a list of media
- *  kinds it does not belong in. */
+/** Every narrowing the shelf offers, by the axis a member thinks in. Kind asks which of the things
+ *  the shelf holds a member wants — a site, a file they attached, or every shared file — and the
+ *  file types narrow within that, so a media kind is never asked to stand for a thing it is not. */
 const FACETS: FacetGroup[] = [
-  { label: "Kind", options: [{ label: SITE_FAMILY, value: SITE_FAMILY }] },
+  {
+    label: "Kind",
+    options: [
+      { label: SITE_FAMILY, value: SITE_FAMILY },
+      { label: ATTACHMENT_FAMILY, value: ATTACHMENT_FAMILY },
+    ],
+  },
   {
     label: "File type",
     options: Object.keys(MEDIA).map((family) => ({ label: family, value: family })),
   },
 ];
-const FAMILIES = [SITE_FAMILY, ...Object.keys(MEDIA)];
+const FAMILIES = [SITE_FAMILY, ATTACHMENT_FAMILY, ...Object.keys(MEDIA)];
 
 /** What the member picked, or the default the screen opens on. Every one of these reads its value
  *  off the place and nowhere else, so a screen opened fresh stands on its defaults — the leading
@@ -395,13 +402,17 @@ function Artifacts({
   const fileParams = new URLSearchParams({ order_by: "shared_at", order: "desc" });
   if (query) fileParams.set("q", query);
   if (media) fileParams.set("media", media);
+  if (picked === ATTACHMENT_FAMILY) fileParams.set("attachment", "true");
   if (scope !== "all") fileParams.set("mine", "true");
   if (after) fileParams.set("cursor", after);
   const walked = usePanelRead<FilesPayload>(
     picked === SITE_FAMILY ? null : "/objects/artifact?" + fileParams.toString(),
   );
   const onSites = picked === SITE_FAMILY;
-  const siteOwner = mainAgent && !media ? mainAgent.id : null;
+  // Attachments narrows to the files a member attached, so it hides the sites the way a file-type
+  // value does; only the default view and the Sites kind draw the site cards.
+  const siteOwner =
+    mainAgent && !media && picked !== ATTACHMENT_FAMILY ? mainAgent.id : null;
   const state = shelf(
     siteOwner ? held : NO_SITES,
     onSites ? NO_FILES : walked,

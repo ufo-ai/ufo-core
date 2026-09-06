@@ -673,6 +673,12 @@ shared_artifact = sa.Table(
     sa.Column("preview_blob_key", sa.Text, nullable=True),
     sa.Column("preview_media_type", sa.Text, nullable=True),
     sa.Column("preview_size_bytes", sa.BigInteger, nullable=True),
+    sa.Column(
+        "attached_by_member",
+        sa.Boolean,
+        nullable=False,
+        server_default=sa.false(),
+    ),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("size_bytes >= 0", name="shared_artifact_size"),

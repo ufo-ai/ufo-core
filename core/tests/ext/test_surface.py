@@ -410,6 +410,7 @@ async def _seed_turn(
                     subject=artifact.subject,
                     media_type=artifact.media_type,
                     size_bytes=artifact.size_bytes,
+                    attached_by_member=artifact.attached_by_member,
                     preview_blob_key=artifact.preview_blob_key,
                     preview_media_type=artifact.preview_media_type,
                     preview_size_bytes=artifact.preview_size_bytes,
@@ -1991,6 +1992,36 @@ async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_
             )
         ).one()
     assert surface.targets == [(target.conversation_id, target.agent_id)]
+
+
+async def test_poller_does_not_re_deliver_a_member_attachment(db: None, tmp_path) -> None:
+    """A file a member attached is a shared artifact of the turn, so it lists on the shelf and
+    downloads through the one route — but the durable-surface reply is the agent's, so the writeback
+    carries only what the agent shared. Re-uploading the member's own file back into the thread is
+    what the `attached_by_member` split keeps out of the reply."""
+    workspace_id, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    await blob.put("artifacts/x/shared.pdf", b"PDF")
+    await blob.put("artifacts/y/mine.pdf", b"PDF")
+    shared = SharedArtifact(
+        blob_key="artifacts/x/shared.pdf",
+        filename="shared.pdf",
+        subject=None,
+        media_type="application/pdf",
+        size_bytes=3,
+    )
+    mine = SharedArtifact(
+        blob_key="artifacts/y/mine.pdf",
+        filename="mine.pdf",
+        subject=None,
+        media_type="application/pdf",
+        size_bytes=3,
+        attached_by_member=True,
+    )
+    turn_id = await _seed_turn(workspace_id, "C5:2.0", "done", "hi there", artifacts=(shared, mine))
+    poller, surface = _poller(workspace_id, RecordingSurface(ref="C5:9.9"), blob)
+    await poller.drain()
+    assert surface.attached == [(turn_id, "C5:9.9", ("shared.pdf",))]
 
 
 def _shared_page(name: str) -> SharedArtifact:

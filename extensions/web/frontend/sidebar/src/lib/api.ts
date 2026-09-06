@@ -2,11 +2,15 @@ import type { ActionCall, ActionInput, ActionView, CredentialRequest } from "@/l
 
 export const BASE = "/surface/web";
 
-/** Carry one file's bytes to the blob store and answer the key they landed under, or null when
- *  this deploy signs no upload URL and the send must carry the file itself. The surface measures
- *  the URL by the size and the sha256 named here, so the PUT must be exactly this file and must
- *  carry the checksum header the signature covers. */
-export async function uploadAttachment(file: File): Promise<string | null> {
+/** One attachment carried to the blob store: the artifact key its bytes landed under and the
+ *  signature the send presents so the surface admits that key. */
+export type UploadRef = { key: string; sig: string };
+
+/** Carry one file's bytes to the blob store and answer the key they landed under with the
+ *  signature that admits it, or null when this deploy signs no upload URL and the send must carry
+ *  the file itself. The surface measures the URL by the size and the sha256 named here, so the PUT
+ *  must be exactly this file and must carry the checksum header the signature covers. */
+export async function uploadAttachment(file: File): Promise<UploadRef | null> {
   try {
     const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
     const sha256 = btoa(String.fromCharCode(...new Uint8Array(digest)));
@@ -17,13 +21,13 @@ export async function uploadAttachment(file: File): Promise<string | null> {
       body: JSON.stringify({ name: file.name, size_bytes: file.size, sha256 }),
     });
     if (!res.ok) return null;
-    const plan = (await res.json()) as { key: string; put_url: string };
+    const plan = (await res.json()) as { key: string; put_url: string; sig: string };
     const put = await fetch(plan.put_url, {
       method: "PUT",
       body: file,
       headers: { "x-amz-checksum-sha256": sha256 },
     });
-    return put.ok ? plan.key : null;
+    return put.ok ? { key: plan.key, sig: plan.sig } : null;
   } catch {
     return null;
   }

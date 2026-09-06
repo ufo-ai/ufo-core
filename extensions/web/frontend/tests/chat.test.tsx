@@ -2751,7 +2751,7 @@ test("a second press while the attachment travels sends the file once", async ()
     ...transcript(),
     "/uploads": async () => {
       await minting;
-      return json({ key: "web-inbox-uploads/abc/notes.txt", put_url: "https://store/1" });
+      return json({ key: "artifacts/abc/notes.txt", put_url: "https://store/1", sig: "signed" });
     },
     "store/1": () => new Response("", { status: 200 }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
@@ -2775,8 +2775,9 @@ test("a second press while the attachment travels sends the file once", async ()
   const sends = handler.mock.calls.filter(([url]) => String(url).includes("/chat?"));
   expect(sends.length).toBe(1);
   expect((sends[0][1]?.body as FormData).getAll("uploaded_key")).toEqual([
-    "web-inbox-uploads/abc/notes.txt",
+    "artifacts/abc/notes.txt",
   ]);
+  expect((sends[0][1]?.body as FormData).getAll("uploaded_sig")).toEqual(["signed"]);
 });
 
 test("the card refuses an eleventh file and says so while the member can still see it", async () => {
@@ -2813,7 +2814,7 @@ test("a file attached while the send runs stays in the card for the next message
     "/uploads": async (_url, init) => {
       await minting;
       const named = JSON.parse(String(init?.body)) as { name: string };
-      return json({ key: "web-inbox-uploads/abc/" + named.name, put_url: "https://store/1" });
+      return json({ key: "artifacts/abc/" + named.name, put_url: "https://store/1", sig: "signed" });
     },
     "store/1": () => new Response("", { status: 200 }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
@@ -2960,6 +2961,62 @@ test("an attachment whose picture will not load falls back to naming the file", 
   fireEvent.error(await screen.findByRole("img", { name: "lights.gif" }));
   await waitFor(() => expect(screen.queryByRole("img", { name: "lights.gif" })).toBeNull());
   expect(screen.getByText("lights.gif")).toBeTruthy();
+});
+
+/** What a member attached is a file of the conversation, so it opens the way every other file in
+ *  the transcript opens rather than sitting on the bubble as a picture nothing can be done with. */
+test("a member's own attachment opens from the bubble", async () => {
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "user",
+          text: "look",
+          files: [
+            {
+              filename: "lights.gif",
+              url: "/dl/lights.gif",
+              preview_url: "/artifacts/lights.gif?signed",
+              media_type: "image/gif",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  expect(await screen.findByRole("button", { name: "Open lights.gif" })).toBeTruthy();
+});
+
+/** A picture a reply shared is drawn inline rather than as a card, and its link expires the same
+ *  way the member's own attachment does. It answers a dead link the same way too: the file is
+ *  named, never left as a broken frame. */
+test("a shared picture whose link will not load falls back to naming the file", async () => {
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Here is the portrait.",
+          files: [
+            {
+              filename: "portrait.jpg",
+              url: "/dl/portrait.jpg",
+              size_bytes: 88_000,
+              preview_url: "https://web/artifacts/preview/portrait.jpg?token=signed",
+              media_type: "image/jpeg",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  fireEvent.error(await screen.findByRole("img", { name: "portrait.jpg" }));
+  await waitFor(() => expect(screen.queryByRole("img", { name: "portrait.jpg" })).toBeNull());
+  expect(screen.getByText("portrait.jpg")).toBeTruthy();
 });
 
 test("a file pasted into the message box is attached rather than typed", async () => {

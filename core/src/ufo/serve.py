@@ -451,6 +451,16 @@ def run() -> None:
     page_feed = CorePageFeed(blob=blob)
     _launch_jobs(runtime, invoker_for, sync_driver, page_feed)
     _mount_ext_routes(app, manifests, credentials, index, embed, config.connect.public_base_url)
+    surface_probes = ConversationProbes(
+        runtime.sandboxes,
+        ProbeTokenCodec(secret=runtime.run_tokens.secret),
+        ProbeEnv(
+            grants=GrantStore() if runtime.credentials is not None else None,
+            clis=connector_clis(runtime.manifests),
+            credentials=runtime.credentials,
+            slots=injecting_slots(runtime.manifests),
+        ).exports,
+    )
     _mount_shared_surfaces(
         app,
         manifests,
@@ -463,6 +473,7 @@ def run() -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        probes=surface_probes,
         runtime_identity=runtime_identity,
         connectors=connectors,
         key_slot_for=registry.key_slot_for,
@@ -1086,6 +1097,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
+    probes: ConversationProbes | None = None,
     runtime_identity: RuntimeIdentity | None = None,
     connectors: ConnectorRegistry | None = None,
     ambient_reply: AmbientReplyClassifier,
@@ -1195,6 +1207,7 @@ def _mount_shared_surfaces(
             _conversation_slots=conversation_slots,
             _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,
             _preview_token=preview_token,
+            _probes=probes,
         )
 
     for manifest in manifests:

@@ -21,7 +21,7 @@ test("the bytes travel to the store measured by the checksum the mint signed", a
       calls.push([String(url), init]);
       return String(url).endsWith("/uploads")
         ? new Response(
-            JSON.stringify({ key: "web-inbox-uploads/abc/report.pdf", put_url: "https://store/1" }),
+            JSON.stringify({ key: "artifacts/abc/report.pdf", put_url: "https://store/1", sig: "signed" }),
             { status: 200 },
           )
         : new Response("", { status: 200 });
@@ -29,7 +29,7 @@ test("the bytes travel to the store measured by the checksum the mint signed", a
   );
 
   const file = new File(["a report"], "report.pdf", { type: "application/pdf" });
-  expect(await uploadAttachment(file)).toBe("web-inbox-uploads/abc/report.pdf");
+  expect(await uploadAttachment(file)).toEqual({ key: "artifacts/abc/report.pdf", sig: "signed" });
   const [mint, put] = calls;
   expect(JSON.parse(String(mint[1].body))).toEqual({
     name: "report.pdf",

@@ -1760,13 +1760,13 @@ async def _admit_inbound(
         await ctx.retitle_conversation(conversation_id, inbound.surface_label)
     thread = MirroredThread(queue_key=inbound.queue_key, message_ts=inbound.reply_root)
     await _mirror_thread(conversation_id, thread)
-    attachments = (
-        files_note(await _download_files(ctx, conversation_id, bot_token, inbound.files))
+    downloaded = (
+        await _download_files(ctx, conversation_id, bot_token, inbound.files)
         if inbound.files
-        else ""
+        else DownloadedFiles((), (), ())
     )
     said = unescape(render_markup(inbound.body, mentioned))
-    body = fence_member_message(marker, context, said, attachments)
+    body = fence_member_message(marker, context, said, files_note(downloaded))
     admitted = await ctx.admit(
         conversation_id,
         body,
@@ -1774,6 +1774,7 @@ async def _admit_inbound(
         context=_turn_context(sender, source),
         speaker_member_id=member_id,
     )
+    await ctx.attach_member_files(admitted.turn_id, downloaded.keys)
     if inbound.is_dm:
         await _anchor_dm_thread(admitted, inbound.reply_root)
     if admitted.opened_run:
@@ -2635,30 +2636,37 @@ async def _stream_download(bot_token: str, url: str) -> AsyncIterator[bytes]:
 
 @dataclass(frozen=True)
 class DownloadedFiles:
-    """What the inbound download produced: the workspace names of files that landed, and the Slack
-    names of files skipped as over-cap — the note reports both so the model knows what it has."""
+    """What the inbound download produced: the workspace names of files that landed, the artifact
+    key each was stored under, and the Slack names of files skipped as over-cap — the note reports
+    the first and last so the model knows what it has, and the keys record the turn's artifacts."""
 
     delivered: tuple[str, ...]
+    keys: tuple[str, ...]
     skipped: tuple[str, ...]
 
 
 async def _download_files(
     ctx: SurfaceContext, conversation_id: UUID, bot_token: str, files: tuple[InboundFile, ...]
 ) -> DownloadedFiles:
+    """Stream each Slack attachment into the store under an artifact key, then land it in the
+    workspace, so a file a member sent from Slack is an artifact of its turn on the same terms one
+    sent from the composer is. Slack's own auth guards the download, so the one pass carrying the
+    bot token reaches the store; from there the sandbox fetches it like any other attachment."""
     used: set[str] = set()
     delivered: list[str] = []
+    keys: list[str] = []
     skipped: list[str] = []
     for file in files:
         name = inbox_name(file.name, used)
         try:
-            await ctx.write_workspace_file(
-                conversation_id, f"{SLACK_INBOX_DIR}/{name}", _stream_download(bot_token, file.url)
-            )
+            key = await ctx.store_inbound_file(name, _stream_download(bot_token, file.url))
         except SlackDownloadTooLarge:
             skipped.append(file.name)
             continue
+        await ctx.deliver_attachment(conversation_id, key, f"{SLACK_INBOX_DIR}/{name}")
         delivered.append(name)
-    return DownloadedFiles(tuple(delivered), tuple(skipped))
+        keys.append(key)
+    return DownloadedFiles(tuple(delivered), tuple(keys), tuple(skipped))
 
 
 def files_note(downloaded: DownloadedFiles) -> str:

@@ -60,3 +60,12 @@ def test_the_shelf_lists_the_logo_sheet_the_deploy_ships() -> None:
     assert f"size_bytes: {sheet.stat().st_size}" in page
     style = dict(CORE_SKILL_REGISTRY.named("ufo-style").files)
     assert sheet.read_bytes() == style["assets/ufo-logo-ratio.pdf"]
+
+
+def test_the_attachments_kind_narrows_to_files_and_hides_the_sites() -> None:
+    """Attachments narrows to the files a member attached: it sets the read's `attachment` filter
+    and clears the site owner so the shelf draws no site cards, the way a file-type value does. Only
+    the default view and the Sites kind draw the sites."""
+    page = (SKILL_DIR / "app.tsx").read_text()
+    assert 'if (picked === ATTACHMENT_FAMILY) fileParams.set("attachment", "true");' in page
+    assert "mainAgent && !media && picked !== ATTACHMENT_FAMILY ? mainAgent.id : null" in page

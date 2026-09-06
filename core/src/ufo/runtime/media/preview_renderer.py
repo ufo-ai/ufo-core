@@ -27,6 +27,22 @@ from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.schema import tables
 
 ARTIFACT_PREVIEW_SUFFIXES = frozenset((".csv", ".docx", ".md", ".pdf", ".pptx", ".svg", ".xlsx"))
+PREVIEW_KINDS = {
+    ".csv": "csv",
+    ".docx": "docx",
+    ".md": "md",
+    ".mkv": "mkv",
+    ".mov": "mov",
+    ".mp4": "mp4",
+    ".pdf": "pdf",
+    ".pptx": "pptx",
+    ".svg": "svg",
+    ".webm": "webm",
+    ".xlsx": "xlsx",
+}
+"""What the preview service draws a cover of, by extension — the document types plus the video
+formats it takes a first frame from. One list answers every caller: the composer rendering a file in
+hand, and the cover drawn for a file a member attached."""
 ARTIFACT_PREVIEW_MEDIA_TYPE = "image/png"
 ARTIFACT_PREVIEW_MAX_WIDTH = 1000
 ARTIFACT_PREVIEW_MAX_HEIGHT = 1400
@@ -41,6 +57,62 @@ PREVIEW_RENDER_TIMEOUT_SECONDS = 330.0
 
 def _eligible(filename_column: sa.Column) -> sa.ColumnElement[bool]:
     return sa.or_(*(filename_column.ilike(f"%{suffix}") for suffix in ARTIFACT_PREVIEW_SUFFIXES))
+
+
+@dataclass(frozen=True)
+class DrawnCover:
+    """The picture one render produced: the key it was PUT under and the size the service reported.
+    The caller writes the row, so the same render serves a share, the backstop, and a member's own
+    attachment while each owns which row it fills."""
+
+    preview_key: str
+    size_bytes: int
+
+
+async def render_document_cover(
+    blob: WorkspaceBlobStore,
+    service_url: str,
+    blob_key: str,
+    filename: str,
+    client: httpx.AsyncClient,
+) -> DrawnCover | None:
+    """Draw one stored document's cover through the preview service, or None when the store cannot
+    presign or the service does not render.
+
+    The service does the reading and the writing: a presigned GET of the source and a plain
+    presigned PUT of the preview key are handed over in one request, and the service fetches,
+    renders, and PUTs the PNG itself. No document's bytes enter this process — the same shape
+    `share_file` and the `render_previews` backstop already render under, so a member's own
+    attachment draws the picture the same way an agent's share does. `client` is the caller's, so a
+    batch keeps one and a single draw holds it to its own budget."""
+    kind = PREVIEW_KINDS.get(PurePosixPath(filename).suffix.lower())
+    if kind is None:
+        return None
+    preview_key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{PurePosixPath(filename).stem}.png"
+    try:
+        source_url = await blob.presigned_get(blob_key, PREVIEW_SOURCE_TTL_SECONDS)
+        put_url = await blob.presigned_put_unmeasured(preview_key, PREVIEW_PUT_TTL_SECONDS)
+    except TypeError:
+        return None
+    request = {
+        "kind": kind,
+        "max_width": ARTIFACT_PREVIEW_MAX_WIDTH,
+        "max_height": ARTIFACT_PREVIEW_MAX_HEIGHT,
+        "pages": 1,
+        "source_url": source_url,
+        "sink": {"put_url": put_url},
+    }
+    try:
+        response = await client.post(
+            f"{service_url}/render", files={"request": (None, json.dumps(request))}
+        )
+    except httpx.HTTPError as error:
+        log("document_cover.unreachable", filename=filename, error_class=type(error).__name__)
+        return None
+    if response.status_code != 200:
+        log("document_cover.refused", filename=filename, http_status=response.status_code)
+        return None
+    return DrawnCover(preview_key=preview_key, size_bytes=int(response.json()["size_bytes"]))
 
 
 @dataclass(frozen=True)
@@ -79,29 +151,9 @@ class PreviewRenderer:
                 await self._render_one(client, row.blob_key, row.filename)
 
     async def _render_one(self, client: httpx.AsyncClient, blob_key: str, filename: str) -> None:
-        suffix = PurePosixPath(filename).suffix.lower()
-        preview_key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{PurePosixPath(filename).stem}.png"
-        source_url = await self.blob.presigned_get(blob_key, PREVIEW_SOURCE_TTL_SECONDS)
-        put_url = await self.blob.presigned_put_unmeasured(preview_key, PREVIEW_PUT_TTL_SECONDS)
-        request = {
-            "kind": suffix[1:],
-            "max_width": ARTIFACT_PREVIEW_MAX_WIDTH,
-            "max_height": ARTIFACT_PREVIEW_MAX_HEIGHT,
-            "pages": 1,
-            "source_url": source_url,
-            "sink": {"put_url": put_url},
-        }
-        try:
-            response = await client.post(
-                f"{self.service_url}/render", files={"request": (None, json.dumps(request))}
-            )
-        except httpx.HTTPError as error:
-            log("render_previews.unreachable", filename=filename, error_class=type(error).__name__)
+        drawn = await render_document_cover(self.blob, self.service_url, blob_key, filename, client)
+        if drawn is None:
             return
-        if response.status_code != 200:
-            log("render_previews.refused", filename=filename, http_status=response.status_code)
-            return
-        size_bytes = int(response.json()["size_bytes"])
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.shared_artifact)
@@ -110,9 +162,9 @@ class PreviewRenderer:
                     tables.shared_artifact.c.preview_blob_key.is_(None),
                 )
                 .values(
-                    preview_blob_key=preview_key,
+                    preview_blob_key=drawn.preview_key,
                     preview_media_type=ARTIFACT_PREVIEW_MEDIA_TYPE,
-                    preview_size_bytes=size_bytes,
+                    preview_size_bytes=drawn.size_bytes,
                 )
             )
 

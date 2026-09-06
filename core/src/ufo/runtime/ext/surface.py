@@ -32,13 +32,16 @@ import asyncio
 import hashlib
 import json
 import re
+import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from io import BytesIO
+from pathlib import PurePosixPath
 from secrets import token_hex
+from time import monotonic
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 from urllib.parse import urlsplit
@@ -54,8 +57,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
+from ufo.blob import BlobNotFound, FleetBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
+from ufo.harness.auth.token_signing import sign_detached, verify_detached
 from ufo.harness.containment import contained_leaf
 from ufo.harness.models.interface import Message, ModelRequest
 from ufo.harness.o11y import emit_metric, log, warn
@@ -65,6 +69,7 @@ from ufo.harness.sandbox.conversation import (
     WorkspaceFile,
 )
 from ufo.harness.sandbox.ingress_url import mint_ingress_view_url
+from ufo.harness.sandbox.session import shell_path, workspace_path
 from ufo.harness.sandbox.terminal import TerminalOp
 from ufo.runtime.access.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
 from ufo.runtime.access.credentials import (
@@ -87,7 +92,7 @@ from ufo.runtime.access.grants import (
     installed_connect_flow,
 )
 from ufo.runtime.agent_scope import agent as bind_agent
-from ufo.runtime.authority import MemberAuthority
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     PARK,
@@ -107,11 +112,18 @@ from ufo.runtime.kinds.agent_setup import (
 )
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.runtime.media.artifact_url import (
+    ARTIFACT_KEY_PREFIX,
+    artifact_media_type,
     artifact_url_expiry,
     mint_artifact_url,
     mint_image_preview_url,
 )
 from ufo.runtime.media.image_previews import raster_image_media_type
+from ufo.runtime.media.preview_renderer import (
+    ARTIFACT_PREVIEW_MEDIA_TYPE,
+    PREVIEW_KINDS,
+    render_document_cover,
+)
 from ufo.runtime.object_views import ActionView, presented_action_views
 from ufo.runtime.seats import (
     SeatEntry,
@@ -178,7 +190,7 @@ from ufo.schema.records import (
 from ufo.sdk.http import cookie_secure
 
 if TYPE_CHECKING:
-    from ufo.runtime.ext.context import SourceReader
+    from ufo.runtime.ext.context import ConversationProbes, SourceReader
     from ufo.runtime.ext.conversation_slots import (
         BoundConversationSlot,
         ConversationSlotContext,
@@ -201,6 +213,22 @@ OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 PREVIEW_THUMBNAIL_MAX_WIDTH = 600
 PREVIEW_THUMBNAIL_MAX_HEIGHT = 800
 PREVIEW_RENDER_TIMEOUT_SECONDS = 330.0
+ATTACHED_COVER_BUDGET_SECONDS = 3.0
+"""How long one send waits for the covers of every document it carried, together. The render is
+milliseconds for what a composer carries — 15-27ms for a page of PDF, measured against the
+in-cluster service — so this is not the expected cost but the bound on the tail, and it is one
+budget rather than one each so `MAX_INBOUND_FILES` attachments cannot serialize into as many waits.
+The preview service holds its own concurrency ceiling, so a saturated one queues renders and this is
+what keeps that queue off the member's send. A file left uncovered is drawn by `render_previews` on
+its next pass."""
+UPLOAD_PUT_TTL_SECONDS = 900
+"""How long a minted upload URL stays good — long enough for a browser to PUT a large file over a
+slow link, short enough that a leaked URL buys hours, not days."""
+ATTACHMENT_FETCH_TTL_SECONDS = 900
+"""How long the presigned GET a sandbox fetches one attachment by stays good."""
+ATTACHMENT_FETCH_TIMEOUT_SECONDS = 90
+"""The deadline on one attachment's fetch into the workspace — under the probe ceiling, since the
+fetch is an off-turn probe whose signed token bounds its own egress window."""
 # The service caps a render at 20 pages (`UFO_PREVIEW_MAX_PAGES`), so a request over that renders
 # fewer pages than it asked for and a caller cannot tell the clamp from the file's own end.
 PREVIEW_PAGES_MAX = 20
@@ -530,14 +558,29 @@ class PreviewRender:
 
 
 @dataclass(frozen=True)
+class UploadGrant:
+    """The store's answer to one composer upload: the artifact key the browser PUTs to, the URL it
+    PUTs by, and the signature the send presents back so the deploy knows it minted this key. The
+    key is the file's final home — the row a send records points straight at these bytes."""
+
+    blob_key: str
+    put_url: str
+    signature: str
+
+
+@dataclass(frozen=True)
 class SharedArtifact:
     """A file a turn shared, as the writeback poller hands it to a surface's `attach`: the blob key
     to stream from, the download name, an optional human caption (`subject`), and its media type and
     size — the size lets a chunked-upload API reserve the exact length up front.
 
     `preview_*` names a second blob holding the rendered picture of a file that is not itself one —
-    a document's first page, rasterized in the sandbox at share time. A file that is already an
-    image carries none: it is its own preview, minted off `blob_key`."""
+    a document's first page, rasterized at share time. A file that is already an image carries none:
+    it is its own preview, minted off `blob_key`.
+
+    `attached_by_member` separates the two ways a file enters a turn: the agent shared it, or the
+    member attached it to the words that opened the turn. A transcript draws each under the one who
+    put it there, so the distinction is the row's to carry rather than a reader's to infer."""
 
     blob_key: str
     filename: str
@@ -547,6 +590,7 @@ class SharedArtifact:
     preview_blob_key: str | None = None
     preview_media_type: str | None = None
     preview_size_bytes: int | None = None
+    attached_by_member: bool = False
 
 
 def shared_artifact_link(
@@ -1752,6 +1796,7 @@ class SurfaceContext:
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
     _preview_url: str | None = None
     _preview_token: str | None = None
+    _probes: "ConversationProbes | None" = None
 
     @property
     def fleet_blob(self) -> FleetBlobStore:
@@ -2097,6 +2142,7 @@ class SurfaceContext:
                         tables.shared_artifact.c.preview_blob_key,
                         tables.shared_artifact.c.preview_media_type,
                         tables.shared_artifact.c.preview_size_bytes,
+                        tables.shared_artifact.c.attached_by_member,
                     )
                     .where(
                         tables.shared_artifact.c.workspace_id == self.workspace_id,
@@ -2117,6 +2163,7 @@ class SurfaceContext:
                 preview_blob_key=row.preview_blob_key,
                 preview_media_type=row.preview_media_type,
                 preview_size_bytes=row.preview_size_bytes,
+                attached_by_member=row.attached_by_member,
             )
             for row in rows
         )
@@ -2820,6 +2867,189 @@ class SurfaceContext:
                 )
         await self._sandboxes.write(conversation_id, rel, bytes(body))
 
+    async def mint_upload(
+        self, filename: str, size_bytes: int, checksum_sha256: str
+    ) -> UploadGrant | None:
+        """The URL a browser PUTs one attachment straight to the store by, bound to the exact bytes,
+        or None on a store that signs none (a filesystem dev deploy).
+
+        The key it lands under is the artifact key the file will keep — nothing is copied or moved
+        later, the row the send records points at these very bytes. The URL is measured, so S3
+        stores exactly the file the page named; and a detached signature over the key rides back
+        with it, because the send admits an upload key only on a signature this deploy minted. The
+        prefix cannot be the gate here as it is for a scratch upload area: the artifact namespace
+        holds every workspace file, so a key alone would let a send claim a file it never uploaded.
+        The signature is what proves the send is naming its own upload."""
+        match self.blob.backend:
+            case S3BlobStore():
+                pass
+            case _:
+                return None
+        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{inbox_name(filename, set())}"
+        put_url = await self.blob.presigned_put(
+            key, size_bytes, checksum_sha256, UPLOAD_PUT_TTL_SECONDS
+        )
+        return UploadGrant(blob_key=key, put_url=put_url, signature=self._upload_signature(key))
+
+    def verify_upload_grant(self, blob_key: str, signature: str) -> bool:
+        """Whether `signature` is the one `mint_upload` struck for `blob_key` in this workspace. The
+        send trusts an upload key on this alone, so a key the deploy never signed — another
+        workspace file, a guessed artifact id — carries no grant and is refused."""
+        return verify_detached(
+            self._artifact_token_secret.encode(), self._upload_message(blob_key), signature
+        )
+
+    def _upload_signature(self, blob_key: str) -> str:
+        return sign_detached(self._artifact_token_secret.encode(), self._upload_message(blob_key))
+
+    def _upload_message(self, blob_key: str) -> bytes:
+        return f"upload:{self.workspace_id}:{blob_key}".encode()
+
+    async def store_inbound_file(self, filename: str, chunks: AsyncIterator[bytes]) -> str:
+        """Stream one inbound file into the store under a fresh artifact key and answer that key —
+        the path for bytes that reach this process rather than the store directly: a dev deploy's
+        inline composer upload, and a Slack download that carries the bot token no sandbox holds.
+        Bounded at the workspace write limit, since a file the workspace cannot mount is one the
+        send cannot deliver."""
+        counted = 0
+
+        async def measured() -> AsyncIterator[bytes]:
+            nonlocal counted
+            async for chunk in chunks:
+                counted += len(chunk)
+                if counted > WORKSPACE_WRITE_MAX_BYTES:
+                    raise ValueError("inbound file exceeds the workspace write bound")
+                yield chunk
+
+        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{inbox_name(filename, set())}"
+        await self.blob.put_stream(key, measured())
+        return key
+
+    async def deliver_attachment(self, conversation_id: UUID, blob_key: str, rel: str) -> None:
+        """Land one stored attachment in the conversation's workspace at `rel`, so the turn's
+        sandbox mounts it already present.
+
+        On S3 the sandbox fetches it itself: a `curl` of a presigned GET, run as an off-turn probe
+        so a signed token authorizes the egress — the bytes go store to sandbox and never cross this
+        process. The probe carries workspace authority, since the presigned URL is its own authority
+        and the store host is admitted to every principal by the base egress rules; a member need
+        not be seated for their own file to arrive. A filesystem dev store signs no URL, so the
+        bytes stream out through the carrier instead."""
+        match self.blob.backend:
+            case S3BlobStore():
+                if self._probes is None:
+                    raise RuntimeError("attachment delivery on s3 requires the probe seam")
+                url = await self.blob.presigned_get(blob_key, ATTACHMENT_FETCH_TTL_SECONDS)
+                target = workspace_path(rel)
+                parent = shell_path(str(PurePosixPath(target).parent))
+                command = (
+                    f"mkdir -p {parent} && curl -sS --fail-with-body "
+                    f"-o {shell_path(target)} --url {shlex.quote(url)}"
+                )
+                result = await self._probes.run(
+                    conversation_id,
+                    command,
+                    timeout_s=ATTACHMENT_FETCH_TIMEOUT_SECONDS,
+                    authority=WORKSPACE_AUTHORITY,
+                )
+                if result.exit_code != 0:
+                    detail = result.stdout.strip() or result.stderr.strip()
+                    raise RuntimeError(detail or f"fetching {rel} into the workspace failed")
+            case _:
+                stream = self.blob.get_stream(blob_key)
+                await self.write_workspace_file(conversation_id, rel, stream)
+
+    async def attach_member_files(self, turn_id: UUID, blob_keys: tuple[str, ...]) -> None:
+        """Record each file a member attached as a shared artifact of the turn that carried it, and
+        draw the cover of every document among them.
+
+        These are the rows `share_file` writes, so the file a member sent and the file an agent
+        produced are one kind of thing everywhere downstream: listed by the artifacts shelf, opened
+        from the conversation, downloaded through the one signed route. The bytes already sit under
+        the artifact key — a browser PUT them there, or `store_inbound_file` streamed them — so the
+        row points at them and nothing is copied.
+
+        The covers share one `ATTACHED_COVER_BUDGET_SECONDS` across the whole send, not one budget
+        each: a render is milliseconds against the in-cluster service — 15-27ms for a page of PDF,
+        measured — so the budget is never the expected cost, but ten attachments must not serialize
+        into ten times the wait. The service fetches the source and PUTs the picture itself, so no
+        document's bytes enter this process. A file that finds the budget spent, a deploy that
+        presigns nothing, and a service that will not render each leave the row uncovered, and
+        `render_previews` draws it on the next pass — the same backstop a share whose render failed
+        already waits on. A raster needs no cover: it is its own picture, which is what
+        `preview_blob_key` being None already means to every reader.
+
+        Nothing here is the send: a file that cannot be recorded or drawn costs the member that
+        file's picture and never their message, which is already admitted."""
+        deadline = monotonic() + ATTACHED_COVER_BUDGET_SECONDS
+        for blob_key in blob_keys:
+            await self._record_attachment(turn_id, blob_key)
+            await self._draw_attachment_cover(blob_key, deadline)
+
+    async def _record_attachment(self, turn_id: UUID, blob_key: str) -> None:
+        filename = PurePosixPath(blob_key).name
+        listed = await self.blob.list(blob_key)
+        size_bytes = next((entry.size_bytes for entry in listed if entry.key == blob_key), 0)
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.shared_artifact)
+                .values(
+                    id=uuid4(),
+                    turn_id=turn_id,
+                    blob_key=blob_key,
+                    workspace_id=self.workspace_id,
+                    filename=filename,
+                    subject=None,
+                    media_type=artifact_media_type(filename),
+                    size_bytes=size_bytes,
+                    attached_by_member=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.shared_artifact.c.turn_id,
+                        tables.shared_artifact.c.blob_key,
+                    ]
+                )
+            )
+
+    async def _draw_attachment_cover(self, blob_key: str, deadline: float) -> None:
+        filename = PurePosixPath(blob_key).name
+        if PREVIEW_KINDS.get(PurePosixPath(filename).suffix.lower()) is None:
+            return
+        if raster_image_media_type(filename) is not None:
+            return
+        if self._preview_url is None:
+            return
+        budget = deadline - monotonic()
+        if budget <= 0:
+            log("surface.attached_cover_unbudgeted", blob_key=blob_key)
+            return
+        async with httpx.AsyncClient(timeout=budget) as client:
+            drawn = await render_document_cover(
+                self.blob, self._preview_url, blob_key, filename, client
+            )
+        if drawn is None:
+            return
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.shared_artifact)
+                .where(
+                    tables.shared_artifact.c.workspace_id == self.workspace_id,
+                    tables.shared_artifact.c.blob_key == blob_key,
+                    tables.shared_artifact.c.preview_blob_key.is_(None),
+                )
+                .values(
+                    preview_blob_key=drawn.preview_key,
+                    preview_media_type=ARTIFACT_PREVIEW_MEDIA_TYPE,
+                    preview_size_bytes=drawn.size_bytes,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
     async def render_preview(
         self, kind: str, data: bytes, start_page: int = 1, pages: int = 1
     ) -> PreviewRender | None:
@@ -3399,6 +3629,7 @@ class SurfaceContext:
                 tables.shared_artifact.c.preview_blob_key,
                 tables.shared_artifact.c.preview_media_type,
                 tables.shared_artifact.c.preview_size_bytes,
+                tables.shared_artifact.c.attached_by_member,
                 tables.shared_artifact.c.created_at,
                 tables.shared_artifact.c.turn_id,
                 tables.member.c.email,
@@ -3441,6 +3672,7 @@ class SurfaceContext:
                     preview_blob_key=row.preview_blob_key,
                     preview_media_type=row.preview_media_type,
                     preview_size_bytes=row.preview_size_bytes,
+                    attached_by_member=row.attached_by_member,
                 ),
                 created_at=row.created_at,
                 owner_email=row.email,
@@ -5333,7 +5565,10 @@ class WritebackPoller:
                         tables.shared_artifact.c.media_type,
                         tables.shared_artifact.c.size_bytes,
                     )
-                    .where(tables.shared_artifact.c.turn_id == turn_id)
+                    .where(
+                        tables.shared_artifact.c.turn_id == turn_id,
+                        tables.shared_artifact.c.attached_by_member.is_(False),
+                    )
                     .order_by(
                         tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key
                     )

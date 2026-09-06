@@ -60,7 +60,7 @@ import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import { newChatHash, sectionHash } from "@/lib/route";
 import { navigate } from "@/lib/router";
-import { uploadAttachment } from "@/lib/api";
+import { uploadAttachment, type UploadRef } from "@/lib/api";
 import {
   answerQuestions,
   refreshTranscript,
@@ -767,18 +767,21 @@ function Composer({
     // The bytes go to the blob store first, so the send body names the keys rather than carrying
     // the files. A file the store took no URL for — a dev deploy that signs none, an upload that
     // failed — rides the multipart body it always has.
-    const uploaded: string[] = [];
+    const uploaded: UploadRef[] = [];
     const inline: File[] = [];
     for (const file of attached) {
-      const key = await uploadAttachment(file);
-      if (key === null) inline.push(file);
-      else uploaded.push(key);
+      const ref = await uploadAttachment(file);
+      if (ref === null) inline.push(file);
+      else uploaded.push(ref);
     }
     let body: string | FormData = trimmed;
     if (uploaded.length || inline.length) {
       const form = new FormData();
       form.set("message", trimmed);
-      for (const key of uploaded) form.append("uploaded_key", key);
+      for (const ref of uploaded) {
+        form.append("uploaded_key", ref.key);
+        form.append("uploaded_sig", ref.sig);
+      }
       for (const file of inline) form.append("file", file);
       body = form;
     }

@@ -4630,9 +4630,21 @@ async def test_a_captionless_file_share_keeps_its_note_in_the_attachments_elemen
     assert response.status_code == 200
 
     inbound = await _turn_inbound(workspace_id)
-    note = slack.files_note(slack.DownloadedFiles(delivered=("errors.txt",), skipped=()))
+    note = slack.files_note(slack.DownloadedFiles(delivered=("errors.txt",), keys=(), skipped=()))
     assert inbound == (_fenced(_marker(inbound), "", attachments=note))
     assert note not in inbound.partition(f"</member_message_{_marker(inbound)}>")[0]
+    # A file a member sent from Slack is a file of the conversation on the same terms one sent from
+    # the composer is: an artifact of the turn that carried it, marked as the member's own.
+    async with workspace_tx() as connection:
+        shared = (
+            await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.attached_by_member,
+                )
+            )
+        ).all()
+    assert [(row.filename, row.attached_by_member) for row in shared] == [("errors.txt", True)]
 
 
 async def test_a_slack_supplied_filename_is_never_a_path(db: None, tmp_path, monkeypatch) -> None:
@@ -4780,7 +4792,9 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
     assert f"{slack.SLACK_INBOX_DIR}/small.txt" in inbound
     assert "Skipped files" in inbound
     assert "big.bin" in inbound
-    note = slack.files_note(slack.DownloadedFiles(delivered=("small.txt",), skipped=("big.bin",)))
+    note = slack.files_note(
+        slack.DownloadedFiles(delivered=("small.txt",), keys=(), skipped=("big.bin",))
+    )
     mark = _marker(inbound)
     assert inbound.endswith(f"<attachments_{mark}>\n{note}\n</attachments_{mark}>")
     assert f"</member_message_{mark}>\n<attachments_{mark}>" in inbound

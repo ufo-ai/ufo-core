@@ -126,6 +126,7 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
 from ufo.harness.auth.bearer import mint_token
+from ufo.harness.auth.token_signing import sign_detached
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog import (
     ANTHROPIC_KEY_SLOT,
@@ -1102,7 +1103,7 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
                     data = json.loads(line.split(":", 1)[1].strip())
                     if event == "terminal":
                         return "".join(deltas), data
-                    if event == "cost":
+                    if event in ("cost", "files"):
                         continue
                     deltas.append(data["text"])
                 elif not line:
@@ -5083,58 +5084,123 @@ async def test_composer_files_land_in_the_workspace_before_the_turn(
 
 
 def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> None:
-    """The note admission writes at the foot of a member's words says where their files landed; the
-    bubble states the files themselves, so the words read as the words they typed. A raster carries
-    the link the attachment route serves its picture from and every other type carries none."""
-    agent_id, conversation_id = uuid4(), uuid4()
+    """The note admission writes at the foot of a member's words says where their files landed; it
+    addresses the model, so the bubble strips it and the words read as the words they typed. What
+    they attached is drawn from the turn's own artifacts instead — a file recorded when the message
+    was sent, carrying the links every other shared file carries."""
+    turn_id = uuid4()
+    attached = {
+        "filename": "lights.gif",
+        "url": "https://web/artifacts/x/lights.gif?signed",
+        "media_type": "image/gif",
+        "size_bytes": 12,
+        "preview_url": "https://web/artifacts/x/lights.gif?signed&preview=image%2Fgif%3A12",
+        "subject": None,
+    }
     rendered = _rendered_messages(
         (
             Message(
                 role="user",
                 content=(
-                    "<context>source: web</context>\nwhat are these\n\n"
+                    f"<context>\nmessage_ref: {turn_id}\nsource: web\n</context>\n"
+                    "what are these\n\n"
+                    "[Attached files, saved in the workspace: web-inbox/lights.gif]"
+                ),
+            ),
+            Message(role="assistant", content="a lamp"),
+        ),
+        turn_ids=frozenset({str(turn_id)}),
+        attached={str(turn_id): {"lights.gif": attached}},
+    )
+    assert rendered[0] == {"role": "user", "text": "what are these", "files": [attached]}
+    assert rendered[1] == {"role": "assistant", "text": "a lamp"}
+
+
+def test_a_message_folded_into_a_turn_draws_its_own_attachment() -> None:
+    """A message a member sends while the turn still runs folds into it and shares its turn id, so
+    the turn holds two member messages. Each draws the files its own note names, matched by name
+    against the turn's rows — the folded file lands on the folded message, never on the one that
+    opened the turn."""
+    turn_id = uuid4()
+    opener = {
+        "filename": "opener.pdf",
+        "url": "https://web/artifacts/a/opener.pdf?signed",
+        "media_type": "application/pdf",
+        "size_bytes": 9,
+        "preview_url": None,
+        "subject": None,
+    }
+    folded = {
+        "filename": "folded.png",
+        "url": "https://web/artifacts/b/folded.png?signed",
+        "media_type": "image/png",
+        "size_bytes": 9,
+        "preview_url": "https://web/artifacts/b/folded.png?signed&preview=image%2Fpng%3A9",
+        "subject": None,
+    }
+
+    def _said(words: str, path: str) -> str:
+        return (
+            f"<context>\nmessage_ref: {turn_id}\nsource: web\n</context>\n"
+            f"{words}\n\n[Attached files, saved in the workspace: {path}]"
+        )
+
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content=_said("first", "web-inbox/opener.pdf")),
+            Message(role="user", content=_said("second", "web-inbox/folded.png")),
+        ),
+        turn_ids=frozenset({str(turn_id)}),
+        attached={str(turn_id): {"opener.pdf": opener, "folded.png": folded}},
+    )
+    assert rendered[0] == {"role": "user", "text": "first", "files": [opener]}
+    assert rendered[1] == {"role": "user", "text": "second", "files": [folded]}
+
+
+def test_a_member_bubble_older_than_the_row_reads_its_files_off_the_note() -> None:
+    """A turn admitted before a member's attachments became artifacts of it holds no row, so its
+    bubble reads the files off the note the model was handed and cards each by name — the words read
+    clean, and the file the member sent is still named where it used to draw."""
+    turn_id = uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=(
+                    f"<context>\nmessage_ref: {turn_id}\nsource: web\n</context>\n"
+                    "what are these\n\n"
                     "[Attached files, saved in the workspace: web-inbox/lights.gif, "
                     "web-inbox/paper.pdf]"
                 ),
             ),
-            Message(role="assistant", content="a lamp and a paper"),
         ),
-        attach=lambda path: web_surface._attachment_preview(
-            "https://web", agent_id, conversation_id, path
-        ),
+        turn_ids=frozenset({str(turn_id)}),
+        attached={},
     )
     assert rendered[0] == {
         "role": "user",
         "text": "what are these",
         "files": [
-            {
-                "filename": "lights.gif",
-                "url": None,
-                "media_type": "image/gif",
-                "preview_url": (
-                    f"https://web/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-                    "/attachments/web-inbox/lights.gif"
-                ),
-            },
+            {"filename": "lights.gif", "url": None, "media_type": "image/gif", "preview_url": None},
             {
                 "filename": "paper.pdf",
                 "url": None,
-                "media_type": "application/pdf",
+                "media_type": "application/octet-stream",
                 "preview_url": None,
             },
         ],
     }
-    assert rendered[1] == {"role": "assistant", "text": "a lamp and a paper"}
 
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_attached_picture_is_drawn_from_the_conversations_own_workspace(
+async def test_an_attached_picture_draws_inline_and_a_document_cards_by_name(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The member's own bubble names the attachment route for the picture it draws, and that route
-    serves the workspace bytes inline once they prove to be the raster the filename declares — never
-    as a download, and never for a path outside the inbox the composer wrote to."""
+    """A raster a member attaches is its own picture: the bubble draws it inline off the signed
+    preview link every shared image draws from, and it serves as that image, never a download. A
+    document beside it carries no picture on a store that presigns none, so the bubble cards it by
+    its name and media type."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -5157,57 +5223,197 @@ async def test_an_attached_picture_is_drawn_from_the_conversations_own_workspace
     )
     (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
     assert said["text"] == "what are these"
-    drawn, carded = said["files"]
-    assert carded == {
-        "filename": "paper.pdf",
-        "url": None,
-        "media_type": "application/pdf",
-        "preview_url": None,
-    }
-    assert drawn["filename"] == "lights.png"
+    files = {row["filename"]: row for row in said["files"]}
+    carded = files["paper.pdf"]
+    assert carded["media_type"] == "application/pdf"
+    assert carded["preview_url"] is None
+    drawn = files["lights.png"]
     served = await client.get(str(drawn["preview_url"]), headers=cookie)
     assert served.status_code == 200
     assert served.content == picture
     assert served.headers["content-type"] == "image/png"
     assert "content-disposition" not in served.headers
-    assert served.headers["x-content-type-options"] == "nosniff"
-    base = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/attachments"
-    for refused in (
-        f"{base}/web-inbox/paper.pdf",
-        f"{base}/web-inbox/nothing.png",
-        f"{base}/notes/lights.png",
-        f"{base}/web-inbox/deeper/lights.png",
-    ):
-        assert (await client.get(refused, headers=cookie)).status_code == 404
     await _consume(client, token, admitted.json()["turn_id"])
 
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_an_attachment_answers_no_other_member(
+async def test_an_attached_document_on_a_presignless_store_shows_no_cover(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A picture answers exactly where the message naming it answers: another member's chat is not
-    theirs to read, so the attachment route refuses them as the transcript does."""
+    """A cover is drawn by the preview service from the stored file over presigned URLs, so a store
+    that signs none draws no cover and reaches no service. The document's row stands uncovered —
+    exactly what `render_previews` looks for — and the bubble names the file until a later pass
+    draws it, on the same terms a share whose render failed already waits on."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    _other_id, other_token = await _seed_member(workspace_id, "guest@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
-        data={"message": "mine"},
-        files=[("file", ("lights.png", _png(), "image/png"))],
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        data={"message": "read this"},
+        files=[("file", ("paper.pdf", b"%PDF-1.7 not really", "application/pdf"))],
+        headers=cookie,
     )
     assert admitted.status_code == 200
     conversation_id = admitted.json()["conversation_id"]
-    refused = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
-        "/attachments/web-inbox/lights.png",
-        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
     )
-    assert refused.status_code == 404
+    (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
+    (carded,) = said["files"]
+    assert carded["filename"] == "paper.pdf"
+    assert carded["preview_url"] is None
+    async with workspace_tx() as connection:
+        uncovered = (
+            await connection.execute(
+                sa.select(tables.shared_artifact.c.preview_blob_key).where(
+                    tables.shared_artifact.c.attached_by_member
+                )
+            )
+        ).all()
+    assert [row.preview_blob_key for row in uncovered] == [None]
     await _consume(client, token, admitted.json()["turn_id"])
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_attached_file_is_an_artifact_of_the_turn_that_carried_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """What a member attaches is a file of the conversation, not a fact about one message: the
+    artifacts shelf lists it beside what the agent shared, and it downloads through the one signed
+    route. It is drawn on the member's own bubble and never on the reply, because the row says who
+    put it there."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        data={"message": "what is this"},
+        files=[("file", ("lights.png", _png(), "image/png"))],
+        headers=cookie,
+    )
+    assert admitted.status_code == 200
+    conversation_id = admitted.json()["conversation_id"]
+
+    listed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/slots/artifacts",
+        headers=cookie,
+    )
+    assert listed.status_code == 200
+    assert "lights.png" in [item["filename"] for item in listed.json()["artifacts"]]
+
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
+    (drawn,) = said["files"]
+    assert drawn["filename"] == "lights.png"
+    assert said["text"] == "what is this"
+    fetched = await client.get(str(drawn["url"]), headers=cookie)
+    assert fetched.status_code == 200
+    assert fetched.content == _png()
+    await _consume(client, token, admitted.json()["turn_id"])
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_presigned_upload_is_delivered_and_recorded(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """An attachment the browser PUT to the store travels as its key and the signature the deploy
+    struck for it: the send verifies the signature, lands the stored bytes in `web-inbox/`, and
+    records the key as an artifact of the turn — no file bytes cross the send. The bytes are already
+    the artifact, so the bubble downloads them straight from the key."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, sandboxes = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    key = f"artifacts/{uuid4()}/report.pdf"
+    with ws(workspace_id):
+        await blob.put(key, b"%PDF-1.7 stored")
+    signature = sign_detached(SECRET.encode(), f"upload:{workspace_id}:{key}".encode())
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        files={
+            "message": (None, "read this"),
+            "uploaded_key": (None, key),
+            "uploaded_sig": (None, signature),
+        },
+        headers=cookie,
+    )
+    assert admitted.status_code == 200
+    conversation_id = admitted.json()["conversation_id"]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.conversation_id).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"])
+                )
+            )
+        ).one()
+    assert "web-inbox/report.pdf" in row.inbound
+    inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
+    assert (inbox / "report.pdf").read_bytes() == b"%PDF-1.7 stored"
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
+    (drawn,) = said["files"]
+    assert drawn["filename"] == "report.pdf"
+    fetched = await client.get(str(drawn["url"]), headers=cookie)
+    assert fetched.status_code == 200
+    assert fetched.content == b"%PDF-1.7 stored"
+    await _consume(client, token, admitted.json()["turn_id"])
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_send_admits_only_an_upload_key_the_deploy_signed(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The artifact namespace holds every workspace file, so a key alone cannot be the gate: the
+    send admits an upload key only on the signature this deploy struck for it. A key carrying a
+    signature it never minted is refused whatever the store holds under it, and the turn is never
+    admitted; a validly signed key whose bytes never landed carries nothing to deliver, so the send
+    says so rather than opening a turn the delivery would fail behind."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    real_key = f"artifacts/{uuid4()}/report.pdf"
+    with ws(workspace_id):
+        await blob.put(real_key, b"%PDF-1.7 stored")
+    forged = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        files={
+            "message": (None, "read this"),
+            "uploaded_key": (None, real_key),
+            "uploaded_sig": (None, "forged"),
+        },
+        headers=cookie,
+    )
+    assert forged.status_code == 403
+    absent = f"artifacts/{uuid4()}/gone.pdf"
+    signature = sign_detached(SECRET.encode(), f"upload:{workspace_id}:{absent}".encode())
+    missing = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        files={
+            "message": (None, "read this"),
+            "uploaded_key": (None, absent),
+            "uploaded_sig": (None, signature),
+        },
+        headers=cookie,
+    )
+    assert missing.status_code == 404
 
 
 @pytest.mark.usefixtures("database_url")
@@ -5378,60 +5584,23 @@ async def test_upload_start_refuses_a_file_the_workspace_write_cannot_take(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_send_refuses_an_uploaded_key_outside_the_upload_prefix(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """The send names which stored object it attaches, so a key that escapes the upload namespace —
-    a conversation's transcript, an artifact the member's audience hides — is refused whatever the
-    store holds under it, and the turn is never admitted."""
-    client, workspace_id, agent_id = web
-    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    for key in (
-        f"conversations/{uuid4()}/messages.json.lz4",
-        "web-inbox-uploads/../conversations/elsewhere/messages.json.lz4",
-        "web-inbox/file.bin",
-    ):
-        refused = await client.post(
-            f"/surface/web/agents/{agent_id}/chat?conversation=new",
-            data={"message": "read this", "uploaded_key": key},
-            files=[("file", ("notes.txt", b"hello", "text/plain"))],
-            headers={"cookie": f"{SESSION_COOKIE}={token}"},
-        )
-        assert refused.status_code == 403
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_send_naming_an_upload_the_store_never_took_is_refused(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """A key of the right shape whose bytes never landed carries nothing to deliver, so the send
-    says so instead of opening a turn the delivery would fail behind."""
-    client, workspace_id, agent_id = web
-    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    refused = await client.post(
-        f"/surface/web/agents/{agent_id}/chat?conversation=new",
-        data={"message": "read this", "uploaded_key": f"web-inbox-uploads/{uuid4()}/absent.bin"},
-        files=[("file", ("notes.txt", b"hello", "text/plain"))],
-        headers={"cookie": f"{SESSION_COOKIE}={token}"},
-    )
-    assert refused.status_code == 404
-
-
-@pytest.mark.usefixtures("database_url")
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_send_carrying_more_attachments_than_the_cap_is_refused(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """A key costs the body nothing, so one request could name stored objects without end and read
     the store into a single workspace. The count is what bounds a send now that the framing bounds
-    the text alone, and inline files and keys count together against it."""
+    the text alone, and inline files and keys count together against it — before any signature is
+    checked, so a flood is turned away at the door."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com")
-    keys = [f"web-inbox-uploads/{uuid4()}/report.pdf" for _ in range(MAX_INBOUND_FILES)]
+    keys = [f"artifacts/{uuid4()}/report.pdf" for _ in range(MAX_INBOUND_FILES)]
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
-        data={"message": "read these", "uploaded_key": keys},
+        data={
+            "message": "read these",
+            "uploaded_key": keys,
+            "uploaded_sig": ["x" for _ in keys],
+        },
         files=[("file", ("notes.txt", b"hello", "text/plain"))],
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
@@ -5440,23 +5609,28 @@ async def test_a_send_carrying_more_attachments_than_the_cap_is_refused(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_presigned_files_land_in_the_workspace_beside_the_inline_ones(
+async def test_presigned_and_inline_attachments_land_together(
     web: tuple[AsyncClient, UUID, UUID],
-    dbos_runtime: tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """An attachment the browser PUT to the blob store travels as its key: the send streams those
-    bytes into the conversation's `web-inbox/` under the member's own filename, beside any file the
-    body still carried inline, and the admitted message names both paths."""
+    """One send carries both kinds: a presigned attachment already under its artifact key, and an
+    inline file the body still holds on a store that signs no upload. Both land in `web-inbox/`
+    under the member's own filename and both are recorded as artifacts of the turn."""
     client, workspace_id, agent_id = web
     _config, _hub, blob, sandboxes = dbos_runtime
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    key = f"web-inbox-uploads/{uuid4()}/report.pdf"
+    key = f"artifacts/{uuid4()}/report.pdf"
     with ws(workspace_id):
         await blob.put(key, b"%PDF-1.7 stored")
+    signature = sign_detached(SECRET.encode(), f"upload:{workspace_id}:{key}".encode())
     STREAM_GATE.arm()
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
-        data={"message": "read these", "uploaded_key": key},
+        data={
+            "message": "read these",
+            "uploaded_key": key,
+            "uploaded_sig": signature,
+        },
         files=[("file", ("notes.txt", b"hello", "text/plain"))],
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )

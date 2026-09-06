@@ -384,6 +384,8 @@ class ArtifactObjects:
                 narrowed = narrowed.where(sa.false())
         if query.filters.get("mine") is True and viewer is not None:
             narrowed = narrowed.where(tables.conversation.c.member_id == viewer)
+        if query.filters.get("attachment") is True:
+            narrowed = narrowed.where(tables.shared_artifact.c.attached_by_member)
         surface = query.filters.get("surface")
         if isinstance(surface, str):
             narrowed = narrowed.where(tables.conversation.c.surface == surface)
@@ -462,6 +464,7 @@ class ArtifactObjects:
                 tables.shared_artifact.c.preview_blob_key,
                 tables.shared_artifact.c.preview_media_type,
                 tables.shared_artifact.c.preview_size_bytes,
+                tables.shared_artifact.c.attached_by_member,
                 tables.shared_artifact.c.created_at,
                 tables.turn.c.conversation_id,
                 tables.conversation.c.audience,
@@ -554,6 +557,7 @@ class ArtifactObjects:
                 "surface": latest.surface,
                 "source": sources.get(latest.conversation_id),
                 "mine": viewer is not None and latest.owner_member_id == viewer,
+                "attachment": latest.attached_by_member,
                 "url": self._download_url(latest),
                 "preview_url": self._preview_url(latest),
             },
@@ -677,6 +681,7 @@ def artifact_object(
                 "surface",
                 "source",
                 "mine",
+                "attachment",
                 "url",
                 "preview_url",
             }
