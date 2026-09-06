@@ -23,11 +23,13 @@ import { ApplicationAction } from "@/apps/action";
 import type { ApplicationActionRecord } from "@/apps/action";
 import { AppConversations } from "@/apps/bands";
 import {
+  archive,
   compose,
   connect,
   founded,
   installShims,
   navigate,
+  onArchived,
   onPlaced,
 } from "@/apps/runtime";
 import type { AppInit } from "@/apps/runtime";
@@ -245,10 +247,12 @@ export {
   IconFilter2,
   IconWorldWww,
   IconX,
+  archive,
   connect,
   founded,
   installShims,
   navigate,
+  onArchived,
   onPlaced,
   mountApp,
   SectionApp,

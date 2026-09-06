@@ -69,6 +69,10 @@ export type RouteOf<Kind extends RouteKind> = Extract<Route, { kind: Kind }>;
  *  track key — so it is declared with the table that reads and writes it. */
 export const COMPOSE = "compose";
 
+/** The chat surface's archive, as the address spells it: a place whose scope is this stands the
+ *  threads the member put away rather than the ones they work in. */
+export const ARCHIVE_SCOPE = "archive";
+
 const TRACK_KEY = "open";
 const TRACK_SEPARATOR = "~";
 

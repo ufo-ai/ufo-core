@@ -896,6 +896,94 @@ test("one page of the chat list gathers the listing's own pages up to its bound"
   expect(await screen.findByRole("button", { name: "Older conversations" })).toBeTruthy();
 });
 
+/** The marks are ids, and the list's stride is a page of the member's recent history — so a thread
+ *  put away months ago falls outside that stride. The archive walks the listing for the threads it
+ *  is looking for, in the list's own stride with the list's own step to the rest: a mark the listing
+ *  never answers costs one stride per open, never the member's whole history. */
+test("the archive walks the listing in the list's stride, and steps to a thread put away long ago", async () => {
+  const AWAY = SECOND_ID;
+  const { calls } = await runPage(
+    "chat",
+    {
+      // A listing that never runs out, with the put-away thread on its ninth page — three past the
+      // six the list's own stride gathers.
+      "/objects/conversation$": (url) => {
+        const held = /cursor=walk-(\d+)/.exec(url);
+        const page = held === null ? 1 : Number(held[1]) + 1;
+        return json({
+          objects: [
+            page === 9
+              ? chatListRow(AWAY, "Put away in March")
+              : chatListRow(CONVO_ID.slice(0, -2) + String(page).padStart(2, "0"), "Page " + page),
+          ],
+          next_cursor: "walk-" + page,
+        });
+      },
+    },
+    { place: { scope: "archive" }, archived: [AWAY] },
+  );
+
+  await screen.findByRole("heading", { name: "Chat" });
+  // The first stride reads six pages and stops on its bound with the mark still out, so it states
+  // what it read and offers the rest — never that nothing is archived.
+  const older = await screen.findByRole("button", { name: "Older conversations" });
+  expect(screen.getByText("No archived conversation on this page.")).toBeTruthy();
+  expect(screen.queryByText("No conversation is archived.")).toBeNull();
+  expect(calls.some((url) => url.includes("cursor=walk-5"))).toBe(true);
+  expect(calls.some((url) => url.includes("cursor=walk-6"))).toBe(false);
+
+  await userEvent.click(older);
+
+  // The next stride lands the mark and ends on it rather than on a listing that never runs out; the
+  // archive holds the put-away thread and nothing else, whatever the walk read on the way.
+  expect(await screen.findByText("Put away in March")).toBeTruthy();
+  expect(screen.queryByText(/^Page \d+$/)).toBeNull();
+  expect(calls.some((url) => url.includes("cursor=walk-8"))).toBe(true);
+  expect(calls.some((url) => url.includes("cursor=walk-9"))).toBe(false);
+  // Every marked thread is in hand, so there is no rest to step to.
+  expect(screen.queryByRole("button", { name: "Older conversations" })).toBeNull();
+});
+
+/** The mark is the portal's, so taking a thread back out is stated to the shell and drawn from the
+ *  set that comes back — the rail and this screen answer to one mark. */
+test("the archive takes a thread back out, and states the act to the shell", async () => {
+  const stated: unknown[] = [];
+  const watch = (event: MessageEvent) => {
+    const message = event.data as { ufo?: string } | null;
+    if (message?.ufo === "archive") stated.push(event.data);
+  };
+  window.addEventListener("message", watch);
+  try {
+    await runPage(
+      "chat",
+      {
+        "/objects/conversation$": () =>
+          json({
+            objects: [chatListRow(CONVO_ID, "Put away"), chatListRow(ARRIVAL_ID, "Still live")],
+            next_cursor: null,
+          }),
+      },
+      { place: { scope: "archive" }, archived: [CONVO_ID] },
+    );
+
+    // The archive draws the threads the member put away, and the live one stays out of it.
+    expect(await screen.findByText("Put away")).toBeTruthy();
+    expect(screen.queryByText("Still live")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Unarchive" }));
+    await vi.waitFor(() =>
+      expect(stated).toEqual([{ ufo: "archive", conversation_id: CONVO_ID, archived: false }]),
+    );
+
+    // The shell holds the set, so the page draws the one it is handed back rather than a mark of
+    // its own.
+    window.postMessage({ ufo: "archived", archived: [] }, "*");
+    expect(await screen.findByText("No conversation is archived.")).toBeTruthy();
+  } finally {
+    window.removeEventListener("message", watch);
+  }
+});
+
 test("the chat list stands over the entry that starts a conversation, and a send founds one", async () => {
   const { calls } = await runPage("chat", {
     "/objects/conversation$": () =>

@@ -122,6 +122,7 @@ type BridgeMessage =
   | { ufo: "navigate"; to: string }
   | { ufo: "compose"; text: string }
   | { ufo: "founded"; agent_id: string; conversation_id: string; title: string }
+  | { ufo: "archive"; conversation_id: string; archived: boolean }
   | { ufo: "resize"; height: number };
 
 /** The one header namespace a call may carry through: the surface's own `x-ufo-*` controls — the
@@ -163,10 +164,18 @@ export type BridgeConfig = {
    *  place the way a portal tab does, and a frame handed one key of it could only stand the screen
    *  the member asked for by guessing the rest. */
   place?: WorkspacePlace;
+  /** The conversations the member put away, by id. The marks are the portal's own and the frame is
+   *  another origin, so a page that reads an archive is handed the set rather than holding one of
+   *  its own — it rides `init` and, while the frame stands, its own message. */
+  archived?: string[];
   /** A conversation the page's own send founded, told to the shell so the rail carries the row
    *  without waiting for its next read. The page could only have founded it through this bridge's
    *  own chat call, so the report claims nothing the shell did not broker. */
   onCreated?: (agentId: string, conversationId: string, title: string) => void;
+  /** A thread the page put away, or took back out. The mark is the portal's own, so the page that
+   *  draws the archive states the act and the shell writes it — the rail and the archive answer to
+   *  one mark rather than to a set each. */
+  onArchive?: (conversationId: string, archived: boolean) => void;
   onSessionEnded?: () => void;
   /** Whether this frame is the chat surface — the one page whose job is speaking. Only it may
    *  post the chat admit: a send runs a model turn with the viewer's whole authority, and every
@@ -181,6 +190,7 @@ export type BridgeConfig = {
 export type BridgeHandle = {
   detach: () => void;
   place: (place: WorkspacePlace) => void;
+  archived: (archived: string[]) => void;
 };
 
 /** A path as the endpoint table reads it: query dropped, leading slashes dropped, split on the
@@ -257,12 +267,15 @@ export function attachBridge({
   agentId,
   banded,
   place,
+  archived,
   onCreated,
+  onArchive,
   onSessionEnded,
   chatSurface = false,
 }: BridgeConfig): BridgeHandle {
   const streams = new Map<string, AbortController>();
   let placed: WorkspacePlace = place ?? {};
+  let putAway: string[] = archived ?? [];
   let page: MessageEventSource | null = null;
 
   /** Relay one server-sent-event response as `frame` messages, then one `end`. A minimal SSE
@@ -332,6 +345,7 @@ export function attachBridge({
           agentId,
           banded,
           place: placed,
+          archived: putAway,
           crumb:
             crumb?.at && framedNavigation(crumb.at)
               ? { ...crumb, at: new URL(crumb.at, location.origin + BASE).href }
@@ -502,6 +516,14 @@ export function attachBridge({
           onCreated?.(message.agent_id, message.conversation_id, message.title);
         }
         return;
+      /* A thread put away or taken back out from the screen that draws it. The shell holds the
+         mark, so the page states the act and every screen reading that mark — this page included —
+         hears it back. */
+      case "archive":
+        if (typeof message.conversation_id === "string" && typeof message.archived === "boolean") {
+          onArchive?.(message.conversation_id, message.archived);
+        }
+        return;
       case "resize":
         if (typeof message.height === "number" && message.height > 0) {
           iframe.style.height = message.height + "px";
@@ -527,6 +549,10 @@ export function attachBridge({
     place: (next: WorkspacePlace) => {
       placed = next;
       page?.postMessage({ ufo: "place", place: next }, { targetOrigin: "*" });
+    },
+    archived: (next: string[]) => {
+      putAway = next;
+      page?.postMessage({ ufo: "archived", archived: next }, { targetOrigin: "*" });
     },
   };
 }

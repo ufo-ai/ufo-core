@@ -24,17 +24,20 @@ import {
   Pane,
   PaneNote,
   SLACK_SURFACE,
+  Segmented,
   SurfaceGlyph,
   UFO_SURFACE,
   Loading,
   agentHash,
   agentName,
+  archive,
   cn,
   founded,
   getJson,
   isPortalChat,
   mountApp,
   navigate,
+  onArchived,
   onPlaced,
   routeIs,
   surfaceWord,
@@ -58,6 +61,16 @@ import type { Agent, Conversation, Crumb, Member, WorkspacePlace } from "ufo/kit
  *  holds for another app is still read inside this one. */
 
 const COMPOSE = "compose";
+
+/** The read the page stands in, as the address spells it: the conversations the member works in, or
+ *  the ones they put away. The sidebar's `Open Archive` lands here on the second, and the selector
+ *  on the list moves between the two. */
+const ARCHIVE = "archive";
+
+const READS: { value: string; label: string }[] = [
+  { value: "", label: "Chats" },
+  { value: ARCHIVE, label: "Archive" },
+];
 
 /** The conversation the pane's place asks this page to stand on: the first slot of its track, with
  *  the fresh sentinel read as the composer. The place carries every key the address does, and this
@@ -180,14 +193,22 @@ function origin(row: ConversationRow): string {
  *
  *  The date runs are named in a fixed order rather than the order their rows arrive in, so a week
  *  with nothing in it does not reorder the column. Every other category takes the order its first
- *  row appeared in, which under a recency read is the app or the source that spoke last. */
+ *  row appeared in, which under a recency read is the app or the source that spoke last.
+ *
+ *  A thread the member put away leaves the list and stands in the archive, which is this same list
+ *  read under the other half of the selector: the marks come from the portal, and they name the one
+ *  read a row belongs to. */
 function runs(
   rows: ConversationRow[],
   category: string,
   hidden: string[],
   now: Date,
+  archived: string[],
+  read: string,
 ): Run[] {
-  const admitted = rows.filter((row) => admits(row, hidden));
+  const away = new Set(archived);
+  const kept = rows.filter((row) => away.has(row.name) === (read === ARCHIVE));
+  const admitted = kept.filter((row) => admits(row, hidden));
   const own = admitted.filter((row) => row.mine);
   const theirs = admitted.filter((row) => !row.mine);
   const grouped = own.length ? bucketed(own, category, now) : [];
@@ -252,6 +273,7 @@ function ChatApp({
   agents,
   crumb,
   portal,
+  putAway,
 }: {
   arrived: WorkspacePlace;
   appId: string;
@@ -259,6 +281,8 @@ function ChatApp({
   agents: Agent[];
   crumb?: Crumb;
   portal: string;
+  /** The conversations the member put away, as the portal held them when this page arrived. */
+  putAway: string[];
 }) {
   const mainAgent = useMainAgent();
   const [at, setAt] = useState<WorkspacePlace>(arrived);
@@ -269,15 +293,37 @@ function ChatApp({
   const after = at.after ?? "";
   const [hidden, setHidden] = useState<string[]>(heldHidden);
   const [category, setCategory] = useState<string>(heldLadder);
+  // The threads the member put away. They are the portal's own marks, so the page is handed them —
+  // on arrival, and again whenever the member puts another one away while this page stands.
+  const [archived, setArchived] = useState<string[]>(putAway);
+  useEffect(() => onArchived(setArchived), []);
+  const read = at.scope === ARCHIVE ? ARCHIVE : "";
+  const archiveRead = read === ARCHIVE;
+  // The ids the archive read is looking for, as one value the walk can be keyed on: taking a thread
+  // back out is a smaller set to find, so the read runs again and the rows it lands are the ones
+  // still put away.
+  const sought = archiveRead ? archived.join("\n") : "";
   // The listing, walked once and again only when the cursor steps — never when the open target, the
   // category or the Show set changes, because none of them changes which rows the read answers.
   // Held so opening a row resolves against it rather than re-walking it, and so a row the listing
   // already carries — including a workspace-shared conversation the member does not own — opens
   // without a second read that would not find it.
+  //
+  // The archive walks the listing for the marked threads rather than sifting the rows in hand: a
+  // mark is an id and the stride is a page of the member's recent history, so a thread put away in
+  // March falls outside it. It takes the list's own stride and the list's own step to the rest,
+  // because a mark the listing never answers — its agent deleted, or another member's mark left in
+  // this browser — would otherwise walk the member's whole history on every open. The walk ends as
+  // soon as every marked thread is in hand, so the usual archive costs one read and offers no step.
   const [list, setList] = useState<Listing>({ kind: "loading" });
   useEffect(() => {
     let live = true;
     setList({ kind: "loading" });
+    const away = new Set(sought.split("\n").filter(Boolean));
+    if (archiveRead && away.size === 0) {
+      setList({ kind: "ready", rows: [], walk: null });
+      return;
+    }
     void (async () => {
       const gathered: ConversationRow[] = [];
       let cursor = after;
@@ -299,17 +345,22 @@ function ChatApp({
           );
           return;
         }
-        gathered.push(...answer.payload.objects);
+        gathered.push(
+          ...(archiveRead
+            ? answer.payload.objects.filter((row) => away.has(row.name))
+            : answer.payload.objects),
+        );
         cursor = answer.payload.next_cursor ?? "";
-        const done = !cursor || page >= CHAT_PAGES;
-        setList({ kind: "ready", rows: [...gathered], walk: done ? cursor || null : null });
+        const held = archiveRead && gathered.length >= away.size;
+        const done = held || !cursor || page >= CHAT_PAGES;
+        setList({ kind: "ready", rows: [...gathered], walk: done && !held ? cursor || null : null });
         if (done) return;
       }
     })();
     return () => {
       live = false;
     };
-  }, [after]);
+  }, [after, archiveRead, sought]);
 
   const [shown, setShown] = useState<Shown>({ kind: "loading" });
   useEffect(() => {
@@ -394,6 +445,12 @@ function ChatApp({
     (target: string | null) => step({ opens: target === null ? undefined : [target] }),
     [step],
   );
+  // The read is a place rather than a preference: the sidebar opens this page on the archive, and a
+  // member who steps back out of it lands on the list they came from.
+  const pickRead = useCallback(
+    (next: string) => step({ scope: next || undefined, opens: undefined, after: undefined }),
+    [step],
+  );
   // A step to another stride answers with rows the page has not read, so the open conversation goes
   // with it: the list is what the member asked to see.
   const turn = useCallback(
@@ -444,7 +501,7 @@ function ChatApp({
     return <PaneNote>This conversation is not available here.</PaneNote>;
   }
   if (shown.kind === "list") {
-    const drawn = runs(shown.rows, category, hidden, new Date());
+    const drawn = runs(shown.rows, category, hidden, new Date(), archived, read);
     if (!mainAgent) return <PaneNote>No such app.</PaneNote>;
     return (
       <Pane>
@@ -468,6 +525,10 @@ function ChatApp({
                 choice turned on and off and leaves it standing, so a member names both in one
                 visit. */}
             <PageToolbar>
+              {/* Which of the two lists the page is drawing. The archive is a read of the member's
+                  own history rather than a filter over it, so it is picked in the open beside the
+                  rows instead of from inside the menu that narrows them. */}
+              <Segmented label="Read" segments={READS} value={read} onPick={pickRead} />
               <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -508,7 +569,15 @@ function ChatApp({
               </span>
             </PageToolbar>
             {drawn.length === 0 ? (
-              <p className="m-0 text-ink-soft">No conversations yet.</p>
+              <p className="m-0 text-ink-soft">
+                {/* An archive stride with a rest to step to has not read the whole history, so it
+                    states what it read rather than that nothing is put away. */}
+                {read !== ARCHIVE
+                  ? "No conversations yet."
+                  : shown.walk || after
+                    ? "No archived conversation on this page."
+                    : "No conversation is archived."}
+              </p>
             ) : (
               drawn.map((run) => (
                 <section key={run.label} className="flex flex-col gap-sm">
@@ -517,7 +586,7 @@ function ChatApp({
                   </h2>
                   <ul className="m-0 flex list-none flex-col gap-hair p-0">
                     {run.rows.map((row) => (
-                      <li key={row.name}>
+                      <li key={row.name} className="flex items-center gap-2xs">
                         <button type="button" onClick={() => place(row.name)} className={ROW}>
                           <span className="min-w-0 flex-1 truncate">{row.title}</span>
                           {/* Where the conversation came in, as the mark and the words for it. A
@@ -541,6 +610,19 @@ function ChatApp({
                             <Moment at={row.last_at} />
                           </span>
                         </button>
+                        {/* Taking a thread back out stands where it is read: the rail draws no
+                            put-away row, so this screen is the one place the act can be reached.
+                            The mark is the portal's, so the press states the act and the shell
+                            writes it. */}
+                        {archiveRead ? (
+                          <Button
+                            variant="row"
+                            className="shrink-0"
+                            onClick={() => archive(row.name, false)}
+                          >
+                            Unarchive
+                          </Button>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
@@ -642,5 +724,6 @@ mountApp(document.getElementById("root")!, (init, agents) => (
     agents={agents}
     crumb={init.crumb}
     portal={init.portal}
+    putAway={init.archived ?? []}
   />
 ));

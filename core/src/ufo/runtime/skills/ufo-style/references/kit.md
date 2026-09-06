@@ -231,10 +231,12 @@ the theme, both colour schemes and every width at once, and a shape built beside
 ## runtime
 
 - **`compose`** — Hand words to the composer of a new chat with this app, unsent.
+- **`archive`** — Put a conversation away, or take it back out.
 - **`connect`** — The handshake:
 - **`founded`** — Tell the shell a send on this page founded a conversation, so its rail carries the row without waiting for the next read.
 - **`installShims`** — Reroute the page's portal transport:
 - **`navigate`** — Move the portal to an address:
+- **`onArchived`** — The conversations the member put away, as the set changes while the page stands — the live half of `init`'s `archived`.
 - **`onPlaced`** — The pane's place as it changes while the page stands — the live half of `init`'s `place`.
 
 ## separator
