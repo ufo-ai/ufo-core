@@ -53,6 +53,7 @@ from ufo.runtime.jobs import (
     TurnDispatcher,
     bindings_from,
     core_jobs,
+    model_key_slots,
 )
 from ufo.runtime.sources.sync import (
     CorePageFeed,
@@ -499,3 +500,17 @@ async def test_put_if_inserts_a_missing_key_but_never_clobbers_one_a_racer_creat
         assert await scoped.get("cursor") == "10|a"
         assert await scoped.put_if("cursor", "11|b", expected=None) is False
         assert await scoped.get("cursor") == "10|a"
+
+
+def test_model_key_slots_name_every_slot_the_deploys_models_key_from() -> None:
+    """The hold reads every key slot a model of the deploy keys from, once each and without the
+    keyless specs; none at all with no registry, which is a deploy with no model to key."""
+    keyed, keyless, *rest = sorted(spec.id for spec in CORE_MODEL_SPECS)
+    specs = {
+        spec.id: replace(spec, key_slot="" if spec.id == keyless else f"{spec.id}-key")
+        for spec in CORE_MODEL_SPECS
+    }
+    specs[keyed] = replace(specs[keyed], key_slot=f"{rest[0]}-key")
+    registry = ModelRegistry(specs=specs, pricing=CORE_PRICING, auto_model=keyed)
+    assert model_key_slots(registry) == tuple(sorted(f"{model}-key" for model in rest))
+    assert model_key_slots(None) == ()

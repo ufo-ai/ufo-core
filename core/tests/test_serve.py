@@ -218,7 +218,7 @@ def test_serve_verifies_the_owner_database_before_it_seats_the_instance(
 
 def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     manifests = (Manifest(name="jobs", version="1"),)
-    registry = SimpleNamespace(key_slot_for=lambda _model: None)
+    registry = SimpleNamespace(key_slot_for=lambda _model: None, specs={})
     page_runner = object()
     captured: dict[str, object] = {}
     runtime = SimpleNamespace(
@@ -277,7 +277,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
 ) -> None:
     """Both jobs runners carry the configured background-jobs model, so a handler's own metered
     call runs on it — the boot registry stays the deploy default a member turn resolves through."""
-    registry = SimpleNamespace(key_slot_for=lambda model: None)
+    registry = SimpleNamespace(key_slot_for=lambda model: None, specs={})
     captured: dict[str, object] = {}
     runtime = SimpleNamespace(
         config=_local_config(),

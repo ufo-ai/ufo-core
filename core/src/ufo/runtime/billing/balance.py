@@ -261,6 +261,47 @@ async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Head
     )
 
 
+def funded(
+    workspace_id: sa.ColumnElement[UUID], own_key_slots: tuple[str, ...] = ()
+) -> sa.ColumnElement[bool]:
+    """A correlated predicate: `BalanceGate.admits` would start work in the workspace `workspace_id`
+    names. That is so when it has no balance row, when its balance stands above the entry line — the
+    reserve, less the grace a settled card has earned — or, above zero, when it holds its own key in
+    one of `own_key_slots`: every slot a model of the deploy keys from, so a workspace paying its
+    own way for any model is read as the gate's own-key exemption reads it for the turns that model
+    serves. `test_the_hold_is_the_gates_entry_line` holds the two to one answer.
+
+    The jobs that write pages and read them for facts test it before opening a workspace. Under the
+    line, with no key of its own, the gate refuses every call the workspace could make, so a source
+    sync there costs a broker call and a page write to feed consumers that cannot run, and each
+    consumer replays one refused batch every tick for as long as the balance stays down. A workspace
+    held here records nothing: the balance row is the state, and the credit that raises it is the
+    wake, because the next tick finds the work due as it always was."""
+    grace = sa.case(
+        (tables.workspace_balance.c.topup_verified_at.is_(None), 0),
+        else_=TOPUP_GRACE_MICRO_USD,
+    )
+    above_the_line = (
+        tables.workspace_balance.c.balance_micro_usd
+        > tables.workspace_balance.c.reserve_micro_usd - grace
+    )
+    serves_itself = sa.and_(
+        tables.workspace_balance.c.balance_micro_usd > 0,
+        sa.exists(
+            sa.select(sa.literal(1)).where(
+                tables.credential.c.workspace_id == tables.workspace_balance.c.workspace_id,
+                tables.credential.c.slot.in_(own_key_slots),
+            )
+        ),
+    )
+    held = sa.select(sa.literal(1)).where(
+        tables.workspace_balance.c.workspace_id == workspace_id,
+        ~above_the_line,
+        ~serves_itself if own_key_slots else sa.true(),
+    )
+    return ~sa.exists(held)
+
+
 @dataclass(frozen=True, slots=True)
 class Purchase:
     """One credit to the balance: what it added, what it cost, and when. A grant charges nothing, so

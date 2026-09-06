@@ -3,7 +3,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
@@ -30,6 +30,7 @@ from ufo.product import PRODUCT_CENSUS_JOB
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import authority_member_id
+from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
     ExtensionContext,
@@ -4251,3 +4252,133 @@ def test_sources_pure_sync_contract() -> None:
     assert len(checks) == 8
     for check in checks:
         check()
+
+
+async def _hold_under_the_line(workspace_id: UUID) -> None:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 1_000_000, 0, "grant")
+            await set_reserve(connection, workspace_id, 2_000_000)
+
+
+async def _credit_above_the_line(workspace_id: UUID) -> None:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 5_000_000, 5_000_000, "card/1")
+
+
+async def test_a_workspace_under_its_balance_line_syncs_nothing_until_credited(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """Under the line the gate refuses the model the page's facts are derived with, so a fetch there
+    feeds a consumer that cannot run. The driver leaves every source of the workspace alone — none
+    is a candidate, none is claimed — and the credit that lifts the balance is the whole wake: the
+    rows were due all along, and the next pass takes them."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "first.md").write_text("the first note")
+    driver, _index, _service = _wire(database_url, vec((21, 1.0)), tmp_path / "blobs", workspace_id)
+    with ws(workspace_id):
+        await context_for("probe", frozenset()).register_source(
+            FOLDER_BACKEND,
+            SourceConfig(root=str(root)),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+            agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+        )
+    await _sync(driver)
+    assert len(await _pages()) == 1
+
+    await _hold_under_the_line(workspace_id)
+    (root / "second.md").write_text("the second note")
+    await _make_due()
+    assert await driver.candidate_workspaces() == ()
+    with ws(workspace_id):
+        assert await _claims(driver) == ()
+    await _sync(driver)
+    assert len(await _pages()) == 1
+
+    await _credit_above_the_line(workspace_id)
+    assert await driver.candidate_workspaces() == (workspace_id,)
+    await _sync(driver)
+    assert {page["title"] for page in await _pages()} == {"first.md", "second.md"}
+
+
+async def test_page_change_candidates_skip_a_workspace_under_its_balance_line(
+    db: None, tmp_path: Path
+) -> None:
+    """A workspace whose pages run past the consumer's cursor is still no candidate while its
+    balance sits at or under the line: the consumer's model call would be refused and the cursor
+    would hold through a stall logged every tick. The credit that lifts the balance makes it a
+    candidate again with no other write."""
+    funded_id, held_id = uuid4(), uuid4()
+    await _seed_page(funded_id)
+    await _seed_page(held_id)
+    await _hold_under_the_line(held_id)
+    runner = _probe_runner(tmp_path)
+    (consumer,) = runner.consumers()
+
+    assert await runner.workspaces_with_changes(consumer) == (funded_id,)
+
+    await _credit_above_the_line(held_id)
+    assert set(await runner.workspaces_with_changes(consumer)) == {funded_id, held_id}
+
+
+async def _store_own_key(workspace_id: UUID) -> None:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.credential).values(
+                    workspace_id=workspace_id,
+                    slot="anthropic_api_key",
+                    ciphertext=b"sealed",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+
+async def test_a_workspace_serving_the_consumers_model_on_its_own_key_is_never_held(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The gate admits a job's model call under the line while the workspace holds its own key for
+    that model and its balance is above zero, so the hold must not reach that workspace: its sources
+    stay candidates and are claimed, on the driver that knows which slots the deploy's models
+    key from. A driver told no slots holds it, as the gate would with no key to weigh."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "first.md").write_text("the first note")
+    driver, _index, _service = _wire(database_url, vec((21, 1.0)), tmp_path / "blobs", workspace_id)
+    with ws(workspace_id):
+        await context_for("probe", frozenset()).register_source(
+            FOLDER_BACKEND,
+            SourceConfig(root=str(root)),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+            agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+        )
+    await _hold_under_the_line(workspace_id)
+    await _store_own_key(workspace_id)
+    assert await driver.candidate_workspaces() == ()
+
+    own_key = replace(driver, own_key_slots=("anthropic_api_key",))
+    assert await own_key.candidate_workspaces() == (workspace_id,)
+    with ws(workspace_id):
+        assert len(await _claims(own_key)) == 1
+
+
+async def test_page_change_candidates_keep_a_workspace_on_its_own_key(
+    db: None, tmp_path: Path
+) -> None:
+    held_id = uuid4()
+    await _seed_page(held_id)
+    await _hold_under_the_line(held_id)
+    await _store_own_key(held_id)
+    runner = _probe_runner(tmp_path)
+    (consumer,) = runner.consumers()
+    assert await runner.workspaces_with_changes(consumer) == ()
+
+    own_key = replace(runner, own_key_slots=("anthropic_api_key",))
+    assert await own_key.workspaces_with_changes(consumer) == (held_id,)

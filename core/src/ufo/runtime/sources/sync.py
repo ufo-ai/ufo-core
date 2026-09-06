@@ -59,6 +59,7 @@ from ufo.harness.o11y import (
     warn,
 )
 from ufo.runtime.access.connectors import AuthProxy, SourceCredentialResolver
+from ufo.runtime.billing.balance import funded
 from ufo.runtime.sources.rest import list_or_empty
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.schema import tables
@@ -608,13 +609,16 @@ class SyncDriver:
     too: a source the archive took every reader from is nobody's feed, so it is neither a candidate
     nor claimed until a restore gives it one back. A parked row — one the provider refused often
     enough that `_skip` slowed it to an hour — is due like any other row, an hour out instead of a
-    minute."""
+    minute. A workspace at or under its balance line (`funded`) holds nothing due at all, and its
+    rows come back with the credit that lifts it; `own_key_slots` names every key slot the deploy's
+    models key from, so a workspace serving any of them on its own key is never held."""
 
     backends: Mapping[str, SourceBackend]
     blob: WorkspaceBlobStore
     postgres: bool
     source_credentials: SourceCredentialResolver | None = None
     identity_resolvers: Mapping[str, SourceIdentityResolver] = field(default_factory=dict)
+    own_key_slots: tuple[str, ...] = ()
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
         """Workspaces holding a source due for sync — one distinct `workspace_id` per such
@@ -633,6 +637,7 @@ class SyncDriver:
                             tables.source.c.claim_expires_at < now,
                         ),
                         _readers_remain(),
+                        funded(tables.source.c.workspace_id, self.own_key_slots),
                     )
                     .distinct()
                 )
@@ -743,6 +748,7 @@ class SyncDriver:
                     tables.source.c.claim_expires_at < now,
                 ),
                 _readers_remain(),
+                funded(tables.source.c.workspace_id, self.own_key_slots),
             )
             .limit(DUE_BATCH_MAX_SOURCES)
         )

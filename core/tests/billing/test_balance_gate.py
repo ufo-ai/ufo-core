@@ -22,6 +22,7 @@ from ufo.runtime.billing.balance import (
     balance_refusal_message,
     credit,
     debit,
+    funded,
     mark_topup_verified,
     set_reserve,
 )
@@ -603,3 +604,78 @@ async def test_a_park_no_gate_still_refuses_reads_as_a_pause(db: None) -> None:
         turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
     with ws(workspace_id):
         assert await turn_status_frame(turn_id) == Parked(message=PARK_NOTICE)
+
+
+async def _funded(
+    connection: AsyncConnection, workspace_id: UUID, own_key_slots: tuple[str, ...] = ()
+) -> bool:
+    row = (
+        await connection.execute(
+            sa.select(tables.workspace.c.id).where(
+                tables.workspace.c.id == workspace_id,
+                funded(tables.workspace.c.id, own_key_slots),
+            )
+        )
+    ).one_or_none()
+    return row is not None
+
+
+async def _store_own_key(connection: AsyncConnection, workspace_id: UUID) -> None:
+    await connection.execute(
+        sa.insert(tables.credential).values(
+            workspace_id=workspace_id,
+            slot="anthropic_api_key",
+            ciphertext=b"sealed",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+
+
+async def test_the_hold_is_the_gates_entry_line(db: None) -> None:
+    """`funded` is the SQL form of the decision `admits` makes before a turn starts, read by the
+    jobs that would otherwise open a workspace the gate is about to refuse. The two agree on every
+    side of the line — no row, above the reserve, at it, under it but inside a settled card's
+    grace, past the grace — and on the own-key exemption: a workspace under the line that holds its
+    own key for the model is admitted while its balance is above zero, held once it is not, and held
+    when the key it holds is for some other model."""
+    async with workspace_tx() as connection:
+        no_row, *_ = await _seed(connection)
+        above, *_ = await _seed(connection)
+        await _fund(connection, above, dollars=10, reserve_dollars=2)
+        at_the_line, *_ = await _seed(connection)
+        await _fund(connection, at_the_line, dollars=2, reserve_dollars=2)
+        in_the_grace, *_ = await _seed(connection)
+        await _fund(connection, in_the_grace, dollars=1, reserve_dollars=2)
+        await mark_topup_verified(connection, in_the_grace)
+        past_the_grace, *_ = await _seed(connection)
+        await _fund(connection, past_the_grace, dollars=1, reserve_dollars=2)
+        await mark_topup_verified(connection, past_the_grace)
+        await debit(connection, past_the_grace, 100 * DOLLAR)
+        own_key, *_ = await _seed(connection)
+        await _fund(connection, own_key, dollars=1, reserve_dollars=10)
+        await _store_own_key(connection, own_key)
+        own_key_at_zero, *_ = await _seed(connection)
+        await _fund(connection, own_key_at_zero, dollars=1, reserve_dollars=10)
+        await _store_own_key(connection, own_key_at_zero)
+        await debit(connection, own_key_at_zero, DOLLAR)
+        expected = [
+            (no_row, (), True),
+            (above, (), True),
+            (at_the_line, (), False),
+            (in_the_grace, (), True),
+            (past_the_grace, (), False),
+            (own_key, ("anthropic_api_key",), True),
+            (own_key, ("openai_api_key",), False),
+            (own_key, (), False),
+            (own_key_at_zero, ("anthropic_api_key",), False),
+        ]
+        for workspace_id, slots, funded_now in expected:
+            gate = BalanceGate(workspace_id)
+            slot = slots[0] if slots else None
+            decision = await gate.admits(connection, key_slot_for=lambda _m, s=slot: s, model="m")
+            assert await _funded(connection, workspace_id, slots) is funded_now, (
+                workspace_id,
+                slots,
+            )
+            assert (decision.outcome == ALLOW) is funded_now, (workspace_id, slots)

@@ -157,6 +157,7 @@ from ufo.runtime.jobs import (
     TurnDispatcher,
     bindings_from,
     core_jobs,
+    model_key_slots,
 )
 from ufo.runtime.media.preview_renderer import (
     PREVIEW_SERVICE_URL_ENV,
@@ -441,6 +442,7 @@ def run() -> None:
         postgres=config.database.url.startswith("postgresql"),
         source_credentials=SourceCredentialResolver(connectors),
         identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
+        own_key_slots=model_key_slots(registry),
     )
     unknown_backends = sorted(
         {entry.backend for entry in config.sources} - sync_driver.backends.keys()
@@ -606,6 +608,7 @@ def _launch_jobs(
         registry=runtime.registry,
         probes=probes,
         background_model=runtime.config.models.background_jobs_model,
+        own_key_slots=model_key_slots(runtime.registry),
     )
     preview_url = os.environ.get(PREVIEW_SERVICE_URL_ENV)
     preview_renderer = (

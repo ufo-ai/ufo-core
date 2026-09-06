@@ -47,6 +47,7 @@ from ufo.runtime.billing.accounting import (
     OffTurnSpendRefused,
     SpendEvaluator,
 )
+from ufo.runtime.billing.balance import funded
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
@@ -419,6 +420,7 @@ class PageChangeRunner:
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None
     background_model: str | None = None
+    own_key_slots: tuple[str, ...] = ()
 
     def consumers(self) -> tuple[PageChangeConsumer, ...]:
         consumers: list[PageChangeConsumer] = []
@@ -457,8 +459,11 @@ class PageChangeRunner:
         pending. So a page-holding but change-free workspace runs no per-tick transaction. A
         workspace whose stored cursor fails to parse counts as pending rather than aborting this
         fleet-wide read — one workspace's unparseable cursor stays that workspace's `drive` failure,
-        never blocking every other workspace's tick. On a per-tenant deploy `owner_tx` resolves to
-        the single workspace, unchanged."""
+        never blocking every other workspace's tick. A workspace at or under its balance line
+        with no model key of its own (`funded`) is not a candidate however far its pages run past
+        the cursor: the gate would refuse every call a consumer makes, and the cursor would stay put
+        through a stall logged every tick. On a per-tenant deploy `owner_tx` resolves to the single
+        workspace, unchanged."""
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         of_workspace = tables.page.c.workspace_id == tables.workspace.c.id
         newest_first = (tables.page.c.revision.desc(), tables.page.c.id.desc())
@@ -491,7 +496,7 @@ class PageChangeRunner:
                         tables.workspace.c.id.label("workspace_id"),
                         newest_revision.label("revision"),
                         newest_id.label("id"),
-                    )
+                    ).where(funded(tables.workspace.c.id, self.own_key_slots))
                 )
             ).all()
         cursors = {row.workspace_id: row.value for row in cursor_rows}
@@ -598,6 +603,18 @@ def _background_registry(
     if registry is None or background_model is None:
         return registry
     return replace(registry, auto_model=background_model)
+
+
+def model_key_slots(registry: ModelRegistry | None) -> tuple[str, ...]:
+    """Every key slot a model of the deploy keys from — what `funded` reads to leave a workspace
+    holding its own key for any of them out of the balance hold. The gate admits, on that key, every
+    turn the model serves: the agents' turns, and the source-trigger turns a page-change consumer
+    opens. So the pages its sources feed stay work the gate lets happen, whichever model the
+    workspace chose to pay for itself; a job the deploy's own model would run is refused by the gate
+    as before, and deferred."""
+    if registry is None:
+        return ()
+    return tuple(sorted({spec.key_slot for spec in registry.specs.values() if spec.key_slot}))
 
 
 def core_jobs(
