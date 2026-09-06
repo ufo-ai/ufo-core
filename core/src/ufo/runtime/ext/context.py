@@ -1032,10 +1032,14 @@ class ConversationFacts:
     disclosure audience that decides who may see a row, and the surface's own name for where that
     conversation lives. Read live rather than snapshotted onto the rows — an audience never changes,
     but a surface label does when a channel is renamed, and a stale name in an `origin` column is a
-    listing telling a member about a place that no longer goes by that name."""
+    listing telling a member about a place that no longer goes by that name. `surface` is the
+    surface the conversation is bound to — a member's (`slack`, `cli`), `SUBAGENT_SURFACE` for a
+    spawned child's, an extension's own name for a room it opened — so a handler offering a member
+    something can tell the conversations a member reads from the ones a machine runs."""
 
     audience: Audience
     surface_label: str | None
+    surface: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1916,6 +1920,7 @@ class ExtensionContext:
                         tables.conversation.c.id,
                         tables.conversation.c.audience,
                         tables.conversation.c.surface_label,
+                        tables.conversation.c.surface,
                     ).where(
                         tables.conversation.c.workspace_id == self.workspace_id,
                         tables.conversation.c.id.in_(conversation_ids),
@@ -1924,7 +1929,9 @@ class ExtensionContext:
             ).all()
         return {
             row.id: ConversationFacts(
-                audience=parse_audience(row.audience), surface_label=row.surface_label
+                audience=parse_audience(row.audience),
+                surface_label=row.surface_label,
+                surface=row.surface,
             )
             for row in rows
         }

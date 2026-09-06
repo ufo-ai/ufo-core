@@ -85,7 +85,7 @@ from ufo.runtime.workspace import (
     ws,
 )
 from ufo.schema import tables
-from ufo.schema.records import Usage
+from ufo.schema.records import SUBAGENT_SURFACE, Usage
 
 MODEL = "claude-opus-4-8"
 JOB = "memory:memory_consolidate"
@@ -964,12 +964,19 @@ async def test_conversation_facts_answers_a_page_in_one_read(db: None) -> None:
     """A member-facing listing decides visibility from the audience of the conversation each row
     reports into, and names its origin from that conversation's surface label. Both come back for a
     whole page at once, and both are read live: an audience never moves, but a renamed channel would
-    leave a snapshotted label describing a place that no longer answers to it."""
+    leave a snapshotted label describing a place that no longer answers to it. The surface itself
+    comes with them, so a handler can tell a member's conversation from a spawned child's."""
     workspace_id = await _workspace()
     member_id = uuid4()
     with ws(workspace_id):
         shared, private = await _conversation(workspace_id), await _conversation(workspace_id)
+        spawned = await _conversation(workspace_id)
         async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .values(surface=SUBAGENT_SURFACE)
+                .where(tables.conversation.c.id == spawned)
+            )
             await connection.execute(
                 sa.insert(tables.member).values(
                     id=member_id,
@@ -988,12 +995,17 @@ async def test_conversation_facts_answers_a_page_in_one_read(db: None) -> None:
                 )
                 .where(tables.conversation.c.id == private)
             )
-        facts = await context_for("sample", frozenset()).conversation_facts((shared, private))
+        facts = await context_for("sample", frozenset()).conversation_facts(
+            (shared, private, spawned)
+        )
 
-    assert facts[shared] == ConversationFacts(audience=SHARED_AUDIENCE, surface_label=None)
-    assert facts[private] == ConversationFacts(
-        audience=member_subject(member_id), surface_label="#eng"
+    assert facts[shared] == ConversationFacts(
+        audience=SHARED_AUDIENCE, surface_label=None, surface="cli"
     )
+    assert facts[private] == ConversationFacts(
+        audience=member_subject(member_id), surface_label="#eng", surface="cli"
+    )
+    assert facts[spawned].surface == SUBAGENT_SURFACE
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

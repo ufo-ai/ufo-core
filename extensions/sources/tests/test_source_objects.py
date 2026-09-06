@@ -18,20 +18,23 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS
+from ufo_ext_sources.resources import resource_digest
 from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
     CONNECTION_OBJECT_KIND,
     MAX_BACKFILL_DAYS,
     SOURCE_KIND,
     SOURCE_TRIGGER_KIND,
+    WATCH_OFFER_MAX,
     SourceObjects,
     SourceSpec,
     _validated_base_url,
+    on_link_seen,
     on_page_change,
     trigger_name,
 )
@@ -61,7 +64,15 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
-from ufo.sdk.manifest import HookContext, PageChangeBatch
+from ufo.sdk.context import SUBAGENT_SURFACE
+from ufo.sdk.manifest import (
+    HookContext,
+    HookOutcome,
+    InjectContext,
+    PageChangeBatch,
+    PostToolUse,
+    UserPromptSubmit,
+)
 from ufo.sdk.objects import AdminRequired, ObjectListQuery, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.tools import SpeakerRequired, ToolContext
@@ -322,7 +333,17 @@ def test_manifest_declares_the_source_kind() -> None:
     declared = manifest()
     assert declared.tools == ()
     assert SOURCE_KIND in {kind.name for kind in declared.objects}
-    assert "page_change" in {hook.event for hook in declared.hooks}
+    assert {hook.event for hook in declared.hooks} == {
+        "page_change",
+        "connection_recorded",
+        "user_prompt_submit",
+        "post_tool_use",
+    }
+    assert {hook.event for hook in declared.hooks if hook.handler is on_link_seen} == {
+        "user_prompt_submit",
+        "post_tool_use",
+    }
+    assert {hook.event for hook in declared.hooks if hook.best_effort} == {"user_prompt_submit"}
     assert {slot.name for slot in declared.credentials} == set(CONNECTORS)
     assert {source.backend for source in declared.sources} == set(CONNECTORS)
 
@@ -1791,6 +1812,7 @@ async def _register(
     owner: UUID | None,
     account: str = "acct-one",
     stream: str = "tasks",
+    provider: str = ASANA,
 ) -> tuple[str, UUID]:
     """Register one (account, stream) source row directly, with the given disclosure, and return
     its binding name + row id — a trigger names a source that already exists, so this sets one up
@@ -1798,12 +1820,12 @@ async def _register(
     with ws(state.workspace_id), agent(state.agent_id):
         ext = context_for(NAME, DECLARED_PROVIDERS)
         source_id = await ext.register_source(
-            ASANA,
+            provider,
             ConnectorSourceConfig(account=account, stream=stream),
             subject=subject,
             owner_member_id=owner,
         )
-    return binding_name(ASANA, account, None), source_id
+    return binding_name(provider, account, None), source_id
 
 
 async def _woken(state: _Workspace, name: str) -> dict[UUID, UUID]:
@@ -1827,12 +1849,14 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         )
 
 
-def _trigger_manifest(source: str, conversation_id: UUID, *, delivery: str = "current") -> str:
+def _trigger_manifest(
+    source: str, conversation_id: UUID, *, delivery: str = "current", resource: str = ""
+) -> str:
     return yaml.safe_dump(
         {
             "kind": SOURCE_TRIGGER_KIND,
-            "name": trigger_name(source, conversation_id),
-            "spec": {"source": source, "delivery": delivery},
+            "name": trigger_name(source, conversation_id, resource),
+            "spec": {"source": source, "delivery": delivery, "resource": resource},
         }
     )
 
@@ -1900,7 +1924,7 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
             .content[0]
             .text
         )
-        assert fetched["spec"] == {"source": name, "delivery": "current"}
+        assert fetched["spec"] == {"source": name, "delivery": "current", "resource": ""}
         assert fetched["status"]["source"] == name
         assert fetched["status"]["conversation"] == str(state.conversation_id)
         assert {(link["relation"], link["target"]) for link in fetched["links"]} == {
@@ -2014,6 +2038,7 @@ def _delete_source_before_create(state: _Workspace, monkeypatch: pytest.MonkeyPa
         binding: str,
         delivery: str,
         created_by_member_id: UUID | None = None,
+        resource: str = "",
     ) -> SourceTrigger:
         await delete_tool.handler(
             _context(state, None),
@@ -2025,6 +2050,7 @@ def _delete_source_before_create(state: _Workspace, monkeypatch: pytest.MonkeyPa
             binding,
             delivery,
             created_by_member_id=created_by_member_id,
+            resource=resource,
         )
 
     monkeypatch.setattr(SourceTriggerStore, "create", delete_before_create)
@@ -2237,7 +2263,7 @@ async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> No
             .content[0]
             .text
         )
-        assert fetched["spec"] == {"source": name, "delivery": "per_page"}
+        assert fetched["spec"] == {"source": name, "delivery": "per_page", "resource": ""}
         assert fetched["status"]["delivery"] == "per_page"
         assert [link["relation"] for link in fetched["links"]] == ["watches"]
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
@@ -2444,7 +2470,7 @@ async def _change_log(
     carrier = sandboxes.carrier
     assert isinstance(carrier, LocalCarrier)
     log_dir = carrier.ufo_home / RUNTIME_DIRNAME / conversation_id.hex / CHANGE_LOG_DIR / name
-    (entry,) = sorted(log_dir.iterdir())
+    (entry,) = sorted(path for path in log_dir.iterdir() if path.is_file())
     return [json.loads(line) for line in entry.read_text().splitlines()]
 
 
@@ -2555,3 +2581,341 @@ async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
         private = _change(source_id, "# secret", subject=member_subject(state.member_id))
         await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(private,))))
         assert await _turns(state.conversation_id) == []
+
+
+GITHUB = "github"
+PR_URL = "https://github.com/metalcraftai/ufo/pull/1684"
+
+
+def _pull_request_page(number: int) -> str:
+    """One GitHub record as the connector lands it — the provider's own JSON, carrying the URL the
+    resource is matched on."""
+    return json.dumps(
+        {
+            "html_url": f"https://github.com/metalcraftai/ufo/pull/{number}",
+            "number": number,
+            "title": "Watch the pull request a trigger names",
+        }
+    )
+
+
+def _narrowed_manifest(source: str, conversation_id: UUID, spelled: str, stored: str) -> str:
+    """A trigger manifest whose spec spells the link one way while its name derives from the
+    canonical form the row stores."""
+    return yaml.safe_dump(
+        {
+            "kind": SOURCE_TRIGGER_KIND,
+            "name": trigger_name(source, conversation_id, stored),
+            "spec": {"source": source, "delivery": "current", "resource": spelled},
+        }
+    )
+
+
+async def _watches(state: _Workspace, name: str) -> list[str]:
+    with ws(state.workspace_id):
+        triggers = await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(name)
+    return sorted(row.resource for row in triggers)
+
+
+async def test_a_trigger_narrowed_to_a_link_wakes_on_that_resource_alone(db: None) -> None:
+    """The agent applies a trigger naming the pull request's link. The conversation then hears about
+    that pull request and about nothing else the source carries, the alert names the link, and the
+    trigger reads back with it."""
+    state = await _workspace()
+    name, source_id = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        applied = await _apply(
+            _context(state, None), _trigger_manifest(name, state.conversation_id, resource=PR_URL)
+        )
+        assert applied["result"] == "created"
+        assert await _watches(state, name) == [PR_URL]
+
+        get_tool = _TOOLS["object_get"]
+        fetched = yaml.safe_load(
+            (
+                await get_tool.handler(
+                    _context(state, None),
+                    get_tool.input_model.model_validate(
+                        {
+                            "ref": f"{SOURCE_TRIGGER_KIND}/"
+                            f"{trigger_name(name, state.conversation_id, PR_URL)}"
+                        }
+                    ),
+                )
+            )
+            .content[0]
+            .text
+        )
+        assert fetched["spec"] == {"source": name, "delivery": "current", "resource": PR_URL}
+        assert fetched["status"]["resource"] == PR_URL
+
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        watched = _change(source_id, _pull_request_page(1684), stream="pull_requests")
+        other = _change(source_id, _pull_request_page(1685), stream="pull_requests")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(watched, other)))
+        )
+
+    [turn] = await _turns(state.conversation_id)
+    assert PR_URL in turn["inbound"]
+    assert f"{PAGE_KIND}/{watched.page_id}" in turn["inbound"]
+    assert f"{PAGE_KIND}/{other.page_id}" not in turn["inbound"]
+    assert "pull_requests: 1 added" in turn["inbound"]
+
+
+async def test_every_spelling_of_the_link_is_one_trigger(db: None) -> None:
+    """The row stores the canonical link, so the repository's own capitalization, a sub-page of the
+    pull request and the API form all name the trigger that exists: re-applying under any of them is
+    the no-op a re-registered source is, and a name derived from another spelling is refused with
+    the one to use."""
+    state = await _workspace()
+    name, _ = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    api_form = "https://api.github.com/repos/metalcraftai/ufo/pulls/1684"
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        for spelled in (
+            "https://github.com/MetalCraftAI/ufo/pull/1684/files",
+            api_form,
+            PR_URL,
+        ):
+            applied = await _apply(
+                _context(state, None),
+                _narrowed_manifest(name, state.conversation_id, spelled, PR_URL),
+            )
+        assert applied["result"] == "updated"
+        assert await _watches(state, name) == [PR_URL]
+
+        with pytest.raises(ValueError, match=trigger_name(name, state.conversation_id, PR_URL)):
+            await tool.handler(
+                _context(state, None),
+                tool.input_model.model_validate(
+                    {
+                        "manifest": _narrowed_manifest(
+                            name, state.conversation_id, api_form, api_form
+                        )
+                    }
+                ),
+            )
+        assert await _watches(state, name) == [PR_URL]
+
+
+async def test_a_link_that_names_no_resource_of_the_source_is_refused(db: None) -> None:
+    """A repository link and a link into another provider name nothing a GitHub source narrows to,
+    and a pull request link names nothing of a source whose provider reads no links."""
+    state = await _workspace()
+    name, _ = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    asana, _ = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, account="acct-two"
+    )
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        for source, link in (
+            (name, "https://github.com/metalcraftai/ufo"),
+            (name, "https://linear.app/metalcraft/issue/UFO-1"),
+            (asana, PR_URL),
+        ):
+            with pytest.raises(ValueError, match="not the link of a resource"):
+                await tool.handler(
+                    _context(state, None),
+                    tool.input_model.model_validate(
+                        {
+                            "manifest": _trigger_manifest(
+                                source, state.conversation_id, resource=link
+                            )
+                        }
+                    ),
+                )
+        assert await _watches(state, name) == []
+        assert await _watches(state, asana) == []
+
+
+async def test_two_triggers_on_one_binding_keep_their_own_change_logs(db: None, tmp_path) -> None:
+    """A conversation holds a whole-binding trigger and one narrowed to a resource of that binding.
+    One landing stamps every page with the same `changed_at`, so a log named for the binding and
+    that stamp alone would be written twice and the whole-binding alert would point at the narrowed
+    trigger's one line. Each trigger logs under its own directory."""
+    state = await _workspace()
+    name, source_id = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    sandboxes = _sandboxes(tmp_path)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+        await _apply(
+            _context(state, None), _trigger_manifest(name, state.conversation_id, resource=PR_URL)
+        )
+        ext = context_for(
+            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
+        )
+        watched = _change(source_id, _pull_request_page(1684), stream="pull_requests")
+        other = _change(source_id, _pull_request_page(1685), stream="pull_requests")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(watched, other)))
+        )
+
+    whole = await _change_log(sandboxes, state.conversation_id, name)
+    narrowed = await _change_log(
+        sandboxes, state.conversation_id, f"{name}/{resource_digest(PR_URL)}"
+    )
+    assert {entry["page"] for entry in whole} == {
+        f"{PAGE_KIND}/{watched.page_id}",
+        f"{PAGE_KIND}/{other.page_id}",
+    }
+    assert {entry["page"] for entry in narrowed} == {f"{PAGE_KIND}/{watched.page_id}"}
+    assert len(await _turns(state.conversation_id)) == 2
+
+
+class _SpawnInput(BaseModel):
+    objective: str = ""
+
+
+async def _conversation_on(state: _Workspace, surface: str) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=state.workspace_id,
+                agent_id=state.agent_id,
+                surface=surface,
+                queue_key=uuid4().hex,
+                member_id=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def _seen(
+    state: _Workspace,
+    payload: UserPromptSubmit | PostToolUse,
+    conversation_id: UUID | None = None,
+) -> HookOutcome:
+    """Show one message or one tool result to the link hook, as the turn it lands on would."""
+    turn = _context(state, None).turn
+    if conversation_id is not None:
+        turn = turn.model_copy(update={"conversation_id": conversation_id})
+    return await on_link_seen(
+        HookContext(
+            ext=context_for(NAME, DECLARED_PROVIDERS),
+            payload=payload,
+            turn=turn,
+            speaker_member_id=state.owner_id,
+        )
+    )
+
+
+async def test_a_link_to_a_synced_resource_is_offered_to_the_conversation(db: None) -> None:
+    """A message or a tool result naming a pull request of a source this workspace syncs earns one
+    offer: the canonical link, the source it belongs to, and the one call that takes it — the
+    `object_apply` manifest on one line, which lands verbatim. The offer is the same whichever way
+    the link arrived."""
+    state = await _workspace()
+    name, _ = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        said = await _seen(state, UserPromptSubmit(text=f"Keep an eye on {PR_URL}/files for me."))
+        returned = await _seen(
+            state,
+            PostToolUse(
+                tool_name="message_spawn", tool_input=_SpawnInput(), output=f"Opened {PR_URL}."
+            ),
+        )
+
+    assert isinstance(said, InjectContext)
+    assert isinstance(returned, InjectContext)
+    assert said.text == returned.text
+    assert said.text.startswith("<watch_offer>")
+    assert said.text.endswith("</watch_offer>")
+    assert f"{PR_URL} " in said.text
+    assert f"{PR_URL}/files" not in said.text
+    assert repr(name) in said.text
+    offer = said.text.removeprefix("<watch_offer>\n").removesuffix("\n</watch_offer>")
+    manifest = offer.split("call object_apply with this manifest:\n", 1)[1]
+    assert manifest.splitlines()[0] == f"kind: {SOURCE_TRIGGER_KIND}"
+    assert yaml.safe_load(manifest) == {
+        "kind": SOURCE_TRIGGER_KIND,
+        "name": trigger_name(name, state.conversation_id, PR_URL),
+        "spec": {"source": name, "resource": PR_URL},
+    }
+    with ws(state.workspace_id), agent(state.agent_id):
+        applied = await _apply(_context(state, None), manifest)
+        assert applied["result"] == "created"
+        assert await _watches(state, name) == [PR_URL]
+
+
+async def test_no_offer_repeats_for_a_resource_the_conversation_watches(db: None) -> None:
+    state = await _workspace()
+    name, _ = await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state, None), _trigger_manifest(name, state.conversation_id, resource=PR_URL)
+        )
+        assert await _seen(state, UserPromptSubmit(text=f"Any news on {PR_URL}?")) is None
+
+
+async def test_links_naming_nothing_synced_earn_no_offer(db: None) -> None:
+    """A repository link, a link of a provider this workspace does not sync, and a pull request of a
+    source that syncs privately name nothing a conversation can be offered."""
+    state = await _workspace()
+    await _register(
+        state,
+        subject=member_subject(state.owner_id),
+        owner=state.owner_id,
+        stream="pull_requests",
+        provider=GITHUB,
+    )
+    await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id, account="acct-two")
+    with ws(state.workspace_id), agent(state.agent_id):
+        for text in (
+            "See https://github.com/metalcraftai/ufo for context.",
+            f"Look at {PR_URL}.",
+            "https://linear.app/metalcraft/issue/UFO-1 is the ticket.",
+        ):
+            assert await _seen(state, UserPromptSubmit(text=text)) is None
+
+
+async def test_no_offer_reaches_a_conversation_a_member_does_not_read(db: None) -> None:
+    """A spawned child's conversation and a room this extension opened for an alert are machine
+    conversations: a trigger applied there would wake nobody a member reads."""
+    state = await _workspace()
+    await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        spawned = await _conversation_on(state, SUBAGENT_SURFACE)
+        room = await _conversation_on(state, NAME)
+        for conversation_id in (spawned, room):
+            seen = await _seen(
+                state, UserPromptSubmit(text=f"Opened {PR_URL}."), conversation_id=conversation_id
+            )
+            assert seen is None
+
+
+async def test_an_offer_names_a_bounded_number_of_resources(db: None) -> None:
+    """A message that pastes a whole board of links is offered the first few, not a page of
+    offers."""
+    state = await _workspace()
+    await _register(
+        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="pull_requests", provider=GITHUB
+    )
+    links = " ".join(
+        f"https://github.com/metalcraftai/ufo/pull/{number}"
+        for number in range(1, WATCH_OFFER_MAX + 3)
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        offered = await _seen(state, UserPromptSubmit(text=links))
+
+    assert isinstance(offered, InjectContext)
+    assert offered.text.count("call object_apply with this manifest:\n") == WATCH_OFFER_MAX
+    assert f"pull/{WATCH_OFFER_MAX + 1} " not in offered.text

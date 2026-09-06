@@ -64,6 +64,9 @@ from ufo.runtime.ext.surface import (
     SurfaceInstallationAccess as SurfaceInstallationAccess,
 )
 from ufo.schema.records import (
+    SUBAGENT_SURFACE as SUBAGENT_SURFACE,
+)
+from ufo.schema.records import (
     AgentChange as AgentChange,
 )
 from ufo.schema.records import (

@@ -534,7 +534,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "memory_0016",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
-        "sources_0002",
+        "sources_0003",
         "monitors_0001",
         "skill_create_0004",
         "coding_0004",
@@ -801,6 +801,41 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
         ]
     )
     assert [key for (key,) in left] == ["cursor:asana-1a2b3c4d"]
+
+
+def test_the_resource_watch_revision_keeps_the_key_the_outgoing_image_infers(
+    tmp_path: Path,
+) -> None:
+    """A watch on one resource of a source is a row of its own table, so `source_trigger` keeps the
+    unique key the release being replaced names in `ON CONFLICT (workspace_id, conversation_id,
+    binding)`. The migrate Job completes before the fleet rolls: a widened key would leave every
+    trigger those pods write with no unique index to infer, and each one would fail."""
+    database_path = tmp_path / "resource-watch.db"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "heads")
+    engine = sa.create_engine("sqlite:///" + str(database_path))
+    try:
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            trigger_keys = {
+                tuple(unique["column_names"])
+                for unique in inspector.get_unique_constraints("source_trigger")
+            }
+            watch_keys = {
+                tuple(unique["column_names"])
+                for unique in inspector.get_unique_constraints("source_resource_watch")
+            }
+    finally:
+        engine.dispose()
+    assert trigger_keys == {("workspace_id", "conversation_id", "binding")}
+    assert watch_keys == {("workspace_id", "conversation_id", "binding", "resource")}
 
 
 def test_coding_migration_carries_review_inboxes_to_per_page_triggers(tmp_path: Path) -> None:

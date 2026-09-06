@@ -1,0 +1,64 @@
+name = "source-watch-offer"
+base = "HEAD"
+suites = ["source_watch_offer"]
+cases = [
+  "watch-pr-from-message",
+  "watch-pr-from-tool-output",
+  "pr-mentioned-in-passing",
+  "repository-link",
+]
+repeats = 3
+concurrency = 4
+max_stacks = 1
+budget_usd = 40.0
+est_usd_per_case = 0.50
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+# The sources extension offers a narrowed source_trigger for every synced resource a turn's text
+# links to, as one <watch_offer> block. The first arm keeps the hook and its reads and silences only
+# the offer, so it removes exactly the text the extension contributes: the two asking cases measure
+# what the offer moves, and the two in-passing cases are the controls that it makes the agent apply
+# nothing it should not. Measured 2026-09-06 at d9f01d784: asking cases 3/3 vs 0/3, in-passing 3/3
+# in both arms.
+
+[[arm]]
+name = "no-offer"
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = """
+    links = _links_in(text)
+    if not links:
+        return None
+"""
+new = """
+    links: tuple[str, ...] = ()
+    if not links:
+        return None
+"""
+
+# The offer carries the call itself — the object_apply manifest, as YAML — so taking it needs no
+# object_explain first. This arm keeps the offer and spells it the earlier way, as prose naming the
+# trigger and its spec, so the pass counts should hold and the `explains` evidence is what moves.
+
+[[arm]]
+name = "prose-offer"
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = """
+                "this workspace syncs. To hear its changes in this conversation, call object_apply "
+                f"with this manifest:\\n{manifest}"
+"""
+new = """
+                "this workspace syncs. To hear its changes in this conversation, apply "
+                f"source_trigger {trigger_name(binding.name, conversation_id, resource)!r} with "
+                f"spec source: {binding.name}, resource: {resource}."
+"""

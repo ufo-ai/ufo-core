@@ -3,9 +3,11 @@ credential slots the direct auth backend reads BYOK keys from, the `direct` auth
 itself, the `source` object kind that turns a granted or keyed provider into syncing source rows,
 the `page` object kind that projects the synced pages back for read, the `source_trigger` kind that
 delivers shared-source changes to one conversation or one conversation per page, the `page_change`
-hook that performs that delivery, the `connection_recorded` hook that gives a connected account its
-canonical streams as the connection lands — so a member who connects a provider in chat needs no
-second act — and the job that retries a creation which did not land. One extension, N backends —
+hook that performs that delivery, the `user_prompt_submit` and `post_tool_use` hooks that offer a
+conversation a trigger on a synced resource the text it reads links to, the `connection_recorded`
+hook that gives a connected account its canonical streams as the connection lands — so a member who
+connects a provider in chat needs no second act — and the job that retries a creation which did not
+land. One extension, N backends —
 each provider builds on the REST connector framework from
 `ufo.sdk.sources`, consuming the pluggable auth-proxy seam rather than importing a broker: the sync
 runner routes a source holding a broker connection to the extension that registers its provider
@@ -25,7 +27,12 @@ from ufo_ext_sources.connected import on_connection_recorded, retry_connected_so
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.registry import CONNECTORS
-from ufo_ext_sources.tools import SOURCE_OBJECT, SOURCE_TRIGGER_OBJECT, on_page_change
+from ufo_ext_sources.tools import (
+    SOURCE_OBJECT,
+    SOURCE_TRIGGER_OBJECT,
+    on_link_seen,
+    on_page_change,
+)
 
 NAME = "sources"
 VERSION = "0.1.0"
@@ -50,6 +57,8 @@ def manifest() -> Manifest:
         hooks=(
             HookSpec(event="page_change", handler=on_page_change),
             HookSpec(event="connection_recorded", handler=on_connection_recorded),
+            HookSpec(event="user_prompt_submit", handler=on_link_seen, best_effort=True),
+            HookSpec(event="post_tool_use", handler=on_link_seen),
         ),
         jobs=(
             JobSpec(

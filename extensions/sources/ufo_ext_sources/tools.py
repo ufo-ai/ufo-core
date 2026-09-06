@@ -28,7 +28,16 @@ A source trigger is one conversation's standing interest in one shared source: a
 the conversation and delete the row to stop. It can wake that conversation for each source batch,
 or open one stable agent conversation per changed page. Its name derives from the source and the
 conversation that owns the trigger. Only a shared source can carry one. The `page_change` hook
-includes only shared pages that the agent may read."""
+includes only shared pages that the agent may read.
+
+A trigger narrows to one resource of that source — a pull request, an issue — named by its URL, and
+then only the changes about that resource wake the conversation. The `user_prompt_submit` and
+`post_tool_use` hooks offer one: a link in a member's message, in a spawned coding child's result or
+in a tool's output that names a resource of a shared source this agent may read, and that the
+conversation does not watch yet, earns a `<watch_offer>` naming the exact trigger to apply. The
+offer writes nothing; the agent applies the trigger in the open, so the thread that opened a pull
+request hears that its checks failed in the thread and not in the channel. A resource's changes
+reach it only on the streams the source syncs."""
 
 import json
 import re
@@ -40,6 +49,7 @@ from typing import Annotated, ClassVar, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.audience import Audience, conversation_audience
@@ -47,6 +57,7 @@ from ufo.sdk.authority import authority_from_member_id, authority_member_id
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import (
+    SUBAGENT_SURFACE,
     AgentArchived,
     CredentialSlotUnset,
     ExtensionContext,
@@ -54,7 +65,14 @@ from ufo.sdk.context import (
 )
 from ufo.sdk.credentials import credential_object_name
 from ufo.sdk.grants import account_object_name
-from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
+from ufo.sdk.manifest import (
+    HookContext,
+    HookOutcome,
+    InjectContext,
+    PageChangeBatch,
+    PostToolUse,
+    UserPromptSubmit,
+)
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
     CREDENTIAL_KIND,
@@ -80,6 +98,7 @@ from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
 from ufo.sdk.tools import ConnectUnavailable, SpeakerRequired, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
+from ufo_ext_sources.resources import canonical_resource, resource_digest, resource_matches
 from ufo_ext_sources.triggers import (
     ListedTrigger,
     SourceTrigger,
@@ -93,6 +112,13 @@ SUMMARY_MAX = 120
 MAX_BACKFILL_DAYS = 36500
 ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
+WATCH_OFFER_MAX = 4
+"""How many links one message or tool result is offered a trigger for. A board of links is not a
+list of things to watch, and every offer costs the turn context."""
+WATCH_OFFER_OPEN = "<watch_offer>"
+WATCH_OFFER_CLOSE = "</watch_offer>"
+LINK = re.compile(r"https://[^\s<>\"'`]+")
+LINK_TRAIL = ".,;:!?)]}*"
 CHANGE_LOG_DIR = "sources"
 DISPOSITIONS = ("added", "updated", "removed")
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -783,11 +809,14 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         )
 
 
-def trigger_name(binding: str, conversation_id: UUID) -> str:
+def trigger_name(binding: str, conversation_id: UUID, resource: str = "") -> str:
     """A trigger IS the pair it names, so its object name derives from that pair exactly as a
     binding's derives from its config — one rule, so an apply under any other name is refused with
-    the one to use rather than filed as a second row over the same pair."""
-    return f"{binding}-{conversation_id.hex}"
+    the one to use rather than filed as a second row over the same pair. A trigger narrowed to one
+    resource is a third element of that identity, digested the way a binding digests its config."""
+    if not resource:
+        return f"{binding}-{conversation_id.hex}"
+    return f"{binding}-{conversation_id.hex}-{resource_digest(resource)}"
 
 
 class SourceTriggerSpec(BaseModel):
@@ -795,6 +824,13 @@ class SourceTriggerSpec(BaseModel):
     source: str = Field(
         title="Source",
         description="The shared source object this trigger watches.",
+    )
+    resource: str = Field(
+        default="",
+        title="Resource",
+        description="The URL of one resource of that source to narrow the trigger to — a GitHub "
+        "pull request or issue. Only the changes about it, on the streams the source syncs, wake "
+        "the conversation. Leave it empty to watch the whole source.",
     )
     delivery: SourceTriggerDelivery = Field(
         default="current",
@@ -831,12 +867,10 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         emails = await owner_emails(row.trigger.created_by_member_id for row in listed)
         return tuple(
             OwnedRow(
-                name=trigger_name(row.trigger.binding, row.trigger.conversation_id),
-                summary=(
-                    bindings[row.trigger.binding].summary()
-                    if row.trigger.binding in bindings
-                    else row.trigger.binding
+                name=trigger_name(
+                    row.trigger.binding, row.trigger.conversation_id, row.trigger.resource
                 ),
+                summary=_trigger_summary(bindings.get(row.trigger.binding), row.trigger),
                 owner=GeneratedObjectOwner(
                     member_id=row.trigger.created_by_member_id,
                     shared=subject_shared(row.audience),
@@ -845,6 +879,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 fields={
                     "conversation": str(row.trigger.conversation_id),
                     "source": row.trigger.binding,
+                    "resource": row.trigger.resource,
                     "delivery": row.trigger.delivery,
                     "origin": row.surface_label or "Portal",
                     "owner_email": emails.get(row.trigger.created_by_member_id),
@@ -884,6 +919,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         return ObjectDetail(
             spec=SourceTriggerSpec(
                 source=listed.trigger.binding,
+                resource=listed.trigger.resource,
                 delivery=listed.trigger.delivery,
             ),
             created_at=listed.trigger.created_at,
@@ -901,6 +937,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         return {
             "conversation": str(listed.trigger.conversation_id),
             "source": listed.trigger.binding,
+            "resource": listed.trigger.resource,
             "delivery": listed.trigger.delivery,
             "origin": listed.surface_label or "Portal",
             "owner_email": emails.get(listed.trigger.created_by_member_id),
@@ -916,13 +953,23 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         owner: GeneratedObjectOwner | None,
     ) -> None:
         """A trigger has nothing to change — re-applying the one that exists is the no-op a
-        re-registered source is — so the only act here is creating one. The name is checked before
-        anything else, because it names the conversation: applying the name of a trigger some other
-        conversation already holds would otherwise report success for a conversation no row was
-        written for. The binding is re-read after the write, because a source's removal drops its
-        triggers in another transaction and one landing behind that sweep would watch a source
-        nobody can reach."""
-        expected = trigger_name(spec.source, ctx.turn.conversation_id)
+        re-registered source is — so the only act here is creating one. A resource is read against
+        the source's provider into the one link the row stores, so every spelling of a pull request
+        is the one trigger. The name is checked before any write, because it names the conversation:
+        applying the name of a trigger some other conversation already holds would otherwise report
+        success for a conversation no row was written for. The binding is re-read after the write,
+        because a source's removal drops its triggers in another transaction and one landing behind
+        that sweep would watch a source nobody can reach."""
+        source = await self._watchable(ctx, spec.source)
+        if spec.resource:
+            resource = canonical_resource(source.spec.provider, spec.resource)
+            if resource is None:
+                raise ValueError(
+                    f"{spec.resource!r} is not the link of a resource of {spec.source!r} that a "
+                    f"{SOURCE_TRIGGER_KIND} narrows to"
+                )
+            spec = spec.model_copy(update={"resource": resource})
+        expected = trigger_name(spec.source, ctx.turn.conversation_id, spec.resource)
         if name != expected:
             raise ValueError(
                 f"a {SOURCE_TRIGGER_KIND} is named for the pair it is — apply it as {expected!r}"
@@ -934,24 +981,24 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 f"a {SOURCE_TRIGGER_KIND} is the source and conversation it names — delete this "
                 "one and apply another"
             )
-        await self._watchable(ctx, spec.source)
         triggers = _require_triggers(ctx.ext)
         await triggers.create(
             conversation_id=ctx.turn.conversation_id,
             binding=spec.source,
             delivery=spec.delivery,
             created_by_member_id=authority_member_id(ctx.authority),
+            resource=spec.resource,
         )
         if await _binding_named(ctx.ext, spec.source) is None:
             await triggers.remove_binding(spec.source)
             raise UnknownObject(f"no {SOURCE_KIND} object named {spec.source!r}")
 
-    async def _watchable(self, ctx: ToolContext, source: str) -> None:
-        """Whether this caller may watch that source, asked of the source kind itself — its `get`
-        is the one place the per-member gate on a binding lives, so a source the caller cannot see
-        comes back as nothing and a stranger guessing a binding never learns one exists. A private
-        source the caller does own is refused for what it is: its pages reach no other reader, so
-        the alert filter would drop every change it ever made."""
+    async def _watchable(self, ctx: ToolContext, source: str) -> ObjectDetail[SourceSpec]:
+        """The source this caller may watch, asked of the source kind itself — its `get` is the one
+        place the per-member gate on a binding lives, so a source the caller cannot see comes back
+        as nothing and a stranger guessing a binding never learns one exists. A private source the
+        caller does own is refused for what it is: its pages reach no other reader, so the alert
+        filter would drop every change it ever made."""
         source_object = await SOURCE_OBJECT.store.get(ctx, source)
         if source_object is None:
             raise UnknownObject(f"no {SOURCE_KIND} object named {source!r}")
@@ -960,6 +1007,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 f"{source!r} syncs privately to the member who registered it, so its changes "
                 "reach no conversation; re-register it as shared to watch it"
             )
+        return source_object
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
         listed = await self._find(ctx.ext, name)
@@ -972,7 +1020,10 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             (
                 row
                 for row in await _require_triggers(ext).list_reported()
-                if trigger_name(row.trigger.binding, row.trigger.conversation_id) == name
+                if trigger_name(
+                    row.trigger.binding, row.trigger.conversation_id, row.trigger.resource
+                )
+                == name
             ),
             None,
         )
@@ -981,7 +1032,9 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
 async def on_page_change(ctx: HookContext) -> HookOutcome:
     """Wake each changed source's triggers. Current delivery sends one batch to the trigger's
     conversation. Per-page delivery sends each change to the stable agent conversation keyed by
-    that trigger and page. Only shared pages that the trigger's agent may read cause a wake."""
+    that trigger and page. Only shared pages that the trigger's agent may read cause a wake.
+
+    A trigger narrowed to one resource is woken by the changes about that resource alone."""
     match ctx.payload:
         case PageChangeBatch(changes=changes):
             pass
@@ -1018,6 +1071,7 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
                 )
             )
             authorized = [change for change in shared if change.source_id in readable]
+            authorized = _about_resource(binding.provider, trigger, authorized)
             if not authorized:
                 continue
             with suppress(AgentArchived):
@@ -1029,6 +1083,109 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
                     authorized,
                 )
     return None
+
+
+def _about_resource(
+    provider: str, trigger: SourceTrigger, changes: list[PageChange]
+) -> list[PageChange]:
+    """The changes one trigger is woken by: all of them for a whole-binding trigger, and for a
+    narrowed one the changes whose page the provider linked to its resource."""
+    if not trigger.resource:
+        return changes
+    return [
+        change for change in changes if resource_matches(provider, trigger.resource, change.body)
+    ]
+
+
+def _trigger_summary(binding: _Binding | None, trigger: SourceTrigger) -> str:
+    """What a member reads the trigger as: the resource it watches where it watches one, since a
+    thread's watch is about that pull request and not about the feed carrying it."""
+    source = binding.summary() if binding is not None else trigger.binding
+    if not trigger.resource:
+        return source
+    return f"{trigger.resource} on {source}"[:SUMMARY_MAX]
+
+
+async def on_link_seen(ctx: HookContext) -> HookOutcome:
+    """Offer this conversation a trigger on each resource the text it just read names — a pull
+    request in a member's message, in a spawned coding child's result, in a tool's output — when a
+    shared source this agent may read syncs it and the conversation does not watch it yet.
+
+    The offer is text and nothing else: no row is written, so a link in a machine conversation makes
+    no standing waker, and the agent decides in the open whether the thread should hear about the
+    resource. A conversation a member does not read — a spawned child's, a room this extension
+    opened for an alert — is offered nothing, since a trigger applied there would wake nobody. Each
+    offer names the exact trigger to apply, so taking it is one call."""
+    match ctx.payload:
+        case UserPromptSubmit(text=text) | PostToolUse(output=text):
+            pass
+        case _:
+            raise RuntimeError("sources link hook fired on an unexpected payload")
+    if ctx.turn is None:
+        return None
+    links = _links_in(text)
+    if not links:
+        return None
+    ext = _require_ext(ctx.ext)
+    conversation_id = ctx.turn.conversation_id
+    facts = await ext.conversation_facts((conversation_id,))
+    if conversation_id not in facts or facts[conversation_id].surface in (
+        SUBAGENT_SURFACE,
+        ext.store.extension,
+    ):
+        return None
+    readable = await ext.readable_source_ids(
+        SourceReader(
+            agent_id=ctx.turn.agent_id,
+            requesting_member_id=None,
+            subjects=frozenset({SHARED_SUBJECT}),
+        )
+    )
+    bindings = [
+        binding
+        for binding in await _bindings_from_ext(ext)
+        if binding.subject == SHARED_SUBJECT
+        and any(stream.source_id in readable for stream in binding.streams)
+    ]
+    if not bindings:
+        return None
+    watched = await _require_triggers(ctx.ext).watched(conversation_id)
+    lines: list[str] = []
+    for link in links:
+        for binding in bindings:
+            resource = canonical_resource(binding.provider, link)
+            if resource is None or (binding.name, resource) in watched:
+                continue
+            watched |= {(binding.name, resource)}
+            manifest = yaml.safe_dump(
+                {
+                    "kind": SOURCE_TRIGGER_KIND,
+                    "name": trigger_name(binding.name, conversation_id, resource),
+                    "spec": {"source": binding.name, "resource": resource},
+                },
+                sort_keys=False,
+            ).strip()
+            lines.append(
+                f"{resource} is a resource of the source {binding.name!r} ({binding.summary()}) "
+                "this workspace syncs. To hear its changes in this conversation, call object_apply "
+                f"with this manifest:\n{manifest}"
+            )
+    if not lines:
+        return None
+    return InjectContext(
+        text="\n".join((WATCH_OFFER_OPEN, *lines[:WATCH_OFFER_MAX], WATCH_OFFER_CLOSE))
+    )
+
+
+def _links_in(text: str) -> tuple[str, ...]:
+    """Every https link the text carries, once each, in order, with the punctuation prose hangs on
+    a link stripped."""
+    found: list[str] = []
+    for match in LINK.finditer(text):
+        link = match.group().rstrip(LINK_TRAIL)
+        if link not in found:
+            found.append(link)
+    return tuple(found)
 
 
 async def _fire_trigger(
@@ -1051,14 +1208,19 @@ async def _fire_trigger(
             )
             latest = max(change.changed_at for change in authorized).isoformat()
             path = await _write_change_log(
-                ext, trigger.conversation_id, binding, latest, authorized
+                ext,
+                trigger.conversation_id,
+                _trigger_scope(binding, trigger),
+                latest,
+                authorized,
             )
             await ext.invoke(
                 trigger.conversation_id,
                 trigger.agent_id,
-                _alert_message(binding, authorized, path),
+                _alert_message(binding, trigger, authorized, path),
                 idempotency_key=(
-                    f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
+                    f"source-trigger:{_trigger_scope(binding, trigger)}:"
+                    f"{trigger.conversation_id.hex}:{latest}"
                 ),
                 authority=authority_from_member_id(member_id),
                 holds_work_already_done=True,
@@ -1077,11 +1239,13 @@ async def _fire_trigger(
                     member_id=trigger.created_by_member_id,
                 )
                 revision = f"{change.changed_at.isoformat()}-{change.revision}"
-                path = await _write_change_log(ext, conversation_id, binding, revision, [change])
+                path = await _write_change_log(
+                    ext, conversation_id, _trigger_scope(binding, trigger), revision, [change]
+                )
                 await ext.invoke(
                     conversation_id,
                     trigger.agent_id,
-                    _alert_message(binding, [change], path),
+                    _alert_message(binding, trigger, [change], path),
                     idempotency_key=(
                         f"source-trigger:{trigger.id.hex}:{member_key}:"
                         f"{change.page_id.hex}:{change.revision}"
@@ -1092,10 +1256,21 @@ async def _fire_trigger(
                 )
 
 
+def _trigger_scope(binding: _Binding, trigger: SourceTrigger) -> str:
+    """What one trigger watches, as one path segment: the binding, or the binding and the digest of
+    its resource. It names the trigger's change-log directory and its alert's idempotency key — a
+    conversation holds a whole-binding trigger and a narrowed one on the same binding, one landing
+    stamps every page it carries with the same `changed_at`, and under the binding alone the second
+    log would overwrite the first and the second alert would be dropped as the first's repeat."""
+    if not trigger.resource:
+        return binding.name
+    return f"{binding.name}/{resource_digest(trigger.resource)}"
+
+
 async def _write_change_log(
     ext: ExtensionContext,
     conversation_id: UUID,
-    binding: _Binding,
+    directory: str,
     latest: str,
     changes: list[PageChange],
 ) -> str | None:
@@ -1108,7 +1283,6 @@ async def _write_change_log(
     raises leaves the cursor unadvanced for the next tick to retry."""
     if ext.files is None:
         return None
-    directory = binding.name
     body = "".join(
         json.dumps(
             {
@@ -1156,7 +1330,9 @@ def _stream_counts(changes: list[PageChange]) -> str:
     )
 
 
-def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str | None) -> str:
+def _alert_message(
+    binding: _Binding, trigger: SourceTrigger, changes: list[PageChange], log_path: str | None
+) -> str:
     if len(changes) <= ALERT_NAMED_MAX:
         detail = (
             "Changed pages (pass each ref unchanged to object_get): "
@@ -1172,9 +1348,14 @@ def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str |
             "List them with object_list page, filtered on this source and stream and ordered by "
             "updated_at desc."
         )
+    watched = (
+        f"{trigger.resource} on the source {binding.name!r} ({binding.summary()})"
+        if trigger.resource
+        else f"The source {binding.name!r} ({binding.summary()})"
+    )
     return (
-        f"The source {binding.name!r} ({binding.summary()}) you watch changed — "
-        f"{_stream_counts(changes)}. {detail} Then tell the member what is new and why it matters."
+        f"{watched} you watch changed — {_stream_counts(changes)}. {detail} Then tell the member "
+        "what is new and why it matters."
     )
 
 
@@ -1258,21 +1439,25 @@ SOURCE_OBJECT = ObjectKind(
 SOURCE_TRIGGER_OBJECT = ObjectKind(
     name=SOURCE_TRIGGER_KIND,
     description=(
-        "A standing wake-up for one shared source: each batch of changed pages wakes a "
-        "conversation. Only its creator or an admin may delete it."
+        "A standing wake-up for one shared source, or for one resource of it: each batch of "
+        "changed pages wakes a conversation. Only its creator or an admin may delete it."
     ),
     guidance=(
         "Apply a manifest naming a shared source. Set `delivery: current` to wake this "
         "conversation for each source batch. Set `delivery: per_page` to open one stable agent "
         "conversation for "
-        f"each changed page. A {SOURCE_TRIGGER_KIND} IS the source and owning conversation it "
-        "names, so its name derives from both. Delete it to stop. A private or unknown source "
-        "cannot be watched. Removing the source removes every trigger on it. Listing returns "
-        "`source`, `delivery`, the owning `conversation`, its creator (`owner_email`), and "
-        "`origin`."
+        "each changed page. Set `resource` to the URL of one pull request or issue of a GitHub "
+        "source to be woken only by the changes about it, on the streams that source syncs. "
+        f"A {SOURCE_TRIGGER_KIND} IS the source, resource, and owning "
+        "conversation it names, so its name derives from all three. Delete it to stop. A private "
+        "or unknown source cannot be watched. Removing the source removes every trigger on it. "
+        "Listing returns `source`, `resource`, `delivery`, the owning `conversation`, its creator "
+        "(`owner_email`), and `origin`."
     ),
     spec_model=SourceTriggerSpec,
     store=SourceTriggerObjects(),
-    list_fields=frozenset({"conversation", "source", "delivery", "origin", "owner_email", "mine"}),
+    list_fields=frozenset(
+        {"conversation", "source", "resource", "delivery", "origin", "owner_email", "mine"}
+    ),
     agent_target_verbs=frozenset({"list", "get", "delete"}),
 )

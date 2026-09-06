@@ -34,6 +34,7 @@ so the walk raises `StreamSkipped` and the run records a skip, not a failure. Th
 intentionally absent — the source seam only reads."""
 
 import asyncio
+import re
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from datetime import UTC, datetime
 from functools import partial
@@ -70,6 +71,18 @@ _UNTIL_STREAMS = frozenset({"commits"})
 _REPO_SKIP_STATUS = frozenset({404, 409, 410})
 _ORG_SKIP_STATUS = frozenset({403, 404, 410})
 _ORG_SCOPE_GATE_STATUS = frozenset({403})
+_OWNER = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})"
+_REPO = r"[A-Za-z0-9_.-]{1,100}"
+_RESOURCE_URLS = (
+    re.compile(
+        rf"^https://(?:www\.)?github\.com/(?P<owner>{_OWNER})/(?P<repo>{_REPO})"
+        r"/(?P<path>pull|issues)/(?P<number>[0-9]{1,10})(?=$|[/#?])"
+    ),
+    re.compile(
+        rf"^https://api\.github\.com/repos/(?P<owner>{_OWNER})/(?P<repo>{_REPO})"
+        r"/(?P<path>pulls|issues)/(?P<number>[0-9]{1,10})(?=$|[/#?])"
+    ),
+)
 
 
 def _stream(
@@ -587,3 +600,39 @@ def _cursor_bounds(
     if not values:
         return None, None
     return max(values), min(values)
+
+
+def resource_url(url: str) -> str | None:
+    """The canonical link of the pull request or issue `url` names —
+    `https://github.com/<owner>/<repo>/pull/<n>` or `.../issues/<n>` — or None: a repository, a
+    commit, or a listing is not a resource a trigger narrows to. The repository is case-folded
+    because GitHub answers one repository under every spelling of its name, and the API form, a
+    sub-page and a fragment all name the same resource, so one pull request is one watch however it
+    was linked."""
+    for pattern in _RESOURCE_URLS:
+        match = pattern.match(url.strip())
+        if match is None:
+            continue
+        repo = f"{match.group('owner')}/{match.group('repo')}".lower()
+        path = "issues" if match.group("path") == "issues" else "pull"
+        return f"https://github.com/{repo}/{path}/{match.group('number')}"
+    return None
+
+
+def resource_aliases(resource: str) -> tuple[str, ...]:
+    """The URL forms GitHub's own records carry for one canonical resource: its page's `html_url`,
+    and the API forms a comment's `issue_url`, a review comment's `pull_request_url` and a workflow
+    run's `pull_requests[].url` link with. GitHub numbers pull requests and issues in one sequence
+    per repository and files a pull request's comments under `issues/<number>`, so both paths name
+    the one resource."""
+    match = _RESOURCE_URLS[0].match(resource)
+    if match is None:
+        return ()
+    repo = f"{match.group('owner')}/{match.group('repo')}"
+    number = match.group("number")
+    return (
+        f"github.com/{repo}/pull/{number}",
+        f"github.com/{repo}/issues/{number}",
+        f"api.github.com/repos/{repo}/pulls/{number}",
+        f"api.github.com/repos/{repo}/issues/{number}",
+    )
