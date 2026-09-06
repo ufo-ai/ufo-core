@@ -1901,6 +1901,79 @@ async def test_a_subagent_turn_claims_its_childs_result_and_leaves_member_rows_p
     assert consumed is None
 
 
+@dataclass
+class FinishAsArrivalLandsModel:
+    """Finishes at once, and an arrival lands on the conversation while that finish streams — a
+    `message_spawn` follow-up reaching a child in its last round. Records each round's messages so
+    a test reads whether the next round closed over the arrival."""
+
+    turn: Turn
+    admission_source: TurnAdmissionSource
+    seen: list[tuple[Message, ...]] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.seen.append(request.messages)
+        if len(self.seen) > 2:
+            raise RuntimeError("the finish was recycled past the arrival it owed")
+        if len(self.seen) == 1:
+            await _queue_arrival(
+                self.turn, "narrow it to staging", admission_source=self.admission_source
+            )
+        call_id = f"f{len(self.seen)}"
+        yield ToolCallStart(id=call_id, name=FINISH_TOOL)
+        yield ToolCallDelta(id=call_id, partial_json=json.dumps({"summary": "the answer"}))
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_spawned_turn_finishing_as_a_followup_lands_reads_it_before_it_ends(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The commit holds the same line for a child as for a root turn: a follow-up pending in its
+    queue refuses the terminal, the finish is recycled, and the next round closes over the message
+    — so a correction that lands as the child finishes is read rather than orphaned on a
+    conversation nothing will run again."""
+    turn = (await _seed_turn("queued", None)).model_copy(
+        update={"subagent_profile": "coding", "parent_turn_id": uuid4()}
+    )
+    model = FinishAsArrivalLandsModel(turn, INTERNAL_ADMISSION)
+    with ws(turn.workspace_id):
+        engine = replace(_engine(turn, model, tmp_path), output_model=_Report)
+        with caplog.at_level(logging.INFO, logger="ufo"):
+            frame = await engine.run()
+    assert frame is not None
+    assert frame.status == "done"
+    refused = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "turn.commit_refused_by_arrivals"
+    ]
+    assert [(entry["turn_status"], entry["pending"]) for entry in refused] == [("done", 1)]
+    assert len(model.seen) == 2
+    assert any("narrow it to staging" in str(message.content) for message in model.seen[1])
+
+
+async def test_a_member_row_on_a_spawned_conversation_holds_no_commit(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The guard counts exactly what the drain claims. A child never drains a member row from its
+    private channel, so one pending there cannot hold its terminal — a guard counting it would
+    recycle a finish no round could ever satisfy."""
+    turn = (await _seed_turn("queued", None)).model_copy(
+        update={"subagent_profile": "coding", "parent_turn_id": uuid4()}
+    )
+    model = FinishAsArrivalLandsModel(turn, MEMBER_ADMISSION)
+    with ws(turn.workspace_id):
+        engine = replace(_engine(turn, model, tmp_path), output_model=_Report)
+        with caplog.at_level(logging.INFO, logger="ufo"):
+            frame = await engine.run()
+    assert frame is not None
+    assert frame.status == "done"
+    assert not any(
+        record.getMessage() == "turn.commit_refused_by_arrivals" for record in caplog.records
+    )
+    assert len(model.seen) == 1
+
+
 async def test_a_main_turn_claims_member_and_internal_rows_alike(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("running", None)
     with ws(turn.workspace_id):

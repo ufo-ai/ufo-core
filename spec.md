@@ -226,9 +226,11 @@ state commits on the failure path too.
   spawn returns its identity at once whatever the caller asked, and its
   contract-validated answer (walled as data — the child's tools read the open web), or the
   structured question it ended asking, arrives on the spawning
-  conversation; `message_spawn` is the reply channel, and neither lifecycle nor cancellation ties
-  it to its spawner. Spawn control reads a finished child of that conversation as its exact
-  identity, terminal, and validated output. A forced close records `incomplete_reason=round_budget`
+  conversation; `message_spawn` is the reply channel — a child whose turn is in flight reads the
+  message at its next round boundary, an idle child as its next turn, and a follow-up's answer
+  always arrives as a delivery — and neither lifecycle nor cancellation ties it to its spawner.
+  Spawn control reads a finished child of that conversation as its exact identity, terminal, and
+  validated output. A forced close records `incomplete_reason=round_budget`
   on the terminal beside its schema-shaped answer. A woken turn reads the durable record, never
   the ending turn's working memory. Two payload knobs any profile may declare: `preload_skills`
   loads the named skills with their `depends` closure and injects their instructions before the

@@ -1005,6 +1005,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             audience=audience,
             authority=turn.authority,
             hub=runtime.hub,
+            invoker=runtime.invoker_for(turn.workspace_id),
             key_slot_for=runtime.registry.key_slot_for,
             billing_url=runtime.billing_url,
             connect_url=runtime.config.connect.public_base_url,

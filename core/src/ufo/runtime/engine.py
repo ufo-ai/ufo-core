@@ -1810,10 +1810,7 @@ class TurnEngine:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
             await self._publish_run()
-            pending_guard = not self.turn.spawned
-            prepared = await self._prepare_run(
-                usage_events, meter, absorbed_ids, requesters, pending_guard
-            )
+            prepared = await self._prepare_run(usage_events, meter, absorbed_ids, requesters)
             if prepared.terminal is not None:
                 return prepared.terminal
             system = prepared.system
@@ -1856,7 +1853,7 @@ class TurnEngine:
                     credential_request=credential_request,
                     connect_request=connect_request,
                     created=tuple(created),
-                    unless_arrivals=pending_guard,
+                    unless_arrivals=True,
                     absorbed=tuple(absorbed_ids),
                 )
                 if frame is None:
@@ -1956,7 +1953,6 @@ class TurnEngine:
         meter: _TurnMeter,
         absorbed_ids: list[UUID],
         requesters: dict[UUID, ActiveMessage],
-        pending_guard: bool,
     ) -> _PreparedRun:
         repair = self._repair()
         parked_record = await repair._parked_record()
@@ -2000,7 +1996,7 @@ class TurnEngine:
                 usage_events,
                 meter,
                 answer=inbound.denied,
-                unless_arrivals=pending_guard,
+                unless_arrivals=True,
                 absorbed=tuple(absorbed_ids),
             )
             if denial is not None:
@@ -2359,9 +2355,10 @@ class TurnEngine:
         never its body or authority ref; an injection rides the message walled in its own delimiter
         so it never reads as member text. Whoever spoke each arrival and whichever agent it named,
         it joins this one turn: multiple members talking to a running bot is one turn, and the
-        model handles the mixed voices. A subagent turn folds only what its own children deliver:
-        its conversation is the parent's private channel that no member speaks into, so the claim
-        leaves an external row there pending rather than rendering it as one of its own.
+        model handles the mixed voices. A subagent turn folds only what is admitted internally —
+        its children's results and its parent's follow-ups: its conversation is the parent's
+        private channel that no member speaks into, so the claim leaves an external row there
+        pending rather than rendering it as one of its own.
 
         The drain publishes the member rows it folded once they are in the window, so a surface
         holding a message it admitted into this turn learns the agent has it. A denied arrival is
@@ -2500,6 +2497,30 @@ class TurnEngine:
             content = INJECTED_CONTEXT.format(content=content, injected=submitted.injected)
         return content, None
 
+    def _owed_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[sa.ColumnElement[bool], ...]:
+        """The inbound rows this turn still owes a drain: pending on its conversation, or stamped
+        by a drain this execution never recorded. A spawned turn's conversation is its parent's
+        private channel that no member speaks into, so it owes only internally admitted rows — its
+        children's results and its parent's follow-ups — and a member row there stays pending
+        rather than rendering as one of its own. The claim and the commit guard read this one
+        predicate: a guard counting a row the claim leaves pending would hold a terminal no round
+        could ever satisfy."""
+        return (
+            tables.inbound_message.c.conversation_id == self.turn.conversation_id,
+            sa.or_(
+                tables.inbound_message.c.consumed_turn_id.is_(None),
+                sa.and_(
+                    tables.inbound_message.c.consumed_turn_id == self.turn.id,
+                    ~tables.inbound_message.c.id.in_(absorbed),
+                ),
+            ),
+            *(
+                (tables.inbound_message.c.admission_source == INTERNAL_ADMISSION,)
+                if self.turn.spawned
+                else ()
+            ),
+        )
+
     @DBOS.step(preemptible=True)
     async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]:
         """Drain the conversation's pending inbound queue, memoized as a DBOS step: rows are
@@ -2508,32 +2529,16 @@ class TurnEngine:
         re-executes the drain and recovers exactly the batch it had claimed, while absorbed rows
         are never re-taken. Each claimed row is rendered here — user_prompt_submit fires inside
         the step, so a replay of a recorded drain reuses the memoized rendering instead of
-        re-firing hooks. An arrival is consumed exactly once and never lost. A subagent turn claims
-        only internally admitted rows — the results its own children deliver — so nothing else can
-        reach a channel that belongs to its parent. A drain whose body runs is by construction
-        live, not a replay, and is where an adopted execution's window catches up with the queue —
-        so it closes the adoption replay window."""
+        re-firing hooks. An arrival is consumed exactly once and never lost. A drain whose body
+        runs is by construction live, not a replay, and is where an adopted execution's window
+        catches up with the queue — so it closes the adoption replay window."""
         self.adoption.replaying = False
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.update(tables.inbound_message)
                     .values(consumed_turn_id=self.turn.id)
-                    .where(
-                        tables.inbound_message.c.conversation_id == self.turn.conversation_id,
-                        sa.or_(
-                            tables.inbound_message.c.consumed_turn_id.is_(None),
-                            sa.and_(
-                                tables.inbound_message.c.consumed_turn_id == self.turn.id,
-                                ~tables.inbound_message.c.id.in_(absorbed),
-                            ),
-                        ),
-                        *(
-                            (tables.inbound_message.c.admission_source == INTERNAL_ADMISSION,)
-                            if self.turn.spawned
-                            else ()
-                        ),
-                    )
+                    .where(*self._owed_arrivals(absorbed))
                     .returning(
                         tables.inbound_message.c.id,
                         tables.inbound_message.c.seq,
@@ -3871,16 +3876,7 @@ class TurnEngine:
                     await connection.execute(
                         sa.select(sa.func.count())
                         .select_from(tables.inbound_message)
-                        .where(
-                            tables.inbound_message.c.conversation_id == self.turn.conversation_id,
-                            sa.or_(
-                                tables.inbound_message.c.consumed_turn_id.is_(None),
-                                sa.and_(
-                                    tables.inbound_message.c.consumed_turn_id == self.turn.id,
-                                    ~tables.inbound_message.c.id.in_(absorbed),
-                                ),
-                            ),
-                        )
+                        .where(*self._owed_arrivals(absorbed))
                     )
                 ).scalar_one()
                 if pending:

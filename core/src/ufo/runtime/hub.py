@@ -117,8 +117,10 @@ class SubagentActivity(BaseModel):
 
 
 class ArrivalQueued(BaseModel):
-    """A member message joined a turn already running. This internal rendezvous wakes a
-    foreground spawn; surface tails filter it out."""
+    """An arrival joined a turn already running — a member's message, or an internally admitted
+    one such as a child's result or a `message_spawn` follow-up. This internal rendezvous wakes
+    whatever waits on the turn; a foreground spawn's wait reads it, and surface tails filter it
+    out."""
 
     arrival_id: UUID
 

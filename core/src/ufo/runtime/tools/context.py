@@ -429,7 +429,8 @@ class Spawn(Protocol):
 class SubagentControl(Protocol):
     """Operations on already-spawned background subagents, keyed by child turn id. `result` reads
     a finished child's exact terminal and validated output; `wait` bounds a hold inside one tool;
-    `cancel` stops a running child; `message` admits an idempotent follow-up. A child's output
+    `cancel` stops a running child; `message` hands a live child an idempotent follow-up at its
+    next round, or admits it as an idle child's next turn. A child's output
     otherwise arrives on the parent's conversation when the child ends. Threaded onto ToolContext
     from the same Subagents workflow that backs `spawn`."""
 
@@ -439,9 +440,7 @@ class SubagentControl(Protocol):
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus: ...
 
-    async def message(
-        self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
-    ) -> SubagentStatus: ...
+    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus: ...
 
 
 @dataclass(eq=False)

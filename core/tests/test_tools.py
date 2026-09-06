@@ -160,9 +160,7 @@ class StubSubagentControl:
             turn_id, SubagentStatus(turn_id=turn_id, status="cancelled", text="")
         )
 
-    async def message(
-        self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
-    ) -> SubagentStatus:
+    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
         self.messaged.append((turn_id, text, dedup_key))
         return self.statuses.get(turn_id, SubagentStatus(turn_id=turn_id, status="queued", text=""))
 

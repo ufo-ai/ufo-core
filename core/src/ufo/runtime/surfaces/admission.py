@@ -206,8 +206,7 @@ class Admission:
                 comment=comment,
                 runtime_config=runtime_config,
             )
-        if admitted.arrival_id is not None and not admitted.opened_run and self.hub is not None:
-            await self.hub.publish(admitted.turn_id, ArrivalQueued(arrival_id=admitted.arrival_id))
+        await self._wake_live_turn(admitted)
         if admitted.comment_id is not None and comment is not None and self.hub is not None:
             await self.hub.publish(
                 admitted.turn_id,
@@ -294,10 +293,11 @@ class Admission:
         or the shortfall surfaces later as a refusal no member can place.
 
         A turn founded on a spawned conversation inherits that conversation's spawn identity from
-        its founding turn — parent linkage, profile, display name, and whether it delivers — so a
-        child woken by its own grandchild's result continues under the same contract and its
-        answer still reaches the conversation that spawned it, never a contractless turn whose
-        work reaches nobody.
+        its founding turn — parent linkage, profile, display name — and delivers its result:
+        nothing awaits a turn past the founding one, so a child woken by its grandchild's result
+        or by a `message_spawn` follow-up continues under the same contract and its answer reaches
+        the conversation that spawned it, never a contractless turn whose work reaches nobody.
+        An arrival that joins a live turn is announced on that turn's hub exactly as a member's is.
 
         `as_scheduled` gives the turn a scheduled fire's meaning without a scheduled row: it founds
         its own turn beside a live one instead of folding, and it is seat-gated on the member it
@@ -355,7 +355,16 @@ class Admission:
             )
         except _SupersededByMember:
             return None
+        await self._wake_live_turn(admitted)
         return admitted.turn_id
+
+    async def _wake_live_turn(self, admitted: Admitted) -> None:
+        """Announce an arrival that joined a live turn on that turn's hub, after its row has
+        committed — one rendezvous for a member's message and an internal one alike, so whatever
+        waits on the turn reads the same frame whichever surface the message came from. A fold
+        that resumed a parked turn opened a run instead, and that run drains the row itself."""
+        if admitted.arrival_id is not None and not admitted.opened_run and self.hub is not None:
+            await self.hub.publish(admitted.turn_id, ArrivalQueued(arrival_id=admitted.arrival_id))
 
     async def _admit(
         self,
@@ -973,7 +982,6 @@ class Admission:
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.subagent_profile,
                         tables.turn.c.subagent_name,
-                        tables.turn.c.result_delivery,
                     ).where(
                         tables.turn.c.conversation_id == conversation_id,
                         tables.turn.c.seq == 1,
@@ -1049,11 +1057,7 @@ class Admission:
                 subagent_name=(
                     None if spawned_identity is None else spawned_identity.subagent_name
                 ),
-                result_delivery=(
-                    DELIVERY_PENDING
-                    if spawned_identity is not None and spawned_identity.result_delivery is not None
-                    else None
-                ),
+                result_delivery=None if spawned_identity is None else DELIVERY_PENDING,
                 context=(
                     None if inbound.context is None else inbound.context.model_dump(mode="json")
                 ),

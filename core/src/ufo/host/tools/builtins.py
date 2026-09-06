@@ -362,9 +362,7 @@ class CancelSpawnInput(BaseModel):
 
 class MessageSpawnInput(BaseModel):
     spawn_id: str = Field(description="The spawn ID to message.")
-    message: str = Field(
-        description="The follow-up message to deliver, run as the spawn's next turn."
-    )
+    message: str = Field(description="The follow-up message to deliver.")
 
 
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
@@ -1200,16 +1198,18 @@ async def cancel_spawn_handler(ctx: ToolContext, args: CancelSpawnInput) -> Tool
 
 
 async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> ToolResult:
-    """Send a running or asking spawn a follow-up message; it runs as the spawn's next turn
-    against its accumulated context once the turn in flight ends, and the follow-up delivers its
-    result to this conversation when it finishes — which is how a bubbled question's answer comes
-    back. Refuses a turn id this turn did not spawn."""
+    """Send a running or asking spawn a follow-up message. A spawn still running reads it at its
+    next tool boundary; one whose turn has ended runs it as its next turn against its accumulated
+    context. Either way the follow-up's result is delivered to this conversation — which is how a
+    bubbled question's answer comes back. The status says when it is read: `running` names the
+    turn that holds it, `queued` the turn that runs next. Refuses a turn id this turn did not
+    spawn."""
     if ctx.subagents is None:
         raise RuntimeError("spawn control is not available in this context")
     if ctx.idempotency_key is None:
         raise RuntimeError("message_spawn dispatched without its idempotency key")
     status = await ctx.subagents.message(
-        UUID(args.spawn_id), args.message, dedup_key=ctx.idempotency_key, delivers_result=True
+        UUID(args.spawn_id), args.message, dedup_key=ctx.idempotency_key
     )
     return ToolResult(
         content=(
@@ -1389,9 +1389,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="message_spawn",
         description=(
-            "Send a follow-up message to a spawn — a background run, or one that ended asking a "
-            "question. It runs as the spawn's next turn against its accumulated context once its "
-            "current turn ends, and delivers its result to this conversation when it finishes."
+            "Send a spawn a follow-up or answer its question. A running spawn reads it before its "
+            "next step; a finished one resumes with it. Its result arrives in this conversation."
         ),
         input_model=MessageSpawnInput,
         handler=message_spawn_handler,

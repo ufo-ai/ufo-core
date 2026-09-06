@@ -2723,6 +2723,7 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         parent=parent,
         authority=parent.authority,
         audience=conversation_audience(None),
+        invoker=runtime.invoker_for(parent.workspace_id),
     )
     queued = await subagents.message(
         child_id, FOLLOWUP_INBOUND, dedup_key="turn-1/message_spawn/call-1"

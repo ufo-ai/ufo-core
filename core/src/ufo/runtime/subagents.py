@@ -70,7 +70,6 @@ from ufo.runtime.turns.contracts import (
     output_contract,
     payload_keys,
 )
-from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -233,6 +232,7 @@ class Subagents:
     audience: Audience
     authority: ExecutionAuthority
     hub: Hub | None = None
+    invoker: TurnInvoker | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     billing_url: str | None = None
     connect_url: str | None = None
@@ -492,28 +492,27 @@ class Subagents:
         text = "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
         return SubagentStatus(turn_id=turn_id, status=row.status, text=text)
 
-    async def message(
-        self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
-    ) -> SubagentStatus:
-        """Queue a follow-up for a background child by admitting the next turn on the child's own
-        conversation with `text` as its inbound. The exit handoff runs it after the turn in
-        flight (create-or-attach hands it the same sandbox), and the engine loads the child's
-        accumulated transcript as prior context — so the follow-up continues the child under its
-        own contract rather than starting fresh. Admission is idempotent through
-        `turn.idempotency_key`: a re-run of the messaging tool step (crash recovery) finds the turn
-        it already admitted under `dedup_key` instead of admitting a second one at the next seq.
-        `delivers_result` marks the follow-up delivering even when the child was awaited foreground
-        — the caller that answers a bubbled question ends its own turn, so the continuation's
-        answer must arrive as a delivery or not at all. Returns the follow-up's status; refuses a
-        turn id that is not a child of this parent, mirroring cancel, and a profile this registry
-        no longer holds. That last check is the admission's, not the child's: the follow-up
-        carries the profile of the child it continues, so admitting one whose profile nothing
-        resolves queues a turn that can only die in its own setup, where the caller that asked for
-        it is no longer there to be told. An agent child carries no profile and nothing to
-        resolve — its agent row cannot vanish."""
+    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+        """Send a child a follow-up through the same internal admission its own children's results
+        ride. A child whose turn is in flight takes `text` as an arrival on its conversation,
+        drained before its next model round — the tool-call boundary — so a correction reaches a
+        multi-round run mid-flight rather than after it has merged; an idle child takes it as its
+        next turn, with its accumulated transcript as prior context. Either way the follow-up
+        continues the child under its own contract and delivers its result to this conversation.
+        The returned status is the admitted turn's: `running` says the turn in flight holds the
+        message, `queued` that it runs next. Admission is idempotent under `dedup_key` on both
+        paths, so a re-run of the messaging tool step (crash recovery) reconnects to the arrival
+        or turn it already admitted. Refuses a turn id that is not a child of this parent,
+        mirroring cancel, and a profile this registry no longer holds. That last check is the
+        admission's, not the child's: the follow-up carries the profile of the child it continues,
+        so admitting one whose profile nothing resolves queues a turn that can only die in its own
+        setup, where the caller that asked for it is no longer there to be told. An agent child
+        carries no profile and nothing to resolve — its agent row cannot vanish."""
         profile = await self._require_child(turn_id)
         if profile is not None:
             self.registry.get(profile)
+        if self.invoker is None:
+            raise RuntimeError("messaging a spawn requires the turn invoker")
         async with workspace_tx() as connection:
             child = (
                 await connection.execute(
@@ -521,93 +520,41 @@ class Subagents:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.subagent_profile,
-                        tables.turn.c.result_delivery,
                         tables.turn.c.runtime_config,
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
-            await connection.execute(
-                sa.select(tables.conversation.c.id)
-                .where(tables.conversation.c.id == child.conversation_id)
-                .with_for_update()
+            runtime_config = (
+                None
+                if child.runtime_config is None
+                else TurnRuntimeConfig.model_validate(child.runtime_config)
             )
-            followup = (
+            await self._require_balance(
+                connection,
+                (
+                    runtime_config.model
+                    if runtime_config is not None and runtime_config.model is not None
+                    else self._profile_model(child.subagent_profile)
+                ),
+                child.agent_id,
+            )
+        admitted = await self.invoker.invoke(
+            child.conversation_id,
+            child.agent_id,
+            text,
+            dedup_key,
+            authority=self.authority,
+            runtime_config=runtime_config,
+        )
+        if admitted is None:
+            raise RuntimeError("follow-up admission answered no turn")
+        async with workspace_tx() as connection:
+            status = (
                 await connection.execute(
-                    sa.select(
-                        tables.turn.c.id,
-                        tables.turn.c.conversation_id,
-                        tables.turn.c.seq,
-                        tables.turn.c.status,
-                    ).where(
-                        tables.turn.c.workspace_id == self.parent.workspace_id,
-                        tables.turn.c.idempotency_key == dedup_key,
-                    )
+                    sa.select(tables.turn.c.status).where(tables.turn.c.id == admitted)
                 )
-            ).one_or_none()
-            if followup is not None and followup.conversation_id != child.conversation_id:
-                raise ValueError("dedup key belongs to another follow-up")
-            if followup is None:
-                runtime_config = (
-                    None
-                    if child.runtime_config is None
-                    else TurnRuntimeConfig.model_validate(child.runtime_config)
-                )
-                await self._require_balance(
-                    connection,
-                    (
-                        runtime_config.model
-                        if runtime_config is not None and runtime_config.model is not None
-                        else self._profile_model(child.subagent_profile)
-                    ),
-                    child.agent_id,
-                )
-                followup_seq = (
-                    await connection.execute(
-                        sa.select(sa.func.max(tables.turn.c.seq)).where(
-                            tables.turn.c.conversation_id == child.conversation_id
-                        )
-                    )
-                ).scalar_one() + 1
-                followup_id = turn_id_for(
-                    self.parent.workspace_id, child.conversation_id, followup_seq
-                )
-                followup_status = "queued"
-                await connection.execute(
-                    sa.insert(tables.turn).values(
-                        id=followup_id,
-                        workspace_id=self.parent.workspace_id,
-                        conversation_id=child.conversation_id,
-                        agent_id=child.agent_id,
-                        seq=followup_seq,
-                        status=followup_status,
-                        inbound=text,
-                        admission_source=INTERNAL_ADMISSION,
-                        idempotency_key=dedup_key,
-                        speaker_member_id=None,
-                        on_behalf_of_member_id=authority_member_id(self.authority),
-                        terminal=None,
-                        parent_turn_id=self.parent.id,
-                        result_delivery=(
-                            DELIVERY_PENDING
-                            if delivers_result or child.result_delivery is not None
-                            else None
-                        ),
-                        subagent_profile=child.subagent_profile,
-                        traceparent=current_traceparent(),
-                        runtime_config=child.runtime_config,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-            else:
-                followup_id, followup_seq, followup_status = (
-                    followup.id,
-                    followup.seq,
-                    followup.status,
-                )
-        if followup_status == "queued":
-            await dispatch_next_turn(self.client, child.conversation_id)
-        return SubagentStatus(turn_id=followup_id, status=followup_status, text="")
+            ).scalar_one()
+        return SubagentStatus(turn_id=admitted, status=status, text="")
 
     async def _resolve(self, target: str) -> SubagentProfile | AgentTarget:
         """The target a spawn names, across both namespaces. A `profile:`/`agent:` prefix is exact;
@@ -1113,9 +1060,10 @@ class Subagents:
         None says the child was moved to the background, where it keeps running and hands back its
         own result, so the parent can answer the member now.
 
-        Member admission publishes the durable arrival row's id through the turn hub. The wait
-        validates that exact row while stamping the child for delivery in one transaction, so a
-        stale replay after the parent absorbed the message does nothing and no database poll runs
+        Admission publishes every arrival row's id through the turn hub. The wait validates that
+        the exact row is a member's message while stamping the child for delivery in one
+        transaction, so an internal arrival — a delivered result — leaves the wait in place, a
+        stale replay after the parent absorbed the message does nothing, and no database poll runs
         while nobody speaks.
 
         The guarded move is the race resolution. It refuses after the child's terminal commits, so
