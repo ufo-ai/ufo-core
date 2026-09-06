@@ -59,6 +59,7 @@ class _Workspace:
     member_id: UUID
     agent_id: UUID
     conversation_id: UUID
+    specialist_agent_id: UUID
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class _MutatingBlob:
 async def _workspace() -> _Workspace:
     workspace_id = uuid4()
     owner_id, member_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4(), uuid4()
+    specialist_agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -114,16 +116,29 @@ async def _workspace() -> _Workspace:
             ],
         )
         await connection.execute(
-            sa.insert(tables.agent).values(
-                id=agent_id,
-                workspace_id=workspace_id,
-                name="assistant",
-                prompt="p",
-                model="claude-opus-4-8",
-                is_main=True,
-                created_at=OWNER_CREATED_AT,
-                updated_at=OWNER_CREATED_AT,
-            )
+            sa.insert(tables.agent),
+            [
+                {
+                    "id": agent_id,
+                    "workspace_id": workspace_id,
+                    "name": "assistant",
+                    "prompt": "p",
+                    "model": "claude-opus-4-8",
+                    "is_main": True,
+                    "created_at": OWNER_CREATED_AT,
+                    "updated_at": OWNER_CREATED_AT,
+                },
+                {
+                    "id": specialist_agent_id,
+                    "workspace_id": workspace_id,
+                    "name": "research",
+                    "prompt": "p",
+                    "model": "claude-opus-4-8",
+                    "is_main": False,
+                    "created_at": OWNER_CREATED_AT,
+                    "updated_at": OWNER_CREATED_AT,
+                },
+            ],
         )
         await connection.execute(
             sa.insert(tables.conversation).values(
@@ -137,7 +152,9 @@ async def _workspace() -> _Workspace:
                 updated_at=OWNER_CREATED_AT,
             )
         )
-    return _Workspace(workspace_id, owner_id, member_id, agent_id, conversation_id)
+    return _Workspace(
+        workspace_id, owner_id, member_id, agent_id, conversation_id, specialist_agent_id
+    )
 
 
 _TOOLS: dict[str, ToolDef] = {
@@ -156,6 +173,7 @@ def _context(
     *,
     speaker_id: UUID | None = None,
     audience: Audience | None = None,
+    agent_id: UUID | None = None,
 ) -> ToolContext:
     exact_audience = (
         conversation_audience(speaker_id or state.owner_id) if audience is None else audience
@@ -168,7 +186,7 @@ def _context(
             id=uuid4(),
             workspace_id=state.workspace_id,
             conversation_id=state.conversation_id,
-            agent_id=state.agent_id,
+            agent_id=agent_id or state.agent_id,
             seq=1,
             status="running",
             inbound="read pages",
@@ -186,7 +204,12 @@ def _context(
 
 
 async def _seed_source(
-    state: _Workspace, backend: str, *, source_id: UUID | None = None, granted: bool = True
+    state: _Workspace,
+    backend: str,
+    *,
+    source_id: UUID | None = None,
+    granted: bool = True,
+    agent_id: UUID | None = None,
 ) -> UUID:
     source_id = uuid4() if source_id is None else source_id
     async with workspace_tx() as connection:
@@ -206,7 +229,7 @@ async def _seed_source(
                 sa.insert(tables.source_grant).values(
                     workspace_id=state.workspace_id,
                     source_id=source_id,
-                    agent_id=state.agent_id,
+                    agent_id=agent_id or state.agent_id,
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
                     updated_at=datetime(2026, 7, 9, tzinfo=UTC),
                 )
@@ -327,10 +350,13 @@ async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
 
 
 async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_path: Path) -> None:
+    """A specialist agent reads a source through its grant alone, so a grant revoked while the body
+    streams is re-read before the page is disclosed, and the read answers nothing."""
     state = await _workspace()
     stored = FilesystemBlobStore(root=tmp_path)
+    specialist = state.specialist_agent_id
     with ws(state.workspace_id):
-        source_id = await _seed_source(state, "asana")
+        source_id = await _seed_source(state, "asana", agent_id=specialist)
         page_id = await _seed_page(state, source_id, stored)
 
         async def revoke() -> None:
@@ -339,13 +365,13 @@ async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_
                     sa.delete(tables.source_grant).where(
                         tables.source_grant.c.workspace_id == state.workspace_id,
                         tables.source_grant.c.source_id == source_id,
-                        tables.source_grant.c.agent_id == state.agent_id,
+                        tables.source_grant.c.agent_id == specialist,
                     )
                 )
 
         assert (
             await PageObjects().get(
-                _context(state, _MutatingBlob(stored, revoke)),
+                _context(state, _MutatingBlob(stored, revoke), agent_id=specialist),
                 str(page_id),
             )
             is None
@@ -355,18 +381,20 @@ async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_
 async def test_pages_list_hides_a_source_this_agent_holds_no_grant_for(
     db: None, tmp_path: Path
 ) -> None:
-    """The page listing reads through `source_pages`, so an ungranted feed's pages must not appear
-    even when they carry the exact subject the agent reads, in its own workspace, un-tombstoned —
-    the same audience the granted feed's page passes on. Only the grant separates them, and `get`
-    refuses the ungranted page too, so the listing is not merely hiding a readable row."""
+    """The page listing reads through `source_pages`, so a specialist agent's ungranted feed's pages
+    must not appear even when they carry the exact subject the agent reads, in its own workspace,
+    un-tombstoned — the same audience the granted feed's page passes on. Only the grant separates
+    them, and `get` refuses the ungranted page too, so the listing is not merely hiding a readable
+    row."""
     state = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
+    specialist = state.specialist_agent_id
     with ws(state.workspace_id):
-        granted_source = await _seed_source(state, "asana")
+        granted_source = await _seed_source(state, "asana", agent_id=specialist)
         ungranted_source = await _seed_source(state, "linear", granted=False)
         granted = await _seed_page(state, granted_source, blob, title="Granted")
         ungranted = await _seed_page(state, ungranted_source, blob, title="Ungranted")
-        ctx = _context(state, blob)
+        ctx = _context(state, blob, agent_id=specialist)
 
         listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
         fetched = await PageObjects().get(ctx, str(ungranted))
@@ -383,6 +411,29 @@ async def test_pages_list_hides_a_source_this_agent_holds_no_grant_for(
     assert {row["name"] for row in listing["objects"]} == {str(granted)}
     assert fetched is None
     assert subjects == {granted: ("shared", False), ungranted: ("shared", False)}
+
+
+async def test_main_lists_and_reads_a_shared_source_page_without_a_grant(
+    db: None, tmp_path: Path
+) -> None:
+    """A shared source is open to the workspace's main agent with no grant: its pages list and read
+    for the main agent exactly as a granted feed's do, while the specialist beside it, holding no
+    grant, sees nothing of the same source."""
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "linear", granted=False)
+        page_id = await _seed_page(state, source_id, blob, title="Shared, ungranted")
+        main_ctx = _context(state, blob)
+        listing = json.loads(await _text(_TOOLS["object_list"], main_ctx, kind=PAGE_KIND))
+        fetched = await PageObjects().get(main_ctx, str(page_id))
+        specialist_ctx = _context(state, blob, agent_id=state.specialist_agent_id)
+        hidden = await PageObjects().get(specialist_ctx, str(page_id))
+
+    assert {row["name"] for row in listing["objects"]} == {str(page_id)}
+    assert fetched is not None
+    assert fetched.spec.title == "Shared, ungranted"
+    assert hidden is None
 
 
 async def test_foreign_room_cannot_read_shared_source_pages(db: None, tmp_path: Path) -> None:

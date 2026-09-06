@@ -572,7 +572,10 @@ def _readers_remain() -> sa.ColumnElement[bool]:
     """A correlated predicate on `source`: the archive has not taken every agent that reads it.
     A source whose grantees are all archived costs a fetch, a page write and the model tokens its
     facts are extracted with, for a feed no turn can reach — so it waits for a restore. A source
-    nobody was granted is a different row with a different history, and syncs as it always did."""
+    nobody was granted is a different row with a different history, and syncs as it always did. A
+    shared source has the main agent as a reader with no grant at all, so it keeps syncing while a
+    live main agent exists — the same rule `_source_readable` reads by, so the main agent is never
+    answering members from pages a stopped feed left behind."""
     granted = sa.select(sa.literal(1)).where(
         tables.source_grant.c.workspace_id == tables.source.c.workspace_id,
         tables.source_grant.c.source_id == tables.source.c.id,
@@ -594,7 +597,16 @@ def _readers_remain() -> sa.ColumnElement[bool]:
             tables.agent.c.archived_at.is_(None),
         )
     )
-    return sa.or_(~sa.exists(granted), sa.exists(granted_to_a_live_agent))
+    read_by_a_live_main = sa.select(sa.literal(1)).where(
+        tables.agent.c.workspace_id == tables.source.c.workspace_id,
+        tables.agent.c.is_main.is_(True),
+        tables.agent.c.archived_at.is_(None),
+    )
+    return sa.or_(
+        ~sa.exists(granted),
+        sa.exists(granted_to_a_live_agent),
+        sa.and_(tables.source.c.subject == SHARED_SUBJECT, sa.exists(read_by_a_live_main)),
+    )
 
 
 @dataclass(frozen=True)

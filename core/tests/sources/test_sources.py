@@ -1094,10 +1094,11 @@ async def _set_archived(agent_id: UUID, archived: bool) -> None:
 async def test_a_source_no_live_agent_can_read_stops_syncing(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
-    """A source is a feed for the agents granted it. Archive every one of them and each pass still
-    costs a fetch, a page write, and the model tokens the page's facts are extracted with — for a
-    feed no turn can reach. So the sweep leaves it alone, and takes it up again on the pass after a
-    restore returns it a reader."""
+    """A private source is a feed for the agents granted it. Archive every one of them and each
+    pass still costs a fetch, a page write, and the model tokens the page's facts are extracted with
+    — for a feed no turn can reach. So the sweep leaves it alone, and takes it up again on the pass
+    after a restore returns it a reader. A shared source is different: the main agent reads it with
+    no grant, so the test beside this one keeps it syncing."""
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
@@ -1121,7 +1122,7 @@ async def test_a_source_no_live_agent_can_read_stops_syncing(
         source_id = await context_for("probe", frozenset()).register_source(
             FOLDER_BACKEND,
             SourceConfig(root=str(root)),
-            subject=SHARED_SUBJECT,
+            subject=member_subject(uuid4()),
             owner_member_id=None,
             agent_id=research_id,
         )
@@ -1143,6 +1144,50 @@ async def test_a_source_no_live_agent_can_read_stops_syncing(
     await _sync(driver)
     assert {page["title"] for page in await _pages()} == {"first.md", "second.md"}
     assert source_id is not None
+
+
+async def test_a_shared_source_keeps_syncing_for_the_main_agent_after_its_grantee_is_archived(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The main agent reads every shared source without a grant, so a shared source always has a
+    reader while a main agent lives: archiving its only grantee changes nothing about the sweep, and
+    the main agent never answers members from pages a stopped feed left behind."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "first.md").write_text("the first note")
+    driver, _index, _service = _wire(database_url, vec((23, 1.0)), tmp_path / "blobs", workspace_id)
+    research_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=research_id,
+                workspace_id=workspace_id,
+                name="research",
+                prompt="p",
+                model="m",
+                is_main=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        await context_for("probe", frozenset()).register_source(
+            FOLDER_BACKEND,
+            SourceConfig(root=str(root)),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+            agent_id=research_id,
+        )
+    await _sync(driver)
+    assert len(await _pages()) == 1
+
+    await _set_archived(research_id, True)
+    (root / "second.md").write_text("the second note")
+    await _make_due()
+    assert await driver.candidate_workspaces() == (workspace_id,)
+    await _sync(driver)
+    assert {page["title"] for page in await _pages()} == {"first.md", "second.md"}
 
 
 async def test_a_source_a_second_live_agent_reads_keeps_syncing(
@@ -1730,20 +1775,46 @@ def _authority_reader(
 
 
 async def test_main_reads_an_owned_source_only_while_its_exact_owner_is_speaking(db: None) -> None:
-    """The exact shape of main's exception: it needs all three of the main agent, a live requesting
-    member, and that member owning the row. Drop any one and only a `source_grant` opens the
-    source — which is what carries the registering agent, speaker or not."""
+    """The exact shape of main's exception on a private source: it needs all three of the main
+    agent, a live requesting member, and that member owning the row. Drop any one and only a
+    `source_grant` opens the source — which is what carries the registering agent, speaker or not.
+    The shared source rides along in every main-agent read, because main reads every shared source
+    without an edge."""
     state = await _authority()
 
     assert await _reachable(
         state, _authority_reader(state, state.main_agent_id, state.owner_id)
-    ) == {state.owned_source_id}
+    ) == {state.owned_source_id, state.unowned_source_id}
 
+    assert await _reachable(state, _authority_reader(state, state.main_agent_id, None)) == {
+        state.unowned_source_id
+    }
+    assert await _reachable(
+        state, _authority_reader(state, state.main_agent_id, state.stranger_id)
+    ) == {state.unowned_source_id}
     assert (
-        await _reachable(state, _authority_reader(state, state.main_agent_id, None)) == frozenset()
+        await _reachable(state, _authority_reader(state, state.ungranted_agent_id, state.owner_id))
+        == frozenset()
     )
+    assert await _reachable(state, _authority_reader(state, state.granted_agent_id, None)) == {
+        state.owned_source_id
+    }
+
+
+async def test_main_reads_every_shared_source_and_a_specialist_only_what_it_is_granted(
+    db: None,
+) -> None:
+    """Sharing a source opens it to the workspace's main agent with no edge and no speaker: the
+    main agent is the one every member talks to and expects to know what the workspace shares. A
+    specialist agent reads only the sources granted to it, shared or not, so its feed set stays the
+    narrow one it was given."""
+    state = await _authority()
+
+    assert await _reachable(state, _authority_reader(state, state.main_agent_id, None)) == {
+        state.unowned_source_id
+    }
     assert (
-        await _reachable(state, _authority_reader(state, state.main_agent_id, state.stranger_id))
+        await _reachable(state, _authority_reader(state, state.ungranted_agent_id, None))
         == frozenset()
     )
     assert (
@@ -1759,7 +1830,8 @@ async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db
     """A scheduled run and a subagent both act with their initiator's authority and neither has a
     speaker, so both reach `source_reader` as one shape: member authority names the owner while
     `requesting_member_id` is None. The exception is the live speaker's alone, so the main agent
-    reaches nothing on either."""
+    reaches the owner's private source on neither — only the shared source, which it reads
+    regardless of who is speaking."""
     state = await _authority()
     for on_behalf_of_member_id in (state.owner_id, state.stranger_id):
         ctx = ToolContext(
@@ -1785,7 +1857,7 @@ async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db
         assert authority_member_id(ctx.authority) == on_behalf_of_member_id
         assert member_subject(on_behalf_of_member_id) in ctx.read_subjects
         assert ctx.source_reader().requesting_member_id is None
-        assert await _reachable(state, ctx.source_reader()) == frozenset()
+        assert await _reachable(state, ctx.source_reader()) == {state.unowned_source_id}
 
 
 async def test_a_failing_source_is_isolated_and_released(

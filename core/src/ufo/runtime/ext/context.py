@@ -997,6 +997,12 @@ class PageState:
 
 
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
+    """Which live sources this reader may read, as a predicate over `source` rows: a source granted
+    to the agent; every shared source when the agent is the workspace's main agent, since the main
+    agent is the one every member talks to and expects to know what the workspace shares; and a
+    member's own private source while that member is the live speaker and the agent is main. A
+    specialist agent reads only what it is granted, shared or not, so its feed set stays the narrow
+    one it was given. The reader's subjects bound every branch."""
     granted = sa.exists(
         sa.select(1).where(
             tables.source_grant.c.workspace_id == workspace_id,
@@ -1004,25 +1010,27 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
             tables.source_grant.c.agent_id == reader.agent_id,
         )
     )
+    reader_is_main = sa.exists(
+        sa.select(1).where(
+            tables.agent.c.workspace_id == workspace_id,
+            tables.agent.c.id == reader.agent_id,
+            tables.agent.c.is_main.is_(True),
+        )
+    )
+    main_reads_shared = sa.and_(tables.source.c.subject == SHARED_SUBJECT, reader_is_main)
     main_for_member = (
         sa.false()
         if reader.requesting_member_id is None
         else sa.and_(
             tables.source.c.owner_member_id == reader.requesting_member_id,
-            sa.exists(
-                sa.select(1).where(
-                    tables.agent.c.workspace_id == workspace_id,
-                    tables.agent.c.id == reader.agent_id,
-                    tables.agent.c.is_main.is_(True),
-                )
-            ),
+            reader_is_main,
         )
     )
     return sa.and_(
         tables.source.c.workspace_id == workspace_id,
         tables.source.c.removed_at.is_(None),
         tables.source.c.subject.in_(reader.subjects),
-        sa.or_(granted, main_for_member),
+        sa.or_(granted, main_reads_shared, main_for_member),
     )
 
 

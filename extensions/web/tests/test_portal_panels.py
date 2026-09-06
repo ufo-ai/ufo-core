@@ -496,11 +496,14 @@ async def test_skills_list_the_workspaces_own_and_the_deploys(portal) -> None:
     assert CHILD_SKILL.name not in {skill["name"] for skill in theirs["skills"]}
 
 
-async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
-    """The workspace memory search unions the member's reachable agents, and source grants stay
-    the fence: a page granted only to a non-main agent answers the member that agent was granted
-    to (their union includes it) and never a member who reaches only the main agent — or, with no
-    grant at all, only the source's own member; the hit's timestamp rides the wire aware."""
+async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_main_agent(
+    portal,
+) -> None:
+    """The workspace memory search unions the member's reachable agents, and every member reaches
+    the main agent, which reads every shared source without a grant. So a shared page granted only
+    to a non-main agent answers the member that agent was granted to and the member who reaches
+    only the main agent alike, and keeps answering both once no grant is left; the hit's timestamp
+    rides the wire aware."""
     client, workspace_id, _agent_a, agent_b = portal
     member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
@@ -584,8 +587,8 @@ async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
     [hit] = page_refs(granted)
     assert hit["kind"] == "source"
     assert hit["created_at"] == minted_at.isoformat()
-    unreachable = (await client.get(path, headers=other_headers)).json()
-    assert page_refs(unreachable) == []
+    through_main = (await client.get(path, headers=other_headers)).json()
+    assert len(page_refs(through_main)) == 1
     async with workspace_tx() as connection:
         await connection.execute(
             sa.delete(tables.source_grant).where(tables.source_grant.c.source_id == source_id)
@@ -593,7 +596,7 @@ async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
     owner_ungranted = (await client.get(path, headers=headers)).json()
     assert len(page_refs(owner_ungranted)) == 1
     stranger_ungranted = (await client.get(path, headers=other_headers)).json()
-    assert page_refs(stranger_ungranted) == []
+    assert len(page_refs(stranger_ungranted)) == 1
 
 
 async def test_memory_listing_is_newest_first_and_bounded(portal, tmp_path: Path) -> None:
