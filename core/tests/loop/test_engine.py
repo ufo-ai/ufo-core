@@ -6670,6 +6670,54 @@ async def test_a_call_rejected_before_its_handler_reads_a_bare_raise_as_bare(
     assert bare.content == BARE_RAISE_NOTICE.format(cls="PermissionError", tool="probe")
 
 
+async def test_every_dispatch_that_does_not_end_ok_is_a_warning_record(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A tool result the model has to recover from is found from logs alone: the counter says how
+    many, the record says which turn, which call, and how it ended. It carries the class and never
+    the error text — a handler's message is text this process never wrote, and `log` redacts by
+    field name, never by value. A call that ended ok writes nothing."""
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                _fixed_result_tool("errored", "the port is taken", is_error=True),
+                _raising_tool("raised", ValueError("the port is taken")),
+                _fixed_result_tool("fine", "ok"),
+            )
+        ),
+    )
+    context = _dispatch_context(engine)
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        for index, name in enumerate(("errored", "raised", "fine", "unknown")):
+            await _dispatch(engine, context, ToolUseBlock(id=f"c{index}", name=name, input={}), {})
+
+    records = [r for r in caplog.records if r.getMessage() == "tool.dispatch_failed"]
+    assert [r.levelno for r in records] == [logging.WARNING] * 3
+    assert [
+        {k: v for k, v in r.ufo.items() if k in ("tool", "call", "outcome", "error_class")}
+        for r in records
+    ] == [
+        {"tool": "errored", "call": "errored", "outcome": "handler_error"},
+        {
+            "tool": "raised",
+            "call": "raised",
+            "outcome": "handler_raised",
+            "error_class": "ValueError",
+        },
+        {
+            "tool": "unknown",
+            "call": "unknown",
+            "outcome": "invalid_call",
+            "error_class": "KeyError",
+        },
+    ]
+    assert all(r.ufo["turn_id"] == str(turn.id) and r.ufo["profile"] == "main" for r in records)
+    assert all("the port is taken" not in str(r.ufo) for r in records)
+
+
 async def test_dispatch_substitutes_a_notice_for_an_error_result_carrying_no_text(
     db: None, tmp_path: Path
 ) -> None:

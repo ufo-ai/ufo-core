@@ -115,6 +115,7 @@ from ufo.harness.o11y import (
     mark_span_outcome,
     span,
     turn_profile,
+    warn,
 )
 from ufo.harness.replies import MarkedReply, ReplyRedaction
 from ufo.harness.rounds import ModelRoundRunner, RoundEventTypes
@@ -3401,10 +3402,14 @@ class TurnEngine:
         One try encloses the whole step and its finally meters the call, so an end reaches the
         counter by leaving the body rather than by a call site remembering to name it — a raise past
         the handler (an image's blob put, a cancellation) is `step_failed` with its class, never an
-        unrecorded call whose handler already ran. A gating hook that fails closed denies the call
-        like a policy Deny and counts as `hook_failed`, so an extension hook that crashes or hangs
-        is not read as policy. Inside the step is where it counts: the recorded result replays on a
-        crash-recovery re-run without re-entering the body, so a replayed turn re-counts nothing."""
+        unrecorded call whose handler already ran. Every end but `ok` is also a warning record
+        naming the turn, the call, the outcome, and the class — never the error text, which is a
+        handler's own message and may echo a sandbox command's stderr — so a failed call is found
+        from logs alone rather than inferred from a counter. A gating hook that fails closed denies
+        the call like a policy Deny and counts as `hook_failed`, so an extension hook that crashes
+        or hangs is not read as policy. Inside the step is where it counts: the recorded result
+        replays on a crash-recovery re-run without re-entering the body, so a replayed turn
+        re-counts nothing."""
         call = bound.call
         self._live_dispatches.add(call.id)
         find_usages: list[Usage] = []
@@ -3454,6 +3459,16 @@ class TurnEngine:
                 _meter_dispatch(
                     self.tools, call, started, outcome, error_class, self.profile, semantic
                 )
+                if outcome != "ok":
+                    warn(
+                        "tool.dispatch_failed",
+                        turn_id=str(self.turn.id),
+                        tool=call.name,
+                        call=semantic.get("call", call.name),
+                        outcome=outcome,
+                        error_class=error_class,
+                        profile=self.profile,
+                    )
 
     async def _prepare_dispatch(
         self, bound: _BoundToolCall, target: ObjectActionTarget | None
