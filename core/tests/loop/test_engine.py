@@ -1777,7 +1777,7 @@ async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by
         model_config = ConfigDict(extra="forbid")
 
     turn = await _seed_turn("queued", None, acts_on_behalf=True)
-    turn = turn.model_copy(update={"subagent_profile": "application_builder"})
+    turn = turn.model_copy(update={"subagent_profile": "ufo_application_builder"})
     seen: list[tuple[UUID | None, UUID | None, dict[str, object]]] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:

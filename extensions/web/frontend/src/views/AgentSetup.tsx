@@ -21,7 +21,7 @@ import { BASE, postIntent } from "@/lib/api";
 import { openConsentWindow } from "@/lib/consent";
 import { newChatHash } from "@/lib/route";
 import { agentName } from "@/lib/agentName";
-import { setPendingAsk } from "@/lib/pendingAsk";
+import { BUILD_ASK, setPendingAsk } from "@/lib/pendingAsk";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { cn } from "@/lib/cn";
 import { navigate } from "@/lib/router";
@@ -82,11 +82,6 @@ const ANOTHER_CADENCE = "Something else";
 
 const BUILD_APP = "Build app";
 const SET_UP_APP = "Set up your";
-/** What the press types on the member's behalf, into the composer they send it from. It names the
- *  skill and stops: the steps live in the skill, and an ask repeating them would be a second copy
- *  of the procedure that drifts the first time either changes. */
-const BUILD_ASK = "Build this workspace its own version of your page. Load your homepage skill and "
-  + "follow it.";
 
 const BLOCKED_POPUP = "Your browser blocked the window. Allow pop-ups and press Connect again.";
 const CONNECT_REFUSED = "The connect did not open a consent page. Try again.";

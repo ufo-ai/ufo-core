@@ -38,6 +38,8 @@ from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.source import (
     CLAIM_TREE_PROG,
+    PROJECT_FILE_ABSENT,
+    PROJECT_FILE_READ,
 )
 from ufo_ext_sites.store import (
     HomepageHoldsThePort,
@@ -1656,7 +1658,7 @@ async def test_a_refused_deploy_never_touches_the_members_running_site(db: None)
         (DEPLOY_WEBSITE_TOOL, {"site_name": "pricing", "entry_point": "index.html"}),
         (
             PUBLISH_WEBSITE_TOOL,
-            {"app_name": "pricing", "dist_path": "dist", "run_command": "node server.js"},
+            {"app_name": "pricing", "run_command": "node server.js"},
         ),
     ):
         tool, ctx = _tool(tool_name, audience)
@@ -1790,7 +1792,6 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
                 tool,
                 broken,
                 project_path="/workspace/app",
-                dist_path="dist",
                 app_name="pricing",
                 install_command=install_command,
                 run_command="node server.js",
@@ -2569,7 +2570,6 @@ async def test_object_get_gates_a_stranger_and_skips_a_serverful_app(db: None) -
             tool,
             _bind(ctx, workspace, app_conversation, owner_id),
             project_path="/workspace/app",
-            dist_path="dist",
             app_name="apphost",
             run_command="node server.js",
         )
@@ -2687,6 +2687,38 @@ def test_the_claim_program_takes_a_planted_link_without_following_it(tmp_path: P
     assert outside.read_bytes() == b"host bytes"
     assert not stale.exists()
     assert (workspace / "sites" / "home" / "assets" / "app.js").read_bytes() == b""
+
+
+def test_the_project_read_answers_absence_apart_from_a_refusal(tmp_path: Path) -> None:
+    """An app page project carries an `application-design.svg` or it does not, and the gate reads
+    the difference off this exit code. The guard answers a missing file with `PathNotFound`, which
+    is a `ContainmentError` and not a `FileNotFoundError`, so absence and refusal only stay apart
+    while the program catches the class the guard actually raises."""
+
+    project = tmp_path / "ufo-app"
+    project.mkdir()
+    (project / "app.tsx").write_text("const page = 1;\n")
+    (project / "escape.svg").symlink_to(tmp_path.parent / "outside.svg")
+    guard_home = str(Path(containment.__file__).parent)
+
+    def read(name: str, maximum: str = "1000") -> CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", PROJECT_FILE_READ, str(project / name), str(tmp_path), maximum],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": guard_home},
+        )
+
+    held = read("app.tsx")
+    assert held.returncode == 0, held.stderr
+    assert held.stdout == "const page = 1;\n"
+
+    assert read("application-design.svg").returncode == PROJECT_FILE_ABSENT
+    assert read("nowhere/application-design.svg").returncode == PROJECT_FILE_ABSENT
+
+    refused = read("escape.svg")
+    assert refused.returncode == 1
+    assert "escape.svg" in refused.stderr
 
 
 def test_the_enumeration_program_lists_and_bounds_the_source_tree(tmp_path: Path) -> None:

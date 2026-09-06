@@ -1,0 +1,32 @@
+name = "app-lifecycle-refusal-detail"
+base = "HEAD"
+suites = ["ufo-app-bench"]
+cases = ["kanban-board", "call-notes", "daily-brief"]
+repeats = 4
+concurrency = 3
+max_stacks = 2
+budget_usd = 90.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+# Whether a lifecycle refusal that names the state and the page's own throw is load-bearing. In one
+# recorded run this check produced eight of twelve refusals, `the page never mounted` was the
+# dominant state, and every case spent its whole turn budget on six to twelve rebuilds. The arm
+# returns the refusal to the bare reason the builder read then. Read on the process scores — spawns
+# and deploys per case — because the claim is that a named fault is repaired rather than rebuilt.
+[[arm]]
+name = "bare-lifecycle-reason"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/tools.py"
+old = '''        record = _ApplicationLifecycleDiagnostic.model_validate_json(diagnostic.stdout)
+        state = (_lifecycle_state(record.snapshot),) if record.snapshot else ()
+        return _lifecycle_message(record.reason, state + record.problems)'''
+new = '''        return _ApplicationLifecycleDiagnostic.model_validate_json(diagnostic.stdout).reason'''

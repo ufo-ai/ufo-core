@@ -1,4 +1,3 @@
-import hashlib
 import json
 import shutil
 import subprocess
@@ -19,6 +18,8 @@ AUDIT_SCRIPT = (
     / "extensions"
     / "sites"
     / "ufo_ext_sites"
+    / "skills"
+    / "application-homepage"
     / "scripts"
     / "audit_application.cjs"
 )
@@ -263,38 +264,23 @@ def test_root_cli_writes_ordered_outputs_and_closes_on_success_and_failure(
     (app / "app.webmanifest").write_text('{"name":"Audit fixture"}')
     (dist / "assets" / "app.css").write_text("body{color:#111;background:#fff}")
     design = (
-        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" width="305" height="844">'
-        b'<g data-app-region="queue"><rect width="145" height="844" /></g>'
-        b'<g data-app-region="detail"><rect x="160" width="145" height="844" /></g>'
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" width="360" height="844">'
+        b'<g data-app-region="queue"><rect width="170" height="844" /></g>'
+        b'<g data-app-region="detail"><rect x="190" width="170" height="844" /></g>'
         b"</svg>"
     )
     (tmp_path / "accepted-design.svg").write_bytes(design)
-    evidence = {
-        "version": 1,
-        "design_sha256": hashlib.sha256(design).hexdigest(),
-        "regions": [
-            {"name": "queue", "left": 0, "top": 0, "width": 145 / 305, "height": 1},
-            {
-                "name": "detail",
-                "left": 160 / 305,
-                "top": 0,
-                "width": 145 / 305,
-                "height": 1,
-            },
-        ],
-    }
-    (tmp_path / "accepted-design.json").write_text(json.dumps(evidence))
     command = """set -eu
 if node /fixture/audit_application.cjs \
   http://127.0.0.1:49123/preview.html \
   /tmp/refused.json /tmp/refused-light.png /tmp/refused-dark.png \
   /tmp/refused-interactive.html /tmp/refused-static.html \
-  /fixture/accepted-design.svg /fixture/accepted-design.json \
+  360 /fixture/accepted-design.svg \
   >/tmp/refused.out 2>/tmp/refused.err; then exit 11; fi
 node /fixture/audit_application.cjs /fixture/app \
   /fixture/report.json /fixture/light.png /fixture/dark.png \
   /fixture/interactive.html /fixture/static.html \
-  /fixture/accepted-design.svg /fixture/accepted-design.json
+  360 /fixture/accepted-design.svg
 python3 - <<'PY'
 import json
 from urllib.error import URLError
@@ -312,7 +298,7 @@ sed 's|/assets/app.css|/missing.css|' /fixture/complete.html > /fixture/app/dist
 if node /fixture/audit_application.cjs /fixture/app \
   /fixture/missing-report.json /fixture/missing-light.png /fixture/missing-dark.png \
   /fixture/missing-interactive.html /fixture/missing-static.html \
-  /fixture/accepted-design.svg /fixture/accepted-design.json \
+  360 /fixture/accepted-design.svg \
   >/fixture/missing.out 2>/fixture/missing.err; then
   exit 14
 else
@@ -327,7 +313,7 @@ if node /fixture/audit_application.cjs /fixture/app \
   /fixture/missing-manifest-report.json /fixture/missing-manifest-light.png \
   /fixture/missing-manifest-dark.png /fixture/missing-manifest-interactive.html \
   /fixture/missing-manifest-static.html \
-  /fixture/accepted-design.svg /fixture/accepted-design.json \
+  360 /fixture/accepted-design.svg \
   >/fixture/missing-manifest.out 2>/fixture/missing-manifest.err; then
   exit 15
 else
@@ -342,7 +328,7 @@ printf '%s' '<!doctype html><p>No lifecycle</p>' > /fixture/app/dist/index.html
 if timeout 25 node /fixture/audit_application.cjs /fixture/app \
   /fixture/failed-report.json /fixture/failed-light.png /fixture/failed-dark.png \
   /fixture/failed-interactive.html /fixture/failed-static.html \
-  /fixture/accepted-design.svg /fixture/accepted-design.json; then
+  360 /fixture/accepted-design.svg; then
   exit 13
 else
   test "$?" -eq 3
@@ -376,7 +362,12 @@ fi
         ("light", NARROW_WIDTH),
         ("dark", NARROW_WIDTH),
     ]
-    assert report["designRegions"] == evidence["regions"]
+    # The script measures the design rather than echoing a file, so what the report carries is the
+    # painted geometry: the two names, in the order the lane draws them.
+    measured = report["designRegions"]
+    assert [region["name"] for region in measured] == ["queue", "detail"]
+    queue, detail = measured
+    assert queue["left"] + queue["width"] <= detail["left"]
     assert [control["name"] for control in report["interaction"]["controls"]] == [
         "First",
         "Second",

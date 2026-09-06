@@ -49,8 +49,9 @@ unless the same turn deployed the site, the seed's deploy-and-bind shape."""
 
 import json
 import shlex
+from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -81,42 +82,31 @@ from ufo.sdk.tools import (
     clipped,
 )
 from ufo_ext_sites.application_audit import (
-    APPLICATION_AUDIT_ATTEMPT_KEY,
-    APPLICATION_AUDIT_TURN_CONTRACT_KEY,
-    MAX_PRODUCT_QA_CONTROLS,
-    AcceptedApplicationDesignEvidence,
-    ApplicationAuditContract,
-    ApplicationAuditFeedback,
+    APPLICATION_DESIGN_MAX_CHARS,
+    APPLICATION_DESIGN_WIDTH,
+    APPLICATION_SOURCE_MAX_CHARS,
+    MAX_MESSAGE_CHARS,
     ApplicationAuditIssue,
     ApplicationAuditReport,
-    ApplicationProductQaResult,
-    ApplicationQaProof,
+    ApplicationAuditVerdict,
+    ApplicationDesign,
+    AuditIssueCode,
     audit_application,
+    validate_application_design,
+    validate_application_source,
 )
-from ufo_ext_sites.application_builder import (
-    APPLICATION_BUILDER_DEPLOY_GUARD_REASON,
-    APPLICATION_BUILDER_DEPLOY_TOOL,
-    APPLICATION_BUILDER_NAME,
-    APPLICATION_BUILDER_QA_CALL_KEY,
-    APPLICATION_BUILDER_QA_MAX_CALLS,
-    APPLICATION_BUILDER_QA_PROOF_KEY,
-    APPLICATION_BUILDER_QA_TOOL,
-    APPLICATION_BUILDER_REDEPLOY_KEY,
-    APPLICATION_DESIGN_EVIDENCE_MAX_CHARS,
-    APPLICATION_DESIGN_MAX_CHARS,
-    APPLICATION_DESIGN_PATH,
-    APPLICATION_SCAFFOLD_PATH,
-    APPLICATION_SOURCE_PATH,
-    APPLICATION_SOURCE_READ,
-    application_design_acceptance_relative,
-    application_design_evidence_relative,
-)
+from ufo_ext_sites.application_homepage import APPLICATION_AUDIT_SCRIPT_PATH
 from ufo_ext_sites.objects import SITE_KIND, effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
 from ufo_ext_sites.source import (
     PROJECT_CONFIG,
     PROJECT_CONFIG_BYTES,
+    PROJECT_DESIGN,
     PROJECT_DIST,
+    PROJECT_FILE_ABSENT,
+    PROJECT_FILE_READ,
+    PROJECT_PREVIEW,
+    PROJECT_PREVIEW_BYTES,
     PROJECT_SOURCE,
     SOURCE_PUT_TTL_SECONDS,
     UPLOAD_SCRIPT,
@@ -133,7 +123,6 @@ from ufo_ext_sites.store import (
 )
 from ufo_ext_sites.surface import site_url
 
-WEBSITE_TOOL = "website"
 START_SERVER_TOOL = "start_server"
 DEPLOY_WEBSITE_TOOL = "deploy_website"
 PUBLISH_WEBSITE_TOOL = "publish_website"
@@ -144,10 +133,19 @@ APPLICATION_AUDIT_TIMEOUT_SECONDS = 120
 APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS = 15
 APPLICATION_AUDIT_REPORT_MAX_BYTES = 1024 * 1024
 APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES = 4096
-APPLICATION_AUDIT_MAX_ATTEMPTS = 2
-APPLICATION_AUDIT_SCRIPT = (
-    Path(__file__).parent / "scripts" / "audit_application.cjs"
-).read_bytes()
+APPLICATION_LIFECYCLE_EXIT = 3
+APPLICATION_DESIGN_FAULT_EXIT = 4
+APPLICATION_LIFECYCLE_SUFFIX = ".lifecycle.json"
+APPLICATION_LIFECYCLE_UNREAD = (
+    "the page did not become ready, and the audit's own record of why could not be read"
+)
+"""What a lifecycle refusal says when its diagnostic is gone. An issue message cannot be empty, so
+an unread diagnostic would raise a validation error in place of the refusal the exit code already
+earned, and the builder would lose the verdict to an internal fault."""
+APPLICATION_AUDIT_SCRIPT = APPLICATION_AUDIT_SCRIPT_PATH.read_bytes()
+"""One file, two callers: the deploy writes it into the sandbox and runs it on the built page,
+and the agent runs it under `$UFO_HOME` on a design it just drew. A second copy would be two
+design contracts."""
 APPLICATION_AUDIT_REPORT_READ = """from pathlib import Path
 import sys
 path = Path(sys.argv[1])
@@ -181,6 +179,55 @@ class _ApplicationLifecycleDiagnostic(BaseModel):
     code: Literal["application_lifecycle"]
     reason: str = Field(min_length=1, max_length=400)
     snapshot: _ApplicationLifecycleSnapshot | None
+    problems: tuple[str, ...] = ()
+
+
+def _lifecycle_state(snapshot: _ApplicationLifecycleSnapshot) -> str:
+    """The three facts the readiness check reads, so a repair aims at the work that never drained
+    rather than at the page. In one recorded run this check produced eight of twelve refusals, and
+    the builder answered each by drawing and building the whole page again."""
+
+    if not snapshot.mounted:
+        return "the page never mounted"
+    blocking = tuple(
+        f"{kind} {count}" for kind, count in snapshot.blocking.model_dump().items() if count
+    )
+    if not blocking and snapshot.state == "idle":
+        return "the page kept re-rendering"
+    named = [] if snapshot.state == "idle" else [f"state {snapshot.state}"]
+    if blocking:
+        named.append(f"{snapshot.blocking_work} blocking ({', '.join(blocking)})")
+    return ", ".join(named)
+
+
+def _lifecycle_joined(reason: str, named: tuple[str, ...], dropped: bool) -> str:
+    parts = (*named, "…") if dropped else named
+    return f"{reason}: {'; '.join(parts)}" if parts else reason
+
+
+def _lifecycle_message(reason: str, named: tuple[str, ...]) -> str:
+    """The lifecycle refusal, held to what an audit issue's message can carry.
+
+    The audit hands up to four console lines of 500 characters each, so the joined reason reaches
+    about five times the field's cap and the issue raises a validation error in place of the
+    refusal the audit had already written. Lines are kept whole, in the order the audit found them,
+    because a line cut in half names no fault. The first line that does not fit whole is the one
+    the builder was about to read, so its head takes the room left rather than nothing — a refusal
+    that names only the state is what this check exists to end. The ellipsis says the rest are in
+    the lifecycle diagnostic beside the report."""
+
+    kept: tuple[str, ...] = ()
+    remaining = named
+    while remaining:
+        composed = _lifecycle_joined(reason, (*kept, remaining[0]), len(remaining) > 1)
+        if len(composed) > MAX_MESSAGE_CHARS:
+            break
+        kept, remaining = (*kept, remaining[0]), remaining[1:]
+    if not remaining:
+        return _lifecycle_joined(reason, kept, False)
+    room = MAX_MESSAGE_CHARS - len(_lifecycle_joined(reason, (*kept, ""), True))
+    head = remaining[0][:room] if room > 0 else ""
+    return _lifecycle_joined(reason, (*kept, head) if head else kept, True)
 
 
 PORT_STOP_PROG = """import os
@@ -394,7 +441,6 @@ SITE_MEDIA_TYPES = {
 }
 SITE_MEDIA_TYPE_DEFAULT = "application/octet-stream"
 
-WEBSITE_DESCRIPTION = "Build a website in the sandbox."
 START_SERVER_DESCRIPTION = (
     "Start a project in the background with automatic port cleanup and readiness detection. Omit "
     "command to serve a static folder. Pass command only for a project's own app server. Use this "
@@ -406,9 +452,10 @@ DEPLOY_WEBSITE_DESCRIPTION = (
     "— beside the sandbox-local url. Re-deploying the same site_name updates it behind that link."
 )
 PUBLISH_WEBSITE_DESCRIPTION = (
-    "Publish a web app: install dependencies, serve the built output (and backend run_command if "
-    "any) from the sandbox, and host it at a permanent link. Returns site_url — the deliverable — "
-    "beside the sandbox-local url. Static files come from dist_path."
+    "Publish a web app that runs a server: install its dependencies, run run_command with $PORT "
+    "set to the port this probes, and host it at a permanent link. Returns site_url — the "
+    "deliverable — beside the sandbox-local url. A folder of built files with no server of its "
+    "own is deploy_website's."
 )
 NO_EXTENSION_CONTEXT = "the website tools dispatched without their ExtensionContext"
 SITE_NEEDS_AN_OWNER = "a hosted site needs an owner: no member is acting on this turn"
@@ -454,13 +501,6 @@ HOMEPAGE_KEEPS_THE_AGENTS_VISIBILITY = (
 )
 
 
-class WebsiteInput(BaseModel):
-    run_command: str = Field(description="The build command to run in the project directory.")
-    project_path: str | None = Field(
-        default=None, description="Project directory to build in. Defaults to the workspace root."
-    )
-
-
 class StartServerInput(BaseModel):
     command: str | None = Field(
         default=None,
@@ -490,7 +530,9 @@ class DeployWebsiteInput(BaseModel):
         description="Directory containing the built static output (index.html)."
     )
     site_name: str = Field(description="A name for the served site; it names the hosted link.")
-    entry_point: str = Field(description="The entry file to serve, e.g. index.html.")
+    entry_point: str = Field(
+        default="index.html", description="The entry file to serve, e.g. index.html."
+    )
     visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
 
 
@@ -505,11 +547,10 @@ class QaUfoApplicationInput(BaseModel):
 class PublishWebsiteInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_path: str = Field(description="The web app project directory.")
-    dist_path: str = Field(description="Directory of the built static output to serve.")
     app_name: str = Field(description="A name for the published app; it names the hosted link.")
     visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
-    run_command: str | None = Field(
-        default=None, description="Optional backend command to run alongside the static files."
+    run_command: str = Field(
+        description="The server command to run. It must listen on the port in $PORT."
     )
     install_command: str | None = Field(
         default=None, description="Optional command to install dependencies before serving."
@@ -982,29 +1023,9 @@ def _build_failed(command: str, project: str, result: ExecResult) -> ToolFailure
     )
 
 
-async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
-    project = workspace_path(args.project_path or WORKSPACE_DIR)
-    result = await ctx.sandbox.bash(
-        f"cd {shlex.quote(project)} && {args.run_command}", timeout_s=BUILD_TIMEOUT_SECONDS
-    )
-    if result.exit_code != 0:
-        return _build_failed(args.run_command, project, result).result()
-    listing = await ctx.sandbox.bash(f"ls -1A {shlex.quote(project)}")
-    files = [name for name in listing.stdout.splitlines() if name]
-    return _json_result({"project_path": project, "files": files})
-
-
 async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
     port = args.port or START_SERVER_PORT
     project = workspace_path(args.project_path)
-    application_builder = ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
-    if application_builder and project != APPLICATION_SCAFFOLD_PATH:
-        raise RuntimeError(
-            f"ufo application preview project_path must be {APPLICATION_SCAFFOLD_PATH}, "
-            f"not {project}"
-        )
-    if application_builder and args.command is not None:
-        raise RuntimeError("ufo application preview does not accept a command")
     log_path = (
         workspace_path(args.log_file)
         if args.log_file
@@ -1015,271 +1036,7 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
         served = await _serve(ctx, command, project, port, log_path)
     except ServeFailed as failed:
         return failed.failure.result()
-    if application_builder:
-        served["url"] = f"{served['url']}/preview.html"
     return _json_result({**served, "project_path": project})
-
-
-async def _application_audit_attempts(ctx: ToolContext) -> int:
-    if ctx.ext is None:
-        raise RuntimeError("the application audit dispatched without its extension context")
-    stored = await ctx.ext.store.get(APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id))
-    if stored is None:
-        return 0
-    if type(stored) is not int:
-        raise RuntimeError("application audit attempt count is not an integer")
-    return stored
-
-
-async def _application_audit_feedback(
-    ctx: ToolContext, issues: tuple[ApplicationAuditIssue, ...], attempts: int
-) -> ApplicationAuditFeedback:
-    if ctx.ext is None:
-        raise RuntimeError("the application audit dispatched without its extension context")
-    used = attempts + 1
-    await ctx.ext.store.put(APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id), used)
-    feedback = ApplicationAuditFeedback(
-        attempt=used,
-        attempts_remaining=APPLICATION_AUDIT_MAX_ATTEMPTS - used,
-        issues=issues,
-    )
-    return feedback
-
-
-async def _accepted_application_design(
-    ctx: ToolContext,
-) -> tuple[AcceptedApplicationDesignEvidence, str, str]:
-    accepted_design_path = await ctx.sandbox.runtime_path(
-        application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
-    )
-    accepted_evidence_path = await ctx.sandbox.runtime_path(
-        application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
-    )
-    evidence_read = await ctx.sandbox.python(
-        APPLICATION_AUDIT_REPORT_READ,
-        accepted_evidence_path,
-        str(APPLICATION_DESIGN_EVIDENCE_MAX_CHARS),
-    )
-    if evidence_read.exit_code != 0 or not evidence_read.stdout:
-        raise RuntimeError(
-            evidence_read.stderr
-            or evidence_read.stdout
-            or "accepted application design evidence is absent"
-        )
-    try:
-        evidence = AcceptedApplicationDesignEvidence.model_validate_json(evidence_read.stdout)
-    except ValueError as error:
-        raise RuntimeError("accepted application design evidence is invalid") from error
-    design_read = await ctx.sandbox.python(
-        APPLICATION_AUDIT_REPORT_READ,
-        accepted_design_path,
-        str(APPLICATION_DESIGN_MAX_CHARS),
-    )
-    if design_read.exit_code != 0 or not design_read.stdout:
-        raise RuntimeError(
-            design_read.stderr or design_read.stdout or "accepted application design is absent"
-        )
-    if sha256(design_read.stdout.encode()).hexdigest() != evidence.design_sha256:
-        raise RuntimeError("accepted application design evidence digest does not match the design")
-    return evidence, accepted_design_path, accepted_evidence_path
-
-
-async def _audit_builder_application(
-    ctx: ToolContext, project: str
-) -> ApplicationAuditReport | ApplicationAuditFeedback:
-    attempts = await _application_audit_attempts(ctx)
-    if attempts >= APPLICATION_AUDIT_MAX_ATTEMPTS:
-        raise RuntimeError("Application audit stopped after two failed product audits.")
-    relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
-    root = await ctx.sandbox.runtime_path(relative_root)
-    script_path = f"{root}.cjs"
-    report_path = f"{root}.json"
-    light_path = f"{root}-light.png"
-    dark_path = f"{root}-dark.png"
-    interactive_path = f"{root}-interactive.html"
-    static_path = f"{root}-static.html"
-    (
-        design_evidence,
-        accepted_design_path,
-        accepted_evidence_path,
-    ) = await _accepted_application_design(ctx)
-    await ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
-    run = await ctx.sandbox.sh(
-        'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"',
-        script_path,
-        project,
-        report_path,
-        light_path,
-        dark_path,
-        interactive_path,
-        static_path,
-        accepted_design_path,
-        accepted_evidence_path,
-        timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
-    )
-    if run.exit_code != 0:
-        detail = (run.stderr or run.stdout).strip()[:400]
-        if run.exit_code == 3:
-            diagnostic_read = await ctx.sandbox.python(
-                APPLICATION_AUDIT_REPORT_READ,
-                f"{report_path}.lifecycle.json",
-                str(APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES),
-            )
-            if diagnostic_read.exit_code != 0:
-                detail = (
-                    diagnostic_read.stderr
-                    or diagnostic_read.stdout
-                    or "application lifecycle diagnostic is absent"
-                ).strip()[:400]
-            else:
-                try:
-                    diagnostic = _ApplicationLifecycleDiagnostic.model_validate_json(
-                        diagnostic_read.stdout
-                    )
-                except ValueError:
-                    detail = "application lifecycle diagnostic is invalid"
-                else:
-                    detail = diagnostic.reason
-        if not detail:
-            detail = "audit returned no error"
-        return await _application_audit_feedback(
-            ctx,
-            (
-                ApplicationAuditIssue(
-                    code="audit_run",
-                    message=f"Run the browser audit successfully: {detail}",
-                ),
-            ),
-            attempts,
-        )
-    report_read = await ctx.sandbox.python(
-        APPLICATION_AUDIT_REPORT_READ,
-        report_path,
-        str(APPLICATION_AUDIT_REPORT_MAX_BYTES),
-    )
-    if report_read.exit_code != 0:
-        detail = (report_read.stderr or report_read.stdout or "audit report is absent").strip()[
-            :400
-        ]
-        return await _application_audit_feedback(
-            ctx,
-            (
-                ApplicationAuditIssue(
-                    code="audit_run",
-                    message=f"Produce a readable browser audit report: {detail}",
-                ),
-            ),
-            attempts,
-        )
-    try:
-        report = ApplicationAuditReport.model_validate_json(report_read.stdout)
-        if report.design_regions != design_evidence.regions:
-            raise ValueError("browser audit design evidence does not match the accepted design")
-        if ctx.ext is None:
-            raise RuntimeError("the application audit dispatched without its extension context")
-        if ctx.turn.parent_turn_id is None:
-            raise RuntimeError("the application audit dispatched without its parent turn")
-        stored_contract = await ctx.ext.store.get(
-            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=ctx.turn.parent_turn_id)
-        )
-        contract = ApplicationAuditContract.model_validate(stored_contract or {})
-    except ValueError as error:
-        return await _application_audit_feedback(
-            ctx,
-            (
-                ApplicationAuditIssue(
-                    code="audit_run",
-                    message=f"Produce a valid browser audit report: {str(error)[:400]}",
-                ),
-            ),
-            attempts,
-        )
-    verdict = audit_application(report, contract)
-    if not verdict.passed:
-        return await _application_audit_feedback(ctx, verdict.issues, attempts)
-    return report
-
-
-async def _application_source_sha256(ctx: ToolContext) -> str:
-    source = await ctx.sandbox.python(
-        APPLICATION_SOURCE_READ, APPLICATION_SOURCE_PATH, WORKSPACE_DIR
-    )
-    if source.exit_code != 0:
-        raise RuntimeError(source.stderr or "app.tsx could not be read")
-    return sha256(source.stdout.encode()).hexdigest()
-
-
-async def _require_current_application_qa(ctx: ToolContext) -> ApplicationQaProof:
-    if ctx.ext is None:
-        raise RuntimeError("product QA dispatched without its extension context")
-    stored = await ctx.ext.store.get(APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id))
-    if stored is None:
-        raise RuntimeError(APPLICATION_BUILDER_DEPLOY_GUARD_REASON)
-    try:
-        proof = ApplicationQaProof.model_validate(stored)
-    except ValueError as error:
-        raise RuntimeError("application builder QA proof is invalid") from error
-    if await _application_source_sha256(ctx) != proof.source_sha256:
-        raise RuntimeError("app.tsx changed after product QA passed")
-    return proof
-
-
-async def qa_ufo_application(ctx: ToolContext, args: QaUfoApplicationInput) -> ToolResult:
-    if ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
-        raise RuntimeError("product QA is available only to the ufo application builder")
-    if ctx.ext is None:
-        raise RuntimeError("product QA dispatched without its extension context")
-    call_key = APPLICATION_BUILDER_QA_CALL_KEY.format(turn_id=ctx.turn.id)
-    stored_calls = await ctx.ext.store.get(call_key)
-    if stored_calls is None:
-        calls = 0
-    elif type(stored_calls) is int:
-        calls = stored_calls
-    else:
-        raise RuntimeError("application product QA call count is not an integer")
-    if calls >= APPLICATION_BUILDER_QA_MAX_CALLS:
-        raise RuntimeError(
-            f"Application audit stopped after {APPLICATION_BUILDER_QA_MAX_CALLS} product audits."
-        )
-    calls += 1
-    await ctx.ext.store.put(call_key, calls)
-    audit = await _audit_builder_application(ctx, APPLICATION_SCAFFOLD_PATH)
-    match audit:
-        case ApplicationAuditFeedback():
-            return _json_result(audit.model_dump())
-        case ApplicationAuditReport():
-            report = audit
-    result = ApplicationProductQaResult(
-        views_checked=tuple(f"{view.scheme} {view.width}px" for view in report.views),
-        controls_checked=tuple(control.name for control in report.interaction.controls)[
-            :MAX_PRODUCT_QA_CONTROLS
-        ],
-        interactions_verified=tuple(control.name for control in report.interaction.successes)[
-            :MAX_PRODUCT_QA_CONTROLS
-        ],
-    )
-    source_sha256 = await _application_source_sha256(ctx)
-    await ctx.ext.store.put(
-        APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id),
-        ApplicationQaProof(
-            source_sha256=source_sha256,
-            browser_batches=calls,
-        ).model_dump(),
-    )
-    return _json_result(result.model_dump())
-
-
-async def deploy_ufo_application(ctx: ToolContext, args: DeployUfoApplicationInput) -> ToolResult:
-    if ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
-        raise RuntimeError("application deploy is available only to the ufo application builder")
-    return await deploy_website(
-        ctx,
-        DeployWebsiteInput(
-            project_path=APPLICATION_SCAFFOLD_PATH,
-            site_name=args.site_name,
-            entry_point="index.html",
-        ),
-    )
 
 
 def _unhosted(displaced: HostedSite | None, conversation_id: UUID) -> dict[str, object]:
@@ -1295,16 +1052,6 @@ def _unhosted(displaced: HostedSite | None, conversation_id: UUID) -> dict[str, 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
     source_project = workspace_path(args.project_path)
-    if (
-        ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
-        and source_project != APPLICATION_SCAFFOLD_PATH
-    ):
-        raise RuntimeError(
-            f"ufo application deploy project_path must be {APPLICATION_SCAFFOLD_PATH}, "
-            f"not {source_project}"
-        )
-    if ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME:
-        await _require_current_application_qa(ctx)
     conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
     bound = await _sites_registry(ctx).homepage(ctx.turn.agent_id)
@@ -1334,32 +1081,213 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     )
 
 
+def _verdict(code: AuditIssueCode, message: str) -> ApplicationAuditVerdict:
+    return ApplicationAuditVerdict(issues=(ApplicationAuditIssue(code=code, message=message),))
+
+
+def _last_words(output: str) -> str:
+    """The end of a build or audit's output, which is where the fault it stopped on is written.
+
+    Every tool in this path — vite, node, the audit script — prints its warnings first and its
+    fatal error last, so a head-truncated message hands the builder the part that does not matter.
+    One recorded build spent its repair round on a `configLoader` deprecation notice while the
+    error that actually stopped the build sat past the cut."""
+
+    text = output.strip()
+    if len(text) <= MAX_MESSAGE_CHARS:
+        return text
+    return "…" + text[-(MAX_MESSAGE_CHARS - 1) :]
+
+
+class ApplicationPageRefused(RuntimeError):
+    """The deterministic verdict that stopped an app page from becoming a site.
+
+    The message is the repair list, because the builder's next `edit` is what reads it. It is
+    raised before anything is written, so a refusal leaves no row, no server, and no blob — which
+    is what makes the audit and the hosting one act: a hosted page is an audited page, and there is
+    nothing else to ask.
+
+    It refuses every attempt, and counts none. A page that fails four times fails four times; the
+    bounds are the child's rounds and the member's next message, never a budget that turns the
+    fourth attempt into a hosted page nobody checked."""
+
+    def __init__(self, verdict: ApplicationAuditVerdict) -> None:
+        super().__init__(
+            "This page cannot be hosted yet. Repair it and deploy again:\n"
+            + "\n".join(f"- {issue.message}" for issue in verdict.issues)
+        )
+        self.verdict = verdict
+
+
+@dataclass(frozen=True)
+class ApplicationPageGate:
+    """What a directory holding `app.tsx` must be true of before its bytes become a site.
+
+    Three deterministic acts in the order that makes each one cheap: the source is read and held to
+    the kit before a build is paid for, the build runs, and the browser measures the page that
+    build wrote. A design sitting beside the source adds the two checks only a design can carry —
+    its components and regions in the source, its layout in the rendered lane.
+
+    An audit that cannot run is not a repair. Chromium dying, a report that will not parse, a
+    wedged sandbox: those raise as themselves, so the builder is never told to edit `app.tsx` to
+    fix the browser."""
+
+    ctx: ToolContext
+    project: str
+
+    async def built_page(self) -> str:
+        """The kit rules, the build, and — for a page drawn against a design — the browser audit.
+
+        The audit drives the page in a preview that answers every read with a workspace holding
+        nothing, so it measures what a page draws on its own. A page whose content is the
+        workspace's own rows draws its blank state there and exposes no control, which is the
+        preview's emptiness and not the page's fault. Every page the builder makes is drawn
+        against a design first, so the design is what says a page was built to be measured this
+        way; the app pages an extension ships carry none and are built and served as they were."""
+        design = await self._design()
+        await self._gate_source(design)
+        await self._build()
+        if design is not None:
+            await self._audit(design)
+        return f"{self.project}/{PROJECT_DIST}"
+
+    async def _read(self, name: str, maximum: int) -> str | None:
+        held = await self.ctx.sandbox.python(
+            PROJECT_FILE_READ, f"{self.project}/{name}", WORKSPACE_DIR, str(maximum)
+        )
+        if held.exit_code == PROJECT_FILE_ABSENT:
+            return None
+        if held.exit_code != 0:
+            raise RuntimeError(held.stderr.strip() or f"{name} could not be read")
+        return held.stdout
+
+    async def _design(self) -> ApplicationDesign | None:
+        source = await self._read(PROJECT_DESIGN, APPLICATION_DESIGN_MAX_CHARS)
+        if source is None:
+            return None
+        try:
+            return validate_application_design(source)
+        except ValueError as error:
+            raise ApplicationPageRefused(_verdict("design", str(error))) from error
+
+    async def _gate_source(self, design: ApplicationDesign | None) -> None:
+        source = await self._read(PROJECT_SOURCE, APPLICATION_SOURCE_MAX_CHARS)
+        if source is None:
+            raise RuntimeError(f"{PROJECT_SOURCE} could not be read")
+        try:
+            validate_application_source(source, design)
+        except ValueError as error:
+            raise ApplicationPageRefused(_verdict("source", str(error))) from error
+
+    async def _build(self) -> None:
+        await self.ctx.sandbox.write_file(f"{self.project}/{PROJECT_CONFIG}", PROJECT_CONFIG_BYTES)
+        await self.ctx.sandbox.write_file(
+            f"{self.project}/{PROJECT_PREVIEW}", PROJECT_PREVIEW_BYTES
+        )
+        await unpack_page_kit(self.ctx, self.project)
+        built = await self.ctx.sandbox.sh(
+            f"cd {shlex.quote(self.project)} && vite build", timeout_s=BUILD_TIMEOUT_SECONDS
+        )
+        if built.exit_code != 0:
+            raise ApplicationPageRefused(
+                _verdict(
+                    "build",
+                    _last_words(built.stderr or built.stdout) or "the page did not build",
+                )
+            )
+
+    async def _audit(self, design: ApplicationDesign | None) -> None:
+        relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{self.ctx.turn.id}"
+        root = await self.ctx.sandbox.runtime_path(relative_root)
+        report_path = f"{root}.json"
+        await self.ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
+        arguments = [
+            f"{root}.cjs",
+            self.project,
+            report_path,
+            f"{root}-light.png",
+            f"{root}-dark.png",
+            f"{root}-interactive.html",
+            f"{root}-static.html",
+            str(APPLICATION_DESIGN_WIDTH),
+        ]
+        if design is not None:
+            arguments.append(f"{self.project}/{PROJECT_DESIGN}")
+        run = await self.ctx.sandbox.sh(
+            'node "$@"',
+            *arguments,
+            timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
+        )
+        if run.exit_code != 0:
+            await self._refuse_or_raise(run, report_path)
+        report_read = await self.ctx.sandbox.python(
+            APPLICATION_AUDIT_REPORT_READ, report_path, str(APPLICATION_AUDIT_REPORT_MAX_BYTES)
+        )
+        if report_read.exit_code != 0:
+            absent = "audit report is absent"
+            raise RuntimeError(_last_words(report_read.stderr or report_read.stdout) or absent)
+        verdict = audit_application(ApplicationAuditReport.model_validate_json(report_read.stdout))
+        if not verdict.passed:
+            raise ApplicationPageRefused(verdict)
+
+    async def _refuse_or_raise(self, run: ExecResult, report_path: str) -> None:
+        """Turn a failed audit run into the repair it is, or raise it as ours.
+
+        The script exits on three kinds of fault and the builder can act on two of them. A design
+        the browser measured and found wrong — text past the lane, regions overlapping — names the
+        region and the overflow, which is an edit. A page that never became ready is the page's own
+        fault and says so. Only a run that could not happen — no Chromium, no node, a wedged box —
+        is infrastructure, and telling a model to repair `app.tsx` over that sends it hunting a
+        fault that is not in the page.
+
+        This is the distinction that mattered most in the field: eight of thirteen deploys in one
+        recorded build were spent on faults the audit had already diagnosed and then discarded."""
+
+        detail = _last_words(run.stderr or run.stdout)
+        if run.exit_code == APPLICATION_DESIGN_FAULT_EXIT:
+            raise ApplicationPageRefused(_verdict("design", detail or "the design did not measure"))
+        if run.exit_code == APPLICATION_LIFECYCLE_EXIT:
+            reason = await self._lifecycle_reason(report_path)
+            raise ApplicationPageRefused(
+                _verdict("lifecycle", reason or detail or APPLICATION_LIFECYCLE_UNREAD)
+            )
+        raise RuntimeError(detail or "the browser audit returned no error")
+
+    async def _lifecycle_reason(self, report_path: str) -> str:
+        diagnostic = await self.ctx.sandbox.python(
+            APPLICATION_AUDIT_REPORT_READ,
+            f"{report_path}{APPLICATION_LIFECYCLE_SUFFIX}",
+            str(APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES),
+        )
+        if diagnostic.exit_code != 0:
+            return ""
+        record = _ApplicationLifecycleDiagnostic.model_validate_json(diagnostic.stdout)
+        state = (_lifecycle_state(record.snapshot),) if record.snapshot else ()
+        return _lifecycle_message(record.reason, state + record.problems)
+
+
 async def _served_directory(
     ctx: ToolContext, project: str
 ) -> tuple[str, dict[str, dict[str, object]]]:
-    """The directory whose bytes are hosted, with its listing: a page project's build output, or the
-    directory it was handed.
+    """The directory whose bytes are hosted, with its listing: a page project's audited build
+    output, or the directory it was handed.
 
     A directory holding `app.tsx` is source, not a site — the app pages an agent edits arrive that
     way, the one file to change and the page that names it, mounted by the skill it loaded — so this
-    writes the deploy's config and kit beside it, builds it here, and hosts the `dist` that build
+    hands it to the gate, which holds it to the kit, builds it, and measures the page that build
     wrote. No browser runs TSX, so a directory naming one could never have been served as it stands,
     and building it is the only reading of it that works.
 
     The agent never runs the build itself. A page deployed as its own source is the one mistake in
     this flow, and a tool that always builds rules it out instead of describing it. The build's
-    output carries its own source, so a later read of the site starts from a project again."""
+    output carries its own source, so a later read of the site starts from a project again.
+
+    A static folder is handed back untouched: the gate is what an app page is held to, not what a
+    member's website is."""
     listing = await _source_listing(ctx, project)
     if PROJECT_SOURCE not in listing:
         return project, listing
-    await ctx.sandbox.write_file(f"{project}/{PROJECT_CONFIG}", PROJECT_CONFIG_BYTES)
-    await unpack_page_kit(ctx, project)
-    built = await ctx.sandbox.sh(
-        f"cd {shlex.quote(project)} && vite build", timeout_s=BUILD_TIMEOUT_SECONDS
-    )
-    if built.exit_code != 0:
-        raise RuntimeError(built.stderr.strip() or built.stdout.strip() or "the page did not build")
-    page = f"{project}/{PROJECT_DIST}"
+    page = await ApplicationPageGate(ctx, project).built_page()
     return page, await _source_listing(ctx, page)
 
 
@@ -1382,19 +1310,7 @@ async def _redeploy_homepage(
     of this conversation displaced from the scratch port is unhosted outright once the serve has
     killed its server: its row must not keep answering a port that now serves the homepage
     build."""
-    requested_by_speaker = ctx.speaker_member_id is not None
-    if (
-        not requested_by_speaker
-        and ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
-        and ctx.turn.parent_turn_id is not None
-        and authority_member_id(ctx.authority) is not None
-        and ctx.ext is not None
-    ):
-        requester = await ctx.ext.store.get(
-            APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=ctx.turn.parent_turn_id)
-        )
-        requested_by_speaker = requester == str(authority_member_id(ctx.authority))
-    if not requested_by_speaker:
+    if ctx.speaker_member_id is None:
         raise SpeakerRequired(HOMEPAGE_REDEPLOY_NEEDS_A_SPEAKER)
     if args.visibility is not None:
         raise ValueError(HOMEPAGE_KEEPS_THE_AGENTS_VISIBILITY)
@@ -1456,8 +1372,8 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
             return _build_failed(
                 args.install_command, workspace_path(args.project_path), install
             ).result()
-    command = args.run_command or f"python3 -m http.server {port} --bind 0.0.0.0"
-    project = workspace_path(args.project_path if args.run_command else args.dist_path)
+    command = args.run_command
+    project = workspace_path(args.project_path)
     publish_log = await ctx.sandbox.runtime_path(PUBLISH_LOG.format(port=port))
     try:
         served = await _serve(ctx, command, project, port, publish_log)
@@ -1534,39 +1450,10 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
 
 SITES_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
-        name=WEBSITE_TOOL,
-        description=WEBSITE_DESCRIPTION,
-        input_model=WebsiteInput,
-        handler=website,
-    ),
-    ToolDef(
         name=START_SERVER_TOOL,
         description=START_SERVER_DESCRIPTION,
         input_model=StartServerInput,
         handler=start_server,
-    ),
-    ToolDef(
-        name=APPLICATION_BUILDER_QA_TOOL,
-        description=(
-            "Run the complete deterministic ufo application product audit against the fixed "
-            "scaffold. It checks the framed app in four views, accessible controls, visible state "
-            "changes, contrast, fit, clipping, console errors, required facts, and first-screen "
-            "placement. It returns passed evidence or one bounded repair batch."
-        ),
-        input_model=QaUfoApplicationInput,
-        handler=qa_ufo_application,
-        profile_only=True,
-    ),
-    ToolDef(
-        name=APPLICATION_BUILDER_DEPLOY_TOOL,
-        description=(
-            "Build the fixed ufo application scaffold and host it at a permanent link after "
-            "product QA passes."
-        ),
-        input_model=DeployUfoApplicationInput,
-        handler=deploy_ufo_application,
-        side_effecting=True,
-        profile_only=True,
     ),
     ToolDef(
         name=DEPLOY_WEBSITE_TOOL,

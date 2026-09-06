@@ -30,6 +30,7 @@ from evals.ablate import (
     ExperimentSpec,
     StackRun,
     collect_counts,
+    collect_metrics,
     ingestion_suites,
     load_experiment,
     record_gaps,
@@ -606,6 +607,73 @@ def test_render_report_names_the_moved_cases(tmp_path: Path) -> None:
     report = render_report(spec, results)
     assert "routing regressed" in report
     assert "did not load" in report
+
+
+def test_collect_metrics_averages_each_suite_score_over_an_arms_records() -> None:
+    metrics = collect_metrics(
+        [
+            {
+                "reports": [
+                    {
+                        "name": "ufo-app-bench",
+                        "cases": [],
+                        "metrics": [
+                            {"name": "process_score", "value": 0.0},
+                            {"name": "app_score", "value": 0.5},
+                        ],
+                    }
+                ]
+            },
+            {
+                "reports": [
+                    {
+                        "name": "ufo-app-bench",
+                        "cases": [],
+                        "metrics": [
+                            {"name": "process_score", "value": 0.6},
+                            {"name": "app_score", "value": 0.4},
+                        ],
+                    }
+                ]
+            },
+        ]
+    )
+
+    assert metrics == {"ufo-app-bench/process_score": 0.3, "ufo-app-bench/app_score": 0.45}
+
+
+def test_the_report_scores_two_arms_that_pass_no_case() -> None:
+    """A suite whose case is a whole build spends whole runs failing every case, and pass counts
+    read flat across arms that are nowhere near each other. The scores the suite already wrote say
+    which way the arm moved."""
+
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("ufo-app-bench",),
+        budget_usd=5.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+    results = (
+        ArmResult(
+            "control",
+            {"kanban-board": CaseCount(0, 1, ("no terminal transcript",))},
+            1.0,
+            metrics={"ufo-app-bench/process_score": 0.0},
+        ),
+        ArmResult(
+            "knockout",
+            {"kanban-board": CaseCount(0, 1, ("no terminal transcript",))},
+            1.0,
+            metrics={"ufo-app-bench/process_score": 0.222},
+        ),
+    )
+
+    report = render_report(spec, results)
+
+    assert "no case moved" in report
+    assert "| ufo-app-bench/process_score | 0.000 | 0.222 (+0.222) |" in report
 
 
 def test_an_arm_keeps_a_worktree_when_materialization_fails_late(tmp_path: Path) -> None:

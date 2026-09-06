@@ -34,13 +34,37 @@ KIT_DIR = PAGE_DIR / "kit"
 KIT_MOUNT = "sdk"
 KIT_ARCHIVE = "sdk.tar.gz"
 PROJECT_SOURCE = "app.tsx"
+PROJECT_DESIGN = "application-design.svg"
 PROJECT_CONFIG = "vite.config.ts"
+PROJECT_PREVIEW = "preview.html"
 PROJECT_DIST = "dist"
-"""A page project's entry, the config it is built with, and where that build writes the page. The
-entry's presence is what tells a deploy the directory it was handed is source rather than a site: no
-browser runs TSX, so a directory whose page names one is a project either way. The config is the
-deploy's own — written beside the entry at deploy time, never carried in the project — so a page
-builds against components as current as the pod that deployed it."""
+"""A page project's entry, the design it is held to, the config it is built with, the frame the
+audit drives it in, and where that build writes the page. The entry's presence is what tells a
+deploy the directory it was handed is source rather than a site: no browser runs TSX, so a directory
+whose page names one is a project either way. The config and the preview frame are the deploy's own
+— written beside the entry at deploy time, never carried in the project — so a page builds against
+components as current as the pod that deployed it, and a page an app extension ships is audited in
+the same portal frame a generated one is."""
+PROJECT_FILE_ABSENT = 17
+PROJECT_FILE_READ = """from containment import ContainmentError, PathNotFound, contained_file
+import sys
+
+try:
+    with contained_file(sys.argv[1], sys.argv[2]) as target:
+        text = target.read_text(int(sys.argv[3]))
+except PathNotFound:
+    raise SystemExit(17)
+except (ContainmentError, OSError) as error:
+    raise SystemExit(str(error))
+sys.stdout.write(text)"""
+"""Read one file of a project through the containment guard, answering 17 when it is not there.
+
+The guard is what makes a project path safe to read: the directory is the agent's, so a name in it
+can be a symlink out of the workspace, and `contained_file` re-derives every component under the
+root rather than trusting the path it was handed. `PathNotFound` is what absence arrives as: the
+guard turns every missing component and missing target into its own `ContainmentError` subclass,
+which is not a `FileNotFoundError`, so catching that instead would send an optional file's absence
+out as a read failure."""
 UPLOAD_SCRIPT = (
     'while [ "$#" -ge 2 ]; do curl -sS --fail-with-body -T "$1" --url "$2" || exit 1; shift 2; done'
 )
@@ -114,7 +138,8 @@ def _page_kit_archive() -> bytes:
 
 
 PAGE_KIT_ARCHIVE = _page_kit_archive()
-PROJECT_CONFIG_BYTES = (PAGE_DIR / "vite.config.ts").read_bytes()
+PROJECT_CONFIG_BYTES = (PAGE_DIR / PROJECT_CONFIG).read_bytes()
+PROJECT_PREVIEW_BYTES = (PAGE_DIR / PROJECT_PREVIEW).read_bytes()
 
 
 async def transfer(

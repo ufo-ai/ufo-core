@@ -7,8 +7,12 @@
 // body, large-text or Kit quiet-label floor from that evidence. A page whose text all clears 4.5:1
 // reports no text entry at all.
 //
-// Usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <accepted-design.svg> <accepted-design-evidence.json>
-//        node app-audit.cjs --design <application-design.svg>
+// Usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <lane-width> [<application-design.svg>]
+//        node app-audit.cjs --design <lane-width> <application-design.svg> [preview.png]
+// The design is measured from the file itself, so the design a deploy is held to is the design
+// sitting beside the source it hosts. A project with no design beside it is audited as a page.
+// The lane width is always passed and never defaulted here: `application_audit.py` holds the one
+// number, and a fallback in this file would be a second copy that drifts silently.
 // The sandbox image installs playwright globally under /usr/local and exports NODE_PATH so the bare
 // name resolves; a carrier that starts the sandbox without that env leaves it unresolvable, so fall
 // back to the path the image installs into.
@@ -20,7 +24,6 @@ const { chromium } = (() => {
   }
 })();
 const fs = require('fs');
-const crypto = require('crypto');
 const http = require('http');
 const path = require('path');
 
@@ -28,7 +31,7 @@ const AA_FLOOR = 4.5;
 const DESIGN_ALPHA_FLOOR = 0.15;
 const DESIGN_REGION_MAX = 6;
 const DESIGN_VISIBLE_TEXT_MAX_CHARS = 72;
-const DESIGN_INITIAL_VIEWPORT = { width: 305, height: 844 };
+const DESIGN_INITIAL_HEIGHT = 844;
 const DESIGN_INITIAL_FOLD = 844;
 const DESIGN_NATIVE_DIMENSION_MAX = 4096;
 const DESIGN_DRAWING_ELEMENTS = 'circle,ellipse,image,line,path,polygon,polyline,rect,text,use';
@@ -44,6 +47,21 @@ const DESIGN_INTERNAL_OVERLAP_SLOP = 1;
 const APPLICATION_LIFECYCLE_TIMEOUT_MS = 15000;
 const APPLICATION_INTERACTION_TIMEOUT_MS = 300;
 const APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX = '.lifecycle.json';
+const APPLICATION_LIFECYCLE_PROBLEM_MAX = 4;
+// The gate reads this file under a byte cap, and one console line of CJK or Cyrillic is three
+// bytes a character. Four lines measured in characters pass that cap, the read fails, and the
+// refusal the audit already wrote reaches the builder as nothing at all.
+const APPLICATION_LIFECYCLE_PROBLEM_BYTES = 600;
+
+function boundedProblem(text) {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= APPLICATION_LIFECYCLE_PROBLEM_BYTES) return text;
+  return bytes
+    .subarray(0, APPLICATION_LIFECYCLE_PROBLEM_BYTES)
+    .toString('utf8')
+    .replace(/\uFFFD+$/, '');
+}
+const DESIGN_FAULT_EXIT = 4;
 const SVG_PRESENTATION_PROPERTIES = new Set(
   ('alignment-baseline baseline-shift clip-path clip-rule color color-interpolation ' +
     'color-interpolation-filters color-rendering cursor cx cy d direction display ' +
@@ -129,36 +147,6 @@ async function validatedApplicationRoot(input) {
   if (!previewStat.isFile()) throw new Error('application preview must be a regular file');
   if (!distStat.isDirectory()) throw new Error('application dist must be a directory');
   return { root, preview, dist };
-}
-
-function acceptedDesignRegions(svgInput, evidenceInput) {
-  if (!path.isAbsolute(svgInput) || !path.isAbsolute(evidenceInput)) {
-    throw new Error('accepted application design paths must be absolute');
-  }
-  const svgPath = fs.realpathSync(svgInput);
-  const evidencePath = fs.realpathSync(evidenceInput);
-  const svg = fs.readFileSync(svgPath);
-  const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
-  const digest = crypto.createHash('sha256').update(svg).digest('hex');
-  if (evidence.version !== 1 || evidence.design_sha256 !== digest) {
-    throw new Error('accepted application design evidence does not match the design');
-  }
-  if (!Array.isArray(evidence.regions) || evidence.regions.length < 2 ||
-      evidence.regions.length > DESIGN_REGION_MAX) {
-    throw new Error('accepted application design evidence has invalid regions');
-  }
-  const names = new Set();
-  for (const region of evidence.regions) {
-    if (!region || typeof region.name !== 'string' || !region.name || region.name.length > 80 ||
-        names.has(region.name) || !['left', 'top', 'width', 'height'].every(
-          (field) => typeof region[field] === 'number' && Number.isFinite(region[field])
-        ) || region.left < 0 || region.left > 1 || region.top < 0 || region.top > 1 ||
-        region.width <= 0 || region.width > 1 || region.height <= 0 || region.height > 1) {
-      throw new Error('accepted application design evidence has invalid regions');
-    }
-    names.add(region.name);
-  }
-  return evidence.regions;
 }
 
 function applicationRequestPaths(requestUrl, application) {
@@ -856,9 +844,10 @@ async function applicationFrame(page) {
 }
 
 class ApplicationLifecycleError extends Error {
-  constructor(reason, snapshot = null) {
+  constructor(reason, snapshot = null, problems = []) {
     super(reason);
     this.snapshot = snapshot;
+    this.problems = problems;
   }
 }
 
@@ -916,8 +905,22 @@ async function waitForApplicationReadyUntil(frame, deadline) {
   throw new ApplicationLifecycleError('application lifecycle did not become ready', last);
 }
 
-async function waitForApplicationReady(frame, timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS) {
-  return waitForApplicationReadyUntil(frame, Date.now() + timeoutMs);
+// A page that never mounted threw on its way there, and the throw is already in `problems` —
+// the console and pageerror listeners the caller attached. Without it the refusal names the
+// symptom and the builder redraws a page whose one broken line it was never shown.
+async function waitForApplicationReady(
+  frame, timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS, problems = []
+) {
+  try {
+    return await waitForApplicationReadyUntil(frame, Date.now() + timeoutMs);
+  } catch (error) {
+    if (!(error instanceof ApplicationLifecycleError)) throw error;
+    throw new ApplicationLifecycleError(
+      error.message,
+      error.snapshot,
+      problems.slice(0, APPLICATION_LIFECYCLE_PROBLEM_MAX).map(boundedProblem)
+    );
+  }
 }
 
 async function measureApplication(
@@ -1641,7 +1644,7 @@ async function renderedDesignRegions(page, viewport) {
   });
 }
 
-async function nativeDesignGeometry(page) {
+async function nativeDesignGeometry(page, laneWidth) {
   const geometry = await page.evaluate(({ initialFold, maximum, width }) => {
     const root = document.documentElement;
     const box = root.viewBox?.baseVal;
@@ -1651,42 +1654,25 @@ async function nativeDesignGeometry(page) {
         box.height > maximum || root.getAttribute('width') !== String(width) ||
         root.getAttribute('height') !== String(box.height)) {
       throw new Error(
-        'application design must use viewBox="0 0 305 H", width="305", and a matching ' +
-        'integer height H from 844 through 4096'
+        `application design must use viewBox="0 0 ${width} H", width="${width}", and a ` +
+        'matching integer height H from 844 through 4096'
       );
     }
     return { width: box.width, height: box.height };
   }, {
     initialFold: DESIGN_INITIAL_FOLD,
     maximum: DESIGN_NATIVE_DIMENSION_MAX,
-    width: DESIGN_INITIAL_VIEWPORT.width,
+    width: laneWidth,
   });
   await page.setViewportSize(geometry);
   return geometry;
 }
 
-async function acceptedDesignHeight(browser, svgPath) {
+async function measuredDesign(browser, laneWidth, svgInput, previewPath) {
+  if (!path.isAbsolute(svgInput)) throw new Error('application design path must be absolute');
+  const svgPath = fs.realpathSync(svgInput);
   const context = await browser.newContext({
-    viewport: DESIGN_INITIAL_VIEWPORT,
-    deviceScaleFactor: 1,
-    reducedMotion: 'reduce',
-    serviceWorkers: 'block',
-  });
-  await context.route(/^https?:/, (route) => route.abort());
-  try {
-    const page = await context.newPage();
-    const source = fs.readFileSync(svgPath).toString('base64');
-    await page.goto(`data:image/svg+xml;base64,${source}`, { waitUntil: 'load' });
-    return (await nativeDesignGeometry(page)).height;
-  } finally {
-    await context.close();
-  }
-}
-
-async function designOnly(svgPath, previewPath) {
-  const browser = await chromium.launch();
-  const context = await browser.newContext({
-    viewport: DESIGN_INITIAL_VIEWPORT,
+    viewport: { width: laneWidth, height: DESIGN_INITIAL_HEIGHT },
     deviceScaleFactor: 1,
     reducedMotion: 'reduce',
     serviceWorkers: 'block',
@@ -1696,17 +1682,26 @@ async function designOnly(svgPath, previewPath) {
     blockedRequests += 1;
     return route.abort();
   });
-  const page = await context.newPage();
   try {
+    const page = await context.newPage();
     const source = fs.readFileSync(svgPath).toString('base64');
     await page.goto(`data:image/svg+xml;base64,${source}`, { waitUntil: 'load' });
-    const geometry = await nativeDesignGeometry(page);
+    const geometry = await nativeDesignGeometry(page, laneWidth);
     const regions = await renderedDesignRegions(page, geometry);
     if (blockedRequests) throw new Error('application design must not contain active or external content');
     if (previewPath) await page.screenshot({ path: previewPath });
-    process.stdout.write(JSON.stringify(regions));
+    return { height: geometry.height, regions };
   } finally {
     await context.close();
+  }
+}
+
+async function designOnly(laneWidth, svgPath, previewPath) {
+  const browser = await chromium.launch();
+  try {
+    const { regions } = await measuredDesign(browser, laneWidth, svgPath, previewPath);
+    process.stdout.write(JSON.stringify(regions));
+  } finally {
     await browser.close();
   }
 }
@@ -1758,7 +1753,7 @@ async function interactionAudit(browser, url) {
       await page.goto(url, { waitUntil: 'load' });
       await assertApplicationResources(resourceProblems);
       const frame = await applicationFrame(page);
-      await waitForApplicationReady(frame);
+      await waitForApplicationReady(frame, APPLICATION_LIFECYCLE_TIMEOUT_MS, problems);
       await frame.evaluate(() => document.fonts.ready);
       await assertApplicationResources(resourceProblems);
       let before = '';
@@ -1895,32 +1890,48 @@ async function interactiveDocument(frame) {
 
 async function main() {
   if (process.argv[2] === '--design') {
-    if (!process.argv[3] || process.argv.length < 4 || process.argv.length > 5) {
-      console.error('usage: node app-audit.cjs --design <application-design.svg> [preview.png]');
+    const laneWidth = Number(process.argv[3]);
+    if (!Number.isInteger(laneWidth) || laneWidth <= 0 || !process.argv[4] ||
+        process.argv.length < 5 || process.argv.length > 6) {
+      console.error(
+        'usage: node app-audit.cjs --design <lane-width> <application-design.svg> [preview.png]'
+      );
       process.exit(2);
     }
-    await designOnly(process.argv[3], process.argv[4]);
+    await designOnly(laneWidth, process.argv[4], process.argv[5]);
     return;
   }
   const [
-    root, reportPath, lightShot, darkShot, interactivePath, staticPath,
-    acceptedDesignPath, acceptedEvidencePath,
+    root, reportPath, lightShot, darkShot, interactivePath, staticPath, lane, designPath,
   ] = process.argv.slice(2);
+  const laneWidth = Number(lane);
   if (!root || !reportPath || !lightShot || !darkShot || !interactivePath || !staticPath ||
-      !acceptedDesignPath || !acceptedEvidencePath || process.argv.length !== 10) {
+      !Number.isInteger(laneWidth) || laneWidth <= 0 ||
+      process.argv.length < 9 || process.argv.length > 10) {
     console.error(
-      'usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <accepted-design.svg> <accepted-design-evidence.json>'
+      'usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <lane-width> [<application-design.svg>]'
     );
     process.exit(2);
   }
   const application = await validatedApplicationRoot(root);
-  const designRegions = acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath);
   const { server, sockets, url } = await startApplicationServer(application);
   const shots = { light: lightShot, dark: darkShot };
   let browser = null;
   try {
     browser = await chromium.launch();
-    const designHeight = await acceptedDesignHeight(browser, acceptedDesignPath);
+    // A design fault is a repair, not a broken run, and only the exit code can say which: leaving
+    // the gate to match on the shape of a message would make prose the contract.
+    let design = { height: DESIGN_INITIAL_FOLD, regions: [] };
+    if (designPath) {
+      try {
+        design = await measuredDesign(browser, laneWidth, designPath, '');
+      } catch (error) {
+        console.error(error && error.message ? error.message : String(error));
+        await closeApplicationAudit(browser, server, sockets);
+        process.exit(DESIGN_FAULT_EXIT);
+      }
+    }
+    const { height: designHeight, regions: designRegions } = design;
     const views = await Promise.all(VIEWS.map(async (view) => {
       const context = await browser.newContext({
         viewport: { width: view.width, height: view.height },
@@ -1941,7 +1952,7 @@ async function main() {
     await page.goto(url, { waitUntil: 'load' });
     await assertApplicationResources(resourceProblems);
     const frame = await applicationFrame(page);
-    await waitForApplicationReady(frame);
+    await waitForApplicationReady(frame, APPLICATION_LIFECYCLE_TIMEOUT_MS, problems);
     await frame.evaluate(() => document.fonts.ready);
     await assertApplicationResources(resourceProblems);
     const measured = await measureApplication(frame, AA_FLOOR);
@@ -2027,6 +2038,7 @@ async function run() {
         code: 'application_lifecycle',
         reason: error.message,
         snapshot: error.snapshot,
+        problems: error.problems || [],
       }));
       process.exitCode = 3;
       return;
@@ -2044,6 +2056,7 @@ module.exports = {
   interactionAudit,
   measure,
   measureApplication,
+  measuredDesign,
   assertApplicationResources,
   startApplicationServer,
   trackApplicationResources,

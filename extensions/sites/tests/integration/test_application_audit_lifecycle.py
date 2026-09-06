@@ -6,11 +6,18 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from ufo_ext_sites.application_audit import DESIGN_VISIBLE_TEXT_MAX_CHARS
-from ufo_ext_sites.application_builder import APPLICATION_DESIGN_AUDIT_MAX_BYTES
+from ufo_ext_sites.application_audit import APPLICATION_DESIGN_WIDTH, DESIGN_VISIBLE_TEXT_MAX_CHARS
 from ufo_ext_sites.source import KIT_DIR
 
-AUDIT_SCRIPT = Path(__file__).parents[2] / "ufo_ext_sites" / "scripts" / "audit_application.cjs"
+AUDIT_SCRIPT = (
+    Path(__file__).parents[2]
+    / "ufo_ext_sites"
+    / "skills"
+    / "application-homepage"
+    / "scripts"
+    / "audit_application.cjs"
+)
+APPLICATION_DESIGN_AUDIT_MAX_BYTES = 4_096
 DRAW_TIMEOUT_SECONDS = 30
 CONTAINER_FIXTURE_MODE = 0o755
 
@@ -32,8 +39,8 @@ def test_dense_cjk_design_text_is_bounded_in_six_real_regions(
         for index in range(6)
     )
     (tmp_path / "design.svg").write_text(
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" '
-        f'width="305" height="844">{rows}</svg>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" '
+        f'width="360" height="844">{rows}</svg>'
     )
     tmp_path.chmod(CONTAINER_FIXTURE_MODE)
 
@@ -49,6 +56,7 @@ def test_dense_cjk_design_text_is_bounded_in_six_real_regions(
             sandbox_image,
             "/fixture/audit_application.cjs",
             "--design",
+            str(APPLICATION_DESIGN_WIDTH),
             "/fixture/design.svg",
         ],
         capture_output=True,

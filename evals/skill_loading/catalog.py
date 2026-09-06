@@ -12,6 +12,8 @@ import zipfile
 from io import BytesIO
 from textwrap import dedent
 
+from ufo_ext_web.surface import BUILD_ASK, SEED_PROMPT
+
 from evals.harness.capability import WorkspaceFile
 from evals.skill_loading.runner import SkillLoadCase
 
@@ -506,7 +508,72 @@ REPORT_PART1_PDF = WorkspaceFile("pdfs/report-part1.pdf", PDF_STUB)
 REPORT_PART2_PDF = WorkspaceFile("pdfs/report-part2.pdf", PDF_STUB)
 SCAN_PDF = WorkspaceFile("pdfs/scan.pdf", PDF_STUB)
 LOCKED_PDF = WorkspaceFile("pdfs/statement-locked.pdf", PDF_STUB)
+# The homepage routing set the redesign turns on, and the two strings the product itself sends.
+#
+# `SEED_PROMPT` reaches `application-homepage`; its three neighbours — making the app, building a
+# site, the chat app's shipped page — never do. `BUILD_ASK` says "your page", so it is agent-
+# relative: on a shipped app it must reach that app's own page skill, and this suite runs on the
+# workspace main agent, which is the chat app. An app a member built has no shipped skill, so the
+# same press reaches `application-homepage` there — measured by `new_application` A15, not here.
+#
+# Changing a page that already exists is not measured here either: this suite seeds no bound site,
+# so the honest answer to "move the search box on your page" is that there is no page, and an agent
+# that says so has routed correctly. `app_home_change` binds a real page and asks for a second
+# change, which is where that property lives.
+#
+# The three `homepage-*-noun` cases are `ufo_app_bench`'s own queries, verbatim. Each names a noun
+# `website-building` also claims — board, notes, brief — and two of them routed there instead,
+# which cost a Docker suite run to discover. A description that takes them back fails here first.
 CASES: tuple[SkillLoadCase, ...] = (
+    SkillLoadCase(
+        "homepage-build-verbatim-seed",
+        SEED_PROMPT,
+        expected="application-homepage",
+        forbidden=("website-building", "create-application", "app-chat-home"),
+    ),
+    SkillLoadCase(
+        "portal-press-own-page-skill",
+        BUILD_ASK,
+        expected="app-chat-home",
+        forbidden=("website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-board-noun",
+        "Build your interactive project board homepage for the ops team.",
+        expected="application-homepage",
+        forbidden=("website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-notes-noun",
+        "Build your interactive internal notes homepage for one customer call.",
+        expected="application-homepage",
+        forbidden=("website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-brief-noun",
+        "Build your interactive daily brief homepage for the team.",
+        expected="application-homepage",
+        forbidden=("website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "new-app-not-homepage",
+        "Build me an app that watches our shared inbox for refund requests and files them.",
+        expected="create-application",
+        forbidden=("application-homepage",),
+    ),
+    SkillLoadCase(
+        "website-not-homepage",
+        "Build me a website for the launch — a landing page with the pricing table and a sign-up "
+        "form.",
+        expected="website-building",
+        forbidden=("application-homepage",),
+    ),
+    SkillLoadCase(
+        "chat-home-not-generic",
+        "Add a pinned row to the chat app's own screen listing the conversations I have not read.",
+        expected="app-chat-home",
+        forbidden=("application-homepage",),
+    ),
     SkillLoadCase(
         "daily-brief-application",
         "Create a private Daily Brief app that reviews my work each morning, publishes the brief "
@@ -1111,8 +1178,8 @@ CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "site-application-homepage",
         "Build your homepage as an interactive project board for the ops team.",
-        expected="website-building",
-        forbidden=("website-building/webapp", "create-application"),
+        expected="application-homepage",
+        forbidden=("website-building", "create-application"),
     ),
     SkillLoadCase(
         "site-portfolio",

@@ -47,8 +47,7 @@ from ufo_ext_eval_env.manifest import (
     NAME as EVAL_ENV_NAME,
 )
 from ufo_ext_sites.application_audit import (
-    APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
-    APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    APPLICATION_KIT_COMPONENTS,
     DESKTOP_WIDTH,
     MIN_CONTROLS,
     MIN_INTERACTIONS,
@@ -56,6 +55,7 @@ from ufo_ext_sites.application_audit import (
     ApplicationAuditContract,
     ApplicationAuditFact,
     ApplicationAuditReport,
+    _local_source_bindings,
     application_design_fidelity,
     audit_application,
 )
@@ -65,18 +65,10 @@ from ufo_ext_sites.application_audit import (
 from ufo_ext_sites.application_audit import (
     NARROW_WIDTH as APPLICATION_NARROW_WIDTH,
 )
-from ufo_ext_sites.application_builder import (
-    APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_BUILDER_DESIGN_TOOL,
-    APPLICATION_BUILDER_EDIT_TOOL,
+from ufo_ext_sites.application_homepage import (
     APPLICATION_BUILDER_NAME,
-    APPLICATION_BUILDER_QA_TOOL,
-    APPLICATION_BUILDER_READ_TOOL,
-    APPLICATION_BUILDER_SKILL,
-    APPLICATION_BUILDER_WRITE_TOOL,
-    APPLICATION_KIT_COMPONENTS,
-    ApplicationBuilderResult,
-    _local_source_bindings,
+    APPLICATION_HOMEPAGE_SKILL,
+    ApplicationBuildResult,
 )
 
 from evals.driver import EVAL_SURFACE, WorkspaceDriver
@@ -99,7 +91,7 @@ from evals.harness.registry import EvalTask
 from evals.harness.scorers import combine, content_words, skill_scorer
 from evals.harness.target import CapabilityTarget
 from evals.suites.app_audit_probe import AUDIT_CONTENT as AUDIT_CONTENT
-from evals.suites.app_audit_probe import AUDIT_DIGEST, app_audit_command
+from evals.suites.app_audit_probe import AUDIT_DIGEST, AppAudit, app_audit
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
@@ -196,15 +188,15 @@ INTERACTION_MIN_CONTROLS = MIN_CONTROLS
 INTERACTION_MIN_SUCCESSES = MIN_INTERACTIONS
 WORKFLOW_WAIT_SECONDS = 900.0
 SUPPORTED_BACKENDS = ("docker",)
-MAX_PREVIEW_SERVER_CALLS = 1
-MAX_BROWSER_QA_CALLS = 4
 MAX_PRODUCT_QA_CALLS = 3
 DEPLOY_TOOLS = (
     "action:site:deploy_website",
     "deploy_ufo_application",
     "action:site:publish_website",
 )
-BUILD_ACTION = f"action:site:{APPLICATION_BUILDER_DELEGATION_TOOL}"
+SPAWN_TOOL = "spawn"
+BUILDER_TARGET = f"profile:{APPLICATION_BUILDER_NAME}"
+DEPLOY_ACTION = "action:site:deploy_website"
 HOMEPAGE_ACTION = "action:agent:set_homepage"
 SOURCE_SENTENCE = re.compile(r"(?<=[.!?])\s+")
 SOURCE_COPY_WINDOW_PARTS = 3
@@ -628,12 +620,6 @@ class _ConnectedAppSeed:
             call.provider for requirement in self.spec.requirements for call in requirement.calls
         }
         store = ScopedStore(extension=EVAL_ENV_NAME)
-        await ScopedStore(extension="sites").put(
-            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
-                request_sha256=sha256(self.request.encode()).hexdigest()
-            ),
-            _application_audit_contract(self.spec).model_dump(mode="json"),
-        )
         for provider in sorted(providers & APP_UNIVERSE_TOOLS.keys()):
             tools = APP_UNIVERSE_TOOLS[provider]
             for tool, response in tools.items():
@@ -1169,7 +1155,7 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
     ) -> tuple[UUID, TerminalFrame]:
         if self.driver is None:
             raise RuntimeError("app action probe has no workspace driver")
-        scoped_name = f"{(await self.contract_identity()).hex}-{name}"
+        scoped_name = f"{(await self.root_turn_id()).hex}-{name}"
         return await self.driver.apply_object_intent(
             self.conversation_id,
             kind,
@@ -1178,9 +1164,11 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
             idempotency_key,
         )
 
-    async def contract_identity(self) -> UUID:
+    async def root_turn_id(self) -> UUID:
+        """The conversation's own last turn, which scopes the names a case's intents write so two
+        cases in one workspace cannot collide."""
         async with workspace_tx() as connection:
-            turn_id = (
+            return (
                 await connection.execute(
                     sa.select(tables.turn.c.id)
                     .where(
@@ -1191,12 +1179,6 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
                     .limit(1)
                 )
             ).scalar_one()
-        contract = await ScopedStore(extension="sites").get(
-            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=turn_id)
-        )
-        if contract is None:
-            raise RuntimeError("app action probe has no bound audit contract")
-        return turn_id
 
 
 @asynccontextmanager
@@ -1231,19 +1213,12 @@ class _AppBenchProbe:
         if output.workspace_dir is None:
             return ArtifactProbeResult(error="app probe has no workspace")
         directory = output.workspace_dir / PROBE_OUTPUT / self.name
-        result = await probe.run(self._command(), PROBE_TIMEOUT_SECONDS)
+        audit = self._audit()
+        result = await probe.run(audit.command, PROBE_TIMEOUT_SECONDS)
         if result.exit_code != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no command output"
             return ArtifactProbeResult(error=f"app probe failed: {detail[:500]}")
-        paths = (
-            directory / f"{self.name}-design.html",
-            directory / f"{self.name}-design.svg",
-            directory / f"{self.name}-design-evidence.json",
-            directory / f"{self.name}-interactive.html",
-            directory / f"{self.name}-static.html",
-            directory / f"{self.name}-audit.json",
-            *(directory / f"{self.name}-{scheme}.png" for scheme in SCHEMES),
-        )
+        paths = tuple(directory / output_name for output_name in audit.outputs)
         source_path = (
             output.workspace_dir / APP_WORKSPACE_ROOT.removeprefix("/workspace/") / "app.tsx"
         )
@@ -1264,9 +1239,9 @@ class _AppBenchProbe:
             )
         )
 
-    def _command(self) -> str:
+    def _audit(self) -> AppAudit:
         directory = f"/workspace/{PROBE_OUTPUT}/{self.name}"
-        return app_audit_command(
+        return app_audit(
             name=self.name,
             output_dir=directory,
             project=APP_WORKSPACE_ROOT,
@@ -1348,8 +1323,8 @@ class _AppActionProbe:
             return replace(captured, error="app action probe cannot admit prepared intents")
         idempotency_key = f"ufo-app-bench:{self.name}:{self.contract.name}"
         try:
-            contract_identity = await probe.contract_identity()
-            scoped_name = f"{contract_identity.hex}-{self.contract.name}"
+            root_turn = await probe.root_turn_id()
+            scoped_name = f"{root_turn.hex}-{self.contract.name}"
             first_turn, first = await probe.apply_object_intent(
                 self.contract.kind,
                 self.contract.name,
@@ -1373,7 +1348,7 @@ class _AppActionProbe:
             store = ScopedStore(extension=EVAL_ENV_NAME)
             action = await store.get(APP_ACTION_KEY_PREFIX + scoped_name)
             refused_action = await store.get(
-                APP_ACTION_KEY_PREFIX + f"{contract_identity.hex}-{refused_name}"
+                APP_ACTION_KEY_PREFIX + f"{root_turn.hex}-{refused_name}"
             )
             fixture = await store.get(APP_ACTION_FIXTURE_PREFIX + scoped_name)
             other_workspace = uuid4()
@@ -1916,23 +1891,23 @@ def _application_builder_scorer() -> Grader:
                 "the parent asked the member for input during the application build",
                 failed,
             )
-        delegations = tuple(call for call in own if call.call == BUILD_ACTION)
+        delegations = tuple(
+            call
+            for call in own
+            if call.name == SPAWN_TOOL and call.arguments.get("target") == BUILDER_TARGET
+        )
         if not delegations:
-            return CapabilityVerdict(
-                False,
-                f"did not call {APPLICATION_BUILDER_DELEGATION_TOOL}",
-                failed,
-            )
+            return CapabilityVerdict(False, "did not spawn the application builder", failed)
         if len(delegations) != 1:
             return CapabilityVerdict(
                 False,
-                f"the parent delegated {len(delegations)} times, expected one worker call",
+                f"the parent spawned {len(delegations)} times, expected one worker call",
                 failed,
             )
         if not delegations[0].succeeded:
-            return CapabilityVerdict(False, "the worker delegation failed", failed)
+            return CapabilityVerdict(False, "the worker spawn failed", failed)
         try:
-            result = ApplicationBuilderResult.model_validate_json(delegations[0].result)
+            result = ApplicationBuildResult.model_validate_json(delegations[0].result)
         except ValueError:
             return CapabilityVerdict(False, "the worker returned no structured result", failed)
         if result.status != "deployed":
@@ -1941,21 +1916,25 @@ def _application_builder_scorer() -> Grader:
                 f"the deterministic acceptance result was {result.status}: {result.blocker}",
                 failed,
             )
+        stray = tuple(
+            call
+            for call in own
+            if call.name == SPAWN_TOOL and call.arguments.get("target") != BUILDER_TARGET
+        )
+        if stray:
+            return CapabilityVerdict(
+                False,
+                f"the parent spawned {stray[0].arguments.get('target')} for the page",
+                failed,
+            )
         parent_forbidden = {
-            "spawn",
             "list_external_tools",
             "describe_external_tools",
             "search_connector_tools",
             "call_external_tool",
-            "read",
             "bash",
             "start_server",
             "js_repl",
-            APPLICATION_BUILDER_DESIGN_TOOL,
-            APPLICATION_BUILDER_QA_TOOL,
-            APPLICATION_BUILDER_READ_TOOL,
-            APPLICATION_BUILDER_EDIT_TOOL,
-            APPLICATION_BUILDER_WRITE_TOOL,
             *DEPLOY_TOOLS,
             HOMEPAGE_ACTION,
             "action:site:build_website",
@@ -1969,91 +1948,58 @@ def _application_builder_scorer() -> Grader:
                 f"the parent entered the worker loop: {', '.join(parent_work)}",
                 failed,
             )
-        required_worker_tools = {
-            APPLICATION_BUILDER_DESIGN_TOOL,
-            APPLICATION_BUILDER_QA_TOOL,
-            "deploy_ufo_application",
-        }
-        if APPLICATION_BUILDER_QA_TOOL == "js_repl":
-            required_worker_tools.add("start_server")
-        completed = frozenset(call.name for call in output.calls if call.succeeded)
-        missing = required_worker_tools - completed
-        if missing:
+        if not any(call.call == DEPLOY_ACTION and call.succeeded for call in output.calls):
             return CapabilityVerdict(
                 False,
-                f"the worker did not complete: {', '.join(sorted(missing))}",
+                f"the worker did not complete {DEPLOY_ACTION}",
                 failed,
             )
-        design_calls = tuple(
-            index
-            for index, call in enumerate(output.calls)
-            if call.name == APPLICATION_BUILDER_DESIGN_TOOL
-        )
-        accepted_designs = tuple(index for index in design_calls if output.calls[index].succeeded)
         source_writes = tuple(
-            index
-            for index, call in enumerate(output.calls)
-            if call.name == APPLICATION_BUILDER_WRITE_TOOL
+            index for index, call in enumerate(output.calls) if call.name == "write"
         )
         if not source_writes:
+            return CapabilityVerdict(False, "the worker wrote no source", failed)
+        designs = tuple(
+            index
+            for index, call in enumerate(output.calls)
+            if call.name == "write" and ".svg" in str(call.input.get("file_path", ""))
+        )
+        if not designs or designs[0] != source_writes[0]:
             return CapabilityVerdict(
                 False,
-                f"the worker did not call {APPLICATION_BUILDER_WRITE_TOOL}",
-                failed,
-            )
-        if (
-            len(design_calls) not in {1, 2}
-            or len(accepted_designs) != 1
-            or accepted_designs[0] != design_calls[-1]
-            or accepted_designs[0] >= source_writes[0]
-        ):
-            return CapabilityVerdict(
-                False,
-                "the worker must write one accepted SVG design before app.tsx",
+                "the worker must write one SVG design before app.tsx",
                 failed,
             )
         if any(call.call == HOMEPAGE_ACTION for call in output.calls):
-            return CapabilityVerdict(
-                False,
-                "the worker tried to certify its own homepage",
-                failed,
-            )
-        successful_qa = sum(
-            1
-            for call in output.calls
-            if call.name == APPLICATION_BUILDER_QA_TOOL and call.succeeded
-        )
-        needed_qa = 2 if APPLICATION_BUILDER_QA_TOOL == "js_repl" else 1
-        if successful_qa < needed_qa:
-            return CapabilityVerdict(
-                False,
-                f"the worker completed {successful_qa} successful QA call(s), expected at least "
-                f"{needed_qa}",
-                failed,
-            )
+            return CapabilityVerdict(False, "the worker tried to bind its own homepage", failed)
         return CapabilityVerdict(
             True,
-            f"the parent delegated once and {APPLICATION_BUILDER_NAME} completed the worker loop",
+            f"the parent spawned once and {APPLICATION_BUILDER_NAME} completed the worker loop",
             _score_evidence("processBuilder", 1, 1),
         )
 
     return DescribedGrader(
-        f"the parent calls {APPLICATION_BUILDER_DELEGATION_TOOL} once; {APPLICATION_BUILDER_NAME} "
-        "owns connector inspection, source, QA, and deployment; deterministic acceptance binds",
+        f"the parent spawns {BUILDER_TARGET} once; {APPLICATION_BUILDER_NAME} owns connector "
+        "inspection, source, and deployment; the deploy gate is the acceptance",
         grade,
     )
 
 
 def _skill_scorer() -> Grader:
-    base = skill_scorer("website-building", APPLICATION_BUILDER_SKILL)
+    base = skill_scorer("website-building", APPLICATION_HOMEPAGE_SKILL)
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdict = await base(output)
-        delegated = any(call.call == BUILD_ACTION and call.succeeded for call in output.own_calls)
+        delegated = any(
+            call.name == SPAWN_TOOL
+            and call.arguments.get("target") == BUILDER_TARGET
+            and call.succeeded
+            for call in output.own_calls
+        )
         if delegated:
             return CapabilityVerdict(
                 True,
-                f"{APPLICATION_BUILDER_NAME} preloads '{APPLICATION_BUILDER_SKILL}'",
+                f"{APPLICATION_BUILDER_NAME} preloads '{APPLICATION_HOMEPAGE_SKILL}'",
                 _score_evidence("processSkill", 1, 1),
             )
         return replace(
@@ -2065,8 +2011,8 @@ def _skill_scorer() -> Grader:
         )
 
     return DescribedGrader(
-        "a direct turn loads 'website-building', or application-builder preloads 'ufo-style' "
-        f"after {APPLICATION_BUILDER_DELEGATION_TOOL}",
+        "a direct turn loads 'website-building', or the builder preloads "
+        f"'{APPLICATION_HOMEPAGE_SKILL}' after its spawn",
         grade,
     )
 
@@ -2080,19 +2026,20 @@ def _delivery_scorer() -> Grader:
             (index, call) for index, call in successful if call.call in DEPLOY_TOOLS
         )
         delegations = tuple(
-            call for call in output.own_calls if call.call == BUILD_ACTION and call.succeeded
+            call
+            for call in output.own_calls
+            if call.name == SPAWN_TOOL
+            and call.arguments.get("target") == BUILDER_TARGET
+            and call.succeeded
         )
         result = None
         if len(delegations) == 1:
             try:
-                result = ApplicationBuilderResult.model_validate_json(delegations[0].result)
+                result = ApplicationBuildResult.model_validate_json(delegations[0].result)
             except ValueError:
                 pass
         accepted = bool(
-            result is not None
-            and result.status == "deployed"
-            and result.site_name
-            and result.site_url
+            result is not None and result.status == "deployed" and result.site and result.site_url
         )
         evidence = _score_evidence(
             "appDelivery", (1 if deployments else 0) + (1 if accepted else 0), 2
@@ -2103,89 +2050,61 @@ def _delivery_scorer() -> Grader:
             )
         if not accepted:
             return CapabilityVerdict(
-                False, "deterministic acceptance did not bind the deployed application", evidence
+                False, "the builder did not answer with a hosted page", evidence
             )
         return CapabilityVerdict(
             True,
-            f"{deployments[0][1].name} completed before deterministic acceptance bound the page",
+            f"{deployments[0][1].name} hosted the page the builder answered with",
             evidence,
         )
 
     return DescribedGrader(
-        "deployment completes before deterministic acceptance binds the application homepage",
+        "the deploy hosts the page and the builder answers with its link",
         grade,
     )
 
 
 def _qa_efficiency_scorer() -> Grader:
+    """The audit lives inside the deploy, so what this measures is how many deploys the page took.
+
+    A refused deploy hosts nothing and answers with the repairs to make, so a build that took one
+    is a build whose first page was right; a build that took four spent three rounds discovering
+    what the source gate would have told it. The floor is the same either way — nothing is hosted
+    until it passes — so this scores the loop, never the acceptance."""
+
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         failed = _score_evidence("processQa", 0, 1)
-        qa_calls = tuple(call for call in output.calls if call.name == APPLICATION_BUILDER_QA_TOOL)
-        if not qa_calls:
-            return CapabilityVerdict(False, "used no application QA call", failed)
-        max_calls = (
-            MAX_BROWSER_QA_CALLS
-            if APPLICATION_BUILDER_QA_TOOL == "js_repl"
-            else MAX_PRODUCT_QA_CALLS
-        )
-        if len(qa_calls) > max_calls:
+        deploys = tuple(call for call in output.calls if call.call == DEPLOY_ACTION)
+        if not deploys:
+            return CapabilityVerdict(False, "made no application deploy", failed)
+        if len(deploys) > MAX_PRODUCT_QA_CALLS:
             return CapabilityVerdict(
                 False,
-                f"used {len(qa_calls)} QA calls, needs at most {max_calls}",
+                f"took {len(deploys)} deploys, needs at most {MAX_PRODUCT_QA_CALLS}",
                 failed,
             )
-        successful = tuple(call for call in qa_calls if call.succeeded)
-        needed = 2 if APPLICATION_BUILDER_QA_TOOL == "js_repl" else 1
-        if len(successful) < needed:
+        if not deploys[-1].succeeded:
+            return CapabilityVerdict(False, "the final application deploy failed", failed)
+        drove = tuple(
+            call.name
+            for call in output.calls
+            if call.name in {"js_repl", "start_server"} and call.succeeded
+        )
+        if drove:
             return CapabilityVerdict(
                 False,
-                f"used {len(successful)} successful QA call(s), needs at least {needed}",
+                f"drove the page itself instead of letting the deploy audit it: {drove[0]}",
                 failed,
             )
-        if not qa_calls[-1].succeeded:
-            return CapabilityVerdict(False, "the final QA call failed", failed)
-        deployments = tuple(
-            (index, call) for index, call in enumerate(output.calls) if call.call in DEPLOY_TOOLS
-        )
-        if not deployments:
-            return CapabilityVerdict(
-                False,
-                "QA must precede the application deployment",
-                failed,
-            )
-        if not deployments[-1][1].succeeded:
-            return CapabilityVerdict(False, "the final application deployment failed", failed)
-        names = tuple(call.call for call in output.calls)
-        qa_indexes = tuple(
-            index
-            for index, call in enumerate(output.calls)
-            if call.name == APPLICATION_BUILDER_QA_TOOL
-        )
-        if APPLICATION_BUILDER_QA_TOOL == "js_repl":
-            starts = tuple(call for call in output.calls if call.name == "start_server")
-            if len(starts) != MAX_PREVIEW_SERVER_CALLS:
-                return CapabilityVerdict(
-                    False,
-                    f"used start_server {len(starts)} time(s), needs {MAX_PREVIEW_SERVER_CALLS}",
-                    failed,
-                )
-            if not starts[0].succeeded:
-                return CapabilityVerdict(
-                    False, "the preview server did not start successfully", failed
-                )
-            if not names.index("start_server") < min(qa_indexes):
-                return CapabilityVerdict(False, "QA must run after start_server", failed)
-        if not any(max(qa_indexes) < index for index, _call in deployments):
-            deployment_name = deployments[0][1].name
-            return CapabilityVerdict(False, f"QA must finish before {deployment_name}", failed)
         return CapabilityVerdict(
             True,
-            f"used {len(qa_calls)} bounded application QA call(s)",
+            f"{len(deploys)} deploy(s), the last one hosted",
             _score_evidence("processQa", 1, 1),
         )
 
     return DescribedGrader(
-        "one bounded application QA protocol ending in success before deployment", grade
+        f"the page is hosted within {MAX_PRODUCT_QA_CALLS} deploys and nothing drives it by hand",
+        grade,
     )
 
 

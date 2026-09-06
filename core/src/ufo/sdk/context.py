@@ -55,6 +55,9 @@ from ufo.runtime.ext.context import (
     UndeclaredCredentialSlot as UndeclaredCredentialSlot,
 )
 from ufo.runtime.ext.context import (
+    WorkspaceAgent as WorkspaceAgent,
+)
+from ufo.runtime.ext.context import (
     trajectory_workspaces as trajectory_workspaces,
 )
 from ufo.runtime.ext.surface import (

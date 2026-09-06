@@ -115,7 +115,6 @@ object_action(
   action="publish_website",
   input={
     project_path="/workspace/my-project",
-    dist_path="public",
     app_name="My App",
     install_command="pip install -r requirements.txt",
     run_command="python api_server.py"

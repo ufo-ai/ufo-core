@@ -23,7 +23,7 @@ import ufo_ext_app_chat
 from ufo_ext_sites.source import PROJECT_SOURCE
 from ufo_ext_sites.store import SiteFile, SourceManifest, hosted_site
 from ufo_ext_web.audience import EXTENSION_WEB
-from ufo_ext_web.surface import HOMEPAGE_SEED_PREFIX
+from ufo_ext_web.surface import HOMEPAGE_SETTLED_PREFIX
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -89,7 +89,7 @@ async def _settle_homepage_jobs(workspace_id: UUID) -> None:
         )
     store = ScopedStore(extension=EXTENSION_WEB)
     for agent_id in agent_ids:
-        await store.put(f"{HOMEPAGE_SEED_PREFIX}{agent_id}", "eval")
+        await store.put(f"{HOMEPAGE_SETTLED_PREFIX}{agent_id}", "eval")
 
 
 def _rowless_page() -> CapabilitySeed:

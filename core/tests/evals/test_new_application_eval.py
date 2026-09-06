@@ -1,11 +1,11 @@
 import asyncio
 import io
 import json
+import re
 import time
 import zipfile
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -43,17 +43,16 @@ def _design_outcome(
     attached: bool = True,
 ) -> ScenarioOutcome:
     preview_input = {
-        "kind": "site",
-        "action": new_application.APPLICATION_BUILDER_WIREFRAME_TOOL,
-        "input": {},
+        "target": new_application.BUILDER_TARGET,
+        "payload": {"objective": "world-clock", "phase": "design"},
     }
     design = b"<svg><text>World clock</text></svg>"
-    digest = sha256(design).hexdigest()
     preview_result = json.dumps(
         {
-            "status": "ready",
-            "shared_filename": "world-clock-wireframe.svg",
-            "design_digest": digest,
+            "status": "designed",
+            "design_path": "/workspace/ufo-app/application-design.svg",
+            "site": "",
+            "site_url": "",
             "blocker": "",
         }
     )
@@ -67,7 +66,7 @@ def _design_outcome(
     if failed_first:
         calls.append(
             ToolInvocation(
-                name="object_action",
+                name="spawn",
                 input=preview_input,
                 result="failed",
                 has_result=True,
@@ -77,18 +76,23 @@ def _design_outcome(
     calls.extend(
         [
             ToolInvocation(
-                name="object_action",
+                name="spawn",
                 input=preview_input,
                 result=preview_result,
                 has_result=True,
                 call_id=PREVIEW_CALL_ID,
-            )
+            ),
+            ToolInvocation(
+                name="share_file",
+                input={"path": "/workspace/ufo-app/application-design.svg"},
+                has_result=True,
+            ),
         ]
     )
     if failed_after:
         calls.append(
             ToolInvocation(
-                name="object_action",
+                name="spawn",
                 input=preview_input,
                 result="failed",
                 has_result=True,
@@ -101,7 +105,7 @@ def _design_outcome(
         output=CapabilityOutput(
             "",
             tuple(calls),
-            artifacts=(SharedArtifact("world-clock-wireframe.svg", design),) if attached else (),
+            artifacts=(SharedArtifact("application-design.svg", design),) if attached else (),
             timing=CaseTiming(
                 wall_ms=wall_ms,
                 turns=(
@@ -197,14 +201,8 @@ class _ArtifactProbe:
         if self.exit_code == 0:
             output = self.workspace / new_application.APPLICATION_ARTIFACT_OUTPUT
             output.mkdir(parents=True)
-            for name, content in (
-                ("homepage-interactive.html", b"<main>interactive</main>"),
-                ("homepage-audit.json", b"{}"),
-                ("homepage-light.png", b"light"),
-                ("homepage-dark.png", b"dark"),
-                ("homepage-static.html", b"<main>static</main>"),
-            ):
-                (output / name).write_bytes(content)
+            for name in set(re.findall(r'"\$capture/([\w.-]+)"', command)):
+                (output / name).write_bytes(name.encode())
         return ProbeCommandResult(self.exit_code, "", "audit failed" if self.exit_code else "")
 
 
@@ -282,11 +280,14 @@ async def test_homepage_artifacts_capture_portable_app_and_audit(tmp_path: Path)
 
     assert result.error == ""
     assert [artifact.name for artifact in result.artifacts] == [
-        "homepage-interactive.html",
+        "homepage-design.html",
+        "homepage-design-regions.json",
         "homepage-audit.json",
         "homepage-light.png",
         "homepage-dark.png",
+        "homepage-interactive.html",
         "homepage-static.html",
+        "timing.json",
         "homepage-app.tsx",
         "homepage-design.svg",
         "homepage-preview.zip",

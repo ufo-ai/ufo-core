@@ -23,6 +23,7 @@ import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
+import { BUILD_ASK, setPendingAsk } from "@/lib/pendingAsk";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
@@ -51,6 +52,7 @@ import { GLYPH_STROKE } from "@/lib/glyph";
  *  stands. */
 const NEW_CONVERSATION = "New conversation";
 const NEW = "New";
+const BUILD_PAGE = "Build page";
 
 /** The slot a conversation nobody has founded yet stands in. Every other slot on this screen is
  *  named by the conversation it holds; this one has no conversation to name it, and the send that
@@ -305,6 +307,18 @@ export function AgentPane({
   // made. What the member did in this pane is held here, the way a permalink's pane holds it.
   const [disclosed, setDisclosed] = useState<string | null>(null);
   const start = () => onPlace({ ...place, opens: [FRESH] }, "push");
+  /** Ask the app for the page it has none of.
+   *
+   *  An app with no homepage draws its conversation column and nothing else, so this is the only
+   *  place a member can be offered the build without being sent to look for it. The press opens
+   *  the work rather than spending it: the ask stands in the composer of the app's own new chat,
+   *  where the member reads it, sends it, and watches the build in a conversation they can
+   *  correct. It is the same words the setup screen's press types, because a member who has seen
+   *  one should not have to recognise a second phrasing as the same act. */
+  const buildPage = () => {
+    setPendingAsk(agent.id, BUILD_ASK, false);
+    onPlace({ ...place, opens: [FRESH] }, "push");
+  };
   // Which lane the list is standing over, rather than whether it is open at all. The lane is named
   // by the conversation it holds, so opening one from the list — or shutting the lane, or starting
   // a conversation — names a different lane and puts the list away with nothing having to remember
@@ -393,6 +407,11 @@ export function AgentPane({
           }
           acts={
             <>
+              {beside ? null : (
+                <Button variant="quiet" size="bar" onClick={buildPage}>
+                  {BUILD_PAGE}
+                </Button>
+              )}
               <Button variant="send" size="bar" onClick={start}>
                 {NEW}
               </Button>

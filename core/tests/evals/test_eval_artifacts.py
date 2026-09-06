@@ -1,11 +1,11 @@
 """Deterministic artifact graders inspect delivered bytes, not filenames or claims."""
 
 import asyncio
+import re
 import subprocess
 import sys
 from dataclasses import replace
 from gzip import compress
-from hashlib import sha256
 from io import BytesIO
 from json import dumps, loads
 from pathlib import Path
@@ -29,19 +29,13 @@ from ufo_ext_eval_env.manifest import (
     NAME as EVAL_ENV_NAME,
 )
 from ufo_ext_sites.application_audit import (
-    APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
-    ApplicationAuditContract,
     ApplicationAuditRegion,
     ApplicationAuditReport,
     application_region_relation,
 )
-from ufo_ext_sites.application_builder import (
-    APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_BUILDER_DEPLOY_TOOL,
-    APPLICATION_BUILDER_DESIGN_TOOL,
-    APPLICATION_BUILDER_QA_TOOL,
-    APPLICATION_BUILDER_WRITE_TOOL,
-    ApplicationBuilderResult,
+from ufo_ext_sites.application_homepage import (
+    APPLICATION_BUILDER_NAME,
+    ApplicationBuildResult,
 )
 
 from evals.ablate import EGRESS_BINARY, Ablation, ArmSpec, load_experiment
@@ -77,6 +71,7 @@ from evals.harness.scorers import (
     shared_artifact_scorer,
     site_archive_scorer,
 )
+from evals.suites.app_audit_probe import app_audit
 from evals.suites.site_build import CASES as SITE_BUILD_CASES
 from evals.suites.site_build import POSTER_PNG
 from evals.suites.ufo_app_bench import (
@@ -91,7 +86,7 @@ from evals.suites.ufo_app_bench import (
     APP_WORKSPACE_FILES,
     AUDIT_CONTENT,
     AUDIT_DIGEST,
-    BUILD_ACTION,
+    BUILDER_TARGET,
     CONNECTED_APPS,
     CONNECTED_CASES,
     CONTROL_CASES,
@@ -103,8 +98,6 @@ from evals.suites.ufo_app_bench import (
     HOUSE_CRITERIA,
     INTERACTION_MIN_CONTROLS,
     INTERACTION_MIN_SUCCESSES,
-    MAX_BROWSER_QA_CALLS,
-    MAX_PRODUCT_QA_CALLS,
     MEASURED_VIEWS,
     MEMBER_QUERIES,
     NARROW_HEIGHT,
@@ -112,6 +105,7 @@ from evals.suites.ufo_app_bench import (
     SCHEMES,
     SETUP_CASES,
     SETUP_CONTRACTS,
+    SPAWN_TOOL,
     TASTE_CRITERIA,
     AppBenchWorkspaceProbe,
     _above_fold_scorer,
@@ -119,7 +113,6 @@ from evals.suites.ufo_app_bench import (
     _AppActionProbe,
     _AppBenchProbe,
     _AppCopyProbe,
-    _application_audit_contract,
     _application_builder_scorer,
     _AppSetupProbe,
     _browser_probe_slot,
@@ -130,7 +123,6 @@ from evals.suites.ufo_app_bench import (
     _design_region_scorer,
     _interaction_screen,
     _json_contains,
-    _kit_component_scorer,
     _measured_screen,
     _missing_setup_terms,
     _qa_efficiency_scorer,
@@ -147,9 +139,15 @@ from evals.suites.ufo_app_bench import (
 )
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.host.tools.builtins import WriteInput
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
+
+(WRITE_PATH_FIELD,) = (name for name in WriteInput.model_fields if "path" in name)
+"""The name the builtin gives its path. A scorer reading any other key finds every write
+pathless and fails a correct run: the one that read `path` scored `processBuilder` 0/1 on
+every recorded build."""
 
 REVENUE = (120, 135, 142, 160)
 STABLE_APPLICATION_LIFECYCLE = b"""<script>
@@ -222,16 +220,11 @@ def test_secondary_text_regression_materializes_one_matched_token_difference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = Path(__file__).parents[3]
-    reference = load_experiment(repo / "evals/app-builder-filled-control-contrast.toml")
     spec = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
-    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
-    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+    builder_path = "extensions/sites/ufo_ext_sites/application_homepage.py"
     theme_path = "extensions/web/frontend/src/theme.css"
     kit_path = "extensions/sites/ufo_ext_sites/page/kit/kit.css"
-    source = {
-        path: (repo / path).read_text()
-        for path in (builder_path, prompt_path, theme_path, kit_path)
-    }
+    source = {path: (repo / path).read_text() for path in (builder_path, theme_path, kit_path)}
     assert tuple(replacement.path for replacement in spec.arm[0].replacements) == (
         theme_path,
         kit_path,
@@ -312,118 +305,11 @@ def test_secondary_text_regression_materializes_one_matched_token_difference(
     regression_ratio = (surface + 0.05) / (luminance("#919090") + 0.05)
     assert regression_ratio < 4.5 <= safe_ratio
     assert safe_ratio == pytest.approx(5.4, abs=0.1)
-    assert spec.cases == reference.cases
-    assert spec.suites == reference.suites
-    assert spec.repeats == reference.repeats == 1
-    assert spec.concurrency == reference.concurrency == 3
+    assert spec.repeats == 1
+    assert spec.concurrency == 3
     assert spec.max_stacks == len(patches) == 2
-    assert spec.template == reference.template
-    assert spec.model is reference.model is None
-    assert spec.reasoning is reference.reasoning is None
-
-
-def test_filled_control_regression_materializes_the_application_runtime_prompt_unit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = Path(__file__).parents[3]
-    reference = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
-    spec = load_experiment(repo / "evals/app-builder-filled-control-contrast.toml")
-    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
-    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-    theme_path = "extensions/web/frontend/src/theme.css"
-    kit_path = "extensions/sites/ufo_ext_sites/page/kit/kit.css"
-    paths = (builder_path, prompt_path, theme_path, kit_path)
-    source = {path: (repo / path).read_text() for path in paths}
-    replacements = spec.arm[0].replacements
-    assert tuple(replacement.path for replacement in replacements) == (
-        theme_path,
-        kit_path,
-        prompt_path,
-    )
-    base = subprocess.run(
-        ("git", "-C", str(repo), "rev-parse", "HEAD"),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    arms = (
-        ArmSpec.model_construct(name="control", files={}, replacements=()),
-        spec.arm[0],
-    )
-    materialized: dict[str, dict[str, str]] = {}
-    roots: list[Path] = []
-    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
-    _stub_egress_binary_copy(monkeypatch, repo)
-    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
-
-    try:
-        tracked = subprocess.run(
-            ("git", "-C", str(repo), "ls-tree", "-r", "--name-only", base),
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        assert kit_path not in tracked
-        for arm in arms:
-            root = tmp_path / arm.name
-            roots.append(root)
-            ablation._materialize(arm, base, root, None)
-            assert spec.repeats == 1
-            assert (root / "ablate-matrix-0.toml").is_file()
-            files = {path: (root / path).read_text() for path in paths}
-            compile(files[builder_path], builder_path, "exec")
-            materialized[arm.name] = files
-    finally:
-        for root in roots:
-            ablation._remove_worktree(root)
-
-    control = materialized["control"]
-    regression = materialized["missing-fill-ink"]
-    assert control == source
-    assert {path for path in paths if regression[path] != control[path]} == {
-        theme_path,
-        kit_path,
-        prompt_path,
-    }
-    for replacement in replacements:
-        assert (
-            regression[replacement.path].replace(replacement.new, replacement.old)
-            == control[replacement.path]
-        )
-    assert control[theme_path].count("--color-fill-ink: #191A1A;") == 1
-    assert control[kit_path].count("--color-fill-ink:#191a1a;") == 1
-    assert control[prompt_path].count("--accent-primary") == 2
-    assert control[prompt_path].count("--color-fill-ink") == 2
-    assert control[prompt_path].count("`--color-link` is text, not a fill") == 1
-    assert "--color-fill-ink: #191A1A;" not in regression[theme_path]
-    assert "--color-fill-ink:#191a1a;" not in regression[kit_path]
-    assert "--color-fill-ink" not in regression[prompt_path]
-    assert "--text-secondary: light-dark(#676767, #A7A9A9);" in control[theme_path]
-    assert "--text-secondary:light-dark(#676767,#a7a9a9)" in control[kit_path]
-    assert 'APPLICATION_BUILDER_MODEL = "google/gemini-3.7-flash"' in control[builder_path]
-    assert 'APPLICATION_BUILDER_REASONING: Literal["medium"] = "medium"' in control[builder_path]
-
-    def luminance(value: str) -> float:
-        channels = tuple(int(value[index : index + 2], 16) / 255 for index in (1, 3, 5))
-        red, green, blue = (
-            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
-            for channel in channels
-        )
-        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
-
-    fill = luminance("#0095FF")
-    ink = luminance("#191A1A")
-    ratio = (max(fill, ink) + 0.05) / (min(fill, ink) + 0.05)
-    assert ratio >= 4.5
-    assert ratio == pytest.approx(5.6, abs=0.1)
-    assert spec.cases == reference.cases
-    assert spec.suites == reference.suites
-    assert spec.repeats == reference.repeats == 1
-    assert spec.concurrency == reference.concurrency == 3
-    assert spec.max_stacks == len(arms) == 2
-    assert spec.template == reference.template
-    assert spec.model is reference.model is None
-    assert spec.reasoning is reference.reasoning is None
+    assert spec.model is None
+    assert spec.reasoning is None
 
 
 def test_style_divergence_regression_materializes_one_wording_difference(
@@ -508,142 +394,7 @@ def test_style_divergence_regression_materializes_one_wording_difference(
     assert spec.reasoning is reference.reasoning is None
 
 
-def test_svg_geometry_wording_materializes_only_the_builder_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = Path(__file__).parents[3]
-    reference = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
-    spec = load_experiment(repo / "evals/app-builder-svg-geometry-wording.toml")
-    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
-    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-    paths = (builder_path, prompt_path)
-    source = {path: (repo / path).read_text() for path in paths}
-    base = subprocess.run(
-        ("git", "-C", str(repo), "rev-parse", "HEAD"),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    arms = (
-        ArmSpec.model_construct(name="control", files={}, replacements=()),
-        spec.arm[0],
-    )
-    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
-    _stub_egress_binary_copy(monkeypatch, repo)
-    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
-    roots: list[Path] = []
-    materialized: dict[str, dict[str, str]] = {}
-
-    try:
-        for arm in arms:
-            root = tmp_path / arm.name
-            roots.append(root)
-            ablation._materialize(arm, base, root, None)
-            changed = subprocess.run(
-                ("git", "-C", str(root), "diff", "--name-only"),
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.splitlines()
-            assert changed == ([] if arm.name == "control" else [prompt_path])
-            materialized[arm.name] = {path: (root / path).read_text() for path in paths}
-    finally:
-        for root in roots:
-            ablation._remove_worktree(root)
-
-    control = materialized["control"]
-    treatment = materialized["redundant-wording"]
-    assert control == source
-    assert treatment[builder_path] == control[builder_path]
-    assert treatment[prompt_path] != control[prompt_path]
-    replacement = spec.arm[0].replacements[0]
-    assert replacement.path == prompt_path
-    assert treatment[prompt_path].replace(replacement.new, replacement.old) == control[prompt_path]
-    for text in (
-        'viewBox="0 0 305 H"',
-        'width="305"',
-        "primary task and required facts above y=844",
-        "every visible drawing and text bound inside the viewBox",
-    ):
-        assert text in control[builder_path]
-    assert 'viewBox="0 0 305 H"' not in control[prompt_path]
-    assert 'viewBox="0 0 305 H"' in treatment[prompt_path]
-    assert "make at most one corrected design call" in control[prompt_path]
-    assert "make at most one corrected design call" in treatment[prompt_path]
-    assert spec.cases == reference.cases
-    assert spec.suites == reference.suites
-    assert spec.repeats == reference.repeats == 1
-    assert spec.concurrency == reference.concurrency == 3
-    assert spec.max_stacks == len(arms) == 2
-    assert spec.template == reference.template
-    assert spec.model is reference.model is None
-    assert spec.reasoning is reference.reasoning is None
-
-
 SUITE_PATH = "evals/suites/ufo_app_bench.py"
-
-
-def test_wireframe_kit_wording_materializes_only_the_builder_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = Path(__file__).parents[3]
-    reference = load_experiment(repo / "evals/app-builder-svg-geometry-wording.toml")
-    spec = load_experiment(repo / "evals/app-builder-wireframe-kit-components.toml")
-    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
-    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-    paths = (builder_path, prompt_path)
-    source = {path: (repo / path).read_text() for path in paths}
-    base = spec.base
-    arms = (
-        ArmSpec.model_construct(name="control", files={}, replacements=()),
-        spec.arm[0],
-    )
-    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
-    _stub_egress_binary_copy(monkeypatch, repo)
-    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
-    roots: list[Path] = []
-    materialized: dict[str, dict[str, str]] = {}
-    scorer: dict[str, str] = {}
-
-    try:
-        for arm in arms:
-            root = tmp_path / arm.name
-            roots.append(root)
-            ablation._materialize(arm, base, root, None)
-            changed = subprocess.run(
-                ("git", "-C", str(root), "diff", "--name-only"),
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.splitlines()
-            assert changed == ([] if arm.name == "control" else [prompt_path])
-            materialized[arm.name] = {path: (root / path).read_text() for path in paths}
-            scorer[arm.name] = (root / SUITE_PATH).read_text()
-    finally:
-        for root in roots:
-            ablation._remove_worktree(root)
-
-    control = materialized["control"]
-    treatment = materialized["no-kit-annotations"]
-    assert control[prompt_path] == source[prompt_path]
-    assert treatment[builder_path] == control[builder_path]
-    replacement = spec.arm[0].replacements[0]
-    assert replacement.path == prompt_path
-    assert control[prompt_path].replace(replacement.old, replacement.new) == treatment[prompt_path]
-    assert "data-kit-component" not in treatment[prompt_path]
-    assert '<g data-kit-component="Card">' in control[prompt_path]
-    assert "same named components directly in `app.tsx`" in control[prompt_path]
-    # Each arm grades with the suite code of its own worktree, so a base whose scorer cannot read
-    # the attribute the arm varies scores both arms the same and reports a flat difference.
-    assert all("data-kit-component" in text for text in scorer.values())
-    assert spec.cases == reference.cases
-    assert spec.suites == reference.suites
-    assert spec.repeats == reference.repeats == 1
-    assert spec.concurrency == reference.concurrency == 3
-    assert spec.max_stacks == len(arms) == 2
-    assert spec.template == reference.template
-    assert spec.model is reference.model is None
-    assert spec.reasoning is reference.reasoning is None
 
 
 READER_REWRITES = {
@@ -799,8 +550,12 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
         "const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };"
         in source
     )
-    assert "const designHeight = await acceptedDesignHeight(browser, acceptedDesignPath);" in source
-    assert "acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath)" in source
+    assert "const { height: designHeight, regions: designRegions } = design;" in source
+    assert "await measuredDesign(browser, laneWidth, designPath, '')" in source
+    # The design lane has no width of its own: the caller passes it, so a drift shows up as a
+    # missing argument rather than as a second number nobody compares.
+    assert "DESIGN_INITIAL_VIEWPORT" not in source
+    assert "acceptedDesignRegions" not in source
     assert "fs.writeFileSync(staticPath, await frame.content())" in source
     assert "window.__ufoCalls || []" in source
     assert "window.__ufoNavigations || []" in source
@@ -844,49 +599,6 @@ def _run_application_audit(
         capture_output=True,
         timeout=120,
     )
-    regions = subprocess.run(
-        (
-            "docker",
-            "exec",
-            container,
-            "node",
-            "/workspace/app-audit.cjs",
-            "--design",
-            "/workspace/accepted-design.svg",
-        ),
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    ).stdout
-    subprocess.run(
-        ("docker", "exec", "-i", container, "tee", "/workspace/design-regions.json"),
-        input=regions,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    subprocess.run(
-        (
-            "docker",
-            "exec",
-            container,
-            "python3",
-            "-c",
-            "import hashlib,json,sys;"
-            "svg=open(sys.argv[1],'rb').read();"
-            "regions=json.load(open(sys.argv[2]));"
-            "json.dump({'version':1,'design_sha256':hashlib.sha256(svg).hexdigest(),"
-            "'regions':regions},open(sys.argv[3],'w'))",
-            "/workspace/accepted-design.svg",
-            "/workspace/design-regions.json",
-            "/workspace/accepted-design.json",
-        ),
-        check=True,
-        capture_output=True,
-        timeout=120,
-    )
     return subprocess.run(
         (
             "docker",
@@ -900,8 +612,8 @@ def _run_application_audit(
             f"/workspace/{artifact_stem}dark.png",
             f"/workspace/{artifact_stem}interactive.html",
             f"/workspace/{artifact_stem}static.html",
+            str(NARROW_WIDTH),
             "/workspace/accepted-design.svg",
-            "/workspace/accepted-design.json",
         ),
         check=False,
         capture_output=True,
@@ -962,8 +674,8 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/accepted-design.svg"),
         input=(
-            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" '
-            b'width="305" height="844">'
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" '
+            b'width="360" height="844">'
             b'<g data-app-region="queue"><rect width="145" height="844" /></g>'
             b'<g data-app-region="detail"><rect x="160" width="145" height="844" /></g>'
             b"</svg>"
@@ -1026,6 +738,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
                 "node",
                 "/workspace/app-audit.cjs",
                 "--design",
+                str(NARROW_WIDTH),
                 "/workspace/application-design.svg",
             ),
             check=False,
@@ -1035,17 +748,17 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         )
 
     def native(svg: bytes) -> bytes:
-        if b'viewBox="0 0 305 ' in svg:
+        if b'viewBox="0 0 360 ' in svg:
             return svg.replace(b"<svg ", b'<svg xmlns="http://www.w3.org/2000/svg" ', 1)
         opening_end = svg.index(b">")
         nested = (
-            svg[:opening_end].replace(b"<svg ", b'<svg x="0" y="0" width="305" height="844" ', 1)
+            svg[:opening_end].replace(b"<svg ", b'<svg x="0" y="0" width="360" height="844" ', 1)
             + b' preserveAspectRatio="none"'
             + svg[opening_end:]
         )
         return (
-            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" '
-            b'width="305" height="844">' + nested + b"</svg>"
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" '
+            b'width="360" height="844">' + nested + b"</svg>"
         )
 
     def render(svg: bytes) -> list[dict[str, object]]:
@@ -1056,18 +769,18 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         return value
 
     lane_design = (
-        b'<svg viewBox="0 0 305 844" width="305" height="844">'
-        b'<g data-app-region="queue"><rect width="305" height="420" /></g>'
-        b'<g data-app-region="detail"><rect y="424" width="305" height="420" /></g></svg>'
+        b'<svg viewBox="0 0 360 844" width="360" height="844">'
+        b'<g data-app-region="queue"><rect width="360" height="420" /></g>'
+        b'<g data-app-region="detail"><rect y="424" width="360" height="420" /></g></svg>'
     )
     native_lane = render(lane_design)
     assert [region["name"] for region in native_lane] == ["queue", "detail"]
 
     right_overrun = invoke(
         native(
-            b'<svg viewBox="0 0 305 844" width="305" height="844">'
+            b'<svg viewBox="0 0 360 844" width="360" height="844">'
             b'<g data-app-region="queue"><text x="300" y="40">Queue overflow</text></g>'
-            b'<g data-app-region="detail"><rect y="80" width="305" height="764" /></g></svg>'
+            b'<g data-app-region="detail"><rect y="80" width="360" height="764" /></g></svg>'
         )
     )
     assert right_overrun.returncode != 0
@@ -1077,7 +790,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
 
     internal_collision = invoke(
         native(
-            b'<svg viewBox="0 0 305 920" width="305" height="920" '
+            b'<svg viewBox="0 0 360 920" width="360" height="920" '
             b'style="font-family:-apple-system,BlinkMacSystemFont,Inter,sans-serif">'
             b'<g data-app-region="meeting-investor" transform="translate(12,622)">'
             b'<rect width="281" height="250" rx="8" />'
@@ -1101,7 +814,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     assert 'text="Attendees: investor@transpose" crosses tag=rect' in internal_collision.stderr
 
     ordinary_lines_and_avatar_stack = render(
-        b'<svg viewBox="0 0 305 844" width="305" height="844">'
+        b'<svg viewBox="0 0 360 844" width="360" height="844">'
         b'<g data-app-region="queue"><rect x="8" y="8" width="289" height="120" />'
         b'<text x="16" y="28">Queue</text><text x="16" y="48">Next line</text>'
         b'<g data-slot="avatar-stack"><text x="16" y="80">AL</text>'
@@ -1112,9 +825,9 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     assert [region["name"] for region in ordinary_lines_and_avatar_stack] == ["queue", "detail"]
     bottom_overrun = invoke(
         native(
-            b'<svg viewBox="0 0 305 844" width="305" height="844">'
-            b'<g data-app-region="queue"><rect width="305" height="800" /></g>'
-            b'<g data-app-region="detail"><rect y="820" width="305" height="40" /></g></svg>'
+            b'<svg viewBox="0 0 360 844" width="360" height="844">'
+            b'<g data-app-region="queue"><rect width="360" height="800" /></g>'
+            b'<g data-app-region="detail"><rect y="820" width="360" height="40" /></g></svg>'
         )
     )
     assert bottom_overrun.returncode != 0
@@ -1437,17 +1150,8 @@ async def test_app_bench_probe_retains_the_final_application_source(tmp_path: Pa
             assert timeout_s == 120
             directory = tmp_path / ".eval-output" / "meeting-tasks"
             directory.mkdir(parents=True)
-            for suffix in (
-                "design.html",
-                "design.svg",
-                "design-evidence.json",
-                "interactive.html",
-                "static.html",
-                "audit.json",
-                "light.png",
-                "dark.png",
-            ):
-                (directory / f"meeting-tasks-{suffix}").write_bytes(suffix.encode())
+            for target in set(re.findall(r'"\$capture/([\w.-]+)"', command)):
+                (directory / target).write_bytes(target.encode())
             return ProbeCommandResult(0, "", "")
 
     source = (
@@ -1464,112 +1168,10 @@ async def test_app_bench_probe_retains_the_final_application_source(tmp_path: Pa
     )
 
     assert result.error == ""
-    assert SharedArtifact("meeting-tasks-design.svg", b"design.svg") in result.artifacts
+    assert (
+        SharedArtifact("meeting-tasks-design.svg", b"meeting-tasks-design.svg") in result.artifacts
+    )
     assert result.artifacts[-1] == SharedArtifact("meeting-tasks-source.tsx", source)
-
-
-async def test_app_bench_kit_component_scorer_requires_wireframe_and_source_match() -> None:
-    scorer = _kit_component_scorer()
-
-    def output(design: str, source: str) -> CapabilityOutput:
-        return CapabilityOutput(
-            "",
-            (),
-            artifacts=(
-                SharedArtifact("meeting-tasks-design.svg", design.encode()),
-                SharedArtifact("meeting-tasks-source.tsx", source.encode()),
-            ),
-        )
-
-    real = await scorer(
-        output(
-            '<svg xmlns="http://www.w3.org/2000/svg">'
-            '<g data-kit-component="Card"/><g data-kit-component="Badge"/></svg>',
-            'import { Badge, Card, mountApp } from "ufo/kit";\n'
-            "const App = () => <main><Badge>Ready</Badge><Card>Queue</Card></main>;\n"
-            'mountApp(document.getElementById("root")!, () => <App />);',
-        )
-    )
-    missing = await scorer(
-        output(
-            '<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>',
-            'import { Card, mountApp } from "ufo/kit";\n'
-            "const App = () => <Card>Queue</Card>;\n"
-            'mountApp(document.getElementById("root")!, () => <App />);',
-        )
-    )
-    unknown = await scorer(
-        output(
-            '<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="DashboardTile"/></svg>',
-            'import { Card, mountApp } from "ufo/kit";\n'
-            "const App = () => <Card>Queue</Card>;\n"
-            'mountApp(document.getElementById("root")!, () => <App />);',
-        )
-    )
-    mismatch = await scorer(
-        output(
-            '<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Badge"/></svg>',
-            'import { Badge, Card, mountApp } from "ufo/kit";\n'
-            'const example = "<Badge>Not rendered</Badge>";\n'
-            "const App = () => <Card>Queue</Card>;\n"
-            'mountApp(document.getElementById("root")!, () => <App />);',
-        )
-    )
-    shadowed = await scorer(
-        output(
-            '<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Badge"/></svg>',
-            'import { Badge as KitBadge, Card, mountApp } from "ufo/kit";\n'
-            "function KitBadge() { return <span>Local</span>; }\n"
-            "const App = () => <main><Card>Queue</Card><KitBadge /></main>;\n"
-            'mountApp(document.getElementById("root")!, () => <App />);',
-        )
-    )
-
-    assert real.passed, real.reason
-    assert real.evidence == {
-        "appKitPassed": 1,
-        "appKitTotal": 1,
-        "appKitWireframeComponents": ["Card", "Badge"],
-        "appKitComponents": ["Badge", "Card"],
-    }
-    assert not missing.passed
-    assert missing.evidence["appKitWireframeComponents"] == []
-    assert "wireframe has no Kit component annotations" in missing.reason
-    assert not unknown.passed
-    assert unknown.evidence["appKitWireframeComponents"] == ["DashboardTile"]
-    assert "unknown Kit component" in unknown.reason
-    assert not mismatch.passed
-    assert mismatch.evidence["appKitComponents"] == ["Card"]
-    assert "wireframe Kit component(s) not rendered in app.tsx: Badge" in mismatch.reason
-    assert not shadowed.passed
-    assert shadowed.evidence["appKitComponents"] == ["Card"]
-
-
-async def test_app_bench_kit_component_scorer_rejects_a_destructured_local_shadow() -> None:
-    scorer = _kit_component_scorer()
-    result = await scorer(
-        CapabilityOutput(
-            "",
-            (),
-            artifacts=(
-                SharedArtifact(
-                    "meeting-tasks-design.svg",
-                    b'<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Card"/></svg>',
-                ),
-                SharedArtifact(
-                    "meeting-tasks-source.tsx",
-                    b'import { Card, mountApp } from "ufo/kit";\n'
-                    b"const local = { Card: () => <main /> };\n"
-                    b"function App() { const { Card } = local; return <Card />; }\n"
-                    b'mountApp(document.getElementById("root")!, () => <App />);',
-                ),
-            ),
-        )
-    )
-
-    assert not result.passed
-    assert result.evidence["appKitComponents"] == []
-    assert "wireframe Kit component(s) not rendered in app.tsx: Card" in result.reason
 
 
 def _output(name: str, content: bytes) -> CapabilityOutput:
@@ -2200,30 +1802,17 @@ async def test_interaction_screen_requires_two_accessible_visible_state_changes(
     assert "pageerror: broken" in console.reason
 
 
-def _application_qa_calls() -> tuple[ToolInvocation, ...]:
-    if APPLICATION_BUILDER_QA_TOOL == "js_repl":
-        return (
-            ToolInvocation("start_server", {}, "started", has_result=True),
-            ToolInvocation("js_repl", {}, "checked", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed", has_result=True),
-        )
-    return (ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "passed", has_result=True),)
-
-
 def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
-    result = ApplicationBuilderResult(
+    result = ApplicationBuildResult(
         status="deployed",
-        source_path="/workspace/ufo-app/app.tsx",
-        site_name="built-app",
+        site="built-app",
         site_url="https://ufo.test/built-app",
-        browser_batches=2 if APPLICATION_BUILDER_QA_TOOL == "js_repl" else 1,
-        controls_checked=("Filter", "Select"),
     ).model_dump_json()
     own_calls = (
         ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
         ToolInvocation(
-            "object_action",
-            {"kind": "site", "action": APPLICATION_BUILDER_DELEGATION_TOOL, "input": {}},
+            "spawn",
+            {"target": f"profile:{APPLICATION_BUILDER_NAME}", "payload": {"phase": "build"}},
             result,
             has_result=True,
         ),
@@ -2231,19 +1820,23 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     worker_calls = (
         ToolInvocation("call_external_tool", {}, "facts", has_result=True),
         ToolInvocation(
-            APPLICATION_BUILDER_DESIGN_TOOL,
-            {"content": "<svg viewBox='0 0 1 1' />"},
+            "write",
+            {WRITE_PATH_FIELD: "/workspace/ufo-app/application-design.svg"},
             "written",
             has_result=True,
         ),
         ToolInvocation(
-            APPLICATION_BUILDER_WRITE_TOOL,
-            {"content": "const page = true;"},
+            "write",
+            {WRITE_PATH_FIELD: "/workspace/ufo-app/app.tsx"},
             "written",
             has_result=True,
         ),
-        *_application_qa_calls(),
-        ToolInvocation(APPLICATION_BUILDER_DEPLOY_TOOL, {}, "deployed", has_result=True),
+        ToolInvocation(
+            "object_action",
+            {"kind": "site", "action": "deploy_website", "input": {}},
+            "deployed",
+            has_result=True,
+        ),
     )
     return CapabilityOutput(
         "Built the app.",
@@ -2282,8 +1875,12 @@ async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
         calls=(
             *base.calls,
             ToolInvocation("object_get", {"ref": "site/daily-brief"}, "read", has_result=True),
-            ToolInvocation("js_repl", {}, "checked repair", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed repair", has_result=True),
+            ToolInvocation(
+                "edit",
+                {"file_path": "/workspace/ufo-app/app.tsx"},
+                "edited",
+                has_result=True,
+            ),
             ToolInvocation(
                 "object_action",
                 {"kind": "site", "action": "deploy_website", "input": {}},
@@ -2320,8 +1917,16 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     base = _built_screen({})
     direct = replace(
         base,
-        calls=tuple(call for call in base.calls if call.call != BUILD_ACTION),
-        own_calls=tuple(call for call in base.own_calls if call.call != BUILD_ACTION),
+        calls=tuple(
+            call
+            for call in base.calls
+            if not (call.name == SPAWN_TOOL and call.input.get("target") == BUILDER_TARGET)
+        ),
+        own_calls=tuple(
+            call
+            for call in base.own_calls
+            if not (call.name == SPAWN_TOOL and call.input.get("target") == BUILDER_TARGET)
+        ),
     )
     wrong_lane_call = ToolInvocation(
         "spawn",
@@ -2369,7 +1974,7 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     )
     no_child_write = replace(
         base,
-        calls=tuple(call for call in base.calls if call.name != APPLICATION_BUILDER_WRITE_TOOL),
+        calls=tuple(call for call in base.calls if call.name != "write"),
     )
 
     accepted = await _application_builder_scorer()(base)
@@ -2382,9 +1987,9 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
 
     assert accepted.passed, accepted.reason
     assert not missing.passed
-    assert f"did not call {APPLICATION_BUILDER_DELEGATION_TOOL}" in missing.reason
+    assert "did not spawn the application builder" in missing.reason
     assert not lane.passed
-    assert "parent entered the worker loop" in lane.reason
+    assert "spawned website_building for the page" in lane.reason
     assert not authored.passed
     assert "parent entered the worker loop" in authored.reason
     assert not edited.passed
@@ -2392,7 +1997,7 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     assert not inspected.passed
     assert "parent entered the worker loop" in inspected.reason
     assert not unwritten.passed
-    assert APPLICATION_BUILDER_WRITE_TOOL in unwritten.reason
+    assert "wrote no source" in unwritten.reason
 
     self_certified = replace(
         base,
@@ -2408,112 +2013,7 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     )
     certified = await _application_builder_scorer()(self_certified)
     assert not certified.passed
-    assert "certify its own homepage" in certified.reason
-
-
-def _design_index(output: CapabilityOutput) -> int:
-    return next(
-        index
-        for index, call in enumerate(output.calls)
-        if call.name == APPLICATION_BUILDER_DESIGN_TOOL
-    )
-
-
-def _rejected_design_call() -> ToolInvocation:
-    return ToolInvocation(
-        APPLICATION_BUILDER_DESIGN_TOOL,
-        {"content": "<svg viewBox='0 0 1440 900' />"},
-        "design viewBox must be '0 0 305 H'",
-        has_result=True,
-        is_error=True,
-    )
-
-
-async def test_ufo_app_bench_accepts_a_corrected_design_after_a_rejection() -> None:
-    base = _built_screen({})
-    design = _design_index(base)
-    corrected = replace(
-        base,
-        calls=(*base.calls[:design], _rejected_design_call(), *base.calls[design:]),
-    )
-
-    verdict = await _application_builder_scorer()(corrected)
-
-    assert verdict.passed, verdict.reason
-
-
-async def test_ufo_app_bench_rejects_more_than_one_design_correction() -> None:
-    base = _built_screen({})
-    design = _design_index(base)
-    repeated = replace(
-        base,
-        calls=(
-            *base.calls[:design],
-            _rejected_design_call(),
-            _rejected_design_call(),
-            *base.calls[design:],
-        ),
-    )
-
-    verdict = await _application_builder_scorer()(repeated)
-
-    assert not verdict.passed
-    assert verdict.reason == "the worker must write one accepted SVG design before app.tsx"
-
-
-async def test_ufo_app_bench_rejects_a_design_call_after_acceptance() -> None:
-    base = _built_screen({})
-    design = _design_index(base)
-    repeated = replace(
-        base,
-        calls=(
-            *base.calls[: design + 1],
-            _rejected_design_call(),
-            *base.calls[design + 1 :],
-        ),
-    )
-
-    verdict = await _application_builder_scorer()(repeated)
-
-    assert not verdict.passed
-    assert verdict.reason == "the worker must write one accepted SVG design before app.tsx"
-
-
-async def test_ufo_app_bench_requires_one_accepted_design_before_the_app_source() -> None:
-    base = _built_screen({})
-    design = _design_index(base)
-    unaccepted = replace(
-        base,
-        calls=(
-            *base.calls[:design],
-            replace(base.calls[design], result="design height must be finite", is_error=True),
-            *base.calls[design + 1 :],
-        ),
-    )
-    source_first = replace(
-        base,
-        calls=(
-            *base.calls[:design],
-            base.calls[design + 1],
-            base.calls[design],
-            *base.calls[design + 2 :],
-        ),
-    )
-    redesigned = replace(
-        base,
-        calls=(*base.calls[: design + 1], base.calls[design], *base.calls[design + 1 :]),
-    )
-
-    refused = await _application_builder_scorer()(unaccepted)
-    reordered = await _application_builder_scorer()(source_first)
-    repeated = await _application_builder_scorer()(redesigned)
-
-    assert not refused.passed
-    assert APPLICATION_BUILDER_DESIGN_TOOL in refused.reason
-    assert not reordered.passed
-    assert reordered.reason == "the worker must write one accepted SVG design before app.tsx"
-    assert not repeated.passed
-    assert repeated.reason == "the worker must write one accepted SVG design before app.tsx"
+    assert "bind its own homepage" in certified.reason
 
 
 async def test_ufo_app_bench_rejects_parent_user_input() -> None:
@@ -2538,8 +2038,16 @@ async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
     scorer = _skill_scorer()
     without_delegation = replace(
         base,
-        calls=tuple(call for call in base.calls if call.call != BUILD_ACTION),
-        own_calls=tuple(call for call in base.own_calls if call.call != BUILD_ACTION),
+        calls=tuple(
+            call
+            for call in base.calls
+            if not (call.name == SPAWN_TOOL and call.input.get("target") == BUILDER_TARGET)
+        ),
+        own_calls=tuple(
+            call
+            for call in base.own_calls
+            if not (call.name == SPAWN_TOOL and call.input.get("target") == BUILDER_TARGET)
+        ),
     )
     without_parent_load = replace(
         base,
@@ -2551,113 +2059,13 @@ async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
     verdict = await scorer(without_parent_load)
 
     assert grading_statement(scorer) == (
-        "a direct turn loads 'website-building', or application-builder preloads 'ufo-style' "
-        "after build_ufo_application"
+        "a direct turn loads 'website-building', or the builder preloads "
+        "'application-homepage' after its spawn"
     )
     assert direct.passed, direct.reason
     assert direct.reason == "loaded 'website-building'"
     assert verdict.passed, verdict.reason
-    assert "preloads 'ufo-style'" in verdict.reason
-
-
-async def test_ufo_app_bench_rejects_a_routine_second_delegation() -> None:
-    base = _built_screen({})
-    second = ToolInvocation(
-        "object_action",
-        {"kind": "site", "action": APPLICATION_BUILDER_DELEGATION_TOOL, "input": {}},
-        "repaired",
-        has_result=True,
-    )
-    repeated = replace(
-        base,
-        calls=(*base.calls, second),
-        own_calls=(*base.own_calls, second),
-    )
-    verdict = await _application_builder_scorer()(repeated)
-
-    assert not verdict.passed
-    assert "delegated 2 times" in verdict.reason
-
-
-async def test_ufo_app_bench_rejects_a_failed_delegation_before_a_success() -> None:
-    base = _built_screen({})
-    failed = ToolInvocation(
-        "object_action",
-        {"kind": "site", "action": APPLICATION_BUILDER_DELEGATION_TOOL, "input": {}},
-        "invalid input",
-        has_result=True,
-        is_error=True,
-    )
-    repeated = replace(
-        base,
-        calls=(failed, *base.calls),
-        own_calls=(failed, *base.own_calls),
-    )
-    verdict = await _application_builder_scorer()(repeated)
-
-    assert not verdict.passed
-    assert "delegated 2 times" in verdict.reason
-
-
-async def test_ufo_app_bench_bounds_product_qa_calls() -> None:
-    grader = _qa_efficiency_scorer()
-    clean = await grader(_built_screen({}))
-    assert clean.passed, clean.reason
-    max_calls = (
-        MAX_BROWSER_QA_CALLS if APPLICATION_BUILDER_QA_TOOL == "js_repl" else MAX_PRODUCT_QA_CALLS
-    )
-
-    repeated_qa = replace(
-        _built_screen({}),
-        calls=(
-            *_built_screen({}).calls[:4],
-            *(
-                ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "extra check", has_result=True)
-                for _ in range(max_calls)
-            ),
-            *_built_screen({}).calls[4:],
-        ),
-    )
-    too_many_calls = await grader(repeated_qa)
-    assert not too_many_calls.passed
-    assert f"at most {max_calls}" in too_many_calls.reason
-
-    failed_qa = replace(
-        _built_screen({}),
-        calls=(
-            *_built_screen({}).calls,
-            ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "failed", has_result=False),
-        ),
-    )
-    failed_call = await grader(failed_qa)
-    assert not failed_call.passed
-    assert "final QA call failed" in failed_call.reason
-
-    base = _built_screen({})
-    first_qa = next(
-        index for index, call in enumerate(base.calls) if call.name == APPLICATION_BUILDER_QA_TOOL
-    )
-    recovered_qa = replace(
-        base,
-        calls=(
-            *base.calls[:first_qa],
-            ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "found a defect", has_result=False),
-            *base.calls[first_qa:],
-        ),
-    )
-    recovered_call = await grader(recovered_qa)
-    assert recovered_call.passed, recovered_call.reason
-
-    qa_after_deploy = replace(
-        _built_screen({}),
-        calls=(
-            *_built_screen({}).calls,
-            ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "late check", has_result=True),
-        ),
-    )
-    wrong_order = await grader(qa_after_deploy)
-    assert not wrong_order.passed
-    assert f"before {APPLICATION_BUILDER_DEPLOY_TOOL}" in wrong_order.reason
+    assert "preloads 'application-homepage'" in verdict.reason
 
 
 async def test_ufo_app_bench_accepts_static_deploy_or_published_application() -> None:
@@ -2666,7 +2074,12 @@ async def test_ufo_app_bench_accepts_static_deploy_or_published_application() ->
         _built_screen({}),
         calls=(
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
-            *_application_qa_calls(),
+            ToolInvocation(
+                "object_action",
+                {"kind": "site", "action": "deploy_website", "input": {}},
+                "deployed",
+                has_result=True,
+            ),
             ToolInvocation(
                 "object_action",
                 {"kind": "site", "action": "publish_website", "input": {}},
@@ -2823,17 +2236,15 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         built = await case.grader(_built_screen({**pages, **report, **shots}))
         assert built.passed, case.name
 
-        blocked = ApplicationBuilderResult(
+        blocked = ApplicationBuildResult(
             status="blocked",
-            source_path="/workspace/ufo-app/app.tsx",
-            browser_batches=0,
             blocker="The source did not compile.",
         ).model_dump_json()
         own_calls = (
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
             ToolInvocation(
-                APPLICATION_BUILDER_DELEGATION_TOOL,
-                {},
+                "spawn",
+                {"target": f"profile:{APPLICATION_BUILDER_NAME}", "payload": {"phase": "build"}},
                 blocked,
                 has_result=True,
             ),
@@ -2879,7 +2290,7 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert case.prepare is None
         assert case.artifact_probe is not None
         assert isinstance(case.artifact_probe, _AppBenchProbe)
-        probe_command = case.artifact_probe._command()
+        probe_command = case.artifact_probe._audit().command
         assert "node /tmp/ufo-app-bench-audit.cjs /workspace/ufo-app" in probe_command
         assert "test -s /workspace/ufo-app/application-design.svg" in probe_command
         assert f'"$capture/{case.name}-design.html"' in probe_command
@@ -3353,7 +2764,7 @@ async def test_app_design_region_grader_measures_names_fold_and_relative_order()
         },
     ]
     for view in report["views"]:
-        if view["width"] == DESKTOP_WIDTH:
+        if view["width"] == NARROW_WIDTH:
             view["regions"] = [dict(region) for region in report["designRegions"]]
     output = CapabilityOutput(
         "Built app",
@@ -3369,7 +2780,7 @@ async def test_app_design_region_grader_measures_names_fold_and_relative_order()
     dark = next(
         view
         for view in report["views"]
-        if view["width"] == DESKTOP_WIDTH and view["scheme"] == "dark"
+        if view["width"] == NARROW_WIDTH and view["scheme"] == "dark"
     )
     dark["regions"][0]["left"] = 0.7
     dark["regions"][1]["left"] = 0.05
@@ -3567,16 +2978,6 @@ async def test_connected_app_seed_grants_sources_and_keeps_one_fixed_data_univer
         action_fixture = await ScopedStore(extension=EVAL_ENV_NAME).get(
             f"{APP_FIXTURE_PREFIX}{GITHUB_PROVIDER}:{action_contract.fixture_tool}"
         )
-        first_contract = await ScopedStore(extension="sites").get(
-            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
-                request_sha256=sha256(MEMBER_QUERIES[spec.name].encode()).hexdigest()
-            )
-        )
-        second_contract = await ScopedStore(extension="sites").get(
-            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
-                request_sha256=sha256(MEMBER_QUERIES[second.name].encode()).hexdigest()
-            )
-        )
         async with workspace_tx() as connection:
             providers = (
                 (
@@ -3622,12 +3023,6 @@ async def test_connected_app_seed_grants_sources_and_keeps_one_fixed_data_univer
     ]
     assert stored == APP_UNIVERSE_TOOLS[DRIVE_PROVIDER]["list_documents"]
     assert isinstance(action_fixture, dict)
-    assert ApplicationAuditContract.model_validate(first_contract) == _application_audit_contract(
-        spec
-    )
-    assert ApplicationAuditContract.model_validate(second_contract) == _application_audit_contract(
-        second
-    )
     assert action_fixture["application_actions"] == [
         contract.connector_value()
         for contract in ACTION_CONTRACTS
@@ -3722,3 +3117,60 @@ def test_kit_rubric_alignment_ablation_changes_only_the_two_kit_rules(
     assert spec.repeats == 1
     assert spec.concurrency == 3
     assert spec.max_stacks == 2
+
+
+def test_every_design_mode_caller_passes_the_one_lane_width() -> None:
+    """The audit script takes the lane width as an argument with no default of its own, so every
+    caller in the tree has to name it. A caller left on the old shape does not fail where it is
+    written: `--design <svg>` still parses as a path in the shell, and the script exits 2 with a
+    usage line that surfaces far from the call.
+
+    The gate reads the repository rather than the callers someone remembers. Naming them one at a
+    time is what let a docker-only caller — unrunnable on an arm64 host, so first executed in CI —
+    stay on the old shape after two others were fixed."""
+
+    audit = app_audit(
+        name="kanban-board",
+        output_dir="/out",
+        project="/workspace/ufo-app",
+        design_path="/workspace/ufo-app/application-design.svg",
+        compile_source=True,
+    )
+    command = audit.command
+    assert f"--design {NARROW_WIDTH} " in command
+    usage = AUDIT_CONTENT.decode()
+    assert "node app-audit.cjs --design <lane-width> <application-design.svg>" in usage
+
+    root = Path(__file__).parents[3]
+    named = re.compile(r"NARROW_WIDTH|APPLICATION_DESIGN_WIDTH|\b360\b")
+    # An invocation, not a mention: the flag as a quoted argument or inside an f-string command.
+    invoked = re.compile(r"""["']--design["']|--design \{""")
+    stale = []
+    for area in ("core", "extensions", "evals"):
+        for source in (root / area).rglob("*.py"):
+            if ".local" in source.parts or "site-packages" in source.parts:
+                continue
+            text = source.read_text().splitlines()
+            for index, line in enumerate(text):
+                if not invoked.search(line):
+                    continue
+                if not named.search("\n".join(text[index : index + 3])):
+                    stale.append(f"{source.relative_to(root)}:{index + 1}")
+    assert not stale, f"callers still on the old --design shape: {stale}"
+
+
+def test_the_audit_command_names_exactly_the_files_it_writes() -> None:
+    """A caller that requires a file the run never makes fails every case on artifacts alone,
+    whatever the agent built, and the failure reads as the agent's. The command is the one place
+    that knows both halves, so the names it hands back are the names it writes."""
+
+    for design_path in (None, "/workspace/ufo-app/application-design.svg"):
+        audit = app_audit(
+            name="kanban-board",
+            output_dir="/out",
+            project="/workspace/ufo-app",
+            design_path=design_path,
+            compile_source=True,
+        )
+        written = set(re.findall(r'"\$capture/([\w.-]+)"', audit.command))
+        assert set(audit.outputs) == written

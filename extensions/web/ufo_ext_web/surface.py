@@ -40,12 +40,12 @@ from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from ufo_ext_imessage.cloud import imessage_offered
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE
 from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
-from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION
 from ufo_ext_sites.objects import SITE_KIND
+from ufo_ext_sites.store import HostedSites
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
 from ufo_ext_slack.surface import SURFACE_SLACK
 from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
@@ -57,7 +57,7 @@ from ufo.sdk.authority import MemberAuthority
 from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
-from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
+from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader, WorkspaceAgent
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.flags import flag_enabled
 from ufo.sdk.http import (
@@ -264,18 +264,44 @@ CHAT_STORE_PREFIX = "chat/"
 TITLE_JOB_NAME = "chat_titles"
 TITLE_JOB_SCHEDULE = "*/15 * * * * *"
 TITLE_BATCH = 5
-HOMEPAGE_SEED_PREFIX = "homepage-seed/"
+HOMEPAGE_SETTLED_PREFIX = "homepage-settled/"
+"""Where the sweep records an agent it has finished with, and a key space of its own because the
+marker changed meaning: the release before this one wrote `homepage-seed/<agent>` for a turn that
+ran. That image serves until the new pods are ready and keeps writing its own key through the
+rollout, so a new sweep reading the old space would read those writes as pages that are bound and
+settle each of those agents for ever."""
+HOMEPAGE_ATTEMPT_PREFIX = "homepage-attempt/"
 SEED_JOB_NAME = "seed_homepages"
 SEED_JOB_SCHEDULE = "0 */5 * * * *"
-HOMEPAGE_TOOLS = (APPLICATION_BUILDER_DELEGATION.canonical_id,)
-SEED_PROMPT = (
-    "Build your homepage: the page members open on the agents screen. State what you are for, "
-    "what you watch, recent work, and what you need from members. Call the site collection's "
-    "build_ufo_application action (object_action with kind site) once for the complete build. "
-    "The worker owns connected data inspection, app.tsx, browser QA, "
-    "repair, and deployment. Product checks own acceptance and homepage binding. Do not inspect "
-    "or repair its work. Give one final response from its structured result."
+SEED_MAX_ATTEMPTS = 3
+HOMEPAGE_TOOLS = (
+    "spawn",
+    "load_skill",
+    "share_file",
+    "action:site:deploy_website",
+    "action:agent:set_homepage",
 )
+"""What a homepage build asks of the agent it fires on, and therefore what an allowlist must name
+for the sweep to admit one.
+
+An allowlist is the whole naming — an agent that declares these holds nothing else — so the set is
+exactly the acts the build needs: reach the builder, load the skill that says how, show the member
+the wireframe, host a page, and bind it. `deploy_website` is the gate itself, so the caller changes
+nothing about what a page must pass; withholding it only removes callers. It is the one that reaches
+a page bound by another conversation, which refuses a worker for having no speaker — the skill sends
+that deploy back to this agent, and it needs the tool to take it."""
+SEED_PROMPT = (
+    "Build your homepage: the page members open for you on the Apps screen. It should state what "
+    "you are for, what you watch, your recent work, and what you need from members. Spawn the "
+    "application homepage builder to draw and build it, then bind what it hosted as your homepage."
+)
+BUILD_ASK = (
+    "Build this workspace its own version of your page. Load your homepage skill and follow it."
+)
+"""What the portal's build press types into the composer the member sends it from. The words are
+stated here and held against the frontend's own copy by a test: the routing eval measures this
+exact string, and a phrasing that drifted on one side would route in the eval and not in the
+portal."""
 TITLE_EXCERPT_CHARS = 1000
 TITLE_MAX_TOKENS = 100
 TITLE_SYSTEM_PROMPT = (
@@ -952,12 +978,30 @@ async def summarize_chat_titles(ctx: ExtensionContext) -> None:
         await ctx.summarized_conversation_title(conversation_id, summary)
 
 
-async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> None:
-    """One homepage-build turn per agent, ever — the batch job behind the Home tab's first fill.
-    The marker alone decides, so the sweep cannot fire on rows it caused and the fleet's existing
-    agents seed through the same sweep. The marker is written only for a turn admission accepted:
-    a refusal — a breached cap, an unseated on-behalf member — leaves the agent unmarked, and the
-    day-bucketed idempotency key retries it tomorrow. The turn rides on behalf of the agent's
+class HomepageSeedAttempt(BaseModel):
+    """What the sweep has already tried for one unbound agent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    attempts: int = Field(default=0, ge=0)
+    bucket: str = ""
+
+
+@dataclass(frozen=True)
+class HomepageSeed:
+    """One homepage per agent — the batch job behind the Home tab's first fill.
+
+    What settles an agent is the bound page, not the fact that a turn once ran for it: a build that
+    refused, a spawn the provider dropped, a turn that ended without deploying all leave the agent
+    with no homepage, and a marker written on the attempt would leave it with none forever. So the
+    sweep asks the `site` kind whether this agent has a bound page and settles on the answer.
+
+    An unbound agent fires once per day bucket, and the attempt count is what stops it: three
+    buckets without a bound page and the agent is marked `unbuilt` and left alone, because a
+    fourth identical attempt is not new information. Attempts are counted under their own prefix,
+    which the candidate query does not count, so a workspace holding a half-tried agent stays due.
+
+    The turn rides on behalf of the agent's
     owner — the earliest-seated admin for an ownerless row — because a deploy needs an acting
     member, and it runs in that member's own room, the shape every on-behalf invocation takes, so
     the authority it carries stays inside a room its member already reads. The homepage answers
@@ -969,7 +1013,7 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     its homepage is the deploy-wide bundle served row-less, so it needs no build. Marking it rather
     than skipping it is what lets the candidate query settle — an unmarked agent it never builds
     would keep the workspace due forever.
-    An agent whose allowlist withholds the homepage build is skipped and left unmarked: the
+    An agent whose allowlist withholds the deploy action is skipped and left unmarked: the
     negative is recomputed every pass, so an allowlist that later gains the action is seeded on the
     next sweep and a marker computed against a stale name can never outlive a deploy. An archived
     app is marked, since it admits no turn at all, and an ownerless agent in a workspace with no
@@ -980,51 +1024,89 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     refused admission is a durable turn its key would answer forever, so a refusal costs at most
     one bucket's attempt while a crash between admitting and marking still dedupes to the turn
     already admitted."""
-    bucket = bucket or datetime.now(UTC).date().isoformat()
-    agents = await ctx.workspace_agents()
-    if not agents:
-        return
-    marked = {key for key, _ in await ctx.store.list(HOMEPAGE_SEED_PREFIX)}
-    admin_resolved = False
-    admin: UUID | None = None
-    for agent in agents:
-        key = f"{HOMEPAGE_SEED_PREFIX}{agent.id}"
-        if key in marked:
-            continue
+
+    ctx: ExtensionContext
+    bucket: str
+    sites: HostedSites
+
+    async def sweep(self) -> None:
+        agents = await self.ctx.workspace_agents()
+        if not agents:
+            return
+        marked = {key for key, _ in await self.ctx.store.list(HOMEPAGE_SETTLED_PREFIX)}
+        attempts = dict(await self.ctx.store.list(HOMEPAGE_ATTEMPT_PREFIX))
+        for agent in agents:
+            key = f"{HOMEPAGE_SETTLED_PREFIX}{agent.id}"
+            if key in marked:
+                continue
+            settled = await self._settled(agent)
+            if settled is not None:
+                await self.ctx.store.put(key, settled)
+                continue
+            if agent.tools is not None and not set(HOMEPAGE_TOOLS) <= set(agent.tools):
+                continue
+            attempt_key = f"{HOMEPAGE_ATTEMPT_PREFIX}{agent.id}"
+            attempt = HomepageSeedAttempt.model_validate(attempts.get(attempt_key) or {})
+            if attempt.attempts >= SEED_MAX_ATTEMPTS:
+                await self.ctx.store.put(key, "unbuilt")
+                continue
+            if attempt.bucket == self.bucket:
+                continue
+            await self._fire(agent, key, attempt_key, attempt)
+
+    async def _settled(self, agent: WorkspaceAgent) -> str | None:
         if agent.archived:
-            await ctx.store.put(key, "archived")
-            continue
+            return "archived"
         if shipped_app_slug(agent.provisioned_by) is not None:
-            await ctx.store.put(key, "shipped")
-            continue
-        if agent.tools is not None and not set(HOMEPAGE_TOOLS) <= set(agent.tools):
-            continue
-        acting = agent.owner_member_id
+            return "shipped"
+        if await self.sites.homepage(agent.id) is not None:
+            return "bound"
+        return None
+
+    async def _acting(self, agent: WorkspaceAgent) -> UUID | None:
+        if agent.owner_member_id is not None:
+            return agent.owner_member_id
+        return await self.ctx.earliest_seated_admin()
+
+    async def _fire(
+        self, agent: WorkspaceAgent, key: str, attempt_key: str, attempt: HomepageSeedAttempt
+    ) -> None:
+        acting = await self._acting(agent)
         if acting is None:
-            if not admin_resolved:
-                admin = await ctx.earliest_seated_admin()
-                admin_resolved = True
-            acting = admin
-        if acting is None:
-            continue
-        conversation_id = await ctx.open_conversation(
+            return
+        conversation_id = await self.ctx.open_conversation(
             agent.id, f"homepage/{agent.id}/{acting}", member_id=acting
         )
-        turn_id = await ctx.invoke(
+        turn_id = await self.ctx.invoke(
             conversation_id,
             agent.id,
             SEED_PROMPT,
-            f"homepage-seed:{agent.id}:{bucket}",
+            f"homepage-seed:{agent.id}:{self.bucket}",
             authority=MemberAuthority(acting),
             as_scheduled=True,
         )
         if turn_id is None:
             raise RuntimeError(f"homepage seed for agent {agent.id} answered no turn")
-        outcomes = await ctx.turn_outcomes((turn_id,))
-        outcome = outcomes.get(turn_id)
+        outcome = (await self.ctx.turn_outcomes((turn_id,))).get(turn_id)
         if outcome is not None and outcome.status == "cancelled":
-            continue
-        await ctx.store.put(key, str(acting))
+            return
+        if await self.sites.homepage(agent.id) is not None:
+            await self.ctx.store.put(key, "bound")
+            return
+        await self.ctx.store.put(
+            attempt_key,
+            HomepageSeedAttempt(attempts=attempt.attempts + 1, bucket=self.bucket).model_dump(),
+        )
+
+
+async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> None:
+    """One homepage per agent — the batch job behind the Home tab's first fill."""
+
+    await HomepageSeed(
+        ctx,
+        bucket or datetime.now(UTC).date().isoformat(),
+        HostedSites(ctx.store.workspace_id, ctx.transaction),
+    ).sweep()
 
 
 async def _open_conversation(

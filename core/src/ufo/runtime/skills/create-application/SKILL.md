@@ -24,6 +24,7 @@ with the title `App Builder` and one task per phase this run will take, in order
 2. `Ask what the build needs`
 3. `Design the homepage`
 4. `Create the app`
+5. `Build the homepage`
 
 Mark a phase `in_progress` when you start it and `completed` in the same round as the act that
 finished it, before you write the reply. The member's progress bar reads nothing else, and a phase
@@ -91,20 +92,22 @@ line: what the application settles itself, what it brings to a person.
 
 Every application builds a homepage: the page members open on the Apps screen, where it states
 what it is for, what it watches, its recent work, and what it needs. The design pass settles what
-this app's page reports and how it is laid out. Finish the name and complete application prompt,
-then call the `site` collection's `design_ufo_application` action with that exact
-`application_name` and `application_prompt`. Omit `revision` on the first call.
+this app's page reports and how it is laid out.
 
-The ufo application builder draws one SVG wireframe in the house style. The action shares that
-exact SVG in the conversation and holds it for the named application's build. Do not load a design
-skill, inspect the SVG, or share it again. After the action returns `ready`, end with `ask_user`:
-`Build it`, `Change the design`.
+Finish the name and complete application prompt, then `load_skill("application-homepage")` and
+spawn the builder for the drawing:
 
-On `Change the design`, call the same action once for the same name. Use the current complete prompt
-and put the member's requested change in `revision`. A successful revision shares its new SVG before
-it replaces the stored design. One page and at most two wireframes are the whole design pass. Create
-the application under the accepted wireframe's name. Its first homepage gives the app builder that
-SVG and digest to implement before QA, deployment, and binding.
+```
+spawn("profile:ufo_application_builder",
+      {objective: <the name and the complete prompt>, phase: "design"})
+```
+
+Check the SVG it returns with the skill's own script, then `share_file` the SVG and the
+`design.png` beside it. End with `ask_user`: `Build it`, `Change the design`.
+
+On `Change the design`, spawn the design phase once more with the same prompt and the member's
+requested change appended as `Member revision: …`. One page and at most two wireframes are the
+whole design pass.
 
 ## Create it
 
@@ -131,6 +134,26 @@ portal's pack by the app's own name.
 A refusal is yours to fix and say plainly — a name already taken takes a new name, not a retry of
 the same one.
 
+## Build the homepage
+
+The accepted design is already in this conversation's sandbox, so the build runs here rather than
+in the new application's own empty one:
+
+```
+spawn("profile:ufo_application_builder",
+      {objective: <the name and the complete prompt>, phase: "build"})
+```
+
+Then bind what it hosted to the application you just made:
+
+```
+object_action(kind="agent", name=<the app name>, action="set_homepage",
+              input={site: <the result's site>})
+```
+
+Give the member the link in the closing reply. A blocked build is stated plainly and leaves the
+application created — its page is built from its own conversation later.
+
 ## Say what it holds nothing of
 
 Nothing else will ever tell the member the new application reaches nothing, so close the turn with
@@ -145,6 +168,8 @@ there instead of trying from this one.
 
 - A turn nobody speaks on cannot create an application. A scheduled fire or a subagent is refused;
   the member has to ask in their own words.
+- Do not inspect, repair, or rewrite what the builder returns. Its design and its page are its own.
+- Do not run `vite`, a browser, or `js_repl` over the page. The deploy audits it.
 - Never offer to delete it or undo the create.
 - Do not create the app before the member's go-ahead, however clear their first message was. The
   interview is where they see what they are agreeing to.

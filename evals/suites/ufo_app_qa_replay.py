@@ -18,19 +18,14 @@ from ufo_ext_eval_env.manifest import (
     APP_QA_EDIT_OLD_BYTES_LIMIT,
 )
 from ufo_ext_sites.application_audit import (
-    SCHEMES,
     ApplicationAuditContract,
     ApplicationAuditIssue,
     ApplicationAuditReport,
     audit_application,
 )
-from ufo_ext_sites.application_builder import (
-    APPLICATION_BUILD_TIMEOUT_SECONDS,
-    APPLICATION_INDEX,
-    APPLICATION_PREVIEW_SCAFFOLD,
-)
-from ufo_ext_sites.source import KIT_DIR, PROJECT_CONFIG_BYTES
-from ufo_ext_sites.tools import APPLICATION_AUDIT_TIMEOUT_SECONDS
+from ufo_ext_sites.application_homepage import APPLICATION_TEMPLATE_DIR
+from ufo_ext_sites.source import KIT_DIR, PROJECT_CONFIG_BYTES, PROJECT_PREVIEW_BYTES
+from ufo_ext_sites.tools import APPLICATION_AUDIT_TIMEOUT_SECONDS, BUILD_TIMEOUT_SECONDS
 
 from evals.harness.capability import (
     ArtifactProbeResult,
@@ -45,14 +40,15 @@ from evals.harness.capability import (
 from evals.harness.harness import EvalMetric, EvalReport, Json, JsonObject
 from evals.harness.registry import EvalTask, capability_task, rewrapped
 from evals.harness.target import CapabilityTarget
-from evals.suites.app_audit_probe import app_audit_command
+from evals.suites.app_audit_probe import app_audit
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "ufo_app_qa_replay"
 APP_ROOT = "/workspace/ufo-app"
 SOURCE_PATH = f"{APP_ROOT}/app.tsx"
 PREVIEW_PATH = f"{APP_ROOT}/preview.svg"
 OUTPUT_ROOT = "/workspace/.eval-output/ufo-app-qa-replay"
-PROBE_TIMEOUT_SECONDS = APPLICATION_BUILD_TIMEOUT_SECONDS + APPLICATION_AUDIT_TIMEOUT_SECONDS
+APPLICATION_INDEX = (APPLICATION_TEMPLATE_DIR / "index.html").read_bytes()
+PROBE_TIMEOUT_SECONDS = BUILD_TIMEOUT_SECONDS + APPLICATION_AUDIT_TIMEOUT_SECONDS
 PROBE_ERROR_DETAIL_CHARS = 500
 PROBE_WRITE_TIMEOUT_SECONDS = 30
 WORKFLOW_WAIT_SECONDS = 300.0
@@ -180,31 +176,24 @@ class AppQaReplayProbe:
         relative = Path(".eval-output/ufo-app-qa-replay") / self.fixture.name / self.phase
         directory = output.workspace_dir / relative
         evidence_path = directory / f"{name}-evidence.json"
-        result = await probe.run(
-            app_audit_command(
-                name=name,
-                output_dir=f"{OUTPUT_ROOT}/{self.fixture.name}/{self.phase}",
-                project=APP_ROOT,
-                design_path=PREVIEW_PATH,
-                compile_source=True,
-            ),
-            PROBE_TIMEOUT_SECONDS,
+        audit = app_audit(
+            name=name,
+            output_dir=f"{OUTPUT_ROOT}/{self.fixture.name}/{self.phase}",
+            project=APP_ROOT,
+            # The subject here is repairing a page against live audits, so the audit measures the
+            # page alone. The captured wireframe stays beside it as the record of the run it came
+            # from, unedited: re-cutting it to today's lane would falsify the provenance that names
+            # the run, arm and call which produced these bytes.
+            design_path=None,
+            compile_source=True,
         )
+        result = await probe.run(audit.command, PROBE_TIMEOUT_SECONDS)
         if result.exit_code != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no command output"
             return ArtifactProbeResult(
                 error=f"app QA replay probe failed: {detail[:PROBE_ERROR_DETAIL_CHARS]}"
             )
-        paths = (
-            directory / f"{name}-design.html",
-            directory / f"{name}-interactive.html",
-            directory / f"{name}-static.html",
-            directory / f"{name}-audit.json",
-            *(directory / f"{name}-{scheme}.png" for scheme in SCHEMES),
-            directory / f"{name}-design.svg",
-            directory / f"{name}-design-evidence.json",
-            directory / "timing.json",
-        )
+        paths = tuple(directory / output_name for output_name in audit.outputs)
         missing = tuple(path.name for path in paths if not path.is_file())
         if missing:
             return ArtifactProbeResult(
@@ -472,7 +461,6 @@ def _replay_grader(fixture: ReplayFixture) -> DescribedGrader[CapabilityOutput]:
             "interactionPassed": not bool(final_codes & {"controls", "interaction"}),
             "factsPassed": not bool(final_codes & {"fact", "above_fold"}),
             "aboveFoldPassed": "above_fold" not in final_codes,
-            "designPassed": "design" not in final_codes,
             "contrastPassed": "contrast" not in final_codes,
         }
         if failures:
@@ -500,7 +488,7 @@ def _case(fixture: ReplayFixture) -> CapabilityCase:
         ),
         workspace_files=(
             WorkspaceFile("ufo-app/index.html", APPLICATION_INDEX),
-            WorkspaceFile("ufo-app/preview.html", APPLICATION_PREVIEW_SCAFFOLD),
+            WorkspaceFile("ufo-app/preview.html", PROJECT_PREVIEW_BYTES),
             WorkspaceFile("ufo-app/app.tsx", fixture.source),
             WorkspaceFile("ufo-app/preview.svg", fixture.preview),
             WorkspaceFile("ufo-app/vite.config.ts", PROJECT_CONFIG_BYTES),
@@ -530,7 +518,6 @@ RATE_FIELDS = (
     ("interaction_pass_rate", "interactionPassed"),
     ("facts_pass_rate", "factsPassed"),
     ("above_fold_pass_rate", "aboveFoldPassed"),
-    ("design_pass_rate", "designPassed"),
     ("contrast_pass_rate", "contrastPassed"),
 )
 

@@ -19,6 +19,15 @@
  *  key the member never typed into. */
 export type PendingAsk = { text: string; send: boolean; meant: string | null };
 
+/** What the build press types on the member's behalf, into the composer they send it from. It names
+ *  the skill and stops: the steps live in the skill, and an ask repeating them would be a second
+ *  copy of the procedure that drifts the first time either changes.
+ *
+ *  Two presses say it — a shipped app's setup screen, and the header of an app that has no page
+ *  yet — and both must say the same words, because the routing eval measures this exact string. */
+export const BUILD_ASK =
+  "Build this workspace its own version of your page. Load your homepage skill and follow it.";
+
 const PENDING = new Map<string, PendingAsk>();
 
 const WAITING = new Set<() => void>();

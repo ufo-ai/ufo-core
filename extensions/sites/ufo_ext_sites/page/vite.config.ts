@@ -22,7 +22,10 @@ import { cpSync, mkdirSync, readdirSync } from "node:fs";
 
 const HERE = new URL("./", import.meta.url).pathname;
 const KIT = new URL("./sdk/kit.js", import.meta.url).pathname;
-const CONFIG = "vite.config.ts";
+/** What the deploy writes beside the project rather than what the project holds: neither belongs in
+ *  the source a later read pulls back, and the next deploy writes both again. Everything else the
+ *  directory carries — the page, its design — is the member's and rides along. */
+const DEPLOY_WRITTEN = new Set(["vite.config.ts", "preview.html"]);
 
 export default {
   base: "./",
@@ -39,7 +42,7 @@ export default {
       closeBundle() {
         mkdirSync(`${HERE}dist/src`, { recursive: true });
         for (const entry of readdirSync(HERE, { withFileTypes: true })) {
-          if (entry.isFile() && entry.name !== CONFIG)
+          if (entry.isFile() && !DEPLOY_WRITTEN.has(entry.name))
             cpSync(`${HERE}${entry.name}`, `${HERE}dist/src/${entry.name}`);
         }
       },

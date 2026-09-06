@@ -1,7 +1,15 @@
-"""Typed deterministic acceptance for an interactive ufo application."""
+"""Typed deterministic acceptance for an interactive ufo application: the browser report the
+audit script writes, the verdict a deploy refuses or hosts on, and the source and design
+validators that run on the bytes before the build.
 
+`deploy_website` is the one caller. A page reaches a member only through it, so this is where
+every rule about what an app page may be is true."""
+
+import re
 from dataclasses import dataclass
+from math import isfinite
 from typing import Annotated, Literal
+from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -33,14 +41,27 @@ APPLICATION_REGION_MIN_AREA = 0.008
 MAX_ISSUES = 8
 MAX_MESSAGE_CHARS = 500
 MAX_PRODUCT_QA_CONTROLS = 100
-APPLICATION_AUDIT_REQUEST_CONTRACT_KEY = (
-    "application-builder/audit-contract/request/{request_sha256}"
+APPLICATION_DESIGN_MAX_CHARS = 128_000
+APPLICATION_SOURCE_MAX_CHARS = 256_000
+APPLICATION_DESIGN_WIDTH = NARROW_WIDTH
+"""The design lane is the narrow view the fidelity check measures. One width for both is what
+lets a region drawn above y=844 be compared with the region rendered above 844 px without a
+scale between them."""
+APPLICATION_DESIGN_EFFECT_ERROR = (
+    "application design native bounds do not support clip, mask, or filter effects"
 )
-APPLICATION_AUDIT_TURN_CONTRACT_KEY = "application-builder/audit-contract/turn/{turn_id}"
-APPLICATION_AUDIT_ATTEMPT_KEY = "application-builder/audit-attempt/{turn_id}"
+APPLICATION_DESIGN_EFFECT_STYLE = re.compile(
+    r"(?:^|[;{])\s*(?:-(?:moz|webkit)-)?(?:clip-path|filter|mask(?:-image)?)\s*:\s*([^;}]+)",
+    re.IGNORECASE,
+)
+SVG_DRAWING_ELEMENTS = frozenset(
+    {"circle", "ellipse", "image", "line", "path", "polygon", "polyline", "rect", "text", "use"}
+)
 AuditTerm = Annotated[str, Field(min_length=1, max_length=200)]
 AuditIssueCode = Literal[
-    "audit_run",
+    "source",
+    "build",
+    "lifecycle",
     "missing_view",
     "empty_view",
     "contrast",
@@ -266,6 +287,16 @@ class ApplicationQaProof(BaseModel):
 
 
 @dataclass(frozen=True)
+class ApplicationDesign:
+    """One validated application design: the regions it names, the kit components it draws, and the
+    lane height it was drawn at."""
+
+    regions: tuple[str, ...]
+    kit_components: tuple[str, ...]
+    height: int
+
+
+@dataclass(frozen=True)
 class ApplicationDesignFidelity:
     """The deterministic score and failures for one accepted SVG implementation."""
 
@@ -298,8 +329,8 @@ def application_first_screen_scale(page_height: int) -> float:
     A region's top and height are fractions of the whole page, so every vertical threshold is
     written against the 844 px first screen and shrinks by this factor on a taller page. One
     threshold then holds one pixel size at every page height the design gate accepts. Horizontal
-    thresholds stay unscaled because the page width is fixed: 305 px for the design lane and one
-    measured viewport width for an application view.
+    thresholds stay unscaled because the page width is fixed: the design lane and the narrow view
+    are both 360 px, and a desktop view is its own measured width.
     """
 
     return APPLICATION_DESIGN_FOLD / page_height
@@ -375,7 +406,13 @@ def application_design_region_fold_failure(
 
 
 def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity:
-    """Measure named region identity, first-screen visibility, and relative desktop order."""
+    """Measure named region identity, first-screen membership, and vertical order at 360 px.
+
+    The design is one 360 px lane, so the lane is what it can be held to: the same width, the same
+    844 px first screen, no scale between what was drawn and what was rendered. The desktop views
+    keep every page check and carry no region verdict — a one-column lane and a 1440 px layout
+    cannot share a fold, so comparing them measures nothing the designer chose.
+    """
 
     design = report.design_regions
     design_names = tuple(region.name for region in design)
@@ -414,26 +451,26 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
             (
                 candidate
                 for candidate in report.views
-                if candidate.scheme == scheme and candidate.width == DESKTOP_WIDTH
+                if candidate.scheme == scheme and candidate.width == NARROW_WIDTH
             ),
             None,
         )
         total += 1 + len(design)
         if view is None:
-            failures.append(f"{scheme} desktop has no region measurement")
+            failures.append(f"{scheme} {NARROW_WIDTH}px has no region measurement")
             continue
         app_names = tuple(region.name for region in view.regions)
         app_by_name = {region.name: region for region in view.regions}
         if len(app_by_name) == len(view.regions) and set(app_names) == set(design_names):
             passed += 1
         else:
-            failures.append(f"{scheme} desktop region names differ")
+            failures.append(f"{scheme} {NARROW_WIDTH}px region names differ")
         for name in design_names:
             region = app_by_name.get(name)
             if region is not None and (not design_by_name[name].above_fold or region.above_fold):
                 passed += 1
             else:
-                failures.append(f"{scheme} desktop lacks visible {name}")
+                failures.append(f"{scheme} {NARROW_WIDTH}px lacks visible {name}")
         for first_index, first_name in enumerate(design_names):
             for second_name in design_names[first_index + 1 :]:
                 expected = application_region_relation(
@@ -454,7 +491,7 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
                     passed += 1
                 else:
                     failures.append(
-                        f"{scheme} desktop changes {expected[0]} order for "
+                        f"{scheme} {NARROW_WIDTH}px changes {expected[0]} order for "
                         f"{first_name} and {second_name}"
                     )
     return ApplicationDesignFidelity(passed=passed, total=total, failures=tuple(failures))
@@ -482,7 +519,11 @@ def audit_application(
     report: ApplicationAuditReport,
     contract: ApplicationAuditContract | None = None,
 ) -> ApplicationAuditVerdict:
-    """Apply the fixed page, interaction, and fact checks to one browser report."""
+    """Apply the fixed page, interaction, and fact checks to one browser report.
+
+    Fidelity is scored only where a design was measured. A page an app extension ships carries no
+    wireframe beside it, and every other check still runs on it: what a design adds is a second
+    contract, never the floor."""
 
     views = {(view.scheme, view.width): view for view in report.views}
     missing = tuple(
@@ -530,7 +571,7 @@ def audit_application(
     if overlaps:
         issues.append(_issue("overlap", f"Fix accidental overlap: {'; '.join(overlaps[:4])}."))
     fidelity = application_design_fidelity(report)
-    if fidelity.failures:
+    if report.design_regions and fidelity.failures:
         issues.append(
             _issue(
                 "design",
@@ -602,3 +643,481 @@ def audit_application(
             )
         )
     return ApplicationAuditVerdict(issues=tuple(issues[:MAX_ISSUES]))
+
+
+IMPORT_DECLARATION = re.compile(r"(?m)^[ \t]*import\b")
+EXPORT_DECLARATION = re.compile(r"(?m)^[ \t]*export\b")
+IMPORT_MODULE = re.compile(r"\bfrom\s*['\"]([^'\"]+)['\"]|\bimport\s*\(\s*['\"]([^'\"]+)['\"]")
+SIDE_EFFECT_IMPORT = re.compile(r"(?m)^[ \t]*import\s*['\"]")
+NON_NAMED_IMPORT = re.compile(r"(?m)^[ \t]*import\s+(?!type\s*\{|\{)")
+SIBLING_MODULE = re.compile(r"\./[\w-]+\.(?:md\?raw|[a-z0-9]+\?url)")
+SIBLING_IMPORT = re.compile(
+    r"(?m)^[ \t]*import\s+[A-Za-z_$][\w$]*\s*from\s*['\"]"
+    r"\./[\w-]+\.(?:md\?raw|[a-z0-9]+\?url)['\"]"
+)
+"""The one kind of module beside `ufo/kit` a page may name: a file committed next to `app.tsx` and
+taken into the bundle at build time by vite's own `?raw` or `?url`. It resolves no package — the
+project installs none — and the deploy's config carries every file of the project through the build,
+so the document or asset ships with the page rather than being fetched at runtime. The shipped Radar
+page reads its tour as `?raw` and the Artifacts page names its logo sheet as `?url`; a member's
+redeploy of either page builds the same import again."""
+NAMED_KIT_IMPORT = re.compile(
+    r"(?ms)^[ \t]*import\s+(?P<type>type\s+)?\{(?P<names>[^{}]*)\}"
+    r"\s*from\s*['\"]ufo/kit['\"]\s*;?"
+)
+KIT_IMPORT_NAME = re.compile(
+    r"(?:(?P<type>type)\s+)?(?P<export>[A-Za-z_$][\w$]*)"
+    r"(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
+)
+SOURCE_LITERAL_OR_COMMENT = re.compile(
+    r"//[^\n]*|/\*.*?\*/|(?<![\w$])'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`",
+    re.DOTALL,
+)
+JSX_COMPONENT = re.compile(r"<\s*([A-Z][A-Za-z0-9_$]*)\b")
+LOCAL_NAMED_DECLARATION = re.compile(r"\b(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)")
+LOCAL_DESTRUCTURED_DECLARATION = re.compile(r"\b(?:const|let|var)\s*\{(?P<bindings>[^{}]*)\}\s*=")
+LOCAL_DESTRUCTURED_BINDING = re.compile(
+    r"(?:^|,)\s*(?:[A-Za-z_$][\w$]*\s*:\s*)?(?:\.\.\.)?"
+    r"([A-Za-z_$][\w$]*)\s*(?=[,}=]|$)"
+)
+FUNCTION_PARAMETERS = re.compile(
+    r"\bfunction\b[^()]*\((?P<function>[^()]*)\)"
+    r"|\((?P<arrow>[^()]*)\)\s*=>"
+    r"|(?P<single>\b[A-Za-z_$][\w$]*)\s*=>",
+    re.DOTALL,
+)
+
+
+def _local_source_bindings(code: str) -> set[str]:
+    bindings = set(LOCAL_NAMED_DECLARATION.findall(code))
+    for declaration in LOCAL_DESTRUCTURED_DECLARATION.finditer(code):
+        bindings.update(LOCAL_DESTRUCTURED_BINDING.findall(declaration.group("bindings")))
+    for parameters in FUNCTION_PARAMETERS.finditer(code):
+        single = parameters.group("single")
+        if single:
+            bindings.add(single)
+            continue
+        values = parameters.group("function") or parameters.group("arrow") or ""
+        bindings.update(
+            re.findall(
+                r"(?:^|,)\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*(?=[:,?=]|$)",
+                values,
+            )
+        )
+        bindings.update(re.findall(r"(?:\{|,|:\s)([A-Za-z_$][\w$]*)\s*(?=[,}=])", values))
+    return bindings
+
+
+APPLICATION_KIT_COMPONENTS = frozenset(
+    {
+        "AgentIcon",
+        "AppConversations",
+        "ApplicationAction",
+        "ArtifactText",
+        "Avatar",
+        "AvatarFallback",
+        "AvatarStack",
+        "Badge",
+        "BrandMark",
+        "Breakdown",
+        "BreakdownHeader",
+        "BreakdownLabel",
+        "BreakdownMark",
+        "BreakdownName",
+        "BreakdownRow",
+        "BreakdownRows",
+        "BreakdownValue",
+        "Button",
+        "Card",
+        "CardAction",
+        "CardContent",
+        "CardDescription",
+        "CardFooter",
+        "CardGrid",
+        "CardHeader",
+        "CardTitle",
+        "Chart",
+        "ChartBars",
+        "ChatPane",
+        "ConversationDetail",
+        "DataTable",
+        "Detail",
+        "Dialog",
+        "DialogTrigger",
+        "DropdownMenu",
+        "DropdownMenuCheckboxItem",
+        "DropdownMenuContent",
+        "DropdownMenuItem",
+        "DropdownMenuLabel",
+        "DropdownMenuRadioGroup",
+        "DropdownMenuRadioItem",
+        "DropdownMenuSeparator",
+        "DropdownMenuTrigger",
+        "Empty",
+        "Facts",
+        "FacetMenu",
+        "FileSheet",
+        "FoundingChat",
+        "Group",
+        "Header",
+        "IconChevronDown",
+        "IconChevronUp",
+        "IconDots",
+        "IconFilter2",
+        "IconWorldWww",
+        "IconX",
+        "Lede",
+        "Legend",
+        "LegendItem",
+        "Loading",
+        "Markdown",
+        "MediaIcon",
+        "Meter",
+        "Moment",
+        "ObjectDetail",
+        "ObjectPane",
+        "Page",
+        "PageToolbar",
+        "Pager",
+        "Pane",
+        "PaneNote",
+        "Panel",
+        "PanelBlank",
+        "PanelEmpty",
+        "PressRow",
+        "RebuildDialog",
+        "RowLines",
+        "Section",
+        "SectionApp",
+        "Segmented",
+        "Separator",
+        "Sheet",
+        "Stat",
+        "StatDelta",
+        "StatDescription",
+        "StatHeader",
+        "StatLabel",
+        "StatMedia",
+        "StatValue",
+        "SurfaceGlyph",
+        "Td",
+        "TdFact",
+        "ToolbarRule",
+        "ViewSwitch",
+    }
+)
+ROOT_MOUNT = re.compile(
+    r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
+)
+# The rules a shipped app page is held to by `gates.py`, restated for the one page nothing else
+# reads. A shipped page is walked in the repo; a generated page exists only in a member's sandbox,
+# so this validator is where the same rules have to be true or they are true of half the product.
+# The refusals are worded as the repair the builder should make, because its repair loop reads them.
+# A Tailwind arbitrary value is always a utility carrying one — `w-[3px]`, `text-[#fff]` — or an
+# arbitrary property, which spells `[prop:value]`. A bare `[...]` is JavaScript: an array of issue
+# references or percentages reads exactly like a raw colour or length, and refusing it would block a
+# page over its data.
+ARBITRARY_VALUE = re.compile(r"[a-z][\w-]*-\[([^\]\n]*)\]")
+ARBITRARY_PROPERTY = re.compile(r"\[([a-z-]+:[^\]\n]*)\]")
+RAW_CSS_VALUE = re.compile(
+    r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
+)
+COMPOSITION_STEPS = ("hair", "2xs", "sm", "2xl", "6xl", "8xl")
+COMPOSITION_GAP = re.compile(r"(?<![\w-])gap-(?:x-|y-)?(\[[^\]]*\]|[\w.]+)")
+FRAMED_STAT = re.compile(r"<Stat[\s>][^>]*?(?<![\w-])border(?![\w-])", re.S)
+PAGE_CLASS_REFUSALS = (
+    (re.compile(r"(?<![\w-])space-[xy]-"), "stack with flex and a gap"),
+    (re.compile(r"(?<![\w-])dark:"), "the colour scheme carries itself; write no dark variant"),
+    (re.compile(r"overflow-hidden text-ellipsis whitespace-nowrap"), "truncate says this"),
+    (re.compile(r"className=\{`"), "compose classes with cn()"),
+)
+STYLE_TAG = re.compile(r"<style[\s/>]")
+DATA_SLOT_ATTRIBUTE = re.compile(r"(?<![\w-])data-slot\s*=")
+
+LITERAL_WHITE_ON_SCHEME_INK = re.compile(
+    r"\bstyle\s*=\s*\{\{"
+    r"(?=(?:(?!\}\}).)*\bbackground(?:Color)?\s*:(?:(?!\}\}).)*var\(--color-ink\))"
+    r"(?=(?:(?!\}\}).)*\bcolor\s*:(?:(?!\}\}).)*['\"](?:#fff(?:fff)?|white)['\"])",
+    re.DOTALL | re.IGNORECASE,
+)
+APPLICATION_DESIGN_REGION = re.compile(r"[a-z][a-z0-9-]{0,79}")
+APPLICATION_DESIGN_KIT_COMPONENT = re.compile(r"[A-Z][A-Za-z0-9]*")
+APPLICATION_SOURCE_REGION = re.compile(r"""data-app-region\s*=\s*[{\s]*["']([a-z][a-z0-9-]*)["']""")
+
+
+def _validate_application_imports(source: str) -> None:
+    modules = tuple(left or right for left, right in IMPORT_MODULE.findall(source))
+    if IMPORT_DECLARATION.search(source) is None or "ufo/kit" not in modules:
+        raise ValueError("app.tsx must import its runtime and components from ufo/kit")
+    if SIDE_EFFECT_IMPORT.search(source) or any(
+        module != "ufo/kit" and SIBLING_MODULE.fullmatch(module) is None for module in modules
+    ):
+        raise ValueError(
+            "app.tsx may import only from ufo/kit and a file beside it, "
+            "as ./name.md?raw or ./name.ext?url"
+        )
+    if NON_NAMED_IMPORT.search(SIBLING_IMPORT.sub("", source)):
+        raise ValueError("app.tsx must use named imports from ufo/kit")
+    if EXPORT_DECLARATION.search(source):
+        raise ValueError("app.tsx must not export declarations")
+    if "UfoAppKit" in source:
+        raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
+
+
+def _rendered_application_components(source: str) -> set[str]:
+    if ROOT_MOUNT.search(source) is None:
+        raise ValueError("mountApp must receive the root element and a render callback")
+    imported_components: dict[str, set[str]] = {}
+    for declaration in NAMED_KIT_IMPORT.finditer(source):
+        if declaration.group("type"):
+            continue
+        for value in declaration.group("names").split(","):
+            imported = KIT_IMPORT_NAME.fullmatch(value.strip())
+            if (
+                imported is not None
+                and imported.group("type") is None
+                and imported.group("export") in APPLICATION_KIT_COMPONENTS
+            ):
+                imported_components.setdefault(imported.group("export"), set()).add(
+                    imported.group("local") or imported.group("export")
+                )
+    code = SOURCE_LITERAL_OR_COMMENT.sub("", source)
+    local_declarations = _local_source_bindings(code)
+    rendered_components = set(JSX_COMPONENT.findall(code)) - local_declarations
+    rendered_kit_components = {
+        exported
+        for exported, local_names in imported_components.items()
+        if not local_names.isdisjoint(rendered_components)
+    }
+    if not rendered_kit_components:
+        raise ValueError("app.tsx must render at least one UI component imported from ufo/kit")
+    return rendered_kit_components
+
+
+def _validate_designed_components(
+    rendered_kit_components: set[str], designed_kit_components: tuple[str, ...]
+) -> None:
+    missing_designed_components = tuple(
+        name for name in designed_kit_components if name not in rendered_kit_components
+    )
+    if missing_designed_components:
+        label = "component" if len(missing_designed_components) == 1 else "components"
+        raise ValueError(
+            f"app.tsx must directly render designed Kit {label}: "
+            f"{', '.join(missing_designed_components)}"
+        )
+
+
+def _validate_designed_regions(source: str, designed_regions: tuple[str, ...]) -> None:
+    marked = set(APPLICATION_SOURCE_REGION.findall(source))
+    missing = tuple(name for name in designed_regions if name not in marked)
+    if missing:
+        label = "region" if len(missing) == 1 else "regions"
+        raise ValueError(
+            f"app.tsx must mark each designed {label} with data-app-region: {', '.join(missing)}"
+        )
+
+
+def _validate_application_styling(source: str) -> None:
+    if LITERAL_WHITE_ON_SCHEME_INK.search(source):
+        raise ValueError(
+            "a --color-ink background must use --color-surface text in both colour schemes"
+        )
+    if STYLE_TAG.search(source):
+        raise ValueError("app.tsx may not emit a <style> tag — the kit's theme is the sheet")
+    if DATA_SLOT_ATTRIBUTE.search(source):
+        raise ValueError("app.tsx: data-slot is reserved for ufo/kit components")
+    for pattern, repair in PAGE_CLASS_REFUSALS:
+        found = pattern.search(source)
+        if found:
+            raise ValueError(f"app.tsx: {found.group(0)!r} — {repair}")
+    for pattern in (ARBITRARY_VALUE, ARBITRARY_PROPERTY):
+        for segment in pattern.finditer(source):
+            if RAW_CSS_VALUE.search(segment.group(1)):
+                raise ValueError(
+                    f"app.tsx: {segment.group(0)} names a raw value — "
+                    "resolve it through a theme token"
+                )
+    if FRAMED_STAT.search(source):
+        raise ValueError(
+            "app.tsx: a Stat carries a border — a figure divides by the space around it, and a "
+            "tile is what a Stat already is"
+        )
+    for gap in COMPOSITION_GAP.finditer(source):
+        if gap.group(1) not in COMPOSITION_STEPS:
+            raise ValueError(
+                f"app.tsx: {gap.group(0)!r} is not a composition step — a page spaces its parts "
+                f"with {', '.join('gap-' + step for step in COMPOSITION_STEPS)} and nothing else"
+            )
+
+
+def validate_application_source(source: str, design: ApplicationDesign | None = None) -> None:
+    """Raise the repair an app page needs before it is worth building.
+
+    Every message is worded as the edit to make, because the builder's repair loop is what reads
+    them. The design is optional: a page deployed without one beside it is still held to the kit,
+    the mount, and the styling rules."""
+
+    _validate_application_imports(source)
+    rendered_kit_components = _rendered_application_components(source)
+    if design is not None:
+        _validate_designed_components(rendered_kit_components, design.kit_components)
+        _validate_designed_regions(source, design.regions)
+    _validate_application_styling(source)
+
+
+def _parse_application_design(source: str) -> tuple[ElementTree.Element, tuple[float, ...]]:
+    if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
+        raise ValueError("application design must not declare XML entities")
+    try:
+        root = ElementTree.fromstring(source)
+    except ElementTree.ParseError as error:
+        raise ValueError("application design must be valid SVG") from error
+    if root.tag.rsplit("}", 1)[-1] != "svg":
+        raise ValueError("application design root must be svg")
+    try:
+        view_box = tuple(
+            float(value) for value in re.split(r"[ ,]+", root.attrib["viewBox"].strip())
+        )
+    except (KeyError, ValueError) as error:
+        raise ValueError("application design svg requires a viewBox") from error
+    if (
+        len(view_box) != 4
+        or not all(isfinite(value) for value in view_box)
+        or view_box[:3] != (0, 0, APPLICATION_DESIGN_WIDTH)
+        or not view_box[3].is_integer()
+        or not APPLICATION_DESIGN_FOLD <= view_box[3] <= APPLICATION_DESIGN_MAX_HEIGHT
+        or root.attrib.get("width") != str(APPLICATION_DESIGN_WIDTH)
+        or root.attrib.get("height") != str(round(view_box[3]))
+    ):
+        raise ValueError(
+            f'application design must use viewBox="0 0 {APPLICATION_DESIGN_WIDTH} H", '
+            f'width="{APPLICATION_DESIGN_WIDTH}", and a matching integer height H from '
+            f"{APPLICATION_DESIGN_FOLD} through {APPLICATION_DESIGN_MAX_HEIGHT}"
+        )
+    return root, view_box
+
+
+def _visible_design_element(
+    element: ElementTree.Element, tag: str, attributes: dict[str, str]
+) -> bool:
+    match tag:
+        case "circle":
+            return attributes.get("r", "") not in {"", "0", "0.0"}
+        case "ellipse":
+            return all(attributes.get(name, "") not in {"", "0", "0.0"} for name in ("rx", "ry"))
+        case "image" | "rect":
+            return all(
+                attributes.get(name, "") not in {"", "0", "0.0"} for name in ("width", "height")
+            )
+        case "line":
+            return (
+                attributes.get("x1", "") != attributes.get("x2", "")
+                or attributes.get("y1", "") != attributes.get("y2", "")
+            ) and attributes.get("stroke", "").casefold() not in {"", "none", "transparent"}
+        case "path":
+            return bool(attributes.get("d"))
+        case "polygon" | "polyline":
+            return bool(attributes.get("points"))
+        case "text":
+            return bool("".join(element.itertext()).strip())
+        case "use":
+            return attributes.get("href", "").startswith("#")
+        case _:
+            return False
+
+
+def _validate_design_attributes(element: ElementTree.Element) -> None:
+    for name, value in element.attrib.items():
+        attribute = name.rsplit("}", 1)[-1].casefold()
+        lowered = value.casefold()
+        if attribute.startswith("on") or any(
+            scheme in lowered for scheme in ("javascript:", "data:", "http:", "https:")
+        ):
+            raise ValueError("application design must not contain active or external content")
+
+
+def _validate_design_element(
+    element: ElementTree.Element,
+    ids: set[str],
+    regions: list[ElementTree.Element],
+    kit_components: list[str],
+) -> bool:
+    tag = element.tag.rsplit("}", 1)[-1]
+    if tag.casefold() in {"clippath", "filter", "mask"}:
+        raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
+    attributes = {name.rsplit("}", 1)[-1]: value.strip() for name, value in element.attrib.items()}
+    if any(
+        name.casefold() in {"clip-path", "filter", "mask", "mask-image"}
+        and value.casefold() not in {"", "none"}
+        for name, value in attributes.items()
+    ) or any(
+        match.group(1).strip().casefold() != "none"
+        for value in (
+            attributes.get("style", ""),
+            "".join(element.itertext()) if tag == "style" else "",
+        )
+        for match in APPLICATION_DESIGN_EFFECT_STYLE.finditer(value)
+    ):
+        raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
+    element_id = element.attrib.get("id", "").strip()
+    if element_id:
+        if element_id in ids:
+            raise ValueError("application design SVG ids must be unique")
+        ids.add(element_id)
+    if tag in {"script", "foreignObject"}:
+        raise ValueError("application design must contain SVG drawing elements only")
+    region = element.attrib.get("data-app-region")
+    if region is not None:
+        if tag != "g" or APPLICATION_DESIGN_REGION.fullmatch(region) is None:
+            raise ValueError("application design regions must be lowercase slugs on SVG g elements")
+        regions.append(element)
+    kit_component = element.attrib.get("data-kit-component")
+    if kit_component is not None:
+        if tag != "g":
+            raise ValueError("application design data-kit-component must be on an SVG g element")
+        if not kit_component.strip():
+            raise ValueError(
+                "application design data-kit-component must name one visual ufo/kit export"
+            )
+        if APPLICATION_DESIGN_KIT_COMPONENT.fullmatch(kit_component) is None:
+            raise ValueError("application design data-kit-component must be one ComponentName")
+        if kit_component not in APPLICATION_KIT_COMPONENTS:
+            raise ValueError(
+                f"application design data-kit-component {kit_component!r} is not a visual "
+                "ufo/kit export"
+            )
+        if kit_component not in kit_components:
+            kit_components.append(kit_component)
+    _validate_design_attributes(element)
+    return tag in SVG_DRAWING_ELEMENTS and _visible_design_element(element, tag, attributes)
+
+
+def validate_application_design(source: str) -> ApplicationDesign:
+    """The regions, kit components, and height of one SVG that meets the design contract."""
+
+    root, view_box = _parse_application_design(source)
+    regions: list[ElementTree.Element] = []
+    kit_components: list[str] = []
+    ids: set[str] = set()
+    drawing_elements = sum(
+        _validate_design_element(element, ids, regions, kit_components) for element in root.iter()
+    )
+    if drawing_elements == 0:
+        raise ValueError("application design must contain SVG drawing elements only")
+    names = tuple(element.attrib["data-app-region"] for element in regions)
+    if not DESIGN_REGION_MIN <= len(names) <= DESIGN_REGION_MAX or len(set(names)) != len(names):
+        raise ValueError(
+            f"application design requires {DESIGN_REGION_MIN} to {DESIGN_REGION_MAX} unique regions"
+        )
+    if any(
+        descendant is not region and descendant.attrib.get("data-app-region") is not None
+        for region in regions
+        for descendant in region.iter()
+    ):
+        raise ValueError("application design regions must not be nested")
+    if not kit_components:
+        raise ValueError(
+            "application design requires data-kit-component on at least one SVG g element"
+        )
+    return ApplicationDesign(names, tuple(kit_components), int(view_box[3]))

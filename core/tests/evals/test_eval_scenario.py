@@ -429,7 +429,7 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
                         ToolUseBlock(
                             id="build",
                             name="object_action",
-                            input={"kind": "site", "action": "build_ufo_application"},
+                            input={"kind": "site", "action": "deploy_website"},
                         ),
                     ),
                 ),
@@ -465,7 +465,7 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
     async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
         assert outcome.followup is not None
         assert outcome.followup.response == "Homepage ready."
-        assert outcome.output.tools == ("action:site:build_ufo_application",)
+        assert outcome.output.tools == ("action:site:deploy_website",)
         return CapabilityVerdict(True, "creation and homepage build completed")
 
     case = ScenarioCase(
@@ -610,7 +610,7 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
                         ToolUseBlock(
                             id="first",
                             name="object_action",
-                            input={"kind": "site", "action": "build_ufo_application"},
+                            input={"kind": "site", "action": "deploy_website"},
                         ),
                     ),
                 ),
@@ -627,7 +627,7 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
                         ToolUseBlock(
                             id="second",
                             name="object_action",
-                            input={"kind": "site", "action": "build_ufo_application"},
+                            input={"kind": "site", "action": "deploy_website"},
                         ),
                     ),
                 ),
@@ -674,8 +674,8 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             "Homepage ready.",
         ]
         assert outcome.output.tools == (
-            "action:site:build_ufo_application",
-            "action:site:build_ufo_application",
+            "action:site:deploy_website",
+            "action:site:deploy_website",
         )
         return CapabilityVerdict(True, "both build attempts retained")
 
@@ -713,7 +713,7 @@ async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path)
                         ToolUseBlock(
                             id="build",
                             name="object_action",
-                            input={"kind": "site", "action": "build_ufo_application"},
+                            input={"kind": "site", "action": "deploy_website"},
                         ),
                     ),
                 ),

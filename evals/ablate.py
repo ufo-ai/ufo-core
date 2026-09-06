@@ -59,8 +59,10 @@ import shutil
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from math import fsum
 from pathlib import Path
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
@@ -257,6 +259,7 @@ class ArmResult:
     name: str
     counts: dict[str, CaseCount]
     cost_usd: float
+    metrics: dict[str, float] = field(default_factory=dict)
     error: str | None = None
     gaps: tuple[str, ...] = ()
     kept_worktree: Path | None = None
@@ -309,6 +312,18 @@ def collect_counts(records: list[dict]) -> tuple[dict[str, CaseCount], float]:
         for name in samples
     }
     return counts, cost / 1e6
+
+
+def collect_metrics(records: list[dict]) -> dict[str, float]:
+    """Each suite metric averaged over an arm's records. Pass counts cannot separate two arms that
+    fail every case, and a suite whose cases are whole builds spends whole runs in that state; the
+    suite's own scores separate them, and the runner already wrote them beside the verdicts."""
+    values: dict[str, list[float]] = {}
+    for record in records:
+        for report in record["reports"]:
+            for metric in report.get("metrics") or ():
+                values.setdefault(f"{report['name']}/{metric['name']}", []).append(metric["value"])
+    return {name: fsum(scores) / len(scores) for name, scores in values.items()}
 
 
 def record_gaps(spec: ExperimentSpec, arm: str, records: list[dict]) -> tuple[str, ...]:
@@ -419,7 +434,27 @@ def render_report(spec: ExperimentSpec, results: tuple[ArmResult, ...]) -> str:
                 lines.append(f"    reason: {arm.reasons[0]}")
         summary = "; ".join(f"{name} {call}" for name, call in moved) if moved else "no case moved"
         lines.append(f"  => {summary}")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines + _metric_table(results)) + "\n"
+
+
+def _metric_table(results: Sequence[ArmResult]) -> list[str]:
+    """Every suite score each arm reached, against control. A case is pass or fail, so an arm that
+    moves a run from nothing built to a page that misses one check reads as flat; these are the
+    numbers that moved."""
+    control, *arms = results
+    names = sorted(control.metrics)
+    if not names or not arms:
+        return []
+    header = "| metric | control | " + " | ".join(arm.name for arm in arms) + " |"
+    lines = ["", "## scores", "", header, "|---" * (len(results) + 1) + "|"]
+    for name in names:
+        base = control.metrics[name]
+        cells = [f"{base:.3f}"]
+        for arm in arms:
+            value = arm.metrics.get(name)
+            cells.append("—" if value is None else f"{value:.3f} ({value - base:+.3f})")
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    return lines
 
 
 @dataclass(frozen=True)
@@ -640,6 +675,7 @@ class Ablation:
                     kept_worktree=root,
                 )
             counts, cost = collect_counts(records)
+            metrics = collect_metrics(records)
             if not gaps and not failures:
                 await self._drop_databases(root)
                 keep = False
@@ -649,6 +685,7 @@ class Ablation:
                 arm.name,
                 counts,
                 cost,
+                metrics=metrics,
                 error="; ".join(failures) if failures else None,
                 gaps=gaps,
                 kept_worktree=kept,

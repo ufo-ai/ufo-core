@@ -38,7 +38,14 @@ from ufo_ext_sites.source import KIT_DIR
 from ufo_testsupport.browser import MISSING_BROWSER_REASON, chrome_for_testing, headless_flags
 from websockets.sync.client import connect
 
-AUDIT_SCRIPT = Path(__file__).parents[2] / "ufo_ext_sites" / "scripts" / "audit_application.cjs"
+AUDIT_SCRIPT = (
+    Path(__file__).parents[2]
+    / "ufo_ext_sites"
+    / "skills"
+    / "application-homepage"
+    / "scripts"
+    / "audit_application.cjs"
+)
 STRICT_FLOOR = 4.5
 ACCENT_LABEL = "Dispatch task"
 FAINT_LABEL = "Secondary caption"

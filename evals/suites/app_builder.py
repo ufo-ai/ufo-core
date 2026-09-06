@@ -38,17 +38,17 @@ APPLICATION_SKILL = "create-application"
 SITE_SKILL = "website-building"
 ASK_TOOL = "ask_user"
 CREATE_TOOL = "object_apply"
-APPLICATION_PREVIEW_TOOL = "action:site:design_ufo_application"
+APPLICATION_DESIGN_SPAWN = "spawn"
 WEBSITE_BUILD_TOOL = "action:site:build_website"
 LOAD_TOOL = "load_skill"
-GUIDED_PHASES = 4
+GUIDED_PHASES = 5
 
 
 def _phase_board_scorer() -> Grader:
     """The board the progress bar reads: one task per phase this run will take, and the first write
-    of it is what the bar's length comes from. A guided build takes four — propose, interview,
-    homepage design, create — so a board of another length is a bar that misstates the run rather
-    than a matter of taste."""
+    of it is what the bar's length comes from. A guided build takes five — propose, interview,
+    homepage design, create, homepage build — so a board of another length is a bar that misstates
+    the run rather than a matter of taste."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         boards = [
@@ -91,7 +91,7 @@ CASES = (
                 (),
             ),
             required_tools_scorer((ASK_TOOL,)),
-            restraint_scorer((CREATE_TOOL, APPLICATION_PREVIEW_TOOL, WEBSITE_BUILD_TOOL)),
+            restraint_scorer((CREATE_TOOL, APPLICATION_DESIGN_SPAWN, WEBSITE_BUILD_TOOL)),
         ),
         digest_tag="app-builder:named-app",
     ),

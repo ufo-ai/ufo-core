@@ -20,4 +20,3 @@ sandbox = { backend = "docker" }
 name = "pre-fix"
 [arm.files]
 "extensions/sites/ufo_ext_sites/skills/website-building/shared/12-playwright-interactive.md" = "arms/pre-fix-playwright-interactive.md"
-"extensions/sites/ufo_ext_sites/skills/website-building/shared/13-ufo-application-qa.md" = "arms/pre-fix-application-qa.md"

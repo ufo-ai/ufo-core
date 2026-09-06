@@ -14,6 +14,7 @@ import sqlalchemy as sa
 import tomli_w
 from pydantic import ValidationError
 from sqlalchemy import make_url
+from ufo_ext_web.surface import HOMEPAGE_TOOLS
 from ufo_testsupport.migrations import apply_cached_migrations
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
@@ -36,8 +37,7 @@ from evals.stack import (
     template_config,
 )
 from evals.suites.ufo_app_prepare import (
-    APP_PARENT_TOOLS,
-    HOMEPAGE_SEED_PREFIX,
+    HOMEPAGE_SETTLED_PREFIX,
     SETTLED_MARKER,
     WEB_EXTENSION,
     prepare_app_eval,
@@ -974,10 +974,10 @@ async def test_app_eval_preparation_settles_each_agent_and_is_idempotent(tmp_pat
     finally:
         await dispose_db()
     assert rows == [
-        (WEB_EXTENSION, f"{HOMEPAGE_SEED_PREFIX}{agent_id}", SETTLED_MARKER)
+        (WEB_EXTENSION, f"{HOMEPAGE_SETTLED_PREFIX}{agent_id}", SETTLED_MARKER)
         for agent_id in agent_ids
     ]
-    assert tool_rows == [(agent_ids[0], list(APP_PARENT_TOOLS)), (agent_ids[1], ["read"])]
+    assert tool_rows == [(agent_ids[0], list(HOMEPAGE_TOOLS)), (agent_ids[1], ["read"])]
 
     init_db(database_url)
     try:
@@ -1014,7 +1014,7 @@ async def test_app_eval_preparation_settles_each_agent_and_is_idempotent(tmp_pat
     finally:
         await dispose_db()
     assert rows == [
-        (WEB_EXTENSION, f"{HOMEPAGE_SEED_PREFIX}{agent_id}", SETTLED_MARKER)
+        (WEB_EXTENSION, f"{HOMEPAGE_SETTLED_PREFIX}{agent_id}", SETTLED_MARKER)
         for agent_id in agent_ids
     ]
     assert tool_rows == [(agent_ids[0], ["object_apply"]), (agent_ids[1], ["read"])]
@@ -1080,7 +1080,7 @@ def test_app_eval_preparation_matches_the_web_homepage_job() -> None:
     from ufo_ext_web import surface as web_surface
 
     assert WEB_EXTENSION == "web"
-    assert HOMEPAGE_SEED_PREFIX == web_surface.HOMEPAGE_SEED_PREFIX
+    assert HOMEPAGE_SETTLED_PREFIX == web_surface.HOMEPAGE_SETTLED_PREFIX
 
 
 async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(

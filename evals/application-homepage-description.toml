@@ -1,0 +1,42 @@
+name = "application-homepage-description"
+base = "HEAD"
+suites = ["skill_loading"]
+cases = [
+  "homepage-build-verbatim-seed",
+  "portal-press-own-page-skill",
+  "homepage-board-noun",
+  "homepage-notes-noun",
+  "homepage-brief-noun",
+  "site-application-homepage",
+  "new-app-not-homepage",
+  "website-not-homepage",
+  "chat-home-not-generic",
+]
+repeats = 3
+concurrency = 4
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 0.35
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+# The routing trigger, measured on the three queries the product actually sends and the three
+# neighbours that must not take them. The shipped wording opens on the member's intent and names
+# the screen the page lives on; the arm opens on the artifact instead, which is how a description
+# is written when nobody has asked what the member typed. Positive and negative loads both count:
+# a wording that wins the three homepage cases by taking `create-application`'s has lost.
+[[arm]]
+name = "artifact-first"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/application-homepage/SKILL.md"
+old = '''description: Load when an app's own homepage is asked for — "build your homepage", your board, notes, brief or dashboard page, or a change to the page members open for an app on the Apps screen. Not a standalone website, a browser game, or creating the app itself.'''
+new = '''description: Load to produce an application homepage — a 360 px SVG wireframe and an app.tsx kit page deployed as a hosted site and bound with set_homepage. Not for a public website, a browser game, or creating the application itself.'''

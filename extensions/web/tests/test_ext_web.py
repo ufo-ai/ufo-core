@@ -6497,7 +6497,7 @@ async def test_homepage_read_hands_over_a_bound_page_whatever_the_agent_is_doing
         )
         assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
         ctx = context_for(EXTENSION_WEB, frozenset(), member_context_read=True)
-        await ctx.store.put(f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}", str(member_id))
+        await ctx.store.put(f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{agent_id}", str(member_id))
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.turn).values(
@@ -6684,14 +6684,14 @@ async def test_homepage_seed_marks_an_app_agent_shipped_without_a_turn(db: None)
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
-    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SEED_PREFIX)
+    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SETTLED_PREFIX)
     assert workspace_id in await candidates()
     with ws(workspace_id):
         ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
         await web_surface.seed_homepages(ctx)
-        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
-    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{app_agent}"] == "shipped"
-    assert workspace_id not in await candidates()
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX))
+    assert markers[f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{app_agent}"] == "shipped"
+    assert workspace_id in await candidates()
     async with workspace_tx() as connection:
         seeded = (
             await connection.execute(
@@ -6845,7 +6845,7 @@ async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: Non
     with ws(workspace_id):
         ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
         await web_surface.seed_homepages(ctx)
-        assert await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX) == ()
+        assert await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX) == ()
         async with workspace_tx() as connection:
             statuses = (await connection.execute(sa.select(tables.turn.c.status))).scalars()
             assert list(statuses) == ["cancelled"]
@@ -6855,8 +6855,10 @@ async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: Non
                 .values(seated_at=sa.func.now())
             )
         await web_surface.seed_homepages(ctx, bucket="retry")
-        markers = await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX)
-    assert [key for key, _ in markers] == [f"{web_surface.HOMEPAGE_SEED_PREFIX}{main_agent}"]
+        assert await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX) == ()
+        attempts = await ctx.store.list(web_surface.HOMEPAGE_ATTEMPT_PREFIX)
+    assert [key for key, _ in attempts] == [f"{web_surface.HOMEPAGE_ATTEMPT_PREFIX}{main_agent}"]
+    assert attempts[0][1] == {"attempts": 1, "bucket": "retry"}
     async with workspace_tx() as connection:
         statuses = (await connection.execute(sa.select(tables.turn.c.status))).scalars()
         assert sorted(statuses) == ["cancelled", "queued"]
@@ -6874,9 +6876,9 @@ async def test_homepage_seed_waits_for_an_admin_for_ownerless_agents(db: None) -
     with ws(workspace_id):
         ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
         await web_surface.seed_homepages(ctx)
-        assert await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX) == ()
+        assert await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX) == ()
     assert dbos.enqueued == []
-    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SEED_PREFIX)
+    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SETTLED_PREFIX)
     assert workspace_id in await candidates()
 
 
@@ -10481,11 +10483,9 @@ async def test_the_homepage_sweep_settles_an_archived_app_without_a_turn(db: Non
     with ws(workspace_id):
         ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
         await web_surface.seed_homepages(ctx)
-        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
-    assert sorted(markers) == sorted(
-        f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, archived_agent)
-    )
-    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{archived_agent}"] == "archived"
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX))
+    assert sorted(markers) == [f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{archived_agent}"]
+    assert markers[f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{archived_agent}"] == "archived"
     async with workspace_tx() as connection:
         seeded = (
             (
@@ -10499,6 +10499,125 @@ async def test_the_homepage_sweep_settles_an_archived_app_without_a_turn(db: Non
             .all()
         )
     assert seeded == [main_agent]
+
+
+async def _bind_homepage(workspace_id: UUID, agent_id: UUID, name: str) -> None:
+    """One hosted site bound as this agent's homepage — what settles the sweep."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(hosted_site).values(
+                workspace_id=workspace_id,
+                conversation_id=uuid4(),
+                name=name,
+                port=5100,
+                creator_member_id=uuid4(),
+                visibility="workspace",
+                generation=uuid4(),
+                deploy_generation=1,
+                homepage_agent_id=agent_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_homepage_sweep_settles_on_the_bound_page_not_on_the_attempt(db: None) -> None:
+    """A turn that ran is not a homepage. What settles an agent is the row `set_homepage` bound, so
+    an agent whose build refused is swept again rather than marked settled forever."""
+
+    workspace_id, main_agent = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-bound@example.com", admin=True)
+    await _bind_homepage(workspace_id, main_agent, "main-home")
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=_SeedDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX))
+        attempts = await ctx.store.list(web_surface.HOMEPAGE_ATTEMPT_PREFIX)
+    assert markers[f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{main_agent}"] == "bound"
+    assert attempts == ()
+    async with workspace_tx() as connection:
+        opened = (
+            (await connection.execute(sa.select(tables.conversation.c.agent_id))).scalars().all()
+        )
+    assert opened == []
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_homepage_sweep_reads_none_of_the_outgoing_images_markers(db: None) -> None:
+    """The image this release replaces marks `homepage-seed/<agent>` with the acting member for a
+    turn it admitted, and it keeps writing that key through the rollout. The marker means only that
+    a turn ran, so the sweep settles under a space of its own: an agent the old image marked is
+    still asked whether it has a page."""
+
+    workspace_id, main_agent = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace_id, "seed-rollout@example.com", admin=True)
+    await _bind_homepage(workspace_id, main_agent, "main-home")
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=_SeedDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await ctx.store.put(f"homepage-seed/{main_agent}", str(member_id))
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX))
+    assert markers[f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{main_agent}"] == "bound"
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_homepage_sweep_fires_once_a_bucket_and_stops_at_three(db: None) -> None:
+    """An unbound agent gets one attempt per day bucket and three attempts in all. A fourth
+    identical attempt is not new information, so the marker reads `unbuilt` and the sweep leaves
+    the agent alone — the member's own message is the door that stays open."""
+
+    workspace_id, main_agent = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-retry@example.com", admin=True)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=_SeedDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    attempt_key = f"{web_surface.HOMEPAGE_ATTEMPT_PREFIX}{main_agent}"
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx, bucket="day-1")
+        await web_surface.seed_homepages(ctx, bucket="day-1")
+        assert dict(await ctx.store.list(web_surface.HOMEPAGE_ATTEMPT_PREFIX))[attempt_key] == {
+            "attempts": 1,
+            "bucket": "day-1",
+        }
+        await web_surface.seed_homepages(ctx, bucket="day-2")
+        await web_surface.seed_homepages(ctx, bucket="day-3")
+        assert dict(await ctx.store.list(web_surface.HOMEPAGE_ATTEMPT_PREFIX))[attempt_key] == {
+            "attempts": 3,
+            "bucket": "day-3",
+        }
+        assert await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX) == ()
+        await web_surface.seed_homepages(ctx, bucket="day-4")
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX))
+    assert markers[f"{web_surface.HOMEPAGE_SETTLED_PREFIX}{main_agent}"] == "unbuilt"
+    async with workspace_tx() as connection:
+        turns = (await connection.execute(sa.select(tables.turn.c.id))).scalars().all()
+    assert len(turns) == 3
+
+
+def test_the_build_press_says_the_same_words_the_routing_eval_measures() -> None:
+    """The press lives in the portal and the eval case is the Python string, so the two are one
+    fact held in two languages. A phrasing that drifted on one side would route in the eval and
+    not in the member's workspace, which is the failure this catches."""
+
+    source = (
+        Path(web_surface.__file__).parents[1] / "frontend" / "src" / "lib" / "pendingAsk.ts"
+    ).read_text()
+    quoted = f'"{web_surface.BUILD_ASK}"'
+    assert quoted in source, f"pendingAsk.ts does not carry {quoted}"
 
 
 @pytest.mark.usefixtures("database_url")

@@ -7,10 +7,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from ufo_ext_sites.application_builder import (
-    APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_BUILDER_WIREFRAME_TOOL,
-)
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
@@ -59,13 +55,7 @@ pytestmark = [
 ]
 
 PUBLIC_BASE_URL = "https://ufo.example.test"
-SITE_ACTIONS = (
-    APPLICATION_BUILDER_DELEGATION_TOOL,
-    "build_website",
-    "deploy_website",
-    APPLICATION_BUILDER_WIREFRAME_TOOL,
-    "publish_website",
-)
+SITE_ACTIONS = ("build_website", "deploy_website", "publish_website")
 SITE_ACTION_IDS = frozenset(f"action:{SITE_KIND}:{name}" for name in SITE_ACTIONS)
 SET_HOMEPAGE_ID = f"action:{AGENT_KIND}:set_homepage"
 AGENT_NAME = "tasks"
@@ -351,7 +341,7 @@ def test_the_site_family_registers_only_as_canonical_actions() -> None:
         assert bound.context is not None and bound.context.store.extension == "sites"
     wire = {tool.name for tool in tools}
     assert wire.isdisjoint({*SITE_ACTIONS, "set_homepage"})
-    assert {"website", "start_server", "object_action"} <= wire
+    assert {"start_server", "object_action"} <= wire
     assert set(ext_by_tool).isdisjoint({*SITE_ACTIONS, "set_homepage"})
     assert SITE_ACTION_IDS | {SET_HOMEPAGE_ID} <= _agent_actions(
         verbs.actions, None, MEMBER_ADMISSION

@@ -4,7 +4,7 @@ import argparse
 import asyncio
 
 import sqlalchemy as sa
-from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION
+from ufo_ext_web.surface import HOMEPAGE_TOOLS
 
 from ufo.config import Config, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -13,13 +13,12 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
 WEB_EXTENSION = "web"
-HOMEPAGE_SEED_PREFIX = "homepage-seed/"
+HOMEPAGE_SETTLED_PREFIX = "homepage-settled/"
 SETTLED_MARKER = "withheld-eval"
-APP_PARENT_TOOLS = (APPLICATION_BUILDER_DELEGATION.canonical_id,)
 
 
 async def prepare_app_eval(config: Config) -> None:
-    """Settle homepage work and limit the app-eval parent to delegation."""
+    """Settle homepage work and hold the app-eval parent to spawning, sharing, and binding."""
     init_db(config.database.url)
     try:
         async with workspace_tx() as connection:
@@ -40,12 +39,12 @@ async def prepare_app_eval(config: Config) -> None:
             await connection.execute(
                 sa.update(tables.agent)
                 .where(tables.agent.c.id == main_agents[0].id)
-                .values(tools=list(APP_PARENT_TOOLS))
+                .values(tools=list(HOMEPAGE_TOOLS))
             )
         for agent in agents:
             with ws(agent.workspace_id):
                 await ScopedStore(extension=WEB_EXTENSION).put(
-                    f"{HOMEPAGE_SEED_PREFIX}{agent.id}", SETTLED_MARKER
+                    f"{HOMEPAGE_SETTLED_PREFIX}{agent.id}", SETTLED_MARKER
                 )
     finally:
         await dispose_db()
@@ -68,7 +67,7 @@ async def prepare_creation_eval(config: Config) -> None:
         for agent in agents:
             with ws(agent.workspace_id):
                 await ScopedStore(extension=WEB_EXTENSION).put(
-                    f"{HOMEPAGE_SEED_PREFIX}{agent.id}", SETTLED_MARKER
+                    f"{HOMEPAGE_SETTLED_PREFIX}{agent.id}", SETTLED_MARKER
                 )
     finally:
         await dispose_db()

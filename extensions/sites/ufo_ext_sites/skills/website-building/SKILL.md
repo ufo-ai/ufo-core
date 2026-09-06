@@ -1,6 +1,6 @@
 ---
 name: website-building
-description: Load when a member asks to build an application homepage, internal board, notes page, brief, dashboard, website, or browser app, including requests with missing content or data. Not for creating a conversational agent or recurring report delivery.
+description: Load when a member asks to build a website, landing page, browser game, internal reference page, board, notes page, brief, or dashboard, including requests with missing content or data. Not an app's own homepage — "your homepage" is application-homepage.
 metadata:
   depends:
   - ufo-style
@@ -13,7 +13,7 @@ Build the complete browser artifact in the sandbox, validate it, and return the 
 
 | Request | Action |
 |---|---|
-| Interactive homepage, dashboard, tracker, board, console, or operational workspace | Follow the ufo application homepage workflow below. |
+| An application's homepage — the page members open for an app on the Apps screen | Load `application-homepage`. |
 | Non-interactive internal reference page or simple site | Build direct HTML, CSS, and JavaScript. |
 | Public informational site | Read `informational/informational.md`. |
 | Stateful app with a backend, accounts, or durable shared data | Load `website-building/webapp`. |
@@ -41,27 +41,9 @@ Read only a reference that the build needs:
 | Empty, loading, or error states | `shared/05-taste.md` |
 | Accessibility and performance | `shared/08-standards.md` |
 | Charts or dense data | `shared/10-charts-and-dataviz.md` |
-| ufo application homepage QA | `shared/13-ufo-application-qa.md` |
 | Complex or multi-page browser QA | `shared/12-playwright-interactive.md` |
 | Backend behavior | `shared/19-backend.md` |
 | Runtime model calls | `shared/20-llm-api.md` |
-
-## ufo application homepage
-
-An application homepage is a working member surface, not a static status report or a design mock.
-Show what the application does, what it watches, its recent work, and what it needs from members.
-Give the primary workflow at least two accessible controls. Each control must produce a visible
-state change with the supplied or clearly synthetic data.
-
-The product provides the fixed Vite project at `"/workspace/ufo-app"`. Keep `index.html` and
-`preview.html` unchanged. Make one foreground delegation for the complete build.
-
-The worker receives the fixed scaffold and source paths. It inspects connected data, writes and
-repairs `app.tsx`, runs browser QA, deploys the site, and returns evidence. Deterministic product
-checks decide acceptance and bind the homepage. The parent does not inspect connector data, source, or browser output
-and does not repair, deploy, verify, or delegate again. Do not call `build_website`. Return the
-accepted `site_url`, or state the worker's blocker. Escalate only when the request is ambiguous or
-when product checks return a failure class with no stable worker or harness rule.
 
 ## Build and verify
 
@@ -69,8 +51,7 @@ Build the requested artifact directly. Do not create a separate specification, r
 sites, initialize Git, make milestone commits, add a logo, or add unrequested features unless the
 member needs one of those outputs.
 
-For a ufo application homepage, use its QA reference above. For every other build, read
-`shared/12-playwright-interactive.md`. Run browser QA at desktop and narrow widths, check both colour
+Read `shared/12-playwright-interactive.md`. Run browser QA at desktop and narrow widths, check both colour
 schemes, exercise every control, and check overflow and console errors. Fix each failure and run the
 failed check again. Deploy only after the checks pass.
 
@@ -78,7 +59,7 @@ failed check again. Deploy only after the checks pass.
   action="deploy_website", input={project_path=…, site_name=…, entry_point="index.html",
   visibility=…})` — for a static folder. Reuse the requested site's name when updating it.
 - Use its `publish_website` action — `object_action(kind="site", action="publish_website",
-  input={project_path=…, dist_path=…, app_name=…, install_command=…, run_command=…,
+  input={project_path=…, app_name=…, install_command=…, run_command=…,
   visibility=…})` — only when the app needs a build step or backend.
 - Use `start_server` only for local validation. Its URL is not a member deliverable.
 - Pass `visibility` only when the member asks. Otherwise keep the conversation default.

@@ -234,8 +234,9 @@ Run order:
 6. Screen one connector-heavy case per model and reasoning setting.
 7. Run the full set once for surviving settings, then three matched repeats for finalists.
 
-The evaluated turn delegates once through `build_ufo_application`. The worker deploys through
-`deploy_ufo_application`, and deterministic acceptance binds the homepage. After the turn ends,
+The evaluated turn spawns `profile:ufo_application_builder` once. The worker deploys through the
+`site` collection's `deploy_website` action, whose gate holds the page to the kit, builds it, and
+measures the built page — a refused deploy hosts nothing — and the parent binds it. After the turn ends,
 the harness locates the generated HTML, serves it, runs the browser audit, exercises accessible
 controls, captures both colour schemes, and preserves the generated HTML beside a static DOM
 snapshot. The HTML report shows the screenshots, trajectory, grader verdicts, audit, downloads, an
@@ -280,7 +281,7 @@ Gate A — harness integrity:
 
 Gate B — three-app presentation baseline:
 
-- All three workers preload `ufo-style` before the build.
+- All three workers preload `application-homepage` before the build.
 - Every case passes its deterministic artifact and browser audit.
 - Every case has a visual verdict for each criterion and both colour schemes.
 - The browser audit proves each exact connected fact above the fold in both desktop schemes. The
@@ -291,8 +292,8 @@ Gate B — three-app presentation baseline:
 
 Gate C — interaction:
 
-- All three workers preload `ufo-style` before the build.
-- Every worker completes `deploy_ufo_application`; deterministic acceptance binds the homepage.
+- All three workers preload `application-homepage` before the build.
+- Every worker completes `action:site:deploy_website`; the parent binds the homepage.
 - Every case passes its deterministic artifact and browser audit.
 - Every case exposes at least two accessible controls that produce distinct visible state changes.
 - Every case has a visual verdict for each criterion and both colour schemes.

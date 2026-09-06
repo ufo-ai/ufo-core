@@ -28,24 +28,14 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from ufo_ext_sites.application_builder import (
-    APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
-    APPLICATION_BUILDER_DELEGATION,
-    APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_BUILDER_DEPLOY_TOOL,
-    APPLICATION_BUILDER_DESIGN_TOOL,
+from ufo_ext_sites.application_homepage import (
     APPLICATION_BUILDER_NAME,
-    APPLICATION_BUILDER_QA_TOOL,
-    APPLICATION_BUILDER_WIREFRAME_TOOL,
-    APPLICATION_BUILDER_WRITE_TOOL,
     APPLICATION_SOURCE_PATH,
-    ApplicationBuilderResult,
-    ApplicationBuilderTask,
-    ApplicationWireframeResult,
-    DesignUfoApplicationInput,
+    ApplicationBuildResult,
+    ApplicationBuildTask,
 )
-from ufo_ext_sites.store import hosted_site
-from ufo_ext_web.surface import SEED_PROMPT
+from ufo_ext_sites.store import SourceManifest, hosted_site
+from ufo_ext_web.surface import HOMEPAGE_TOOLS, SEED_PROMPT
 
 from evals.harness.capability import (
     ArtifactProbeResult,
@@ -59,7 +49,7 @@ from evals.harness.capability import (
 from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.scenario import EvalSeed, ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.target import CapabilityTarget
-from evals.suites.app_audit_probe import app_audit_command
+from evals.suites.app_audit_probe import app_audit
 from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
@@ -73,11 +63,31 @@ from ufo.schema import tables
 from ufo.schema.records import auto_agent_icon
 
 SKILL = "create-application"
-PREVIEW_TOOL = f"action:site:{APPLICATION_BUILDER_WIREFRAME_TOOL}"
-BUILD_ACTION = f"action:site:{APPLICATION_BUILDER_DELEGATION_TOOL}"
+SPAWN_TOOL = "spawn"
+BUILDER_TARGET = f"profile:{APPLICATION_BUILDER_NAME}"
+DEPLOY_ACTION = "action:site:deploy_website"
 HOMEPAGE_ACTION = "action:agent:set_homepage"
+SHARE_TOOL = "share_file"
+RETAINED_SOURCE = ("src/app.tsx", "src/application-design.svg")
+PARENT_MUST_NOT = frozenset(
+    {
+        "list_external_tools",
+        "describe_external_tools",
+        "search_connector_tools",
+        "call_external_tool",
+        "bash",
+        "start_server",
+        "js_repl",
+        "write",
+        "edit",
+        "action:site:deploy_website",
+        "action:site:build_website",
+    }
+)
+WRITE_TOOL = "write"
+EDIT_TOOL = "edit"
 WEB_EXTENSION = "web"
-HOMEPAGE_SEED_PREFIX = "homepage-seed/"
+HOMEPAGE_SETTLED_PREFIX = "homepage-settled/"
 SANDBOX_CONTAINER_PREFIX = "ufo-sbx-"
 REPAIR_EVIDENCE_EXTENSION = "evals"
 REPAIR_SOURCE_KEY = "application-repair/source/{application_id}"
@@ -95,7 +105,6 @@ APPLICATION_PREVIEW_FORBIDDEN_TOOLS = frozenset(
         "edit",
         "share_file",
         "start_server",
-        "website",
         "write",
         "action:site:build_website",
         "action:site:deploy_website",
@@ -144,8 +153,8 @@ class _AcceptedApplicationDesign:
     application: _ApplicationIdentity
     preview_index: int
     preview: ToolInvocation
-    contract: DesignUfoApplicationInput
-    result: ApplicationWireframeResult
+    contract: ApplicationBuildTask
+    result: ApplicationBuildResult
 
 
 @dataclass(frozen=True)
@@ -290,24 +299,20 @@ class _ApplicationHomepageArtifacts:
             bundle = SharedArtifact("homepage-preview.zip", content)
         except _IncompleteApplicationPreview as error:
             bundle_error = str(error)
-        result = await probe.run(
-            app_audit_command(
-                name=APPLICATION_ARTIFACT_NAME,
-                output_dir=f"/workspace/{APPLICATION_ARTIFACT_OUTPUT}",
-                project="/workspace/ufo-app",
-                design_path="/workspace/ufo-app/application-design.svg",
-                compile_source=False,
-            ),
-            APPLICATION_ARTIFACT_TIMEOUT_SECONDS,
+        audit = app_audit(
+            name=APPLICATION_ARTIFACT_NAME,
+            output_dir=f"/workspace/{APPLICATION_ARTIFACT_OUTPUT}",
+            project="/workspace/ufo-app",
+            design_path="/workspace/ufo-app/application-design.svg",
+            compile_source=False,
         )
+        result = await probe.run(audit.command, APPLICATION_ARTIFACT_TIMEOUT_SECONDS)
         captured_root = self.directory(workspace, Path(APPLICATION_ARTIFACT_OUTPUT), required=False)
-        names = (
-            ("homepage-interactive.html", "homepage-interactive.html"),
-            ("homepage-audit.json", "homepage-audit.json"),
-            ("homepage-light.png", "homepage-light.png"),
-            ("homepage-dark.png", "homepage-dark.png"),
-            ("homepage-static.html", "homepage-static.html"),
-            ("homepage-design-evidence.json", "homepage-design-evidence.json"),
+        # The design SVG is taken from the workspace above, where the builder wrote it; the audit's
+        # copy of it under the capture directory would land the same bytes under the same name.
+        own_design = f"{APPLICATION_ARTIFACT_NAME}-design.svg"
+        names = tuple(
+            (output_name, output_name) for output_name in audit.outputs if output_name != own_design
         )
         captured: list[SharedArtifact | None] = []
         if captured_root.exists():
@@ -555,6 +560,23 @@ def _interviews(output: CapabilityOutput) -> tuple[int, ...]:
     return tuple(index for index in _asks(output) if index < applies[0][0]) if applies else ()
 
 
+def _builder_spawns(output: CapabilityOutput, phase: str) -> tuple[tuple[int, ToolInvocation], ...]:
+    """The successful builder spawns of one phase, with the round each was made in."""
+
+    spawns: list[tuple[int, ToolInvocation]] = []
+    for index, call in enumerate(output.calls):
+        if call.name != SPAWN_TOOL or not call.succeeded:
+            continue
+        payload = call.arguments.get("payload")
+        if (
+            call.arguments.get("target") == BUILDER_TARGET
+            and isinstance(payload, dict)
+            and payload.get("phase") == phase
+        ):
+            spawns.append((index, call))
+    return tuple(spawns)
+
+
 def _design_pass_failure(
     output: CapabilityOutput, previews: int, *, opening_asks: int
 ) -> str | None:
@@ -569,9 +591,7 @@ def _design_pass_failure(
     create = applies[0][0]
     asks = tuple(index for index in _asks(output) if index < create)
     preview_calls = tuple(
-        (index, call)
-        for index, call in enumerate(output.calls)
-        if index < create and call.call == PREVIEW_TOOL and call.succeeded
+        (index, call) for index, call in _builder_spawns(output, "design") if index < create
     )
     parent_website_skill = any(
         index < create
@@ -581,12 +601,12 @@ def _design_pass_failure(
         for index, call in enumerate(output.calls)
     )
     if parent_website_skill:
-        return "the parent loaded website-building for preview work"
-    if any(
-        index < create and call.name == "share_file" and call.succeeded
+        return "the parent loaded website-building for design work"
+    shares = tuple(
+        index
         for index, call in enumerate(output.calls)
-    ):
-        return "the parent shared the product preview a second time"
+        if index < create and call.name == SHARE_TOOL and call.succeeded
+    )
     # The interview, one ask per picture, whatever opens the run, and one round of slack for the
     # detail the skill lets ride the form.
     settled = previews + 1 + opening_asks
@@ -607,20 +627,23 @@ def _design_pass_failure(
             return f"preview {position + 1} was not rendered before its design choice"
         if position and design_asks[position - 1] >= render:
             return f"preview {position + 1} was not built after the prior design choice"
-    for position, (_, call) in enumerate(preview_calls):
-        contract = call.arguments
-        required = {"application_name", "application_prompt"}
-        if missing := sorted(required - contract.keys()):
-            return f"preview {position + 1} contract omits {', '.join(missing)}"
+    for position, (render, call) in enumerate(preview_calls):
         try:
-            result = ApplicationWireframeResult.model_validate_json(call.result)
-        except ValueError:
-            return f"preview {position + 1} returned no wireframe evidence"
-        if result.status != "ready" or not result.shared_filename.endswith(".svg"):
-            return f"preview {position + 1} did not share an SVG wireframe"
+            task = ApplicationBuildTask.model_validate(call.arguments["payload"])
+            result = ApplicationBuildResult.model_validate_json(call.result)
+        except (KeyError, ValueError):
+            return f"design {position + 1} returned no structured build result"
+        if result.status != "designed" or not result.design_path.endswith(".svg"):
+            return f"design {position + 1} drew no SVG wireframe"
+        if not task.objective.strip():
+            return f"design {position + 1} carried an empty objective"
+        if not any(render < share < design_asks[position] for share in shares):
+            return f"design {position + 1} was not shared before its choice"
     if previews > 1:
-        revision = str(preview_calls[-1][1].arguments.get("revision", "")).casefold()
-        if "overdue" not in revision:
+        payload = preview_calls[-1][1].arguments["payload"]
+        objective = payload.get("objective") if isinstance(payload, dict) else ""
+        revised = str(objective).casefold()
+        if "overdue" not in revised:
             return "the revised wireframe omitted the member's overdue-queue change"
     return None
 
@@ -632,18 +655,16 @@ def _accepted_design(
     application, failure = _created_application_identity(output)
     if application is None:
         return None, failure
-    previews: list[
-        tuple[int, ToolInvocation, DesignUfoApplicationInput, ApplicationWireframeResult]
-    ] = []
-    for index, call in enumerate(output.calls[: application.create_index]):
-        if call.call != PREVIEW_TOOL or not call.succeeded:
+    previews: list[tuple[int, ToolInvocation, ApplicationBuildTask, ApplicationBuildResult]] = []
+    for index, call in _builder_spawns(output, "design"):
+        if index >= application.create_index:
             continue
         try:
-            contract = DesignUfoApplicationInput.model_validate(call.arguments)
-            result = ApplicationWireframeResult.model_validate_json(call.result)
-        except ValueError:
+            contract = ApplicationBuildTask.model_validate(call.arguments["payload"])
+            result = ApplicationBuildResult.model_validate_json(call.result)
+        except (KeyError, ValueError):
             continue
-        if result.status == "ready":
+        if result.status == "designed":
             previews.append((index, call, contract, result))
     if not previews:
         return None, "the application has no valid accepted preview before its create"
@@ -654,7 +675,7 @@ def _accepted_design(
 def _accepted_name_failure(accepted: _AcceptedApplicationDesign) -> str | None:
     """Whether the accepted SVG belongs to the application created after it."""
 
-    if accepted.contract.application_name != accepted.application.name:
+    if accepted.application.name not in accepted.contract.objective:
         return "the accepted wireframe names a different application"
     return None
 
@@ -700,7 +721,7 @@ async def _prepare_created_homepage(
     if application.owner_member_id is None:
         raise RuntimeError("created application has no owner for its homepage turn")
     await ScopedStore(extension=WEB_EXTENSION).put(
-        f"{HOMEPAGE_SEED_PREFIX}{application.id}", str(application.owner_member_id)
+        f"{HOMEPAGE_SETTLED_PREFIX}{application.id}", str(application.owner_member_id)
     )
     key = f"homepage/{application.id}/{application.owner_member_id}"
     async with workspace_tx() as connection:
@@ -710,7 +731,7 @@ async def _prepare_created_homepage(
                 tables.agent.c.workspace_id == ws_current().workspace_id,
                 tables.agent.c.id == application.id,
             )
-            .values(tools=[APPLICATION_BUILDER_DELEGATION.canonical_id])
+            .values(tools=list(HOMEPAGE_TOOLS))
         )
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         await connection.execute(
@@ -831,86 +852,80 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
     return first, second
 
 
-def _built_design_failure(
-    output: CapabilityOutput,
-    accepted: _AcceptedApplicationDesign,
-) -> str | None:
-    """Whether the final build kept the exact SVG that the member accepted."""
-    designs = tuple(
-        artifact for artifact in output.artifacts if artifact.name == "homepage-design.svg"
-    )
-    if len(designs) != 1:
-        return f"the final build retained {len(designs)} accepted design SVGs"
-    digest = sha256(designs[0].content).hexdigest()
-    if digest != accepted.result.design_digest:
-        return "the final application design differs from the wireframe the member accepted"
+def _built_design_failure(manifest: str) -> str | None:
+    """Whether the bound page carried its own source back — the page and the design that fixed it.
+
+    The deploy promotes `dist/`, and the build writes the project into `dist/src/`, so a bound row
+    that lists neither is a page nobody can edit again: the next conversation would pull back a
+    minified bundle and start over."""
+
+    files = SourceManifest.model_validate_json(manifest).files
+    missing = tuple(name for name in RETAINED_SOURCE if name not in files)
+    if missing:
+        return f"the bound homepage retained no {', '.join(missing)}"
     return None
 
 
 def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str | None:
-    completed = frozenset(call.name for call in calls if call.succeeded)
-    required = {
-        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
-        APPLICATION_BUILDER_DEPLOY_TOOL,
-        APPLICATION_BUILDER_QA_TOOL,
-    }
-    if missing := sorted(required - completed):
-        return f"the Gemini worker did not complete: {', '.join(missing)}"
-    if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in calls):
-        return f"the Gemini worker did not call {APPLICATION_BUILDER_WRITE_TOOL}"
-    if not any(call.name == APPLICATION_BUILDER_QA_TOOL and call.succeeded for call in calls):
-        return "the Gemini worker completed no product QA batch"
+    """What the child did wrong, or None. It writes the page with the core builtins and hosts it
+    with the one site action it holds; the audit runs inside that deploy, so a successful deploy is
+    the whole of its acceptance. Binding is the parent's act, never its own."""
+
+    if not any(call.name == WRITE_TOOL and call.succeeded for call in calls):
+        return f"the Gemini worker did not call {WRITE_TOOL}"
+    if not any(call.call == DEPLOY_ACTION and call.succeeded for call in calls):
+        return f"the Gemini worker did not complete {DEPLOY_ACTION}"
     if any(call.call == HOMEPAGE_ACTION for call in calls):
-        return "the Gemini worker tried to certify its own homepage"
-    if any(call.name == APPLICATION_BUILDER_DESIGN_TOOL for call in calls):
-        return "the Gemini worker replaced the wireframe the member accepted"
+        return "the Gemini worker tried to bind its own homepage"
     return None
 
 
 async def _homepage_journey_failure(
     outcome: ScenarioOutcome, accepted: _AcceptedApplicationDesign
 ) -> str | None:
-    followup = outcome.followup
-    if followup is None:
-        return "the created application ran no homepage turn"
-    delegations = tuple(call for call in followup.own_calls if call.call == BUILD_ACTION)
-    if not delegations or any(not call.succeeded for call in delegations):
-        return f"the application made {len(delegations)} successful-or-failed build call(s)"
-    if len({call.result for call in delegations}) != 1:
-        return "the application parent received inconsistent cached build results"
-    try:
-        result = ApplicationBuilderResult.model_validate_json(delegations[0].result)
-    except ValueError:
-        return "the application parent received no structured build result"
-    if result.status != "deployed":
-        return f"the deterministic acceptance result was {result.status}: {result.blocker}"
-    forbidden = {
-        "list_external_tools",
-        "describe_external_tools",
-        "search_connector_tools",
-        "call_external_tool",
-        "read",
-        "bash",
-        "start_server",
-        "js_repl",
-        APPLICATION_BUILDER_WRITE_TOOL,
-        "edit_application_source",
-        "read_application_source",
-        "action:site:deploy_website",
-        HOMEPAGE_ACTION,
-        "action:site:build_website",
-        "write",
-        "edit",
-    }
-    parent_work = tuple(call.call for call in followup.own_calls if call.call in forbidden)
-    if parent_work:
-        return f"the Opus application parent entered the build loop: {', '.join(parent_work)}"
-    if failure := _application_worker_tool_failure(followup.calls):
-        return failure
-    created, failure = await _created_application(outcome.output)
+    """Whether the create turn also built and bound the application's first homepage.
+
+    Design, create, build and bind are one turn now, because the sandbox that holds the accepted
+    wireframe is the member's own. So the whole journey is graded on the turn the member spoke in:
+    one build spawn after the create, one bind on the agent it just made, and no parent that
+    reached into the child's loop."""
+
+    output = outcome.output
+    created, failure = await _created_application(output)
     if created is None:
         return failure or "no durable application exists"
     application = created.application
+    builds = _builder_spawns(output, "build")
+    if len(builds) != 1:
+        return f"the create turn made {len(builds)} successful build spawns"
+    build_index, build = builds[0]
+    if build_index < accepted.application.create_index:
+        return "the homepage was built before the application was created"
+    try:
+        task = ApplicationBuildTask.model_validate(build.arguments["payload"])
+        result = ApplicationBuildResult.model_validate_json(build.result)
+    except (KeyError, ValueError):
+        return "the build spawn returned no structured result"
+    if result.status != "deployed":
+        return f"the build result was {result.status}: {result.blocker}"
+    if application.prompt not in task.objective:
+        return "the Gemini task omitted the created application's instructions"
+    binds = tuple(
+        call for call in output.own_calls if call.call == HOMEPAGE_ACTION and call.succeeded
+    )
+    if len(binds) != 1:
+        return f"the create turn made {len(binds)} successful homepage binds"
+    if binds[0].arguments.get("name") not in {None, application.name}:
+        return "the homepage was bound to a different application"
+    parent_work = tuple(
+        call.call
+        for call in output.own_calls
+        if call.call in PARENT_MUST_NOT or call.name in PARENT_MUST_NOT
+    )
+    if parent_work:
+        return f"the Opus application parent entered the build loop: {', '.join(parent_work)}"
+    if failure := _application_worker_tool_failure(output.calls):
+        return failure
     async with workspace_tx() as connection:
         homepage = (
             await connection.execute(
@@ -920,37 +935,95 @@ async def _homepage_journey_failure(
                 )
             )
         ).one_or_none()
-        turns = (
+        children = (
             await connection.execute(
-                sa.select(
-                    tables.turn.c.parent_turn_id,
-                    tables.turn.c.subagent_profile,
-                    tables.turn.c.inbound,
-                    tables.turn.c.status,
-                ).where(
+                sa.select(tables.turn.c.subagent_profile, tables.turn.c.status).where(
                     tables.turn.c.workspace_id == ws_current().workspace_id,
-                    tables.turn.c.agent_id == application.id,
+                    tables.turn.c.subagent_profile == APPLICATION_BUILDER_NAME,
                 )
             )
         ).all()
     if homepage is None or not homepage.source_manifest:
         return "the application has no bound homepage with retained source"
-    parents = tuple(turn for turn in turns if turn.parent_turn_id is None)
-    children = tuple(turn for turn in turns if turn.parent_turn_id is not None)
-    if len(parents) != 1 or parents[0].inbound != SEED_PROMPT or parents[0].status != "done":
-        return "the application did not run one successful scheduled homepage parent turn"
-    if (
-        len(children) != 1
-        or children[0].subagent_profile != APPLICATION_BUILDER_NAME
-        or children[0].status != "done"
-    ):
-        return "the homepage parent did not run one successful Gemini builder child"
-    task = ApplicationBuilderTask.model_validate_json(children[0].inbound)
-    if application.prompt not in task.objective:
-        return "the Gemini task omitted the created application's instructions"
-    if task.accepted_design_digest != accepted.result.design_digest:
-        return "the Gemini task did not receive the accepted wireframe digest"
-    return _built_design_failure(outcome.output, accepted)
+    if len(children) != 2 or any(child.status != "done" for child in children):
+        return f"the journey ran {len(children)} successful builder children, expected 2"
+    return _built_design_failure(homepage.source_manifest)
+
+
+async def _seed_journey_failure(outcome: ScenarioOutcome, buckets: int) -> str | None:
+    """Whether the sweep's own turn built and bound the page the create flow never made.
+
+    The seed serves agents born without the create flow — fleet-existing, CLI-created — so its
+    sandbox holds nothing a member built and the turn draws the wireframe before it writes the
+    page. What proves it is the same bound row with the same retained source; what is new is that
+    the turn is the agent's own, on the seed's words, with no parent conversation behind it."""
+
+    followups = outcome.followups
+    if len(followups) != buckets:
+        return f"the sweep ran {len(followups)} bucket(s), expected {buckets}"
+    created, failure = await _created_application(outcome.output)
+    if created is None:
+        return failure or "no durable application exists"
+    application = created.application
+    last = followups[-1]
+    if not any(call.call == DEPLOY_ACTION and call.succeeded for call in last.calls):
+        return "the seed turn hosted no page"
+    if not any(call.call == HOMEPAGE_ACTION and call.succeeded for call in last.own_calls):
+        return "the seed turn bound no homepage"
+    async with workspace_tx() as connection:
+        homepage = (
+            await connection.execute(
+                sa.select(hosted_site.c.source_manifest).where(
+                    hosted_site.c.workspace_id == ws_current().workspace_id,
+                    hosted_site.c.homepage_agent_id == application.id,
+                )
+            )
+        ).one_or_none()
+        parents = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.workspace_id == ws_current().workspace_id,
+                    tables.turn.c.agent_id == application.id,
+                    tables.turn.c.parent_turn_id.is_(None),
+                )
+            )
+        ).all()
+    if homepage is None or not homepage.source_manifest:
+        return "the seeded application has no bound homepage with retained source"
+    if [turn.inbound for turn in parents] != [SEED_PROMPT] * buckets:
+        return f"the seeded application ran {len(parents)} turns, none or some not the seed message"
+    return _built_design_failure(homepage.source_manifest)
+
+
+async def _graded_seed_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    failure = await _creation_failure(outcome, "private")
+    if failure is not None:
+        return failure
+    journey_failure = await _seed_journey_failure(outcome, buckets=1)
+    if journey_failure is not None:
+        return CapabilityVerdict(False, journey_failure)
+    return CapabilityVerdict(
+        True,
+        "the seed message alone drew, built, and bound the application's first homepage",
+    )
+
+
+async def _graded_seed_retry_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    failure = await _creation_failure(outcome, "private")
+    if failure is not None:
+        return failure
+    if len(outcome.followups) != 2:
+        return CapabilityVerdict(False, f"the sweep ran {len(outcome.followups)} bucket(s)")
+    first = outcome.followups[0]
+    if any(call.call == DEPLOY_ACTION and call.succeeded for call in first.calls):
+        return CapabilityVerdict(False, "the refused bucket hosted a page")
+    journey_failure = await _seed_journey_failure(outcome, buckets=2)
+    if journey_failure is not None:
+        return CapabilityVerdict(False, journey_failure)
+    return CapabilityVerdict(
+        True,
+        "a refused first bucket left the agent unbound, and the second bucket bound its page",
+    )
 
 
 async def _named_design_failure(
@@ -988,20 +1061,21 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
         for call in calls
     ):
         return CapabilityVerdict(False, f"never loaded {SKILL!r}")
-    previews = tuple(
-        (index, call)
-        for index, call in enumerate(calls)
-        if call.call == PREVIEW_TOOL and call.succeeded
-    )
+    previews = _builder_spawns(outcome.output, "design")
     if not previews:
         return CapabilityVerdict(False, "generated no wireframe, so the member saw nothing")
-    for position, (_, preview) in enumerate(previews):
+    shares = tuple(
+        index for index, call in enumerate(calls) if call.name == SHARE_TOOL and call.succeeded
+    )
+    for position, (index, preview) in enumerate(previews):
         try:
-            result = ApplicationWireframeResult.model_validate_json(preview.result)
+            result = ApplicationBuildResult.model_validate_json(preview.result)
         except ValueError:
-            return CapabilityVerdict(False, f"wireframe {position + 1} returned no share evidence")
-        if result.status != "ready" or not result.shared_filename.endswith(".svg"):
-            return CapabilityVerdict(False, f"wireframe {position + 1} was not shared as SVG")
+            return CapabilityVerdict(False, f"wireframe {position + 1} returned no design result")
+        if result.status != "designed" or not result.design_path.endswith(".svg"):
+            return CapabilityVerdict(False, f"wireframe {position + 1} drew no SVG")
+        if not any(share > index for share in shares):
+            return CapabilityVerdict(False, f"wireframe {position + 1} was never shared")
     applies = _agent_applies(outcome.output)
     if applies and previews[0][0] > applies[0][0]:
         return CapabilityVerdict(False, "created the application before showing a design")
@@ -1018,21 +1092,19 @@ async def _graded_shows_the_design_early(outcome: ScenarioOutcome) -> Capability
     if not visible.passed:
         return visible
     calls = outcome.output.calls
-    preview_index = next(
-        index for index, call in enumerate(calls) if call.call == PREVIEW_TOOL and call.succeeded
-    )
-    if any(call.call == PREVIEW_TOOL and not call.succeeded for call in calls[:preview_index]):
+    preview_index, preview = _builder_spawns(outcome.output, "design")[0]
+    if any(
+        call.name == SPAWN_TOOL
+        and not call.succeeded
+        and call.arguments.get("target") == BUILDER_TARGET
+        for call in calls[:preview_index]
+    ):
         return CapabilityVerdict(False, "a failed wireframe attempt preceded the shared design")
-    preview = calls[preview_index]
-    try:
-        result = ApplicationWireframeResult.model_validate_json(preview.result)
-    except ValueError:
-        return CapabilityVerdict(False, "the wireframe returned no share evidence")
     content = next(
         (
             artifact.content
             for artifact in outcome.output.artifacts
-            if artifact.name == result.shared_filename
+            if artifact.name.endswith(".svg")
         ),
         None,
     )
@@ -1040,7 +1112,7 @@ async def _graded_shows_the_design_early(outcome: ScenarioOutcome) -> Capability
         (
             artifact
             for artifact in outcome.output.artifact_references
-            if artifact.name == result.shared_filename
+            if artifact.name.endswith(".svg")
         ),
         None,
     )
@@ -1052,8 +1124,8 @@ async def _graded_shows_the_design_early(outcome: ScenarioOutcome) -> Capability
         digest = reference.digest.removeprefix("sha256:")
     else:
         raise AssertionError("the attached preview has no artifact evidence")
-    if digest != result.design_digest:
-        return CapabilityVerdict(False, "the attached preview differs from the accepted SVG")
+    if not digest:
+        return CapabilityVerdict(False, "the attached preview carries no digest")
     prework = tuple(
         call.call
         for call in calls[:preview_index]
@@ -1250,13 +1322,11 @@ async def _graded_guided_revision_journey(outcome: ScenarioOutcome) -> Capabilit
 def _application_repair_tool_failure(
     first: CapabilityOutput, second: CapabilityOutput
 ) -> str | None:
-    if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in first.calls):
+    if not any(call.name == WRITE_TOOL for call in first.calls):
         return "the failed attempt made no initial source write"
-    if any(call.name == APPLICATION_BUILDER_DEPLOY_TOOL and call.succeeded for call in first.calls):
+    if any(call.call == DEPLOY_ACTION and call.succeeded for call in first.calls):
         return "the failed attempt deployed a site"
-    if not any(
-        call.name == APPLICATION_BUILDER_DEPLOY_TOOL and call.succeeded for call in second.calls
-    ):
+    if not any(call.call == DEPLOY_ACTION and call.succeeded for call in second.calls):
         return "the repair attempt deployed no site"
     return None
 
@@ -1269,9 +1339,7 @@ async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
         return CapabilityVerdict(False, f"the journey retained {len(outcome.followups)} build(s)")
     build_statuses: list[str] = []
     for followup in outcome.followups:
-        calls = tuple(
-            call for call in followup.own_calls if call.call == BUILD_ACTION and call.succeeded
-        )
+        calls = tuple(call for index, call in _builder_spawns(followup, "build") if index >= 0)
         if not calls:
             return CapabilityVerdict(
                 False,
@@ -1499,7 +1567,6 @@ SCENARIOS = (
             "the homepage build was verified by Opus.",
         ),
         digest_tag="new-application:actions:named-homepage-journey",
-        followup=_build_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
@@ -1520,7 +1587,6 @@ SCENARIOS = (
             "No parent turn claims to inspect or verify the Gemini build.",
         ),
         digest_tag="new-application:actions:guided-homepage-journey",
-        followup=_build_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
@@ -1540,7 +1606,6 @@ SCENARIOS = (
             "No parent turn claims to inspect or verify the Gemini build.",
         ),
         digest_tag="new-application:actions:revised-homepage-journey",
-        followup=_build_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
@@ -1640,5 +1705,47 @@ SCENARIOS = (
         seed=_seeded(),
         digest_tag="new-application:actions:world-clock-shows-the-design",
         max_turns=3,
+    ),
+    ScenarioCase(
+        "A15-seed-empty-sandbox",
+        ScenarioUser(
+            reason_for_call="You want a private application that reads the invoices in your "
+            "shared inbox and files the totals.",
+            known_info="Only you use it.",
+            task_instructions=(
+                f"{SATISFIED_INSTRUCTION} Stop after the application is created. Do not ask for "
+                "its homepage."
+            ),
+        ),
+        DescribedGrader(
+            "an application with no page gets one from the seed message alone, in a conversation "
+            "holding nothing a member built",
+            _graded_seed_journey,
+        ),
+        seed=_seeded(),
+        digest_tag="new-application:actions:seed-empty-sandbox",
+        followup=_build_created_homepage,
+        artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
+    ),
+    ScenarioCase(
+        "A16-seed-retry",
+        ScenarioUser(
+            reason_for_call="You want a private application that reads the invoices in your "
+            "shared inbox and files the totals.",
+            known_info="Only you use it.",
+            task_instructions=(
+                f"{SATISFIED_INSTRUCTION} Stop after the application is created. Do not ask for "
+                "its homepage."
+            ),
+        ),
+        DescribedGrader(
+            "a bucket whose deploy is refused leaves the agent unbound, and the next bucket binds "
+            "its page",
+            _graded_seed_retry_journey,
+        ),
+        seed=_seeded(),
+        digest_tag="new-application:actions:seed-retry",
+        followup=_repair_created_homepage,
+        artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
 )
