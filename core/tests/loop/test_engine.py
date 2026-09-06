@@ -1674,32 +1674,53 @@ async def test_the_speaker_helper_refuses_a_memberless_call_with_the_refs_a_retr
         assert result.is_error
         assert result.content == expected
 
-    bound = await _dispatch(
+
+async def test_the_speaker_helper_stands_aside_when_a_member_is_bound(
+    db: None, tmp_path: Path
+) -> None:
+    """With a member bound the helper raises nothing and answers with that member's id, so a
+    handler reads its requester from the same call it gates on."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def bare(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        return ToolResult(content=(TextContent(text=str(ctx.require_speaker())),))
+
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
+    engine = replace(
+        _engine(shared, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="bare_gate", description="d", input_model=StrictInput, handler=bare),)
+        ),
+        turn=shared.model_copy(update={"speaker_member_id": speaker}),
+    )
+
+    result = await _dispatch(
         engine,
         _dispatch_context(engine),
         ToolUseBlock(id="bound", name="bare_gate", input={"requested_by": str(shared.id)}),
-        requesters,
+        {shared.id: ActiveMessage(member_id=speaker, rendered="mine")},
     )
-    assert not bound.is_error
-    assert bound.content == str(speaker)
+
+    assert not result.is_error
+    assert result.content == str(speaker)
 
 
-async def test_a_hand_raised_no_speaker_value_error_is_normalized_at_the_wrapper(
+async def test_a_handler_that_skips_the_helper_reads_back_its_own_plain_refusal(
     db: None, tmp_path: Path
 ) -> None:
-    """An extension that writes the no-speaker refusal as a plain `ValueError` still exits the
-    wrapper as `SpeakerRequired`, so the retry path holds for a hand-raised refusal: the words the
-    handler wrote stand, and the active member refs are named beside them. Every other
-    `ValueError` keeps its own class, so nothing but a stated no-speaker condition is renamed."""
+    """The helper is what earns the retry, and nothing behind it reads a refusal's words to guess
+    at its class. A handler that raises the no-speaker condition as a plain `ValueError` reaches
+    the model as that `ValueError`, with no member refs beside it, so the class stays a declaration
+    the handler makes rather than a string the engine matches on."""
 
     class StrictInput(BaseModel):
         model_config = ConfigDict(extra="forbid")
 
     async def hand_raised(ctx: ToolContext, args: StrictInput) -> ToolResult:
         raise ValueError("this act requires a speaking member")
-
-    async def unrelated(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        raise ValueError("the port is already taken")
 
     shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
@@ -1713,69 +1734,20 @@ async def test_a_hand_raised_no_speaker_value_error_is_normalized_at_the_wrapper
                     input_model=StrictInput,
                     handler=hand_raised,
                 ),
-                ToolDef(
-                    name="unrelated", description="d", input_model=StrictInput, handler=unrelated
-                ),
             )
         ),
         turn=shared.model_copy(update={"speaker_member_id": speaker}),
     )
-    requesters = {shared.id: ActiveMessage(member_id=speaker, rendered="mine")}
-    context = replace(_dispatch_context(engine), speaker_member_id=None)
-
-    normalized = await _dispatch(
-        engine, context, ToolUseBlock(id="hand", name="hand_raised", input={}), requesters
-    )
-    plain = await _dispatch(
-        engine, context, ToolUseBlock(id="other", name="unrelated", input={}), requesters
-    )
-
-    assert normalized.is_error
-    assert normalized.content == (
-        "SpeakerRequired: this act requires a speaking member"
-        + REQUESTED_BY_HINT.format(refs=str(shared.id))
-    )
-    assert plain.is_error
-    assert plain.content == "ValueError: the port is already taken"
-
-
-async def test_a_normalized_refusal_with_nothing_bound_stays_a_plain_refusal(
-    db: None, tmp_path: Path
-) -> None:
-    """Fail-closed: a background turn binds no member and offers no ref, so the same hand-raised
-    refusal is still a refusal and carries no hint. Normalizing the class never admits the call and
-    never names a member the round cannot name."""
-
-    class StrictInput(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-
-    async def hand_raised(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        raise ValueError("this act requires a speaking member")
-
-    background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
-    engine = replace(
-        _engine(background, EchoModel(), tmp_path),
-        tools=ToolRegistry(
-            (
-                ToolDef(
-                    name="hand_raised",
-                    description="d",
-                    input_model=StrictInput,
-                    handler=hand_raised,
-                ),
-            )
-        ),
-    )
 
     result = await _dispatch(
         engine,
-        _dispatch_context(engine),
+        replace(_dispatch_context(engine), speaker_member_id=None),
         ToolUseBlock(id="hand", name="hand_raised", input={}),
-        {},
+        {shared.id: ActiveMessage(member_id=speaker, rendered="mine")},
     )
 
     assert result.is_error
-    assert result.content == "SpeakerRequired: this act requires a speaking member"
+    assert result.content == "ValueError: this act requires a speaking member"
 
 
 async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:

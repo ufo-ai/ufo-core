@@ -263,14 +263,6 @@ DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>
 REQUESTED_BY_HINT = (
     " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
 )
-SPEAKER_CONDITIONS = (
-    "speaking member",
-    "member requester",
-    "names no member",
-    "requires a speaker",
-    "needs a speaker",
-    "requested_by",
-)
 INTERRUPTED_TURN_NOTICE = (
     "<interrupted_turn>The turn above ended before it answered. Everything it ran is above and "
     "already happened — treat those results as done, and do not repeat them.</interrupted_turn>"
@@ -817,26 +809,6 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
 
 def _bounded(content: str) -> str:
     return clipped(content, MAX_TOOL_RESULT_CHARS)
-
-
-def _speaker_refusal(error: Exception) -> Exception:
-    """The same refusal, carrying the class that says how to repair it. A handler that raises the
-    no-speaker condition as a plain `ValueError` means it every bit as much as one that raises
-    `SpeakerRequired`, and an extension outside this repository writes that line without ever
-    reading the class. Read at the one place a handler's exception leaves the wrapper, its refusal
-    lands as the class the retry path reads, so the member refs are named and the model can
-    resubmit with `requested_by`.
-
-    Only an exact `ValueError` whose text states the condition is rewritten. A subclass keeps its
-    own class, which is what stops a validation error or a narrower refusal from being renamed,
-    and the message the handler wrote is carried through unchanged. Nothing here admits a call: a
-    refusal stays a refusal, and only the words that reach the model change."""
-    if type(error) is not ValueError:
-        return error
-    detail = str(error).lower()
-    if not any(condition in detail for condition in SPEAKER_CONDITIONS):
-        return error
-    return SpeakerRequired(str(error))
 
 
 def _speaker_hint(error: Exception, member_refs: Sequence[UUID]) -> str:
@@ -3630,15 +3602,14 @@ class TurnEngine:
             if parked is None:
                 raise
             raise parked from error
-        except Exception as raised:
-            refusal = _speaker_refusal(raised)
+        except Exception as error:
             return _HandlerOutput(
-                _error_text(bound.call.name, refusal, bound.member_refs),
+                _error_text(bound.call.name, error, bound.member_refs),
                 True,
-                tool.untrusted or isinstance(raised, UntrustedContentError),
+                tool.untrusted or isinstance(error, UntrustedContentError),
                 (),
                 "handler_raised",
-                type(refusal).__name__,
+                type(error).__name__,
             )
 
     async def _finish_dispatch(
