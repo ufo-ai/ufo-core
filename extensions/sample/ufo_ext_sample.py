@@ -1300,7 +1300,9 @@ class SampleSearchProvider:
         return FetchedPage(url=request.url, text=SAMPLE_FETCH_TEXT)
 
 
-def build_flag_provider(_cache_ttl_seconds: float) -> InMemoryProvider:
+def build_flag_provider(
+    _cache_ttl_seconds: float, _declared: Mapping[str, FlagSpec]
+) -> InMemoryProvider:
     """The OpenFeature provider the probe registers through the `flag_providers` Manifest point:
     `sample-flag-on` resolves true and `sample-flag-off` false, so a flagged path is driven both
     ways through the real SDK. Its variations are the strings a flag service holds, which is what

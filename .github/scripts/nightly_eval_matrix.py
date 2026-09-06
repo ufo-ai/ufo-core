@@ -81,13 +81,17 @@ class Arm:
 
 
 ARMS = (
-    Arm("assistant_eval", {"research": {"search_provider": "perplexity"}}),
+    Arm(
+        "assistant_eval",
+        {"research": {"search_provider": "perplexity"}, "flags": {"backend": "open"}},
+    ),
     Arm(
         "assistant_hosted",
         {
             "research": {"search_provider": "perplexity"},
             "browser": {"cdp_provider": "browserbase"},
             "memory": {"index_backend": "turbopuffer"},
+            "flags": {"backend": "open"},
         },
     ),
 )

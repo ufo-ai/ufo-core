@@ -58,7 +58,7 @@ def test_the_keyed_deploy_gets_a_provider_aimed_at_its_own_flagship_app(
     """The three keys are the whole configuration: two of them compose the evaluate URL and the
     third authorizes it, so a keyed deploy reads its own app and no other."""
     _keyed(monkeypatch)
-    provider = flagship.build(CACHE_TTL_SECONDS)
+    provider = flagship.build(CACHE_TTL_SECONDS, {})
     assert isinstance(provider, FlagshipServerProvider)
     client = provider._client
     assert client.endpoint == (
@@ -89,7 +89,7 @@ def test_a_key_the_deploy_projects_empty_reads_as_unkeyed(
     one. It answers like the absent key: no provider, every flag on its code default."""
     _keyed(monkeypatch)
     monkeypatch.setenv(unseeded, "")
-    assert flagship.build(CACHE_TTL_SECONDS) is None
+    assert flagship.build(CACHE_TTL_SECONDS, {}) is None
 
 
 @pytest.mark.parametrize(
@@ -104,7 +104,7 @@ def test_a_deploy_missing_any_one_key_gets_no_provider(
     _keyed(monkeypatch)
     monkeypatch.delenv(missing, raising=False)
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        assert flagship.build(CACHE_TTL_SECONDS) is None
+        assert flagship.build(CACHE_TTL_SECONDS, {}) is None
     record = caplog.records[-1]
     assert record.message == "flagship.unkeyed"
     assert record.ufo == {

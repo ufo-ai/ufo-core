@@ -25,9 +25,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.flags import flag_enabled
 from ufo.sdk.jobs import WorkspaceCandidates, agent_is_live, owner_candidates
 
 EXTENSION_NAME = "app_notification"
+NOTIFICATION_FLAG = "enable-notification-app"
 NOTIFICATION_KIND = "notification"
 NOTIFY_SUBJECTS_PER_TURN = 8
 SUBJECT_MAX = 120
@@ -145,6 +147,16 @@ def _row(row: sa.RowMapping) -> Notification:
 
 def _claim_available(now: datetime) -> sa.ColumnElement[bool]:
     return sa.or_(notification.c.claim_expires_at.is_(None), notification.c.claim_expires_at < now)
+
+
+async def notifications_enabled() -> bool:
+    """Whether the Notification app acts in the bound workspace: `notify` writes, the drain wakes,
+    `deliver` pushes. The same flag hides the app's page in the portal, so one key withholds the
+    whole feature from an environment, and it reads closed where nothing answers — a feature an
+    environment holds back is not offered by a flag service that failed to answer. A stack that
+    wants the feature without a flag service selects the `open` backend, as the dev tomls and the
+    nightly sweep's stack config do."""
+    return await flag_enabled(NOTIFICATION_FLAG, default=False)
 
 
 async def inbox_agent_id(ctx: ExtensionContext) -> UUID | None:

@@ -908,7 +908,8 @@ def _select_flag_provider(
             f"config selects flag provider backend {config.flags.backend!r} but no extension "
             "registers it"
         )
-    provider = selected.build(config.flags.cache_ttl_seconds)
+    declared = {spec.key: spec for manifest in manifests for spec in manifest.flags}
+    provider = selected.build(config.flags.cache_ttl_seconds, declared)
     if provider is None:
         warn("flags.backend_unkeyed", backend=config.flags.backend)
     return provider

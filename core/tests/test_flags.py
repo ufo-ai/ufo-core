@@ -103,7 +103,7 @@ async def _check_a_backend_holding_no_such_flag_reads_as_the_call_site_default()
     """The state a deploy is in before an operator creates a flag, and the one a deleted flag leaves
     behind. A caller withholding a shipped screen passes True here, so the screen stands until the
     service answers false — the direction that cannot take a working portal away."""
-    init_flags(sample.build_flag_provider(0.0))
+    init_flags(sample.build_flag_provider(0.0, {}))
     with ws(uuid4()):
         assert await flag_enabled("no-such-flag", default=True) is True
         assert await flag_enabled("no-such-flag", default=False) is False
@@ -112,7 +112,7 @@ async def _check_a_backend_holding_no_such_flag_reads_as_the_call_site_default()
 async def _check_the_selected_backend_answers_on_and_off() -> None:
     """The sample extension's registered backend, bound through the same `init_flags` boot path
     `serve` runs, decides the read rather than the default."""
-    init_flags(sample.build_flag_provider(0.0))
+    init_flags(sample.build_flag_provider(0.0, {}))
     with ws(uuid4()):
         assert await flag_enabled(sample.FLAG_ON, default=False) is True
         assert await flag_enabled(sample.FLAG_OFF, default=True) is False

@@ -8,7 +8,8 @@ website building and the code REPL, document generation, todos, durable objectiv
 enrichment, scheduled tasks, member-authored skills, markdown content sources over a GitHub
 repository or a serve-local directory, the ufo terminal
 surface, the member web portal, and the operator session debugger, the Bedrock and OpenRouter
-model providers, Cloudflare Flagship as the feature-flag backend, Metronome plan provisioning,
+model providers, Cloudflare Flagship as the feature-flag backend (and the open backend a stack
+without a flag service selects), Metronome plan provisioning,
 usage and seat metering, and the coding
 subagent — but over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), Slack and iMessage surfaces,
@@ -88,6 +89,7 @@ EXTENSIONS = (
     "skill_create",
     "embed_openai",
     "flagship",
+    "flags_open",
     "metronome",
 )
 SKILLS_DIR = Path(__file__).parent / "skills"

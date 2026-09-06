@@ -48,3 +48,6 @@ ingress_public_url = "__INGRESS_PUBLIC_URL__"
 # reaches this container's serve on the published port.
 [connect]
 public_base_url = "__PUBLIC_BASE_URL__"
+
+[flags]
+backend = "open"

@@ -22,6 +22,7 @@ inside the ceiling `flag_enabled` holds a caller to — so an unreachable Flagsh
 bounded wait and the closed state, never an error.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import httpx
@@ -29,7 +30,7 @@ from flagship import FlagshipServerProvider
 from openfeature.provider import FeatureProvider
 
 from ufo.sdk.credentials import deploy_env
-from ufo.sdk.manifest import FlagProviderSpec, Manifest
+from ufo.sdk.manifest import FlagProviderSpec, FlagSpec, Manifest
 from ufo.sdk.o11y import warn
 
 NAME = "flagship"
@@ -49,7 +50,7 @@ OFF_VARIATION = "off"
 ANSWERED_ONLY_FIELDS = frozenset({"updated_at", "updated_by"})
 
 
-def build(cache_ttl_seconds: float) -> FeatureProvider | None:
+def build(cache_ttl_seconds: float, _declared: Mapping[str, FlagSpec]) -> FeatureProvider | None:
     """The provider core binds to the OpenFeature API at boot, or None when the deploy carries no
     Flagship app, account, or token — the deploy then reads every flag as its code default."""
     app_id = deploy_env(APP_ID_ENV)

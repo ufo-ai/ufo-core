@@ -28,6 +28,7 @@ from ufo_ext_app_notification.store import (
     Posted,
     Refused,
     inbox_agent_id,
+    notifications_enabled,
 )
 
 NOTIFY_TOOL_NAME = "notify"
@@ -47,6 +48,10 @@ NOTIFY_NEEDS_A_MEMBER = (
     "this turn runs under workspace authority and names no member, so there is nobody to notify"
 )
 NOTIFY_NO_INBOX = "the Notification app is not live in this workspace, so there is no inbox"
+NOTIFY_OFF = (
+    "notifications are switched off in this workspace; if the member should know, say it in your "
+    "reply"
+)
 NOTIFY_SELF = "the notification agent does not notify itself"
 NOTIFY_INSIDE_A_DELIVERY = (
     "this turn is delivering a notification; it does not raise one about that"
@@ -93,6 +98,8 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
     member_id = authority_member_id(ctx.authority)
     if member_id is None:
         return _refusal(NOTIFY_NEEDS_A_MEMBER)
+    if not await notifications_enabled():
+        return _refusal(NOTIFY_OFF)
     ext = _require_ext(ctx.ext)
     store = NotificationStore(ext)
     if await store.is_delivery_turn(ctx.turn.id):

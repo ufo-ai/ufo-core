@@ -31,6 +31,7 @@ from ufo_ext_app_notification.store import (
     Notification,
     NotificationStore,
     inbox_agent_id,
+    notifications_enabled,
 )
 
 DRAIN_COOLDOWN_SECONDS = 300
@@ -49,6 +50,8 @@ class InboxDrain:
     ctx: ExtensionContext
 
     async def run(self) -> None:
+        if not await notifications_enabled():
+            return
         inbox = await inbox_agent_id(self.ctx)
         if inbox is None:
             return

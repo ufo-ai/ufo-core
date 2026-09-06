@@ -21,6 +21,8 @@ throughout: what was called, how many times, and with which subjects are exact f
 trajectory. Every case runs one sample, since one raise in three of a routine run is the noise this
 suite exists to catch."""
 
+import re
+
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
@@ -144,8 +146,13 @@ def _file(path: str, content: str) -> WorkspaceFile:
     return WorkspaceFile(path=path, content=content.encode())
 
 
+MENTIONS_THE_QUEUE = re.compile(r"\bnotif|\bqueue", re.IGNORECASE)
+
+
 def _raised_exactly(subjects: frozenset[str]) -> Grader:
-    """One `notify` per subject in `subjects`, no more and none for anything else."""
+    """One `notify` per subject in `subjects`, no more and none for anything else — and a reply
+    that never says so. The member reads the reply; the notification reaches them on its own, and a
+    line about the tool or the queue is a line they cannot act on and did not ask for."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         raised = [
@@ -155,7 +162,10 @@ def _raised_exactly(subjects: frozenset[str]) -> Grader:
             return CapabilityVerdict(
                 False, f"raised {sorted(raised)}, wanted one each of {sorted(subjects)}"
             )
-        return CapabilityVerdict(True, f"raised once each about {sorted(subjects)}")
+        said = MENTIONS_THE_QUEUE.search(output.response)
+        if said is not None:
+            return CapabilityVerdict(False, f"the reply mentions the queue: {said.group(0)!r}")
+        return CapabilityVerdict(True, f"raised once each about {sorted(subjects)}, said nothing")
 
     return grade
 

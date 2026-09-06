@@ -102,6 +102,9 @@ public_base_url = "http://ufo.localhost:8710"
 
 [sandbox]
 ingress_public_url = "http://ufo.localhost:8100"
+
+[flags]
+backend = "open"
 """
 CORE_VERSIONS_DIR = MIGRATIONS_DIR / "versions"
 MIGRATION_HEAD_FILENAME = "HEAD"

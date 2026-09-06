@@ -11,12 +11,14 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from ufo_ext_app_notification.kind import RAISE_REFUSAL
 from ufo_ext_app_notification.manifest import NAME, NOTIFICATION_AGENT, manifest
 from ufo_ext_app_notification.notify_tool import (
     NOTIFICATION_AGENT_NAME,
     NOTIFY_FOLDED,
     NOTIFY_NEEDS_A_MEMBER,
+    NOTIFY_OFF,
     NOTIFY_QUEUED,
     NOTIFY_SELF,
     NOTIFY_TOOL_NAME,
@@ -24,6 +26,7 @@ from ufo_ext_app_notification.notify_tool import (
     notify,
 )
 from ufo_ext_app_notification.store import (
+    NOTIFICATION_FLAG,
     NOTIFICATION_KIND,
     NOTIFY_SUBJECTS_PER_TURN,
     NotificationStore,
@@ -31,6 +34,7 @@ from ufo_ext_app_notification.store import (
 from ufo_ext_app_notification.store import notification as notification_table
 
 from ufo.db import workspace_tx
+from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
@@ -266,6 +270,39 @@ async def test_a_repeat_on_a_subject_already_raised_folds_and_counts(db: None) -
     assert row["body"] == "now 400 pages changed"
     assert row["last_raised_at"] >= row["created_at"]
     assert row["produced_by_turn_id"] == first.turn.id
+
+
+def _flag(served: str) -> InMemoryProvider:
+    return InMemoryProvider(
+        {NOTIFICATION_FLAG: InMemoryFlag(default_variant="set", variants={"set": served})}
+    )
+
+
+async def test_the_flag_withholds_notify_where_it_reads_off(db: None) -> None:
+    """One key withholds the feature from an environment: where the flag answers off, `notify`
+    refuses before it writes; where it answers on, or where nothing answers, it queues."""
+    workspace_id, member_id, agent_id, _, conversation_id = await _seed()
+    try:
+        init_flags(_flag(SERVED_TRUE))
+        with ws(workspace_id), agent(agent_id):
+            on = await notify(
+                _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id),
+                NotifyInput(subject=SOURCE, body="14 deals moved"),
+            )
+        init_flags(_flag(SERVED_FALSE))
+        with ws(workspace_id), agent(agent_id):
+            off = await notify(
+                _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id),
+                NotifyInput(subject="source/github", body="deploy failed"),
+            )
+            rows = await _rows(workspace_id)
+    finally:
+        init_flags(InMemoryProvider({}))
+
+    assert on.content[0].text == NOTIFY_QUEUED
+    assert off.is_error is True
+    assert off.content[0].text == NOTIFY_OFF
+    assert [row["subject"] for row in rows] == [SOURCE]
 
 
 async def test_the_same_subject_for_two_members_is_two_rows(db: None) -> None:

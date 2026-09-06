@@ -333,10 +333,15 @@ class FlagSpec:
     The declaration is the set each hosted environment's terraform must declare, held to it by a
     gate: a key the code reads and the flag service does not hold evaluates to its call-site default
     forever, which on a screen looks exactly like a state somebody chose. `what` states what turning
-    it on offers, in one line, because whoever decides that is reading the terraform, not this."""
+    it on offers, in one line, because whoever decides that is reading the terraform, not this.
+    `open` is what the `open` flag backend — the one a dev or eval stack selects to have the whole
+    product without a flag service — serves for this key: on for a flag that offers a withheld
+    feature, which is every flag but one, and off for a flag that selects between two shapes the
+    fleet already serves one of, so such a stack lands on the fleet's shape."""
 
     key: str
     what: str
+    open: bool = True
 
 
 @dataclass(frozen=True)
@@ -344,15 +349,16 @@ class FlagProviderSpec:
     """A feature-flag provider an extension registers, selected by `config.flags.backend`. `backend`
     is the name; `build` constructs the process-wide OpenFeature provider once at boot, only when
     selected, from `config.flags.cache_ttl_seconds` — the window it may answer a flag out of its own
-    response cache. Core ships no backend and reads every flag through `ufo.flags.flag_enabled`, so
-    a deploy swaps providers with a config line.
+    response cache — and the flags every active extension declared, keyed by flag key, for a backend
+    that answers from declarations rather than a service. Core ships no backend and reads every flag
+    through `ufo.flags.flag_enabled`, so a deploy swaps providers with a config line.
 
     `build` returns None when the deploy carries no credential for the backend. Flags then resolve
     to the default each call site passes rather than failing the boot: a flag says whether a feature
     is offered, and a deploy that cannot read one offers what its code defaults to."""
 
     backend: str
-    build: Callable[[float], FeatureProvider | None]
+    build: Callable[[float, Mapping[str, FlagSpec]], FeatureProvider | None]
 
 
 @dataclass(frozen=True)

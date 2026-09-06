@@ -58,6 +58,7 @@ EXTENSIONS = (
     "index_default",
     "embed_openai",
     "flagship",
+    "flags_open",
     "bedrock",
     "openrouter",
     "ufo",

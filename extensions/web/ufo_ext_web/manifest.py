@@ -60,6 +60,7 @@ FLAGS = (
     FlagSpec(
         key=LANES_SHELL_FLAG,
         what="The portal serves the lanes shell rather than the sidebar shell.",
+        open=False,
     ),
 )
 

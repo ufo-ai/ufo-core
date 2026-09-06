@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from ufo_ext_app_notification.drain import (
     BATCH_CLOSE,
     BATCH_CLOSE_ESCAPE,
@@ -20,6 +21,7 @@ from ufo_ext_app_notification.drain import (
 from ufo_ext_app_notification.manifest import NAME
 from ufo_ext_app_notification.notify_tool import NOTIFICATION_AGENT_NAME
 from ufo_ext_app_notification.store import (
+    NOTIFICATION_FLAG,
     NOTIFICATION_KIND,
     Lane,
     Notification,
@@ -27,9 +29,11 @@ from ufo_ext_app_notification.store import (
     Posted,
 )
 from ufo_ext_app_notification.store import notification as notification_table
+from ufo_ext_flags_open import build
 from ufo_testsupport.invoker import RecordingInvoker
 
 from ufo.db import workspace_tx
+from ufo.flags import SERVED_FALSE, init_flags
 from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, context_for
@@ -397,6 +401,35 @@ async def test_a_lapsed_lease_hands_the_rows_to_the_next_tick(db: None) -> None:
     assert [row.subject for row in claimed] == ["source/crm"]
     assert held == ()
     assert [row.subject for row in again] == ["source/crm"]
+
+
+async def test_the_drain_wakes_nobody_where_the_flag_reads_off(db: None) -> None:
+    workspace_id, member_id, agent_id, inbox_id = await _seed()
+    dbos = StubDbos()
+    ctx = _drain_ctx(workspace_id, dbos)
+    try:
+        init_flags(
+            InMemoryProvider(
+                {
+                    NOTIFICATION_FLAG: InMemoryFlag(
+                        default_variant="off", variants={"off": SERVED_FALSE}
+                    )
+                }
+            )
+        )
+        with ws(workspace_id), agent(inbox_id):
+            await _post(ctx, inbox_id, member_id, agent_id, "source/crm", "first")
+            await InboxDrain(ctx=ctx).run()
+            held = await _turns(workspace_id)
+        init_flags(build(0.0, {}))
+        with ws(workspace_id), agent(inbox_id):
+            await InboxDrain(ctx=ctx).run()
+            woken = await _turns(workspace_id)
+    finally:
+        init_flags(InMemoryProvider({}))
+
+    assert held == []
+    assert len(woken) == 1
 
 
 def test_the_drain_message_walls_each_body_and_escapes_its_own_close() -> None:

@@ -1,0 +1,52 @@
+name = "notify-raise-wording"
+base = "HEAD"
+suites = ["notify_raise"]
+repeats = 3
+concurrency = 2
+max_stacks = 2
+budget_usd = 60.0
+est_usd_per_case = 0.20
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+flags = { backend = "open" }
+
+[[arm]]
+name = "silence-rule"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/notify_tool.py"
+old = '''    "what this turn already told them or a fault you can repair."
+)'''
+new = '''    "what this turn already told them or a fault you can repair. Never mention this tool, the "
+    "queue, or that anyone was notified: your reply says what you found, and the notification "
+    "reaches the member on its own."
+)'''
+
+[[arm]]
+name = "no-ufo-condition"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/notify_tool.py"
+old = '''    "an email that needs a decision or is going unanswered, a customer or investor turning. It is "
+    "not for ufo's own condition: a connection that stopped authenticating or a task that faults "
+    "is `report_problem` and a line in your reply, never a notification. Nothing answers back "'''
+new = '''    "an email that needs a decision or is going unanswered, a customer or investor turning. "
+    "Nothing answers back "'''
+
+[[arm]]
+name = "no-already-told"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/notify_tool.py"
+old = '''    "call per subject, whatever the batch size; two different things are two calls. Do not raise "
+    "what this turn already told them or a fault you can repair."'''
+new = '''    "call per subject, whatever the batch size; two different things are two calls."'''
