@@ -18,10 +18,14 @@
 //! they open it.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::text::{Line, Span};
+use serde::{Deserialize, Serialize};
 
+use crate::config::CONVERSATIONS_FILE;
 use crate::ui::picker::{PickKey, PickOutcome, Picker};
 use crate::ui::theme::Theme;
 use crate::ui::wrap;
@@ -70,6 +74,50 @@ pub struct Fetch {
     pub search: String,
 }
 
+/// The list as the workspace last answered it, kept beside the member's history so the page opens
+/// on it — in this process and the next — before the workspace answers again. The file names the
+/// sign-in it was read under, so another member's sign-in on this machine leaves it unread, and a
+/// sign-out deletes it with the credential.
+pub struct Cache {
+    path: PathBuf,
+    session: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    session: String,
+    conversations: Vec<ConversationRow>,
+}
+
+impl Cache {
+    pub fn at(home: &Path, session: &str) -> Cache {
+        Cache {
+            path: home.join(CONVERSATIONS_FILE),
+            session: session.to_string(),
+        }
+    }
+
+    /// The rows stored under this sign-in: none where nothing is stored, the file does not parse,
+    /// or another sign-in wrote it.
+    pub fn load(&self) -> Vec<ConversationRow> {
+        fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Stored>(&text).ok())
+            .filter(|stored| stored.session == self.session)
+            .map(|stored| stored.conversations)
+            .unwrap_or_default()
+    }
+
+    pub fn store(&self, rows: &[ConversationRow]) {
+        let stored = Stored {
+            session: self.session.clone(),
+            conversations: rows.to_vec(),
+        };
+        let text = serde_json::to_string(&stored).expect("rows serialize");
+        let _ = fs::write(&self.path, text);
+    }
+}
+
 pub struct Conversations {
     rows: Vec<ConversationRow>,
     picker: Picker,
@@ -87,12 +135,23 @@ pub struct Conversations {
 }
 
 impl Conversations {
-    /// A page that has asked for its first list and waits on it, cursor in the entry bar. `back`
-    /// says whether Esc has a conversation to return to.
-    pub fn new(back: bool) -> Conversations {
+    /// A page opened on `rows` — the list as it last stood, or none yet — that has asked for its
+    /// first list and waits on it, cursor in the entry bar. A row that moved since the member last
+    /// saw it is bold from the start. `back` says whether Esc has a conversation to return to.
+    pub fn new(
+        back: bool,
+        rows: Vec<ConversationRow>,
+        seen: &HashMap<String, f64>,
+    ) -> Conversations {
+        let now = now_seconds();
+        let mut picker = Picker::new(rows.iter().map(|row| row_text(row, now)).collect());
+        for (index, row) in rows.iter().enumerate() {
+            let moved = seen.get(&row.id).is_some_and(|&stamp| row.last_at > stamp);
+            picker.set_bold(index, moved);
+        }
         Conversations {
-            rows: Vec::new(),
-            picker: Picker::new(Vec::new()),
+            rows,
+            picker,
             loading: true,
             error: None,
             generation: 1,
@@ -122,6 +181,11 @@ impl Conversations {
         self.slot = slot;
     }
 
+    /// The rows the page shows, in list order.
+    pub fn rows(&self) -> &[ConversationRow] {
+        &self.rows
+    }
+
     /// The fetch the page opened with.
     pub fn first_fetch(&self) -> Fetch {
         Fetch {
@@ -139,15 +203,18 @@ impl Conversations {
     /// that is drawn bold, and so is one that appeared while the page was up. The page's first
     /// load takes `current` — the conversation behind the page, which the member was just
     /// reading — as seen where it stands.
+    ///
+    /// Says whether the whole list landed — the answer to no search — which is the list the page
+    /// opens on next time.
     pub fn loaded(
         &mut self,
         generation: u32,
         result: Result<Vec<ConversationRow>, String>,
         seen: &mut HashMap<String, f64>,
         current: Option<&Target>,
-    ) {
+    ) -> bool {
         if generation != self.generation {
-            return;
+            return false;
         }
         self.loading = false;
         match result {
@@ -162,8 +229,7 @@ impl Conversations {
                     .and_then(|at| self.rows.get(at))
                     .map(|row| row.id.clone());
                 let now = now_seconds();
-                let several = distinct_agents(&rows) > 1;
-                let items = rows.iter().map(|row| row_text(row, now, several)).collect();
+                let items = rows.iter().map(|row| row_text(row, now)).collect();
                 self.rows = rows;
                 self.picker = Picker::new(items);
                 self.picker.set_page(self.list);
@@ -185,8 +251,12 @@ impl Conversations {
                 {
                     self.picker.select_index(index);
                 }
+                self.asked.is_empty()
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
         }
     }
 
@@ -412,16 +482,10 @@ fn is_current(row: &ConversationRow, target: &Target) -> bool {
     }
 }
 
-fn distinct_agents(rows: &[ConversationRow]) -> usize {
-    let mut agents: Vec<&str> = rows.iter().map(|row| row.agent.as_str()).collect();
-    agents.sort_unstable();
-    agents.dedup();
-    agents.len()
-}
-
 /// One row as the list states it: where the conversation lives, how long since it moved, what it
-/// is called, who opened it when that was somebody else, and which agent when there are several.
-pub fn row_text(row: &ConversationRow, now_seconds: u64, several_agents: bool) -> String {
+/// is called, who opened it when that was somebody else, and which agent when it is not the main
+/// one.
+pub fn row_text(row: &ConversationRow, now_seconds: u64) -> String {
     let origin = wrap::clip(&origin(row), ORIGIN_WIDTH).to_string();
     let age = age(row.last_at as u64, now_seconds);
     let mut text = format!(
@@ -432,7 +496,7 @@ pub fn row_text(row: &ConversationRow, now_seconds: u64, several_agents: bool) -
         text.push_str(GAP);
         text.push_str(speaker);
     }
-    if several_agents {
+    if !row.main {
         text.push_str(GAP);
         text.push_str(&row.agent);
     }
@@ -501,6 +565,7 @@ mod tests {
             surface_label: None,
             speaker: None,
             agent: agent.to_string(),
+            main: agent == "assistant",
             last_at: now_seconds() as f64 - 2.0 * HOUR as f64,
             postable: true,
             channel: None,
@@ -511,8 +576,12 @@ mod tests {
         Theme::for_mode(ColorMode::TrueColor, Scheme::Dark)
     }
 
+    fn fresh(back: bool) -> Conversations {
+        Conversations::new(back, Vec::new(), &HashMap::new())
+    }
+
     fn loaded(rows: Vec<ConversationRow>) -> Conversations {
-        let mut page = Conversations::new(true);
+        let mut page = fresh(true);
         page.set_layout(0, ROWS);
         load(&mut page, 1, Ok(rows));
         page
@@ -548,23 +617,24 @@ mod tests {
     }
 
     #[test]
-    fn a_row_states_origin_age_title_speaker_and_agent_when_several() {
+    fn a_row_states_origin_age_title_speaker_and_the_agent_when_not_the_main_one() {
         let now = now_seconds();
         let mut slack = row("c1", "Who owns the pager", "slack", "assistant");
         slack.surface_label = Some("#eng".to_string());
         slack.speaker = Some("Nate Ford".to_string());
         slack.last_at = (now - 3 * DAY) as f64;
         assert_eq!(
-            row_text(&slack, now, false),
+            row_text(&slack, now),
             "Slack #eng         3d  Who owns the pager  Nate Ford"
         );
         let web = row("c2", "Deploy plan", "web", "notes");
         assert_eq!(
-            row_text(&web, now, true),
+            row_text(&web, now),
             "Web                2h  Deploy plan  notes"
         );
         let app = row("c3", "Ping", "extension:notification", "notification");
-        assert!(row_text(&app, now, false).starts_with("Notification    "));
+        assert!(row_text(&app, now).starts_with("Notification    "));
+        assert!(row_text(&app, now).ends_with("  notification"));
     }
 
     #[test]
@@ -790,6 +860,58 @@ mod tests {
     }
 
     #[test]
+    fn a_page_opens_on_the_rows_it_is_given_bold_where_they_moved_since_seen() {
+        let mut seen = HashMap::new();
+        let moved = row("c1", "Who owns the pager", "slack", "assistant");
+        seen.insert("c1".to_string(), moved.last_at - 60.0);
+        let still = row("c2", "Deploy plan", "web", "assistant");
+        seen.insert("c2".to_string(), still.last_at);
+        let unmet = row("c3", "Ping", "web", "assistant");
+        let rows = vec![moved, still, unmet];
+        let mut page = Conversations::new(true, rows.clone(), &seen);
+        page.set_layout(0, ROWS);
+        let lines = text(&page.render(&theme(), 80, ROWS));
+        assert!(lines[1].contains("Who owns the pager"), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.contains(LOADING)),
+            "{lines:?}"
+        );
+        assert_eq!(bold_rows(&mut page), vec![true, false, false]);
+        assert!(
+            page.loaded(1, Ok(rows.clone()), &mut seen, None),
+            "the whole list landed"
+        );
+        page.key(PickKey::Char('p'));
+        let fetch = page
+            .due_fetch(Instant::now() + REQUERY_AFTER)
+            .expect("the typed word is asked");
+        assert!(
+            !page.loaded(fetch.generation, Ok(rows), &mut seen, None),
+            "a search's answer is not the list"
+        );
+    }
+
+    #[test]
+    fn the_cache_keeps_the_list_for_the_sign_in_it_came_from() {
+        let home =
+            std::env::temp_dir().join(format!("ufo-conversations-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+        let cache = Cache::at(&home, "host.1");
+        assert!(cache.load().is_empty(), "nothing stored yet");
+        let rows = vec![row("c1", "Who owns the pager", "slack", "assistant")];
+        cache.store(&rows);
+        assert_eq!(Cache::at(&home, "host.1").load(), rows);
+        assert!(
+            Cache::at(&home, "host.2").load().is_empty(),
+            "another sign-in's list"
+        );
+        std::fs::write(home.join(CONVERSATIONS_FILE), "{").expect("a torn file");
+        assert!(cache.load().is_empty(), "a torn file is no list");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn a_row_that_moved_since_the_member_saw_it_is_bold_until_opened() {
         let mut seen = HashMap::new();
         let current = Target::Channel("abc".to_string());
@@ -799,7 +921,7 @@ mod tests {
         let mut theirs = row("c2", "Who owns the pager", "slack", "assistant");
         theirs.last_at = 200.0;
         seen.insert("c1".to_string(), 50.0);
-        let mut page = Conversations::new(true);
+        let mut page = fresh(true);
         page.set_layout(0, ROWS);
         page.loaded(
             1,
@@ -834,13 +956,13 @@ mod tests {
         );
 
         seen.insert("c1".to_string(), 150.0);
-        let mut reopened = Conversations::new(true);
+        let mut reopened = fresh(true);
         reopened.set_layout(0, ROWS);
         reopened.loaded(1, Ok(vec![mine, theirs]), &mut seen, Some(&current));
         assert_eq!(bold_rows(&mut reopened), vec![false, false]);
 
         let mut stale = HashMap::from([("c2".to_string(), 100.0)]);
-        let mut later = Conversations::new(true);
+        let mut later = fresh(true);
         later.set_layout(0, ROWS);
         later.loaded(
             1,
@@ -857,7 +979,7 @@ mod tests {
 
     #[test]
     fn the_page_states_the_list_and_the_search_line_carries_the_words() {
-        let waiting = Conversations::new(false);
+        let waiting = fresh(false);
         let drawn = text(&waiting.render(&theme(), 60, 6));
         assert_eq!(drawn.len(), 6);
         assert_eq!(drawn[0], "  UFO Chats");
@@ -894,7 +1016,7 @@ mod tests {
             "and reads idle once it does not"
         );
 
-        let mut failed = Conversations::new(true);
+        let mut failed = fresh(true);
         load(&mut failed, 1, Err("lost connection".to_string()));
         assert_eq!(text(&failed.render(&theme(), 60, 6))[1], "lost connection");
 

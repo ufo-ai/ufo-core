@@ -44,7 +44,7 @@ fn draw_the_conversation_rows(bencher: divan::Bencher, rows: usize) {
         divan::black_box(
             listed
                 .iter()
-                .map(|row| row_text(row, 1_700_000_000, true))
+                .map(|row| row_text(row, 1_700_000_000))
                 .collect::<Vec<String>>(),
         )
     });
@@ -59,6 +59,7 @@ fn listed(rows: usize) -> Vec<ConversationRow> {
             surface_label: (row % 2 == 0).then(|| "#general".to_string()),
             speaker: (row % 3 == 0).then(|| "Nate Ford".to_string()),
             agent: if row % 5 == 0 { "notes" } else { "assistant" }.to_string(),
+            main: row % 5 != 0,
             last_at: 1_699_000_000.0 + row as f64,
             postable: true,
             channel: None,

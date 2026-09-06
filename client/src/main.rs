@@ -1107,6 +1107,7 @@ fn run_tty(
     let mut app = App::new(
         std::io::stdout(),
         &home.root,
+        &seed.session_id,
         theme,
         host,
         label.clone(),

@@ -247,6 +247,7 @@ _MEMBER_MESSAGE_RE = re.compile(
     re.DOTALL,
 )
 _CONTEXT_TAG_RE = re.compile(r"\A<context>\n.*?\n</context>\n", re.DOTALL)
+_MESSAGE_REF_RE = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)")
 _INJECTED_CONTEXT_RE = re.compile(r"\n\n<injected_context>\n.*\n</injected_context>\Z", re.DOTALL)
 
 SILENCE_SENTINEL = "<response></response>"
@@ -351,6 +352,16 @@ def member_message_text(inbound: str) -> str:
     said = _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound))
     found = _MEMBER_MESSAGE_RE.search(said)
     return said if found is None else found.group("said")
+
+
+def member_message_ref(inbound: str) -> str | None:
+    """The `message_ref` the engine wrote at the head of an inbound's <context> tag — the turn or
+    queue row the message founded — or None where the text opens with no such tag. The tag is what
+    tells a message somebody admitted from a notice the engine wrote into the transcript itself, so
+    a projection that draws member lines draws only inbounds that carry one, and consults
+    `agent_origin_refs` for the ones a machine admitted."""
+    found = _MESSAGE_REF_RE.match(inbound)
+    return None if found is None else found.group("ref").strip()
 
 
 @dataclass(frozen=True)

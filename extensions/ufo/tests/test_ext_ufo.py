@@ -285,6 +285,25 @@ async def test_only_a_terminal_frame_reads_what_the_turn_shared() -> None:
     ]
 
 
+async def test_an_unstreamed_reply_is_said_whole() -> None:
+    """A reply the stream never delivered as `txt` — a resume landing on a finished turn — is one
+    `say` carrying its blank lines, so its paragraphs stand apart as they did live."""
+
+    async def files() -> tuple[SharedFile, ...]:
+        return ()
+
+    async def frames() -> AsyncIterator[tuple[str, Terminal]]:
+        yield (
+            "c1",
+            Terminal(frame=TerminalFrame(status="done", text="Here it is:\n\nOne.\n\nTwo.")),
+        )
+
+    lines = [
+        line async for line in stream_directives(aclosing(frames()), 5.0, files=files, turn_id=TURN)
+    ]
+    assert lines[0] == b"say\tHere it is:\\n\\nOne.\\n\\nTwo.\n"
+
+
 async def test_stream_privately_renders_a_connect_handoff() -> None:
     async def frames() -> AsyncIterator[tuple[str, Terminal]]:
         yield (
@@ -1689,22 +1708,36 @@ async def test_an_op_error_reply_fails_the_op_with_the_terminals_words(
         terminals.disconnect(conversation_id)
 
 
+def _framed(text: str, ref: str = "142f1dd4-8c24-5faa-9c20-b760d238ecb1") -> str:
+    """A member inbound as the engine writes it: the <context> tag naming its message ref, then the
+    words."""
+    return (
+        "<context>\n"
+        f"message_ref: {ref}\n"
+        "time: Sunday 2026-08-16 23:04 EDT\n"
+        "sender: alex@metalcraft.ai\n"
+        "source: ufo cli (alex@metalcraft.ai)\n"
+        "</context>\n"
+        f"{text}"
+    )
+
+
 def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> None:
     from ufo.harness.models.interface import Message, TextBlock
     from ufo.runtime.turns.transcript import Conversation
 
     marker = "00aabbcc"
-    fenced = f"<member_message_{marker}>\nwhat is up\n</member_message_{marker}>"
+    fenced = _framed(f"<member_message_{marker}>\nwhat is up\n</member_message_{marker}>")
     conversation = Conversation(
         seq=1,
         messages=(
             Message(role="user", content=fenced),
             Message(role="assistant", content=(TextBlock(text="not much"),)),
-            Message(role="user", content=(TextBlock(text="tell me more"),)),
+            Message(role="user", content=(TextBlock(text=_framed("tell me more")),)),
             Message(role="assistant", content=(TextBlock(text="the latest reply"),)),
         ),
     )
-    lines = history_directives(conversation)
+    lines = history_directives(conversation, frozenset())
     assert lines == (
         b"you\twhat is up\n",
         b"say\tnot much\n",
@@ -1731,11 +1764,11 @@ def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
         messages=(
             Message(role="user", content=composed),
             Message(role="assistant", content=(TextBlock(text="not much"),)),
-            Message(role="user", content=(TextBlock(text="tell me more"),)),
+            Message(role="user", content=(TextBlock(text=_framed("tell me more")),)),
             Message(role="assistant", content=(TextBlock(text="the latest reply"),)),
         ),
     )
-    lines = history_directives(conversation)
+    lines = history_directives(conversation, frozenset())
     assert lines == (
         b"you\tsup\n",
         b"say\tnot much\n",
@@ -1750,7 +1783,7 @@ def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
     conversation = Conversation(
         seq=1,
         messages=(
-            Message(role="user", content="try it"),
+            Message(role="user", content=_framed("try it")),
             Message(
                 role="assistant",
                 content=(
@@ -1759,10 +1792,10 @@ def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
                 ),
             ),
             Message(role="assistant", content=(TextBlock(text="Nothing ran."),)),
-            Message(role="user", content="understood"),
+            Message(role="user", content=_framed("understood")),
         ),
     )
-    lines = history_directives(conversation)
+    lines = history_directives(conversation, frozenset())
     assert lines == (
         b"you\ttry it\n",
         b"note\tCompleted 1 step\n",
@@ -1775,11 +1808,85 @@ def test_history_budget_keeps_the_newest_messages() -> None:
     from ufo.harness.models.interface import Message
     from ufo.runtime.turns.transcript import Conversation
 
-    old = Message(role="user", content="a" * 30_000)
-    new = Message(role="user", content="the recent one")
+    old = Message(role="user", content=_framed("a" * 30_000))
+    new = Message(role="user", content=_framed("the recent one"))
     conversation = Conversation(seq=1, messages=(old, new))
-    lines = history_directives(conversation)
+    lines = history_directives(conversation, frozenset())
     assert lines == (b"you\tthe recent one\n",)
+
+
+def test_history_leaves_only_the_latest_reply_to_the_tail() -> None:
+    """A reply a machine's admission followed is history like any other: only the last reply —
+    the one the tail replays — is left off, not every reply since the member last spoke."""
+    from ufo.harness.models.interface import Message, TextBlock
+    from ufo.runtime.turns.transcript import Conversation
+
+    spawned = "6bff4092-5ffc-55f4-8af1-c34089930bf4"
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content=_framed("look into the pager rotation")),
+            Message(role="assistant", content=(TextBlock(text="Spawning a look."),)),
+            Message(
+                role="user",
+                content=_framed('<spawn_result status="done">Nate</spawn_result>', ref=spawned),
+            ),
+            Message(role="assistant", content=(TextBlock(text="Nate owns the pager."),)),
+        ),
+    )
+    assert history_directives(conversation, frozenset({spawned})) == (
+        b"you\tlook into the pager rotation\n",
+        b"say\tSpawning a look.\n",
+    )
+
+
+def test_history_hides_what_no_member_said() -> None:
+    """A subagent's result and a scheduled firing are admitted by machines, an interrupted-turn
+    notice is written by the engine with no <context> tag at all: none is the member's words, so
+    none draws a `you` line — while the reply each answered still lands before it."""
+    from ufo.harness.models.interface import Message, TextBlock
+    from ufo.runtime.turns.transcript import Conversation
+
+    spawned = "6bff4092-5ffc-55f4-8af1-c34089930bf4"
+    fired = "0f3c2a1e-1111-5222-8333-444455556666"
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content=_framed("look into the pager rotation")),
+            Message(role="assistant", content=(TextBlock(text="Spawning a look."),)),
+            Message(
+                role="user",
+                content=_framed(
+                    '<spawn_result target="profile:coding" spawn_id="x" status="done">'
+                    '{"result":"Nate owns it"}</spawn_result>',
+                    ref=spawned,
+                ),
+            ),
+            Message(role="assistant", content=(TextBlock(text="Nate owns the pager."),)),
+            Message(
+                role="user", content="<interrupted_turn>The turn above ended.</interrupted_turn>"
+            ),
+            Message(role="assistant", content=(TextBlock(text="Picking up where it stopped."),)),
+            Message(
+                role="user",
+                content=_framed(
+                    "<scheduled_task> scheduled_fire: 2026-09-06T15:17:00Z </scheduled_task> check",
+                    ref=fired,
+                ),
+            ),
+            Message(role="assistant", content=(TextBlock(text="Checked."),)),
+            Message(role="user", content=_framed("thanks")),
+        ),
+    )
+    lines = history_directives(conversation, frozenset({spawned, fired}))
+    assert lines == (
+        b"you\tlook into the pager rotation\n",
+        b"say\tSpawning a look.\n",
+        b"say\tNate owns the pager.\n",
+        b"say\tPicking up where it stopped.\n",
+        b"say\tChecked.\n",
+        b"you\tthanks\n",
+    )
 
 
 async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
@@ -1828,7 +1935,7 @@ async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
     conversation = Conversation(
         seq=1,
         messages=(
-            Message(role="user", content="what is up"),
+            Message(role="user", content=_framed("what is up")),
             Message(role="assistant", content=(TextBlock(text="the reply"),)),
         ),
     )
@@ -2215,6 +2322,7 @@ async def test_conversations_lists_every_surface_and_agent_the_member_reaches(
         "surface_label": None,
         "speaker": None,
         "agent": "assistant",
+        "main": True,
         "last_at": rows[str(web)]["last_at"],
         "postable": True,
         "channel": None,
@@ -2225,6 +2333,7 @@ async def test_conversations_lists_every_surface_and_agent_the_member_reaches(
     assert rows[str(terminal)]["channel"] == "abc123"
     assert rows[str(texts)]["postable"] is False
     assert rows[str(notes)]["agent"] == "notes"
+    assert rows[str(notes)]["main"] is False
 
     searched = await client.get(
         "/surface/ufo/conversations",
@@ -2283,7 +2392,7 @@ async def test_a_conversation_opened_by_id_replays_then_admits_a_comment(
             Conversation(
                 seq=1,
                 messages=(
-                    Message(role="user", content="Who owns the pager"),
+                    Message(role="user", content=_framed("Who owns the pager")),
                     Message(role="assistant", content=(TextBlock(text="Nate does."),)),
                 ),
             )

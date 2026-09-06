@@ -88,6 +88,7 @@ from ufo.sdk.surfaces import (
     TerminalOp,
     TurnContext,
     TurnRuntimeConfig,
+    member_message_ref,
     member_message_text,
 )
 
@@ -192,10 +193,17 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None
 HISTORY_CHAR_BUDGET = 20_000
 
 
-def history_directives(conversation: Conversation) -> tuple[bytes, ...]:
+def history_directives(
+    conversation: Conversation, agent_origin: frozenset[str]
+) -> tuple[bytes, ...]:
     """The conversation so far, rendered for a fresh resume: the member's messages as `you`, the
-    agent's replies as `say`. Trailing replies are left off — the tail replays the latest turn's
+    agent's replies as `say`. The last reply is left off — the tail replays the latest turn's
     frames, and a reply said here too would print twice. The newest messages win the budget.
+
+    A member's message is one the engine framed with its <context> tag and that no machine
+    admitted: a subagent's result, a scheduled firing — `agent_origin` names those by their
+    `message_ref` — and a notice the engine wrote into the transcript itself carry no words of the
+    member's, so they draw no `you` line, though the reply before each still lands.
 
     A turn's steps stand over the reply they produced, as the one `note` line that counts them:
     every text but the turn's last was written between calls, so it is a step of the work rather
@@ -227,10 +235,13 @@ def history_directives(conversation: Conversation) -> tuple[bytes, ...]:
         if answer or steps:
             said.append((False, answer, steps))
         answer, steps = "", 0
-        said.append((True, text, 0))
+        ref = member_message_ref(text)
+        if ref is None or ref in agent_origin:
+            continue
+        said.append((True, member_message_text(text), 0))
     if answer or steps:
         said.append((False, answer, steps))
-    while said and not said[-1][0]:
+    if said and not said[-1][0]:
         said.pop()
     kept: list[tuple[bool, str, int]] = []
     budget = HISTORY_CHAR_BUDGET
@@ -266,10 +277,8 @@ def _dispatched(message: Message, active: set[str]) -> int:
 
 def _history_text(message: Message) -> str:
     if isinstance(message.content, str):
-        raw = message.content
-    else:
-        raw = "\n\n".join(block.text for block in message.content if block.type == "text")
-    return member_message_text(raw) if message.role == "user" else raw
+        return message.content
+    return "\n\n".join(block.text for block in message.content if block.type == "text")
 
 
 def directives_for(
@@ -388,7 +397,7 @@ def _answer(
     )
     match frame.status:
         case "done":
-            said = () if streamed else _say_lines(frame.text)
+            said = () if streamed else (directive("say", frame.text),)
             sealed = "" if frame.credential_request is None else frame.credential_request.sealed
             secrets = tuple(
                 directive("secret", sealed, prompt.slot, prompt.prompt) for prompt in collect
@@ -403,20 +412,16 @@ def _answer(
             )
             return (
                 *attestation,
-                *_say_lines(safe_error or TURN_FAILED_MESSAGE),
+                directive("say", safe_error or TURN_FAILED_MESSAGE),
                 *shared,
                 directive("ask", PROMPT),
             )
         case "cancelled":
             if frame.text:
                 closing = directive("exit", "0") if exits else directive("ask", PROMPT)
-                return (*attestation, *_say_lines(frame.text), *shared, closing)
+                return (*attestation, directive("say", frame.text), *shared, closing)
             return (*attestation, directive("say", "cancelled"), *shared, directive("ask", PROMPT))
     raise ValueError(f"unmapped terminal status {frame.status!r}")
-
-
-def _say_lines(text: str) -> tuple[bytes, ...]:
-    return tuple(directive("say", line) for line in (text.splitlines() or [text]))
 
 
 @dataclass(frozen=True)
@@ -903,7 +908,8 @@ class _ChannelStream:
         if self.turn.resumed and self.request.headers.get(SINCE_HEADER) is None:
             transcript = await self.ctx.read_transcript(self.conversation_id)
             if transcript is not None:
-                history = history_directives(transcript)
+                machine = await self.ctx.agent_origin_refs(self.conversation_id)
+                history = history_directives(transcript, machine)
         directives = stream_directives(
             self.ctx.tail(self.turn.id, since),
             HOLD_SECONDS,
@@ -1123,9 +1129,10 @@ def _comment_author(entry: ListedConversation, email: str, own: bool) -> str:
 
 class ConversationRow(BaseModel):
     """One conversation as the terminal lists it. `speaker` is who opened it when that was
-    somebody else; `channel` is set for the member's own terminal conversations, which the client
-    resumes on their channel rather than joining by id, so the terminal it stands in is the
-    sandbox again."""
+    somebody else; `main` says the conversation runs with the workspace's main agent, so the client
+    names the agent only where it is another; `channel` is set for the member's own terminal
+    conversations, which the client resumes on their channel rather than joining by id, so the
+    terminal it stands in is the sandbox again."""
 
     id: UUID
     title: str
@@ -1133,6 +1140,7 @@ class ConversationRow(BaseModel):
     surface_label: str | None
     speaker: str | None
     agent: str
+    main: bool
     last_at: float
     postable: bool
     channel: str | None
@@ -1166,9 +1174,7 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
             member_admitted=True,
         )
         rows.extend(
-            _conversation_row(entry, agent.name, member_id, email)
-            for entry in listed
-            if entry.title
+            _conversation_row(entry, agent, member_id, email) for entry in listed if entry.title
         )
     rows.sort(key=lambda row: row.last_at, reverse=True)
     return Response(
@@ -1180,7 +1186,7 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
 
 
 def _conversation_row(
-    entry: ListedConversation, agent: str, member_id: UUID, email: str
+    entry: ListedConversation, agent: AgentSummary, member_id: UUID, email: str
 ) -> ConversationRow:
     own = entry.audience == str(conversation_audience(member_id))
     spoke = own or any(who.email == email for who in entry.speakers)
@@ -1201,7 +1207,8 @@ def _conversation_row(
         surface=entry.summary.surface,
         surface_label=entry.surface_label,
         speaker=speaker,
-        agent=agent,
+        agent=agent.name,
+        main=agent.main,
         last_at=(entry.summary.last_turn_at or entry.summary.created_at).timestamp(),
         postable=not isinstance(_posting(entry, member_id, email), _ReadOnly),
         channel=channel,

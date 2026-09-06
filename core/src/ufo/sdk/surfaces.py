@@ -163,6 +163,9 @@ from ufo.runtime.ext.surface import (
     is_silence_sentinel as is_silence_sentinel,
 )
 from ufo.runtime.ext.surface import (
+    member_message_ref as member_message_ref,
+)
+from ufo.runtime.ext.surface import (
     member_message_text as member_message_text,
 )
 from ufo.runtime.ext.surface import (

@@ -237,8 +237,9 @@ impl Target {
 
 /// One conversation the member may open, as the workspace lists it: `channel` names the member's
 /// own terminal conversations, which resume rather than join; `postable` is false where the
-/// surface takes no message from here.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// surface takes no message from here; `main` says the conversation runs with the workspace's
+/// main agent, so the agent is named only where it is another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationRow {
     pub id: String,
     pub title: String,
@@ -246,6 +247,7 @@ pub struct ConversationRow {
     pub surface_label: Option<String>,
     pub speaker: Option<String>,
     pub agent: String,
+    pub main: bool,
     pub last_at: f64,
     pub postable: bool,
     pub channel: Option<String>,
@@ -1305,8 +1307,8 @@ mod tests {
     #[test]
     fn a_conversation_list_parses_its_rows() {
         let body = r#"{"conversations":[{"id":"c1","title":"Deploy plan","surface":"web",
-            "surface_label":null,"speaker":null,"agent":"assistant","last_at":1700000000.5,
-            "postable":true,"channel":null}]}"#;
+            "surface_label":null,"speaker":null,"agent":"assistant","main":true,
+            "last_at":1700000000.5,"postable":true,"channel":null}]}"#;
         let listed: ConversationList = serde_json::from_str(body).expect("rows");
         assert_eq!(
             listed.conversations,
@@ -1317,6 +1319,7 @@ mod tests {
                 surface_label: None,
                 speaker: None,
                 agent: "assistant".into(),
+                main: true,
                 last_at: 1_700_000_000.5,
                 postable: true,
                 channel: None,

@@ -11,6 +11,7 @@ const CREDENTIALS_FILE: &str = "credentials";
 const SESSION_FILE: &str = "session";
 const WORKSPACE_FILE: &str = "workspace";
 const GATEWAY_FILE: &str = "gateway";
+pub const CONVERSATIONS_FILE: &str = "conversations.json";
 #[cfg(windows)]
 const BIN_NAME: &str = "ufo.exe";
 #[cfg(not(windows))]
@@ -67,8 +68,15 @@ impl Home {
         self.write(GATEWAY_FILE, url, false);
     }
 
+    /// Forget the sign-in: the credential, the session it minted, the workspace it named, and
+    /// the conversation list read under it — the next member of this machine sees none of it.
     pub fn clear_signin(&self) {
-        for name in [CREDENTIALS_FILE, SESSION_FILE, WORKSPACE_FILE] {
+        for name in [
+            CREDENTIALS_FILE,
+            SESSION_FILE,
+            WORKSPACE_FILE,
+            CONVERSATIONS_FILE,
+        ] {
             let _ = fs::remove_file(self.root.join(name));
         }
     }
@@ -354,10 +362,12 @@ mod tests {
         assert_eq!(home.session().as_deref(), Some("host.1.2"));
         assert_eq!(home.workspace().as_deref(), Some("https://w.example"));
         assert_eq!(home.gateway().as_deref(), Some("https://g.example"));
+        fs::write(home.root.join(CONVERSATIONS_FILE), "{}").unwrap();
         home.clear_signin();
         assert!(home.credentials().is_none());
         assert!(home.session().is_none());
         assert!(home.workspace().is_none());
+        assert!(!home.root.join(CONVERSATIONS_FILE).exists());
         assert_eq!(home.gateway().as_deref(), Some("https://g.example"));
         let _ = fs::remove_dir_all(&home.root);
     }

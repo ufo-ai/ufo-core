@@ -3430,9 +3430,9 @@ const SLACK_THREAD: &str = "5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f";
 const TEXTS_THREAD: &str = "7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081";
 #[cfg(unix)]
 const LISTING: &str = r##"{"conversations":[
-{"id":"5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f","title":"Who owns the pager","surface":"slack","surface_label":"#eng","speaker":"Nate Ford","agent":"assistant","last_at":1700000000.0,"postable":true,"channel":null},
-{"id":"6c2f5d2b-ad2f-4a4b-9a2f-1e3c4d5e6f70","title":"list files","surface":"ufo","surface_label":null,"speaker":null,"agent":"assistant","last_at":1699990000.0,"postable":true,"channel":"abc123"},
-{"id":"7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081","title":"remind me at 5","surface":"imessage","surface_label":null,"speaker":null,"agent":"assistant","last_at":1699980000.0,"postable":false,"channel":null}
+{"id":"5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f","title":"Who owns the pager","surface":"slack","surface_label":"#eng","speaker":"Nate Ford","agent":"assistant","main":true,"last_at":1700000000.0,"postable":true,"channel":null},
+{"id":"6c2f5d2b-ad2f-4a4b-9a2f-1e3c4d5e6f70","title":"list files","surface":"ufo","surface_label":null,"speaker":null,"agent":"assistant","main":true,"last_at":1699990000.0,"postable":true,"channel":"abc123"},
+{"id":"7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081","title":"remind me at 5","surface":"imessage","surface_label":null,"speaker":null,"agent":"assistant","main":true,"last_at":1699980000.0,"postable":false,"channel":null}
 ]}"##;
 
 #[cfg(unix)]
@@ -3545,12 +3545,12 @@ fn a_terminal_row_resumes_on_its_channel_with_the_directory() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Ctrl+L lists over a running conversation and Esc returns to it with the transcript intact. The
+/// Ctrl+K lists over a running conversation and Esc returns to it with the transcript intact. The
 /// script holds one exchange the client never reaches, so the gateway is still listening when the
 /// page asks for its list.
 #[cfg(unix)]
 #[test]
-fn ctrl_l_lists_from_a_conversation_and_esc_returns_to_it() {
+fn ctrl_k_lists_from_a_conversation_and_esc_returns_to_it() {
     let served = serve_with(
         vec![
             Exchange {
@@ -3573,7 +3573,7 @@ fn ctrl_l_lists_from_a_conversation_and_esc_returns_to_it() {
         .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening message reaches the gateway");
     wait_for(&session, "hello there");
-    session.press(b"\x0c");
+    session.press(b"\x0b");
     let page = wait_for(&session, "Who owns the pager");
     assert!(page.contains("UFO Chats"), "{page}");
     assert!(page.contains("New chat \u{276f}"), "{page}");
@@ -3589,11 +3589,11 @@ fn ctrl_l_lists_from_a_conversation_and_esc_returns_to_it() {
     session.press(b"\x1b");
     let back = wait_for(&session, "hello there");
     assert!(!back.contains("UFO Chats"), "{back}");
-    let (row, col) = locate(&back, "\u{2303}L");
+    let (row, col) = locate(&back, "\u{2303}K");
     session.press(click(row, col).as_bytes());
     let reopened = wait_for(&session, "UFO Chats");
     assert!(
-        !reopened.contains("\u{2303}L"),
+        !reopened.contains("\u{2303}K"),
         "the page carries no hint: {reopened}"
     );
     let _ = session.child.kill();

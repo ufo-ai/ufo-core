@@ -38,7 +38,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::pr::Pr;
-use crate::ui::conversations::{labeled, Conversations, Fetch, Pick, Slot, NEW_CHAT_LABEL};
+use crate::ui::conversations::{labeled, Cache, Conversations, Fetch, Pick, Slot, NEW_CHAT_LABEL};
 use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
@@ -237,6 +237,8 @@ pub struct App<W: Write = io::Stdout> {
     secret: Option<SecretEntry>,
     path_pick: Option<PathPick>,
     conversations: Option<Conversations>,
+    cache: Cache,
+    cached: Vec<ConversationRow>,
     page_draft: AskState,
     page_hit: Option<(u16, Range<u16>)>,
     seen: HashMap<String, f64>,
@@ -272,6 +274,7 @@ impl<W: Write> App<W> {
     pub fn new(
         out: W,
         home_root: &std::path::Path,
+        session_id: &str,
         theme: Theme,
         host: String,
         channel: String,
@@ -281,6 +284,8 @@ impl<W: Write> App<W> {
         let (cols, rows) = sane_size();
         let mut screen = AltScreen::new(out, theme.mode);
         let _ = screen.enter();
+        let cache = Cache::at(home_root, session_id);
+        let cached = cache.load();
         App {
             signals: Signals {
                 enabled: theme.mode != ColorMode::Plain,
@@ -300,6 +305,8 @@ impl<W: Write> App<W> {
             secret: None,
             path_pick: None,
             conversations: None,
+            cache,
+            cached,
             page_draft: AskState::default(),
             page_hit: None,
             seen: HashMap::new(),
@@ -396,10 +403,11 @@ impl<W: Write> App<W> {
         self.screen.invalidate();
     }
 
-    /// Open the conversation page over whatever is showing, and name the fetch it opens with.
-    /// `back` says whether Esc has a conversation to return to.
+    /// Open the conversation page over whatever is showing — on the list as it last stood, so
+    /// it reads at once — and name the fetch it opens with. `back` says whether Esc has a
+    /// conversation to return to.
     pub fn open_conversations(&mut self, back: bool) -> Fetch {
-        let page = Conversations::new(back);
+        let page = Conversations::new(back, self.cached.clone(), &self.seen);
         let fetch = page.first_fetch();
         self.conversations = Some(page);
         if self.focus != Focus::Conversations {
@@ -436,19 +444,26 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// One conversation fetch answered — dropped when the page has since closed.
+    /// One conversation fetch answered — dropped when the page has since closed. The whole list,
+    /// when that is what landed and it changed, is what the page opens on next time, here and in
+    /// the next process of this sign-in.
     pub fn conversations_loaded(
         &mut self,
         generation: u32,
         result: Result<Vec<ConversationRow>, String>,
     ) {
-        if let Some(page) = self.conversations.as_mut() {
-            page.loaded(
-                generation,
-                result,
-                &mut self.seen,
-                self.live_target.as_ref(),
-            );
+        let Some(page) = self.conversations.as_mut() else {
+            return;
+        };
+        let whole = page.loaded(
+            generation,
+            result,
+            &mut self.seen,
+            self.live_target.as_ref(),
+        );
+        if whole && page.rows() != self.cached.as_slice() {
+            self.cached = page.rows().to_vec();
+            self.cache.store(&self.cached);
         }
     }
 
@@ -457,7 +472,7 @@ impl<W: Write> App<W> {
         self.conversations.as_mut()?.due_fetch(now)
     }
 
-    /// One key on the page. Esc and Ctrl+L close it; Up, Down, PageUp and PageDown walk the
+    /// One key on the page. Esc and Ctrl+K close it; Up, Down, PageUp and PageDown walk the
     /// column; Enter opens the highlighted row from the search line or the list and starts a new
     /// chat from the entry bar; every other key writes where the cursor stands.
     fn conversations_key(&mut self, key: KeyEvent) -> Reply {
@@ -467,7 +482,7 @@ impl<W: Write> App<W> {
             return Reply::None;
         };
         let pick = match key.code {
-            KeyCode::Char('l') if ctrl => Pick::Close,
+            KeyCode::Char('k') if ctrl => Pick::Close,
             KeyCode::Esc => Pick::Close,
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
                 match pick_key(key) {
@@ -1104,7 +1119,7 @@ impl<W: Write> App<W> {
     fn compose_key(&mut self, key: KeyEvent) -> Reply {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('l') if ctrl => return Reply::OpenConversations,
+            KeyCode::Char('k') if ctrl => return Reply::OpenConversations,
             KeyCode::Char('?') if self.read_only.is_some() => {
                 self.focus = Focus::Keys;
                 return Reply::None;
@@ -1480,7 +1495,7 @@ impl<W: Write> App<W> {
             &self.host,
             &self.channel,
             self.pr.as_ref(),
-            true,
+            Some(status::LIST_HINT),
         );
         dock.push(footer);
 
@@ -1513,6 +1528,19 @@ impl<W: Write> App<W> {
         frame.extend(dock);
         let cursor =
             cursor_in_entry.map(|(row, col)| ((avail + entry_at + row) as u16, col as u16));
+        self.present(frame, cursor);
+    }
+
+    /// Hand the frame to the screen with every row cut at the screen's edge: the terminal
+    /// soft-wraps a wider row and shifts every row below it, the entry bar included. Width is
+    /// counted in painted units, so a link's escape costs nothing.
+    fn present(&mut self, mut frame: Vec<Line<'static>>, cursor: Option<(u16, u16)>) {
+        let cols = self.cols as usize;
+        for line in frame.iter_mut() {
+            if painted_width(line) > cols {
+                *line = clip_line(line, cols);
+            }
+        }
         let _ = self.screen.frame(&frame, cursor);
     }
 
@@ -1596,7 +1624,7 @@ impl<W: Write> App<W> {
             &self.host,
             &self.channel,
             self.pr.as_ref(),
-            false,
+            None,
         );
         dock.push(footer);
 
@@ -1624,7 +1652,7 @@ impl<W: Write> App<W> {
         let mut frame = mark;
         frame.extend(page.render(&self.theme, self.cols, avail));
         frame.extend(dock);
-        let _ = self.screen.frame(&frame, cursor);
+        self.present(frame, cursor);
     }
 
     fn entry_rows(&self, width: usize) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
@@ -1788,6 +1816,42 @@ impl<W: Write> App<W> {
 }
 
 /// `line` underlined whole — the affordance a hovered fold row takes.
+/// The columns a row paints: an OSC escape is a zero-width unit, every other char at least one.
+fn painted_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .flat_map(|span| wrap::units(&span.content))
+        .map(|(_, step)| step)
+        .sum()
+}
+
+/// A row cut to `width` painted columns. Visible units stop at the first that does not fit; every
+/// zero-width unit still ships, so a link opened before the cut is closed after it.
+fn clip_line(line: &Line<'static>, width: usize) -> Line<'static> {
+    let mut left = width;
+    let mut full = false;
+    let mut spans = Vec::new();
+    for span in &line.spans {
+        let mut kept = String::new();
+        for (unit, step) in wrap::units(&span.content) {
+            if step == 0 {
+                kept.push_str(unit);
+            } else if !full && step <= left {
+                left -= step;
+                kept.push_str(unit);
+            } else {
+                full = true;
+            }
+        }
+        if !kept.is_empty() {
+            spans.push(Span::styled(kept, span.style));
+        }
+    }
+    let mut cut = Line::from(spans).style(line.style);
+    cut.alignment = line.alignment;
+    cut
+}
+
 fn underline_line(line: Line<'static>) -> Line<'static> {
     let spans = line
         .spans
@@ -1906,7 +1970,6 @@ pub fn decode_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Char('a') if ctrl => Key::Home,
         KeyCode::Char('e') if ctrl => Key::End,
         KeyCode::Char('u') if ctrl => Key::KillLine,
-        KeyCode::Char('k') if ctrl => Key::KillToEnd,
         KeyCode::Char('w') if ctrl => Key::KillWord,
         KeyCode::Char('y') if ctrl => Key::Yank,
         KeyCode::Char('z') if ctrl => Key::Undo,
@@ -1943,6 +2006,11 @@ mod tests {
     /// painted is readable. Each one gets a home of its own, because the composer's history is a
     /// file — a shared one would let a recall in a later test read what an earlier test typed.
     fn app_on_memory() -> App<Vec<u8>> {
+        app_at(scratch_home(), "ufo.test", "host.1")
+    }
+
+    /// A home no other test writes into.
+    fn scratch_home() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let home = std::env::temp_dir().join(format!(
             "ufo-ui-test-{}-{}",
@@ -1951,11 +2019,17 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("a scratch home");
+        home
+    }
+
+    /// An app on `home` whose screen writes into memory, signed in at `host` under `session`.
+    fn app_at(home: PathBuf, host: &str, session: &str) -> App<Vec<u8>> {
         App::new(
             Vec::new(),
             &home.clone(),
+            session,
             Theme::for_mode(ColorMode::TrueColor, theme::Scheme::Dark),
-            "ufo.test".to_string(),
+            host.to_string(),
             "host.1".to_string(),
             home,
         )
@@ -2633,6 +2707,7 @@ mod tests {
             surface_label: Some("#eng".to_string()),
             speaker: None,
             agent: "assistant".to_string(),
+            main: true,
             last_at: 0.0,
             postable,
             channel: None,
@@ -2671,6 +2746,95 @@ mod tests {
         assert_eq!(app.focus, Focus::Choose);
     }
 
+    #[test]
+    fn a_row_wider_than_the_screen_is_cut_at_its_edge() {
+        let mut app = app_on_memory();
+        let line = Line::from(vec![
+            Span::styled("abc", app.theme.member),
+            Span::raw("defgh"),
+        ]);
+        let cut = clip_line(&line, 5);
+        assert_eq!(cut.to_string(), "abcde");
+        assert_eq!(cut.spans[0].style, app.theme.member);
+        let cols = app.cols as usize;
+        app.note(&"n".repeat(cols + 200));
+        app.paint();
+        let painted = String::from_utf8_lossy(app.screen.written()).to_string();
+        assert!(painted.contains(&"n".repeat(cols)), "the note is drawn");
+        assert!(
+            !painted.contains(&"n".repeat(cols + 1)),
+            "and cut where the screen ends"
+        );
+    }
+
+    #[test]
+    fn a_link_costs_no_columns_and_stays_closed_past_the_cut() {
+        let url = "https://github.com/acme/repo/pull/1892/with/a/tail/that/runs/on/and/on";
+        let label = format!("{}PR #1892{}", osc::link_open(url), osc::LINK_CLOSE);
+        let linked = Line::from(vec![Span::raw(label.clone()), Span::raw("x".repeat(10))]);
+        assert_eq!(painted_width(&linked), 18);
+        assert_eq!(clip_line(&linked, 10).to_string(), format!("{label}xx"));
+        assert_eq!(
+            clip_line(&linked, 3).to_string(),
+            format!("{}PR {}", osc::link_open(url), osc::LINK_CLOSE)
+        );
+        let pr = Pr {
+            number: 1892,
+            url: url.to_string(),
+        };
+        let (footer, _) = status::footer(
+            &Theme::for_mode(ColorMode::TrueColor, theme::Scheme::Dark),
+            80,
+            "acme.ufo.dev",
+            "general",
+            Some(&pr),
+            Some(status::LIST_HINT),
+        );
+        assert_eq!(
+            painted_width(&footer),
+            80,
+            "a linked footer fills its row whole"
+        );
+    }
+
+    /// The page as it renders into the transcript area, one string.
+    fn page_text(app: &App<Vec<u8>>) -> String {
+        let page = app.conversations.as_ref().expect("the page is up");
+        page.render(&app.theme, 80, 24)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_page_opens_on_the_list_it_last_showed_here_and_in_the_next_process() {
+        let home = scratch_home();
+        let mut app = app_at(home.clone(), "ufo.test", "host.1");
+        app.open_conversations(false);
+        assert!(page_text(&app).contains("Loading…"), "nothing to show yet");
+        app.conversations_loaded(1, Ok(vec![listed("c1", "Who owns the pager", true)]));
+        app.close_conversations();
+        app.open_conversations(false);
+        let shown = page_text(&app);
+        assert!(shown.contains("Who owns the pager"), "{shown}");
+        assert!(!shown.contains("Loading…"), "{shown}");
+        drop(app);
+
+        let mut next = app_at(home.clone(), "ufo.test", "host.1");
+        next.open_conversations(false);
+        assert!(
+            page_text(&next).contains("Who owns the pager"),
+            "the stored list opens the page"
+        );
+        let mut elsewhere = app_at(home, "ufo.test", "host.2");
+        elsewhere.open_conversations(false);
+        assert!(
+            page_text(&elsewhere).contains("Loading…"),
+            "another sign-in's list stays unread"
+        );
+    }
+
     /// Whether the first list row is drawn bold; the cursor rests in the entry, so no row carries
     /// the highlight's own bold.
     fn first_row_bold(app: &mut App<Vec<u8>>) -> bool {
@@ -2706,11 +2870,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_opens_the_conversation_page_and_a_pick_names_the_row() {
+    fn ctrl_k_opens_the_conversation_page_and_a_pick_names_the_row() {
         let mut app = app_on_memory();
         typed(&mut app, "draft");
         assert_eq!(
-            app.on_key(ctrl(KeyCode::Char('l'))),
+            app.on_key(ctrl(KeyCode::Char('k'))),
             Reply::OpenConversations
         );
         let fetch = app.open_conversations(true);
@@ -2843,7 +3007,7 @@ mod tests {
         assert_eq!(app.focus, Focus::Compose);
         app.open_conversations(true);
         assert_eq!(
-            app.on_key(ctrl(KeyCode::Char('l'))),
+            app.on_key(ctrl(KeyCode::Char('k'))),
             Reply::CloseConversations
         );
         app.open_conversations(false);
@@ -2878,7 +3042,7 @@ mod tests {
             "{painted}"
         );
         assert_eq!(
-            app.on_key(ctrl(KeyCode::Char('l'))),
+            app.on_key(ctrl(KeyCode::Char('k'))),
             Reply::OpenConversations
         );
         app.reset_conversation(&Target::Channel("abc".to_string()), "abc".to_string(), None);

@@ -97,6 +97,7 @@ from ufo.runtime.ext.surface import (
     fence_member_message,
     inbox_name,
     is_silence_sentinel,
+    member_message_ref,
     member_message_text,
     mint_marker,
     record_transcript_access,
@@ -3348,6 +3349,21 @@ def test_member_message_text_strips_the_engine_envelope() -> None:
     assert member_message_text(fenced) == "sup"
     typed = "keep this <context>\nnot the engine's\n</context>\n and this <injected_context> too"
     assert member_message_text(typed) == typed
+
+
+def test_member_message_ref_reads_the_engine_tag_and_nothing_else() -> None:
+    """The ref at the head of the engine's <context> tag names the turn or queue row the inbound
+    founded — what a projection checks against `agent_origin_refs` to tell a machine's admission
+    from a member's. A notice the engine wrote into the transcript bare carries no tag and so no
+    ref, and a tag typed inside a message is not at the head."""
+    ref = uuid4()
+    tag = _context_tag(ref, None, datetime(2026, 8, 16, 23, 4, tzinfo=UTC))
+    assert member_message_ref(tag + "sup") == str(ref)
+    assert member_message_ref(INJECTED_CONTEXT.format(content=tag + "sup", injected="x")) == str(
+        ref
+    )
+    assert member_message_ref("<interrupted_turn>ended</interrupted_turn>") is None
+    assert member_message_ref("keep this <context>\nmessage_ref: nope\n</context>\n") is None
 
 
 async def _seed_pending_arrival(

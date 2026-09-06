@@ -62,7 +62,7 @@ pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+Up / Ctrl+Down", "Jump between your messages"),
         ("Ctrl+T", "Open or close the steps behind the last reply"),
         ("Ctrl+A / Ctrl+E", "Line start / end"),
-        ("Ctrl+U / Ctrl+K / Ctrl+W", "Kill to start / end / word"),
+        ("Ctrl+U / Ctrl+W", "Kill to start / word"),
         ("Ctrl+Y", "Yank"),
         ("Ctrl+Z", "Undo"),
         (
@@ -77,7 +77,7 @@ pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
         ("Double / triple click", "Select the word / line"),
         ("Click", "Open the URL under it, or clear the selection"),
         ("Esc", "Stop the turn / cancel picker"),
-        ("Ctrl+L", "List conversations; Enter or a click opens one"),
+        ("Ctrl+K", "List conversations; Enter or a click opens one"),
         ("Ctrl+B", "Detach from the turn, leaving it running"),
         ("Ctrl+C", "Exit"),
         ("?", "Hotkeys, on an empty composer"),
@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(listed[0], ("Enter", "Send"));
         assert!(keys.contains(&"?"));
         assert!(keys.contains(&"Esc"));
-        assert!(keys.contains(&"Ctrl+L"));
+        assert!(keys.contains(&"Ctrl+K"));
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         sorted.dedup();

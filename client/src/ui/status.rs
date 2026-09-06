@@ -112,7 +112,7 @@ pub fn elapsed(ran: Duration) -> String {
 /// The key that opens the conversation list, drawn at the footer's right end as a reminder and
 /// a click target. Plain narrow characters: a menu glyph here is drawn double width by some
 /// terminals, which wraps the row.
-pub const LIST_HINT: &str = "⌃L list";
+pub const LIST_HINT: &str = "⌃K list";
 /// The dock's rules stop a cell short of the right edge; the hint ends with them.
 const HINT_INSET: usize = 1;
 
@@ -125,29 +125,26 @@ pub struct FooterHits {
 
 /// The dock's last line: the workspace this client is talking to, the channel the conversation
 /// sits in, the working directory's PR when one exists and fits, and — under a conversation,
-/// where `hint` is set — `LIST_HINT` at the right end, padded across `width`. The PR label
-/// carries OSC 8 markers so the terminal keeps it a link; the returned columns are the click
-/// targets. Nothing where there is no host to state.
+/// where `hint` names the list key — that hint at the right end, padded across `width`. The PR
+/// label carries OSC 8 markers so the terminal keeps it a link; the returned columns are the
+/// click targets. Nothing where there is no host to state.
 pub fn footer(
     theme: &Theme,
     width: u16,
     workspace_host: &str,
     channel: &str,
     pr: Option<&Pr>,
-    hint: bool,
+    hint: Option<&str>,
 ) -> (Line<'static>, FooterHits) {
     if workspace_host.is_empty() {
         return (Line::raw(""), FooterHits::default());
     }
     let width = width as usize;
     let separator = wrap::width(SEPARATOR);
-    let hint = if hint && width > separator + wrap::width(LIST_HINT) + HINT_INSET {
-        wrap::width(LIST_HINT)
-    } else {
-        0
-    };
-    let room = if hint > 0 {
-        width - HINT_INSET - hint - separator
+    let hint = hint.filter(|hint| width > separator + wrap::width(hint) + HINT_INSET);
+    let hint_width = hint.map_or(0, wrap::width);
+    let room = if hint.is_some() {
+        width - HINT_INSET - hint_width - separator
     } else {
         width
     };
@@ -182,11 +179,11 @@ pub fn footer(
             spans.push(Span::styled(text, theme.muted));
         }
     }
-    if hint > 0 {
+    if let Some(hint) = hint {
         let end = width - HINT_INSET;
-        spans.push(Span::raw(" ".repeat(end - used - hint)));
-        spans.push(Span::styled(LIST_HINT.to_string(), theme.muted));
-        hits.list = Some(end - hint..end);
+        spans.push(Span::raw(" ".repeat(end - used - hint_width)));
+        spans.push(Span::styled(hint.to_string(), theme.muted));
+        hits.list = Some(end - hint_width..end);
         used = end;
     }
     spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
@@ -377,7 +374,7 @@ mod tests {
             "acme.ufo.dev",
             "engineering-standup",
             None,
-            true,
+            Some(LIST_HINT),
         );
         assert_eq!(
             line.to_string(),
@@ -395,7 +392,7 @@ mod tests {
 
     #[test]
     fn footer_without_a_channel_is_the_host_alone() {
-        let (line, _) = footer(&theme(), 30, "acme.ufo.dev", "", None, true);
+        let (line, _) = footer(&theme(), 30, "acme.ufo.dev", "", None, Some(LIST_HINT));
         assert_eq!(
             line.to_string(),
             format!("{:<22}{LIST_HINT} ", "acme.ufo.dev")
@@ -404,17 +401,31 @@ mod tests {
 
     #[test]
     fn footer_clips_the_host_before_the_hint_and_drops_the_hint_when_nothing_fits() {
-        let (line, hits) = footer(&theme(), 20, "acme.ufo.dev", "general", None, true);
+        let (line, hits) = footer(
+            &theme(),
+            20,
+            "acme.ufo.dev",
+            "general",
+            None,
+            Some(LIST_HINT),
+        );
         assert_eq!(line.to_string(), format!("acme.ufo.   {LIST_HINT} "));
         assert_eq!(hits.list, Some(12..19));
-        let (line, hits) = footer(&theme(), 10, "acme.ufo.dev", "general", None, true);
+        let (line, hits) = footer(
+            &theme(),
+            10,
+            "acme.ufo.dev",
+            "general",
+            None,
+            Some(LIST_HINT),
+        );
         assert_eq!(line.to_string(), "acme.ufo.d");
         assert_eq!(hits.list, None);
     }
 
     #[test]
     fn footer_without_a_host_is_nothing() {
-        let (line, hits) = footer(&theme(), 40, "", "general", None, true);
+        let (line, hits) = footer(&theme(), 40, "", "general", None, Some(LIST_HINT));
         assert!(line.to_string().is_empty());
         assert_eq!(hits, FooterHits::default());
     }
@@ -425,7 +436,14 @@ mod tests {
             number: 1892,
             url: "https://github.com/acme/repo/pull/1892".to_string(),
         };
-        let (line, hits) = footer(&theme(), 44, "acme.ufo.dev", "general", Some(&pr), true);
+        let (line, hits) = footer(
+            &theme(),
+            44,
+            "acme.ufo.dev",
+            "general",
+            Some(&pr),
+            Some(LIST_HINT),
+        );
         assert_eq!(
             line.to_string(),
             format!(
@@ -446,7 +464,7 @@ mod tests {
 
     #[test]
     fn footer_under_the_page_carries_no_list_hint() {
-        let (line, hits) = footer(&theme(), 40, "acme.ufo.dev", "general", None, false);
+        let (line, hits) = footer(&theme(), 40, "acme.ufo.dev", "general", None, None);
         assert_eq!(
             line.to_string(),
             format!("{:<40}", "acme.ufo.dev · general")
@@ -460,7 +478,14 @@ mod tests {
             number: 1892,
             url: "https://github.com/acme/repo/pull/1892".to_string(),
         };
-        let (line, hits) = footer(&theme(), 36, "acme.ufo.dev", "general", Some(&pr), true);
+        let (line, hits) = footer(
+            &theme(),
+            36,
+            "acme.ufo.dev",
+            "general",
+            Some(&pr),
+            Some(LIST_HINT),
+        );
         assert_eq!(
             line.to_string(),
             format!("{:<28}{LIST_HINT} ", "acme.ufo.dev · general")

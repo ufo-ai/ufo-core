@@ -31,7 +31,6 @@ pub enum Key {
     WordLeft,
     WordRight,
     KillLine,
-    KillToEnd,
     KillWord,
     Yank,
     Undo,
@@ -170,20 +169,11 @@ impl AskState {
             Key::WordRight => self.cursor = self.snap(self.word_right(), true),
             Key::KillLine => {
                 let from = self.line_start();
-                self.kill(from, self.cursor, killing, false);
-            }
-            Key::KillToEnd => {
-                let line_end = self.line_end();
-                let to = if line_end == self.cursor && line_end < self.text.len() {
-                    line_end + 1
-                } else {
-                    line_end
-                };
-                self.kill(self.cursor, to, killing, true);
+                self.kill(from, self.cursor, killing);
             }
             Key::KillWord => {
                 let from = self.snap(self.word_left(), false);
-                self.kill(from, self.cursor, killing, false);
+                self.kill(from, self.cursor, killing);
             }
             Key::Yank => {
                 if let Some(top) = self.kills.last().cloned() {
@@ -279,20 +269,14 @@ impl AskState {
         }
     }
 
-    fn kill(&mut self, from: usize, to: usize, merging: bool, forward: bool) {
+    fn kill(&mut self, from: usize, to: usize, merging: bool) {
         if from == to {
             return;
         }
         self.snapshot();
         let taken = self.cut(from, to);
         match self.kills.last_mut() {
-            Some(top) if merging => {
-                if forward {
-                    top.push_str(&taken);
-                } else {
-                    top.insert_str(0, &taken);
-                }
-            }
+            Some(top) if merging => top.insert_str(0, &taken),
             _ => {
                 if self.kills.len() == KILL_MAX {
                     self.kills.remove(0);
@@ -761,23 +745,6 @@ mod tests {
     }
 
     #[test]
-    fn kill_to_end_takes_the_rest_of_the_line() {
-        let mut state = AskState::default();
-        drive(
-            &mut state,
-            &[
-                Key::Paste("one\ntwo".into()),
-                Key::BufferHome,
-                Key::KillToEnd,
-            ],
-            &[],
-        );
-        assert_eq!(state.text, "\ntwo");
-        drive(&mut state, &[Key::KillToEnd], &[]);
-        assert_eq!(state.text, "two");
-    }
-
-    #[test]
     fn rows_and_cursor_cells_follow_the_wrap() {
         let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("abcdefgh\nij".into())], &[]);
@@ -886,24 +853,6 @@ mod tests {
         assert_eq!(state.text, "one ");
         drive(&mut state, &[Key::Yank], &[]);
         assert_eq!(state.text, "one two ");
-    }
-
-    #[test]
-    fn forward_kills_append_to_the_entry() {
-        let mut state = AskState::default();
-        drive(
-            &mut state,
-            &[
-                Key::Paste("one\ntwo".into()),
-                Key::BufferHome,
-                Key::KillToEnd,
-            ],
-            &[],
-        );
-        drive(&mut state, &[Key::KillToEnd, Key::KillToEnd], &[]);
-        assert_eq!(state.text, "");
-        drive(&mut state, &[Key::Yank], &[]);
-        assert_eq!(state.text, "one\ntwo");
     }
 
     #[test]
