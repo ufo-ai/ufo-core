@@ -85,6 +85,7 @@ from ufo.schema.records import (
     TerminalFrame,
     Usage,
 )
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
 from ufo.serve import _mount_shared_surfaces
@@ -565,6 +566,7 @@ async def _seed_workspace() -> UUID:
                 prompt="be brief",
                 model="claude-opus-4-8",
                 is_main=True,
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1986,3 +1988,464 @@ async def test_a_member_downloads_a_file_from_their_own_channels_workspace(
 
 def test_terminal_runtime_id_matches_the_client() -> None:
     assert terminal_runtime_id("conversation") == "8b34dbc2c05eb4d7e25d48efeace8245"
+
+
+async def _seed_conversation_row(
+    workspace_id: UUID,
+    agent_id: UUID,
+    *,
+    surface: str,
+    queue_key: str,
+    audience: str,
+    member_id: UUID | None,
+    title: str,
+    surface_label: str | None = None,
+) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=surface,
+                queue_key=queue_key,
+                member_id=member_id,
+                audience=audience,
+                surface_label=surface_label,
+                title=title,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return conversation_id
+
+
+async def _seed_done_turn(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    *,
+    inbound: str,
+    speaker_member_id: UUID | None,
+    admission_source: str = "member",
+    sender: str | None = None,
+    seq: int = 1,
+    reply: str = "ok",
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status="done",
+                inbound=inbound,
+                admission_source=admission_source,
+                speaker_member_id=speaker_member_id,
+                context=None if sender is None else {"sender": sender},
+                terminal=TerminalFrame(status="done", text=reply).model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+async def _seed_agent(
+    workspace_id: UUID, name: str, *, visibility: str, owner_member_id: UUID | None = None
+) -> UUID:
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="be brief",
+                model="claude-opus-4-8",
+                is_main=False,
+                visibility=visibility,
+                owner_member_id=owner_member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+async def _main_agent_id(workspace_id: UUID) -> UUID:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == workspace_id, tables.agent.c.is_main
+                )
+            )
+        ).scalar_one()
+
+
+async def test_conversations_lists_every_surface_and_agent_the_member_reaches(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """The list the terminal draws: the member's own conversations and the workspace-shared ones,
+    on every surface, for every agent they reach — never a machine lane, another member's private
+    thread, or a private agent they neither own nor were opened into. Each row says whether a
+    message may be posted into it and, for the member's own terminal conversations, the channel a
+    resume addresses."""
+    client, workspace_id = ufo
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    nate = await _seed_member(workspace_id, "nate@example.com")
+    main = await _main_agent_id(workspace_id)
+    owned = await _seed_agent(workspace_id, "notes", visibility="private", owner_member_id=owner)
+    walled = await _seed_agent(workspace_id, "finance", visibility="private", owner_member_id=nate)
+    mine = str(conversation_audience(owner))
+    web = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"{main}/owner@example.com/1",
+        audience=mine,
+        member_id=owner,
+        title="Deploy plan",
+    )
+    await _seed_done_turn(workspace_id, web, main, inbound="Deploy plan", speaker_member_id=owner)
+    slack = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="slack",
+        queue_key="C1:1.0",
+        audience="shared",
+        member_id=None,
+        title="Who owns the pager",
+        surface_label="#eng",
+    )
+    await _seed_done_turn(
+        workspace_id,
+        slack,
+        main,
+        inbound="Who owns the pager",
+        speaker_member_id=nate,
+        sender="Nate Ford (nate@example.com)",
+    )
+    terminal = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="ufo",
+        queue_key="owner@example.com:abc123",
+        audience=mine,
+        member_id=owner,
+        title="list files",
+    )
+    await _seed_done_turn(
+        workspace_id, terminal, main, inbound="list files", speaker_member_id=owner
+    )
+    texts = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="imessage",
+        queue_key="+15551234567",
+        audience=mine,
+        member_id=owner,
+        title="remind me at 5",
+    )
+    await _seed_done_turn(
+        workspace_id, texts, main, inbound="remind me at 5", speaker_member_id=owner
+    )
+    notes = await _seed_conversation_row(
+        workspace_id,
+        owned,
+        surface="web",
+        queue_key=f"{owned}/owner@example.com/1",
+        audience=mine,
+        member_id=owner,
+        title="Meeting notes",
+    )
+    await _seed_done_turn(
+        workspace_id, notes, owned, inbound="Meeting notes", speaker_member_id=owner
+    )
+    lane = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"intent/{main}/owner@example.com",
+        audience=mine,
+        member_id=owner,
+        title="Portal actions",
+    )
+    await _seed_done_turn(
+        workspace_id, lane, main, inbound="{}", speaker_member_id=owner, admission_source="intent"
+    )
+    theirs = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"{main}/nate@example.com/1",
+        audience=str(conversation_audience(nate)),
+        member_id=nate,
+        title="Nate's plan",
+    )
+    await _seed_done_turn(workspace_id, theirs, main, inbound="Nate's plan", speaker_member_id=nate)
+    ledger = await _seed_conversation_row(
+        workspace_id,
+        walled,
+        surface="web",
+        queue_key=f"{walled}/owner@example.com/1",
+        audience=mine,
+        member_id=owner,
+        title="Ledger",
+    )
+    await _seed_done_turn(workspace_id, ledger, walled, inbound="Ledger", speaker_member_id=owner)
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+
+    listed = await client.get(
+        "/surface/ufo/conversations", headers={"authorization": f"Bearer {token}"}
+    )
+
+    assert listed.status_code == 200
+    rows = {row["id"]: row for row in listed.json()["conversations"]}
+    assert set(rows) == {str(web), str(slack), str(terminal), str(texts), str(notes)}
+    assert rows[str(web)] == {
+        "id": str(web),
+        "title": "Deploy plan",
+        "surface": "web",
+        "surface_label": None,
+        "speaker": None,
+        "agent": "assistant",
+        "last_at": rows[str(web)]["last_at"],
+        "postable": True,
+        "channel": None,
+    }
+    assert rows[str(slack)]["speaker"] == "Nate Ford"
+    assert rows[str(slack)]["surface_label"] == "#eng"
+    assert rows[str(slack)]["postable"] is True
+    assert rows[str(terminal)]["channel"] == "abc123"
+    assert rows[str(texts)]["postable"] is False
+    assert rows[str(notes)]["agent"] == "notes"
+
+    searched = await client.get(
+        "/surface/ufo/conversations",
+        params={"q": "pager"},
+        headers={"authorization": f"Bearer {token}"},
+    )
+    assert [row["id"] for row in searched.json()["conversations"]] == [str(slack)]
+
+    stranger = _mint(SECRET, workspace_id, "stranger@example.com", _future())
+    unseated = await client.get(
+        "/surface/ufo/conversations", headers={"authorization": f"Bearer {stranger}"}
+    )
+    assert unseated.status_code == 403
+    naked = await client.get("/surface/ufo/conversations")
+    assert naked.status_code == 401
+
+
+async def test_a_conversation_opened_by_id_replays_then_admits_a_comment(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """Opening a Slack thread from the terminal reads like a resume: history as `you` and `say`,
+    then the prompt. A message admits a turn into that conversation as this member, carrying the
+    comment notice Slack posts before the reply — and the stream that admitted it never says the
+    notice back to the member who typed it."""
+    from ufo.harness.models.interface import Message, TextBlock
+    from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
+
+    client, workspace_id = ufo
+    blob = runtime[2]
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    nate = await _seed_member(workspace_id, "nate@example.com")
+    main = await _main_agent_id(workspace_id)
+    slack = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="slack",
+        queue_key="C1:1.0",
+        audience="shared",
+        member_id=None,
+        title="Who owns the pager",
+        surface_label="#eng",
+    )
+    await _seed_done_turn(
+        workspace_id,
+        slack,
+        main,
+        inbound="Who owns the pager",
+        speaker_member_id=nate,
+        sender="Nate Ford (nate@example.com)",
+        reply="Nate does.",
+    )
+    await blob.put(
+        transcript_key(slack),
+        encode(
+            Conversation(
+                seq=1,
+                messages=(
+                    Message(role="user", content="Who owns the pager"),
+                    Message(role="assistant", content=(TextBlock(text="Nate does."),)),
+                ),
+            )
+        ),
+    )
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    bearer = {"authorization": f"Bearer {token}"}
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        opened = await client.post(
+            f"/surface/ufo/conversation/{slack}", content=b"", headers=bearer
+        )
+    assert opened.status_code == 200
+    replayed = _lines(opened.content)
+    assert replayed[0] == ["you", "Who owns the pager"]
+    assert ["say", "Nate does."] in replayed
+    assert ["ask", ">"] in replayed
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        posted = await client.post(
+            f"/surface/ufo/conversation/{slack}", content=b"I do, this week.", headers=bearer
+        )
+    assert posted.status_code == 200
+    lines = _lines(posted.content)
+    assert lines[0][0] == "sent"
+    answer = "".join(f for verb, *rest in lines if verb in {"txt", "say"} for f in rest)
+    assert "echo:" in answer
+    assert not any("commented" in field for line in lines for field in line), lines
+    async with workspace_tx() as connection:
+        turn = (
+            await connection.execute(
+                sa.select(tables.turn.c.speaker_member_id, tables.turn.c.admission_source).where(
+                    tables.turn.c.conversation_id == slack, tables.turn.c.seq == 2
+                )
+            )
+        ).one()
+        comment = (
+            await connection.execute(
+                sa.select(tables.mid_turn_reply.c.text, tables.mid_turn_reply.c.round_index).where(
+                    tables.mid_turn_reply.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert (turn.speaker_member_id, turn.admission_source) == (owner, "member")
+    assert (comment.text, comment.round_index) == (
+        "owner@example.com commented: I do, this week.",
+        -1,
+    )
+
+
+async def test_a_conversation_opened_by_id_admits_plainly_into_the_members_own_web_chat(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    main = await _main_agent_id(workspace_id)
+    web = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"{main}/owner@example.com/1",
+        audience=str(conversation_audience(owner)),
+        member_id=owner,
+        title="Deploy plan",
+    )
+    await _seed_done_turn(workspace_id, web, main, inbound="Deploy plan", speaker_member_id=owner)
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        posted = await client.post(
+            f"/surface/ufo/conversation/{web}",
+            content=b"ship it",
+            headers={"authorization": f"Bearer {token}"},
+        )
+
+    assert posted.status_code == 200
+    async with workspace_tx() as connection:
+        comments = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.mid_turn_reply))
+        ).scalar_one()
+        seqs = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.seq).where(tables.turn.c.conversation_id == web)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert comments == 0
+    assert sorted(seqs) == [1, 2]
+
+
+async def test_a_conversation_opened_by_id_refuses_what_the_wall_and_the_surface_forbid(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """The same answers the portal gives: another member's private thread and a private agent's
+    conversation are not found, a read-only surface opens but takes no message, a terminal claim
+    has no place on a joined conversation, and an unlinked bearer reaches nothing."""
+    client, workspace_id = ufo
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    nate = await _seed_member(workspace_id, "nate@example.com")
+    main = await _main_agent_id(workspace_id)
+    walled = await _seed_agent(workspace_id, "finance", visibility="private", owner_member_id=nate)
+    mine = str(conversation_audience(owner))
+    theirs = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"{main}/nate@example.com/1",
+        audience=str(conversation_audience(nate)),
+        member_id=nate,
+        title="Nate's plan",
+    )
+    await _seed_done_turn(workspace_id, theirs, main, inbound="Nate's plan", speaker_member_id=nate)
+    ledger = await _seed_conversation_row(
+        workspace_id,
+        walled,
+        surface="web",
+        queue_key=f"{walled}/owner@example.com/1",
+        audience=mine,
+        member_id=owner,
+        title="Ledger",
+    )
+    await _seed_done_turn(workspace_id, ledger, walled, inbound="Ledger", speaker_member_id=owner)
+    texts = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="imessage",
+        queue_key="+15551234567",
+        audience=mine,
+        member_id=owner,
+        title="remind me at 5",
+    )
+    await _seed_done_turn(
+        workspace_id, texts, main, inbound="remind me at 5", speaker_member_id=owner
+    )
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    bearer = {"authorization": f"Bearer {token}"}
+
+    async def post(conversation: str, body: bytes, **extra: str) -> Response:
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            return await client.post(
+                f"/surface/ufo/conversation/{conversation}",
+                content=body,
+                headers={
+                    **bearer,
+                    **{key.replace("_", "-"): value for key, value in extra.items()},
+                },
+            )
+
+    assert (await post(str(theirs), b"")).status_code == 404
+    assert (await post(str(ledger), b"")).status_code == 404
+    assert (await post("not-a-uuid", b"")).status_code == 404
+    opened = await post(str(texts), b"")
+    assert opened.status_code == 200
+    assert ["ask", ">"] in _lines(opened.content)
+    refused = await post(str(texts), b"at 6 instead")
+    assert refused.status_code == 403
+    assert refused.text == "This conversation is read-only here. Reply in iMessage to continue it."
+    claimed = await post(str(texts), b"", x_ufo_cwd="/tmp")
+    assert claimed.status_code == 400
+    stranger = _mint(SECRET, workspace_id, "stranger@example.com", _future())
+    assert (await post(str(texts), b"", authorization=f"Bearer {stranger}")).status_code == 403
+    assert await _turn_count(workspace_id) == 3

@@ -3,6 +3,7 @@
 //! The dock states what is happening now; what happened is the transcript's.
 //! Every member-visible string renders through the theme's roles.
 
+pub mod conversations;
 pub mod editor;
 pub mod history;
 pub mod markdown;
@@ -19,7 +20,7 @@ pub mod theme;
 pub mod toolrender;
 mod wrap;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -37,6 +38,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::pr::Pr;
+use crate::ui::conversations::{labeled, Conversations, Fetch, Pick, Slot, NEW_CHAT_LABEL};
 use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
@@ -48,9 +50,15 @@ use crate::ui::status::{Activity, Progress, Signals, StatusRow};
 use crate::ui::term::AltScreen;
 use crate::ui::theme::{ColorMode, Theme};
 use crate::ui::toolrender::OpView;
-use crate::wire::OpRequest;
+use crate::wire::{ConversationRow, OpRequest, Target};
 
 pub const PROMPT_IDLE: &str = "›";
+/// The caret on the input that holds the cursor — the composer, a list row, the page's search or
+/// entry line; `PROMPT_IDLE` marks the same lines when the cursor is elsewhere.
+pub const FOCUS_CARET: &str = "❯";
+const SERVER_PROMPT: &str = ">";
+const READ_ONLY_MESSAGE: &str =
+    "This conversation is read-only here. Reply in {surface} to continue it.";
 const QUEUE_SHOWN: usize = 3;
 const ENTRY_ROWS_MAX: usize = 8;
 const PICKER_ROWS: usize = 8;
@@ -154,22 +162,35 @@ pub enum Reply {
     Send(String),
     Clipboard(ClipEntry),
     Attach(std::path::PathBuf),
-    Recall { text: String, arrival_id: String },
+    Recall {
+        text: String,
+        arrival_id: String,
+    },
     Choice(String),
     ChoiceCancelled,
     Secret(String),
     Stop,
     Detach,
+    /// The member asked for the conversation page.
+    OpenConversations,
+    /// The member left the page for the conversation underneath it.
+    CloseConversations,
+    /// The member picked a conversation to open.
+    Open(ConversationRow),
+    /// The member typed into the page's entry bar: a fresh terminal conversation opening with
+    /// these words.
+    NewChat(String),
     Exit,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Focus {
     Compose,
     Choose,
     Secret,
     Path,
     Keys,
+    Conversations,
 }
 
 struct Chooser {
@@ -211,9 +232,16 @@ pub struct App<W: Write = io::Stdout> {
     queued: VecDeque<QueuedSend>,
     early_absorbed: Vec<String>,
     focus: Focus,
+    behind: Focus,
     chooser: Option<Chooser>,
     secret: Option<SecretEntry>,
     path_pick: Option<PathPick>,
+    conversations: Option<Conversations>,
+    page_draft: AskState,
+    page_hit: Option<(u16, Range<u16>)>,
+    seen: HashMap<String, f64>,
+    live_target: Option<Target>,
+    read_only: Option<String>,
     retained: Retained,
     reply_open: bool,
     view_rows: usize,
@@ -233,6 +261,7 @@ pub struct App<W: Write = io::Stdout> {
     channel: String,
     pr: Option<Pr>,
     pr_hit: Option<(u16, Range<usize>)>,
+    list_hit: Option<(u16, Range<usize>)>,
     cwd: PathBuf,
     working: bool,
     cols: u16,
@@ -266,9 +295,16 @@ impl<W: Write> App<W> {
             queued: VecDeque::new(),
             early_absorbed: Vec::new(),
             focus: Focus::Compose,
+            behind: Focus::Compose,
             chooser: None,
             secret: None,
             path_pick: None,
+            conversations: None,
+            page_draft: AskState::default(),
+            page_hit: None,
+            seen: HashMap::new(),
+            live_target: None,
+            read_only: None,
             retained: Retained::new(cols),
             reply_open: false,
             view_rows: 1,
@@ -288,6 +324,7 @@ impl<W: Write> App<W> {
             channel,
             pr: None,
             pr_hit: None,
+            list_hit: None,
             cwd,
             working: false,
             cols,
@@ -299,7 +336,204 @@ impl<W: Write> App<W> {
 
     pub fn set_endpoint(&mut self, host: String, channel: String) {
         self.host = host;
+        self.live_target = Some(Target::Channel(channel.clone()));
         self.channel = channel;
+    }
+
+    /// Name the conversation on the wire — what the page tells apart from the rest, so a reply
+    /// landing in it while the page is up is drawn as news.
+    pub fn set_live_target(&mut self, target: Target) {
+        self.live_target = Some(target);
+    }
+
+    /// The member opened `row` from the page: it stands seen where it is.
+    pub fn mark_seen(&mut self, row: &ConversationRow) {
+        self.seen.insert(row.id.clone(), row.last_at);
+    }
+
+    /// Start over on another conversation: the transcript, the composer, and every mark of the
+    /// turn that was running are dropped, and the mark heads the new transcript. `read_only` names
+    /// the surface to reply in where this one takes no message from here.
+    pub fn reset_conversation(
+        &mut self,
+        target: &Target,
+        channel: String,
+        read_only: Option<String>,
+    ) {
+        self.stream = markdown::StreamRenderer::default();
+        self.ask = AskState::default();
+        self.prompt = PROMPT_IDLE.to_string();
+        self.queued.clear();
+        self.early_absorbed.clear();
+        self.focus = Focus::Compose;
+        self.behind = Focus::Compose;
+        self.chooser = None;
+        self.secret = None;
+        self.path_pick = None;
+        self.conversations = None;
+        self.page_draft = AskState::default();
+        self.page_hit = None;
+        self.live_target = Some(target.clone());
+        self.read_only = read_only;
+        self.retained = Retained::new(self.cols);
+        self.reply_open = false;
+        self.window_start = 0;
+        self.hover = None;
+        self.exit_images.clear();
+        self.selection = None;
+        self.flash = None;
+        self.running_op = None;
+        self.running_desc = None;
+        self.narration = None;
+        self.runs_counted.clear();
+        self.last_reply.clear();
+        self.channel = channel;
+        self.working = false;
+        self.status = StatusRow::new();
+        let off = self.progress.off(&self.signals);
+        self.splice_raw(&off);
+        self.masthead();
+        self.screen.invalidate();
+    }
+
+    /// Open the conversation page over whatever is showing, and name the fetch it opens with.
+    /// `back` says whether Esc has a conversation to return to.
+    pub fn open_conversations(&mut self, back: bool) -> Fetch {
+        let page = Conversations::new(back);
+        let fetch = page.first_fetch();
+        self.conversations = Some(page);
+        if self.focus != Focus::Conversations {
+            self.behind = self.focus;
+            self.page_draft = std::mem::take(&mut self.ask);
+        }
+        self.focus = Focus::Conversations;
+        self.screen.invalidate();
+        fetch
+    }
+
+    /// Leave the page for the conversation underneath it, in whatever state its stream left it
+    /// while the page was up — the prompt, a chooser, a secret entry — with the draft the member
+    /// had been typing there back in the entry.
+    pub fn close_conversations(&mut self) {
+        self.conversations = None;
+        self.page_hit = None;
+        if self.focus == Focus::Conversations {
+            self.focus = self.behind;
+            self.ask = std::mem::take(&mut self.page_draft);
+        }
+        self.behind = Focus::Compose;
+        self.screen.invalidate();
+    }
+
+    /// Where the stream puts the member's input next. While the page is up it waits behind the
+    /// page rather than taking it down: a reply landing in the conversation is news the page
+    /// draws, never a reason to leave it.
+    fn take_focus(&mut self, focus: Focus) {
+        if self.focus == Focus::Conversations {
+            self.behind = focus;
+        } else {
+            self.focus = focus;
+        }
+    }
+
+    /// One conversation fetch answered — dropped when the page has since closed.
+    pub fn conversations_loaded(
+        &mut self,
+        generation: u32,
+        result: Result<Vec<ConversationRow>, String>,
+    ) {
+        if let Some(page) = self.conversations.as_mut() {
+            page.loaded(
+                generation,
+                result,
+                &mut self.seen,
+                self.live_target.as_ref(),
+            );
+        }
+    }
+
+    /// The fetch the page's typed words call for now, if any.
+    pub fn conversations_due_fetch(&mut self, now: Instant) -> Option<Fetch> {
+        self.conversations.as_mut()?.due_fetch(now)
+    }
+
+    /// One key on the page. Esc and Ctrl+L close it; Up, Down, PageUp and PageDown walk the
+    /// column; Enter opens the highlighted row from the search line or the list and starts a new
+    /// chat from the entry bar; every other key writes where the cursor stands.
+    fn conversations_key(&mut self, key: KeyEvent) -> Reply {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(page) = self.conversations.as_mut() else {
+            self.focus = Focus::Compose;
+            return Reply::None;
+        };
+        let pick = match key.code {
+            KeyCode::Char('l') if ctrl => Pick::Close,
+            KeyCode::Esc => Pick::Close,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                match pick_key(key) {
+                    Some(pick) => page.key(pick),
+                    None => Pick::None,
+                }
+            }
+            KeyCode::Tab => {
+                page.cycle(true);
+                Pick::None
+            }
+            KeyCode::BackTab => {
+                page.cycle(false);
+                Pick::None
+            }
+            KeyCode::End => {
+                page.set_slot(Slot::Entry);
+                Pick::None
+            }
+            KeyCode::Home => {
+                page.home();
+                Pick::None
+            }
+            KeyCode::Enter if page.slot() == Slot::Entry => {
+                let text = self.ask.expand();
+                self.ask = AskState::default();
+                if text.trim().is_empty() {
+                    return Reply::None;
+                }
+                return Reply::NewChat(text);
+            }
+            KeyCode::Char('v') if ctrl && page.slot() == Slot::Entry => {
+                return Reply::Clipboard(ClipEntry::Compose);
+            }
+            _ if page.slot() == Slot::Entry => {
+                let Some(decoded) = decode_key(key) else {
+                    return Reply::None;
+                };
+                let width = self.entry_width();
+                return match self.ask.apply(decoded, &self.history.entries, width) {
+                    Outcome::Cancel => Reply::Exit,
+                    Outcome::Continue | Outcome::Submit => Reply::None,
+                };
+            }
+            _ => match pick_key(key) {
+                Some(pick) => page.key(pick),
+                None => Pick::None,
+            },
+        };
+        self.conversations_step(pick)
+    }
+
+    fn conversations_step(&mut self, pick: Pick) -> Reply {
+        match pick {
+            Pick::None => Reply::None,
+            Pick::Open(row) => Reply::Open(row),
+            Pick::Close => {
+                let back = self.conversations.as_ref().is_some_and(|page| page.back());
+                if back {
+                    self.close_conversations();
+                    Reply::CloseConversations
+                } else {
+                    Reply::Exit
+                }
+            }
+        }
     }
 
     pub fn set_pr(&mut self, pr: Option<Pr>) {
@@ -593,12 +827,12 @@ impl<W: Write> App<W> {
     // ── member input states ───────────────────────────────────────────────────────────────────
 
     pub fn ask_prompt(&mut self, prompt: &str) {
-        self.prompt = if prompt.is_empty() {
+        self.prompt = if prompt.is_empty() || prompt == SERVER_PROMPT {
             PROMPT_IDLE.to_string()
         } else {
             prompt.to_string()
         };
-        self.focus = Focus::Compose;
+        self.take_focus(Focus::Compose);
     }
 
     pub fn choose(&mut self, prompt: &str, options: &[String]) {
@@ -608,7 +842,7 @@ impl<W: Write> App<W> {
             prompt: prompt.to_string(),
             picker,
         });
-        self.focus = Focus::Choose;
+        self.take_focus(Focus::Choose);
     }
 
     pub fn secret_begin(&mut self, prompt: &str) {
@@ -616,7 +850,7 @@ impl<W: Write> App<W> {
             prompt: prompt.to_string(),
             value: String::new(),
         });
-        self.focus = Focus::Secret;
+        self.take_focus(Focus::Secret);
     }
 
     pub fn collecting_secret(&self) -> bool {
@@ -796,6 +1030,7 @@ impl<W: Write> App<W> {
                 self.focus = Focus::Compose;
                 Reply::None
             }
+            Focus::Conversations => self.conversations_key(key),
         }
     }
 
@@ -803,7 +1038,13 @@ impl<W: Write> App<W> {
     /// land.
     pub fn entry_still(&self, entry: ClipEntry) -> bool {
         match entry {
-            ClipEntry::Compose => self.focus == Focus::Compose,
+            ClipEntry::Compose => {
+                self.focus == Focus::Compose
+                    || self
+                        .conversations
+                        .as_ref()
+                        .is_some_and(|page| page.slot() == Slot::Entry)
+            }
             ClipEntry::Secret => self.focus == Focus::Secret,
             ClipEntry::Path => self.focus == Focus::Path,
         }
@@ -844,6 +1085,17 @@ impl<W: Write> App<W> {
                         .extend(text.chars().filter(|ch| !ch.is_control()));
                 }
             }
+            Focus::Conversations => {
+                if self
+                    .conversations
+                    .as_ref()
+                    .is_some_and(|page| page.slot() == Slot::Entry)
+                {
+                    let width = self.entry_width();
+                    self.ask
+                        .apply(Key::Paste(text), &self.history.entries, width);
+                }
+            }
             Focus::Choose | Focus::Keys => {}
         }
         Reply::None
@@ -852,6 +1104,13 @@ impl<W: Write> App<W> {
     fn compose_key(&mut self, key: KeyEvent) -> Reply {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('l') if ctrl => return Reply::OpenConversations,
+            KeyCode::Char('?') if self.read_only.is_some() => {
+                self.focus = Focus::Keys;
+                return Reply::None;
+            }
+            KeyCode::Esc if self.read_only.is_some() && self.working => return Reply::Stop,
+            _ if self.read_only.is_some() => return Reply::None,
             KeyCode::Up if !ctrl && self.ask.text.is_empty() && !self.queued.is_empty() => {
                 return self.recall_queued();
             }
@@ -1065,7 +1324,44 @@ impl<W: Write> App<W> {
     /// selection at the grain repeated clicks cycle to; a drag extends it, scrolling at the
     /// window's edges; releasing a drag or a widened grain copies it. A plain click opens the URL
     /// under it, or clears the selection. Motion is held for the fold affordance the paint draws.
-    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+    /// On the conversation page the wheel moves the selection and a click opens the row under it.
+    pub fn on_mouse(&mut self, mouse: MouseEvent) -> Reply {
+        if let (MouseEventKind::Down(MouseButton::Left), Some((row, columns))) =
+            (mouse.kind, self.list_hit.as_ref())
+        {
+            if mouse.row == *row && columns.contains(&(mouse.column as usize)) {
+                return if self.conversations.is_some() {
+                    self.conversations_step(Pick::Close)
+                } else {
+                    Reply::OpenConversations
+                };
+            }
+        }
+        if let Some(page) = self.conversations.as_mut() {
+            let pick = match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    page.scroll(-1);
+                    Pick::None
+                }
+                MouseEventKind::ScrollDown => {
+                    page.scroll(1);
+                    Pick::None
+                }
+                MouseEventKind::Down(MouseButton::Left) => match self.page_hit.as_ref() {
+                    Some((search, _)) if mouse.row == *search => {
+                        page.set_slot(Slot::Search);
+                        Pick::None
+                    }
+                    Some((_, entry)) if entry.contains(&mouse.row) => {
+                        page.set_slot(Slot::Entry);
+                        Pick::None
+                    }
+                    _ => page.click(mouse.row),
+                },
+                _ => Pick::None,
+            };
+            return self.conversations_step(pick);
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll(3),
             MouseEventKind::ScrollDown => self.scroll(-3),
@@ -1076,12 +1372,12 @@ impl<W: Write> App<W> {
                         osc::open_url(&pr.url);
                         self.flash = Some((format!("Opened {}", pr.url), Instant::now()));
                         self.selection = None;
-                        return;
+                        return Reply::None;
                     }
                 }
                 if (mouse.row as usize) >= self.view_rows {
                     self.selection = None;
-                    return;
+                    return Reply::None;
                 }
                 let at = (
                     self.window_start + mouse.row as usize,
@@ -1089,7 +1385,7 @@ impl<W: Write> App<W> {
                 );
                 if self.retained.toggle(at.0, at.1, &self.theme) {
                     self.selection = None;
-                    return;
+                    return Reply::None;
                 }
                 let grain = self.clicks.press(at);
                 self.selection = Some(Selection::begin(at.0, at.1, grain));
@@ -1107,6 +1403,7 @@ impl<W: Write> App<W> {
             MouseEventKind::Up(MouseButton::Left) => self.finish_press(),
             _ => {}
         }
+        Reply::None
     }
 
     fn finish_press(&mut self) {
@@ -1155,6 +1452,10 @@ impl<W: Write> App<W> {
     }
 
     pub fn paint(&mut self) {
+        if self.focus == Focus::Conversations && self.conversations.is_some() {
+            self.paint_conversations();
+            return;
+        }
         let cols = self.cols as usize;
         let mut dock: Vec<Line> = Vec::new();
         let below = self.retained.scrolled();
@@ -1173,18 +1474,21 @@ impl<W: Write> App<W> {
         let entry_at = dock.len();
         dock.extend(entry);
         dock.push(rule());
-        let (footer, pr_columns) = status::footer(
+        let (footer, hits) = status::footer(
             &self.theme,
             self.cols,
             &self.host,
             &self.channel,
             self.pr.as_ref(),
+            true,
         );
         dock.push(footer);
 
         let avail = (self.rows as usize).saturating_sub(dock.len()).max(1);
         self.view_rows = avail;
-        self.pr_hit = pr_columns.map(|columns| ((avail + dock.len() - 1) as u16, columns));
+        let footer_row = (avail + dock.len() - 1) as u16;
+        self.pr_hit = hits.pr.map(|columns| (footer_row, columns));
+        self.list_hit = hits.list.map(|columns| (footer_row, columns));
         let live = self.live_tail();
         let window = self.retained.window(avail, &live, &self.theme);
         self.window_start = window.start;
@@ -1267,6 +1571,62 @@ impl<W: Write> App<W> {
         }
     }
 
+    /// The page: the mark, the heading and the list in the transcript area, and the dock below
+    /// with the search line over the entry bar — the activity line and the footer still those of
+    /// the conversation behind. The cursor stands where the page's column puts it.
+    fn paint_conversations(&mut self) {
+        let cols = self.cols as usize;
+        let rule = || Line::styled("─".repeat(cols.saturating_sub(1)), self.theme.prompt);
+        let mark = masthead::masthead(&self.theme, self.cols);
+        let mut dock: Vec<Line> = vec![self.activity_line(cols), rule()];
+        let page = self.conversations.as_ref().expect("the page is up");
+        let (search, search_col) = page.search_line(&self.theme, self.cols);
+        let search_at = dock.len();
+        dock.push(search);
+        dock.push(rule());
+        let entry_prompt = labeled(NEW_CHAT_LABEL, page.slot() == Slot::Entry);
+        let (entry, cursor_in_entry) = self.compose_rows_with(&entry_prompt);
+        let entry_at = dock.len();
+        let entry_rows = entry.len();
+        dock.extend(entry);
+        dock.push(rule());
+        let (footer, hits) = status::footer(
+            &self.theme,
+            self.cols,
+            &self.host,
+            &self.channel,
+            self.pr.as_ref(),
+            false,
+        );
+        dock.push(footer);
+
+        let avail = (self.rows as usize)
+            .saturating_sub(dock.len() + mark.len())
+            .max(1);
+        let window = avail + mark.len();
+        self.view_rows = 0;
+        let footer_row = (window + dock.len() - 1) as u16;
+        self.pr_hit = hits.pr.map(|columns| (footer_row, columns));
+        self.list_hit = hits.list.map(|columns| (footer_row, columns));
+        self.page_hit = Some((
+            (window + search_at) as u16,
+            (window + entry_at) as u16..(window + entry_at + entry_rows) as u16,
+        ));
+        let page = self.conversations.as_mut().expect("the page is up");
+        page.set_layout(mark.len(), avail);
+        let cursor = match page.slot() {
+            Slot::Entry => {
+                cursor_in_entry.map(|(row, col)| ((window + entry_at + row) as u16, col as u16))
+            }
+            Slot::Search => Some(((window + search_at) as u16, search_col)),
+            Slot::List => None,
+        };
+        let mut frame = mark;
+        frame.extend(page.render(&self.theme, self.cols, avail));
+        frame.extend(dock);
+        let _ = self.screen.frame(&frame, cursor);
+    }
+
     fn entry_rows(&self, width: usize) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
         match self.focus {
             Focus::Compose => self.compose_rows(),
@@ -1274,13 +1634,34 @@ impl<W: Write> App<W> {
             Focus::Secret => self.secret_rows(width),
             Focus::Path => self.path_rows(width),
             Focus::Keys => (self.keys_rows(width), None),
+            Focus::Conversations => (Vec::new(), None),
         }
     }
 
     fn compose_rows(&self) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
-        let width = self.entry_width();
+        if let Some(surface) = &self.read_only {
+            let said = READ_ONLY_MESSAGE.replace("{surface}", surface);
+            let row = Line::styled(
+                wrap::clip(&said, self.cols as usize).to_string(),
+                self.theme.muted,
+            );
+            return (vec![row], None);
+        }
+        self.compose_rows_with(&self.prompt)
+    }
+
+    /// The entry bar under `prompt`: the draft's rows, at most `ENTRY_ROWS_MAX`, with the cursor.
+    fn compose_rows_with(&self, prompt: &str) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
+        let prompt = if prompt == PROMPT_IDLE {
+            FOCUS_CARET
+        } else {
+            prompt
+        };
+        let width = (self.cols as usize)
+            .saturating_sub(3 + wrap::width(prompt))
+            .max(8);
         let layout = self.ask.render(width);
-        let prompt_w = wrap::width(&self.prompt);
+        let prompt_w = wrap::width(prompt);
         let total = layout.rows.len();
         let window = ENTRY_ROWS_MAX.min(total.max(1));
         let first = layout
@@ -1291,7 +1672,7 @@ impl<W: Write> App<W> {
         let mut cursor = None;
         for (index, row) in layout.rows.iter().enumerate().skip(first).take(window) {
             let lead = if index == 0 {
-                Span::styled(format!("{} ", self.prompt), self.theme.prompt)
+                Span::styled(format!("{prompt} "), self.theme.prompt)
             } else {
                 Span::raw(ECHO_INDENT.to_string())
             };
@@ -1304,7 +1685,7 @@ impl<W: Write> App<W> {
         }
         if rows.is_empty() {
             rows.push(Line::from(Span::styled(
-                self.prompt.clone(),
+                prompt.to_string(),
                 self.theme.prompt,
             )));
             cursor = Some((0, prompt_w + 1));
@@ -2242,5 +2623,269 @@ mod tests {
             .map(|span| wrap::width(&visible(&span.content)))
             .sum();
         assert_eq!(width, 30);
+    }
+
+    fn listed(id: &str, title: &str, postable: bool) -> ConversationRow {
+        ConversationRow {
+            id: id.to_string(),
+            title: title.to_string(),
+            surface: "slack".to_string(),
+            surface_label: Some("#eng".to_string()),
+            speaker: None,
+            agent: "assistant".to_string(),
+            last_at: 0.0,
+            postable,
+            channel: None,
+        }
+    }
+
+    #[test]
+    fn a_turn_ending_under_the_page_waits_behind_it() {
+        let mut app = app_on_memory();
+        app.set_live_target(Target::Channel("host.1".to_string()));
+        app.begin_turn();
+        app.open_conversations(true);
+        app.conversations_loaded(1, Ok(vec![listed("c1", "Who owns the pager", true)]));
+        app.txt("the reply");
+        app.end_turn(true);
+        app.ask_prompt(">");
+        assert_eq!(
+            app.focus,
+            Focus::Conversations,
+            "the reply is news, not a reason to leave"
+        );
+        app.paint();
+        let painted = String::from_utf8_lossy(app.screen.written()).to_string();
+        assert!(painted.contains("UFO Chats"), "{painted}");
+        app.close_conversations();
+        assert_eq!(app.focus, Focus::Compose);
+        assert_eq!(
+            app.prompt, PROMPT_IDLE,
+            "the server's bare prompt is the idle one"
+        );
+
+        app.open_conversations(true);
+        app.choose("Pick one", &["a".to_string(), "b".to_string()]);
+        assert_eq!(app.focus, Focus::Conversations);
+        app.close_conversations();
+        assert_eq!(app.focus, Focus::Choose);
+    }
+
+    /// Whether the first list row is drawn bold; the cursor rests in the entry, so no row carries
+    /// the highlight's own bold.
+    fn first_row_bold(app: &mut App<Vec<u8>>) -> bool {
+        let page = app.conversations.as_ref().expect("the page is up");
+        let lines = page.render(&app.theme, 80, 24);
+        lines[1]
+            .spans
+            .iter()
+            .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+    }
+
+    #[test]
+    fn a_reply_landing_behind_the_page_makes_its_row_bold() {
+        let mut app = app_on_memory();
+        app.set_live_target(Target::Channel("abc".to_string()));
+        app.open_conversations(true);
+        let mut mine = listed("c1", "list files", true);
+        mine.channel = Some("abc".to_string());
+        mine.last_at = 100.0;
+        let other = listed("c2", "Who owns the pager", true);
+        app.conversations_loaded(1, Ok(vec![mine.clone(), other.clone()]));
+        assert!(!first_row_bold(&mut app), "nothing bold at first sight");
+        mine.last_at = 200.0;
+        let fetch = app.conversations_due_fetch(Instant::now() + std::time::Duration::from_secs(6));
+        assert_eq!(fetch.map(|fetch| fetch.generation), Some(2));
+        app.conversations_loaded(2, Ok(vec![mine.clone(), other.clone()]));
+        assert!(first_row_bold(&mut app), "the moved row is bold");
+        app.mark_seen(&mine);
+        app.close_conversations();
+        app.open_conversations(true);
+        app.conversations_loaded(1, Ok(vec![mine, other]));
+        assert!(!first_row_bold(&mut app), "opened rows are seen");
+    }
+
+    #[test]
+    fn ctrl_l_opens_the_conversation_page_and_a_pick_names_the_row() {
+        let mut app = app_on_memory();
+        typed(&mut app, "draft");
+        assert_eq!(
+            app.on_key(ctrl(KeyCode::Char('l'))),
+            Reply::OpenConversations
+        );
+        let fetch = app.open_conversations(true);
+        assert_eq!(fetch.generation, 1);
+        assert_eq!(fetch.search, "");
+        assert!(app.ask.text.is_empty(), "the page's entry starts empty");
+        app.conversations_loaded(
+            1,
+            Ok(vec![
+                listed("c1", "Who owns the pager", true),
+                listed("c2", "Deploy plan", true),
+            ]),
+        );
+        app.paint();
+        let painted = String::from_utf8_lossy(app.screen.written()).to_string();
+        assert!(painted.contains("UFO Chats"), "{painted}");
+        assert!(painted.contains("Deploy plan"), "{painted}");
+        assert!(painted.contains("Search \u{203a}"), "{painted}");
+        assert!(painted.contains("New chat ❯"), "{painted}");
+        assert!(painted.contains("ufo.test"), "the footer stays: {painted}");
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            painted.contains(&version),
+            "the mark heads the page: {painted}"
+        );
+        app.on_key(key(KeyCode::Up));
+        typed(&mut app, "deploy");
+        let picked = app.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(&picked, Reply::Open(row) if row.id == "c2"),
+            "{picked:?}"
+        );
+    }
+
+    #[test]
+    fn typing_in_the_entry_bar_starts_a_new_chat_and_the_draft_waits_behind() {
+        let mut app = app_on_memory();
+        typed(&mut app, "half a thought");
+        app.open_conversations(true);
+        assert!(app.ask.text.is_empty());
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            Reply::None,
+            "an empty entry sends nothing"
+        );
+        typed(&mut app, "hello there");
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            Reply::NewChat("hello there".to_string())
+        );
+        assert!(app.ask.text.is_empty());
+        typed(&mut app, "kept");
+        app.close_conversations();
+        assert_eq!(
+            app.ask.text, "half a thought",
+            "the conversation's draft returns"
+        );
+        assert_eq!(app.focus, Focus::Compose);
+    }
+
+    #[test]
+    fn a_click_on_the_page_opens_the_row_under_it() {
+        let mut app = app_on_memory();
+        app.open_conversations(false);
+        app.conversations_loaded(1, Ok(vec![listed("c1", "Who owns the pager", true)]));
+        app.paint();
+        let top = masthead::masthead(&app.theme, app.cols).len() as u16;
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: top + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(app.on_mouse(press), Reply::Open(row) if row.id == "c1"));
+        let above = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(app.on_mouse(above), Reply::None);
+        let (search_row, entry_rows) = app.page_hit.clone().expect("the dock was painted");
+        let on_search = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: search_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(app.on_mouse(on_search), Reply::None);
+        typed(&mut app, "pag");
+        assert!(
+            app.ask.text.is_empty(),
+            "typing after a click on the search line searches"
+        );
+        let on_entry = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: entry_rows.start,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(app.on_mouse(on_entry), Reply::None);
+        typed(&mut app, "hi");
+        assert_eq!(app.ask.text, "hi");
+    }
+
+    #[test]
+    fn a_click_on_the_footer_hint_opens_the_page_and_the_page_carries_none() {
+        let mut app = app_on_memory();
+        app.paint();
+        let (row, columns) = app.list_hit.clone().expect("the footer carries the hint");
+        let painted = String::from_utf8_lossy(app.screen.written()).to_string();
+        assert!(painted.contains(status::LIST_HINT), "{painted}");
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: columns.start as u16,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(app.on_mouse(press), Reply::OpenConversations);
+        app.open_conversations(true);
+        app.paint();
+        assert_eq!(app.list_hit, None, "the page's footer carries no hint");
+    }
+
+    #[test]
+    fn esc_leaves_the_page_for_the_conversation_or_exits_without_one() {
+        let mut app = app_on_memory();
+        app.open_conversations(true);
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Reply::CloseConversations);
+        assert_eq!(app.focus, Focus::Compose);
+        app.open_conversations(true);
+        assert_eq!(
+            app.on_key(ctrl(KeyCode::Char('l'))),
+            Reply::CloseConversations
+        );
+        app.open_conversations(false);
+        assert_eq!(app.on_key(key(KeyCode::Esc)), Reply::Exit);
+    }
+
+    #[test]
+    fn a_reset_starts_a_bare_transcript_and_a_read_only_one_takes_no_message() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        app.txt("an old reply");
+        app.end_turn(false);
+        typed(&mut app, "half a thought");
+        app.reset_conversation(
+            &Target::Conversation("c1".to_string()),
+            "#eng".to_string(),
+            Some("Slack".to_string()),
+        );
+        assert_eq!(app.channel, "#eng");
+        assert!(app.ask.text.is_empty());
+        assert!(!transcript(&mut app).contains("an old reply"));
+        typed(&mut app, "hello");
+        assert_eq!(app.on_key(key(KeyCode::Enter)), Reply::None);
+        assert!(
+            app.ask.text.is_empty(),
+            "a read-only conversation takes no draft"
+        );
+        app.paint();
+        let painted = String::from_utf8_lossy(app.screen.written()).to_string();
+        assert!(
+            painted.contains("Reply in Slack to continue it."),
+            "{painted}"
+        );
+        assert_eq!(
+            app.on_key(ctrl(KeyCode::Char('l'))),
+            Reply::OpenConversations
+        );
+        app.reset_conversation(&Target::Channel("abc".to_string()), "abc".to_string(), None);
+        typed(&mut app, "hello");
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            Reply::Send("hello".to_string())
+        );
     }
 }

@@ -4128,6 +4128,7 @@ class SurfaceContext:
         conversation_id: UUID | None = None,
         participation: Literal["mine", "others"] | None = None,
         search: str | None = None,
+        member_admitted: bool = False,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them — `ConversationDirectory.list`,
         bound to this surface's workspace."""
@@ -4140,6 +4141,7 @@ class SurfaceContext:
             conversation_id=conversation_id,
             participation=participation,
             search=search,
+            member_admitted=member_admitted,
         )
 
     async def readable_conversation(

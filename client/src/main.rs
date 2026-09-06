@@ -6,24 +6,26 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{Event as TermEvent, KeyEventKind};
 
 use ufo::clipboard::{self, Clip};
 use ufo::cmd::{cp, fscli, llm, run, tools};
 #[cfg(unix)]
 use ufo::interrupt;
 use ufo::ops::{self, OpRuntime};
-use ufo::ui::history::{list_conversations, record_conversation, PastConversation};
-use ufo::ui::picker::{PickOutcome, Picker};
+use ufo::ui::conversations::{surface_word, Fetch};
 use ufo::ui::plain::Plain;
 use ufo::ui::{self, App, ClipEntry, Reply};
-use ufo::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
+use ufo::wire::{
+    ConversationRow, Directive, Lister, OpRequest, PostBody, SendLane, SentAck, Session, Stop,
+    Target,
+};
 use ufo::{config, jsonio, pr};
 
 const HELP: &str = "\
 Opens a conversation with your workspace assistant.
 
-Usage: ufo [--resume [id]] [--remote] [--model MODEL] [--no-internet] [--environment FILE]
+Usage: ufo [--resume ID] [--remote] [--model MODEL] [--no-internet] [--environment FILE]
            [--json] [message...]
        ufo login | logout
        ufo cp SRC DST  (one side is CHANNEL:PATH; directories sync)
@@ -42,7 +44,8 @@ Commands:
   tool           Describe or call an object or connector tool with JSON.
 
 Options:
-  --resume [id]  Resume a conversation; bare --resume picks from this machine's list.
+  --resume ID    Open a conversation by its channel or id. With no message and no id,
+                 ufo opens on the list of your chats.
   --remote       Run in the workspace's sandbox instead of the current directory.
   --model MODEL  Run each turn on this model.
   --no-internet  Run each turn without public internet access.
@@ -60,7 +63,8 @@ const RECONNECT_ATTEMPTS: u32 =
 const TICK: Duration = Duration::from_millis(80);
 const SEND_ATTEMPTS: usize = 3;
 const SEND_RETRY: Duration = Duration::from_millis(500);
-const RESUME_ROWS: usize = 12;
+const CONVERSATION_ID_LEN: usize = 36;
+const CONVERSATION_ID_DASHES: [usize; 4] = [8, 13, 18, 23];
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -130,10 +134,7 @@ fn main() {
                     resumed = Some(id.clone());
                     rest = &rest[2..];
                 }
-                _ => {
-                    resumed = Some(pick_resume(&home));
-                    rest = &rest[1..];
-                }
+                _ => die("--resume needs a conversation id or channel."),
             },
             _ => break,
         }
@@ -154,11 +155,31 @@ fn main() {
         home.store_session(&minted);
         minted
     });
-    let channel_name = env_nonempty("UFO_CHANNEL").or(resumed).unwrap_or_else(|| {
+    let named = match (env_nonempty("UFO_CHANNEL"), resumed) {
+        (Some(channel), _) => Some(Target::Channel(channel)),
+        (None, Some(id)) if is_conversation_id(&id) => Some(Target::Conversation(id)),
+        (None, Some(channel)) => Some(Target::Channel(channel)),
+        (None, None) => None,
+    };
+    if workspace_url.is_none()
+        && named
+            .as_ref()
+            .is_some_and(|target| target.channel().is_none())
+    {
+        die("Sign in first: run ufo, then ufo --resume <id>.");
+    }
+    let tty = std::io::stdout().is_terminal();
+    let pick = named.is_none()
+        && message.is_empty()
+        && workspace_url.is_some()
+        && !json
+        && tty
+        && ui::wants_fx();
+    let target = named.unwrap_or_else(|| {
         if workspace_url.is_some() {
-            random_channel()
+            Target::Channel(random_channel())
         } else {
-            ONBOARDING_CHANNEL.to_string()
+            Target::Channel(ONBOARDING_CHANNEL.to_string())
         }
     });
     let launch_dir = env::current_dir()
@@ -173,12 +194,11 @@ fn main() {
             .map(String::from)
     };
     let installed = config::installed(&home);
-    let tty = std::io::stdout().is_terminal();
     let workdir = private_workdir().unwrap_or_else(|error| die(&error));
     let mut session = Session::new(
         resolve_gateway(env_nonempty("UFO_URL"), home.gateway()),
         workspace_url,
-        channel_name,
+        target,
         token,
         session_id,
         cwd_header,
@@ -191,7 +211,11 @@ fn main() {
         .unwrap_or_else(|error| die(&error));
     #[cfg(unix)]
     interrupt::install();
-    update_resume(&session, tty && !json);
+    update_resume(
+        session.workspace_url.as_deref(),
+        session.target.label(),
+        tty && !json,
+    );
     config::sweep_retired(&home);
     let scratch = workdir.clone();
     let stash_home = home.root.clone();
@@ -203,7 +227,7 @@ fn main() {
     let code = if json {
         run_json(session, runtime, home, message)
     } else if tty && ui::wants_fx() {
-        run_tty(session, runtime, home, message)
+        run_tty(session, runtime, home, message, pick)
     } else {
         run_plain(session, runtime, home, message)
     };
@@ -294,29 +318,29 @@ fn hostname() -> String {
 
 /// Take back one queued message on its own connection: the member pressed Up to recall it, and
 /// the composer waits on the server's word that the words are theirs again.
-fn retract_instant(lane: SendLane, text: String, arrival_id: String, evt: Sender<LoopEvent>) {
+fn retract_instant(lane: SendLane, text: String, arrival_id: String, evt: Sender<WireEvent>) {
     thread::spawn(move || {
         let retracted = lane.retract(&arrival_id).unwrap_or(false);
-        let _ = evt.send(LoopEvent::Wire(WireEvent::Retracted {
+        let _ = evt.send(WireEvent::Retracted {
             text,
             arrival_id,
             retracted,
-        }));
+        });
     });
 }
 
 /// Admit one message into the running turn on its own connection, retrying under one
 /// idempotency key; a send that never acks falls back to the wire's boundary queue.
-fn send_instant(lane: SendLane, text: String, evt: Sender<LoopEvent>, cmd: Sender<WireCmd>) {
+fn send_instant(lane: SendLane, text: String, evt: Sender<WireEvent>, cmd: Sender<WireCmd>) {
     thread::spawn(move || {
         let send_id = random_hex::<16>();
         for attempt in 0..SEND_ATTEMPTS {
             match lane.send(&send_id, &text) {
                 Ok(ack) => {
-                    let _ = evt.send(LoopEvent::Wire(WireEvent::Sent {
+                    let _ = evt.send(WireEvent::Sent {
                         text: text.clone(),
                         ack,
-                    }));
+                    });
                     return;
                 }
                 Err(_) if attempt + 1 < SEND_ATTEMPTS => thread::sleep(SEND_RETRY),
@@ -327,12 +351,12 @@ fn send_instant(lane: SendLane, text: String, evt: Sender<LoopEvent>, cmd: Sende
     });
 }
 
-fn stop_instant(prepared: Stop, evt: Sender<LoopEvent>) {
+fn stop_instant(prepared: Stop, evt: Sender<WireEvent>) {
     thread::spawn(move || {
         if let Err(error) = prepared.send() {
-            let _ = evt.send(LoopEvent::Wire(WireEvent::Dir(Directive::Note(format!(
+            let _ = evt.send(WireEvent::Dir(Directive::Note(format!(
                 "Not stopped: {error}"
-            )))));
+            ))));
         }
     });
 }
@@ -393,14 +417,14 @@ fn wants_style(tty: bool) -> bool {
         && env::var_os("NO_COLOR").is_none()
 }
 
-fn update_resume(session: &Session, tty: bool) {
+fn update_resume(workspace_url: Option<&str>, label: &str, tty: bool) {
     #[cfg(unix)]
     {
         if !tty {
             interrupt::set_resume("");
             return;
         }
-        match resume_command(session.workspace_url.as_deref(), &session.channel) {
+        match resume_command(workspace_url, label) {
             Some(command) if wants_style(tty) => interrupt::set_resume(&format!(
                 "\x1b[2mResume this conversation: \x1b[0m\x1b[1m{command}\x1b[0m"
             )),
@@ -410,8 +434,20 @@ fn update_resume(session: &Session, tty: bool) {
     }
     #[cfg(not(unix))]
     {
-        let _ = (session, tty);
+        let _ = (workspace_url, label, tty);
     }
+}
+
+/// Whether `text` is a conversation id — the shape `--resume` tells from a channel.
+fn is_conversation_id(text: &str) -> bool {
+    text.len() == CONVERSATION_ID_LEN
+        && text.char_indices().all(|(at, ch)| {
+            if CONVERSATION_ID_DASHES.contains(&at) {
+                ch == '-'
+            } else {
+                ch.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn print_resume(workspace_url: Option<&str>, channel: &str, tty: bool) {
@@ -429,57 +465,6 @@ fn print_resume(workspace_url: Option<&str>, channel: &str, tty: bool) {
     }
 }
 
-/// Bare `--resume`: pick from the conversations this machine opened.
-fn pick_resume(home: &config::Home) -> String {
-    if !std::io::stdout().is_terminal() || !ui::wants_fx() {
-        die("--resume needs a conversation id when there is no terminal to pick in.");
-    }
-    let items = list_conversations(&home.root);
-    if items.is_empty() {
-        die("No conversation on this machine to resume.");
-    }
-    let rows = ui::history::conversation_rows(&items);
-    let (raw, probe) = ui::RawGuard::enter();
-    let theme = ui::theme::Theme::detect(false, probe.scheme);
-    let mut dock = ui::term::DockTerm::new(std::io::stdout(), theme.mode);
-    let mut picker = Picker::new(rows);
-    picker.set_page(RESUME_ROWS);
-    let mut typed: VecDeque<KeyEvent> = probe.typeahead.into();
-    let picked = loop {
-        let mut lines = vec![ratatui::text::Line::styled(
-            "Resume a conversation".to_string(),
-            theme.heading,
-        )];
-        lines.extend(picker.render(&theme, 80, RESUME_ROWS));
-        let _ = dock.frame(&[], &lines, None);
-        let key = match typed.pop_front() {
-            Some(key) => key,
-            None => match crossterm::event::read() {
-                Ok(TermEvent::Key(key)) => key,
-                Ok(_) => continue,
-                Err(_) => break None,
-            },
-        };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        let Some(pick) = ui::pick_key(key) else {
-            continue;
-        };
-        match picker.apply_key(pick) {
-            PickOutcome::Picked(_) => break picker.current_index(),
-            PickOutcome::Cancelled => break None,
-            PickOutcome::Continue => {}
-        }
-    };
-    let _ = dock.close();
-    drop(raw);
-    match picked {
-        Some(index) => items[index].channel.clone(),
-        None => process::exit(0),
-    }
-}
-
 // ── wire thread ─────────────────────────────────────────────────────────────────────────────────
 
 enum WireEvent {
@@ -491,9 +476,12 @@ enum WireEvent {
         attempt: u32,
         retry_in_s: u64,
     },
+    /// Sign-in landed: the workspace, the channel the conversation moved to, and a session on it
+    /// the loop opens other conversations from.
     WorkspaceChanged {
         url: String,
         channel: String,
+        seed: Box<Session>,
     },
     Stoppable(Stop),
     Sendable(SendLane),
@@ -537,7 +525,6 @@ struct Wire {
     listen: Option<f64>,
     heed_listen: bool,
     detached: bool,
-    recorded: bool,
     opened: bool,
     install: bool,
     installed_this_run: bool,
@@ -692,13 +679,18 @@ impl Wire {
                 self.home.store_workspace(&url);
                 self.home.store_gateway(&self.session.gateway_url);
                 self.session.workspace_url = Some(url.clone());
-                if self.session.channel == ONBOARDING_CHANNEL {
-                    self.session.channel = random_channel();
+                if self.session.target.channel() == Some(ONBOARDING_CHANNEL) {
+                    self.session.target = Target::Channel(random_channel());
                 }
-                update_resume(&self.session, self.session.tty);
+                update_resume(
+                    self.session.workspace_url.as_deref(),
+                    self.session.target.label(),
+                    self.session.tty,
+                );
                 let _ = self.evt.send(WireEvent::WorkspaceChanged {
                     url,
-                    channel: self.session.channel.clone(),
+                    channel: self.session.target.label().to_string(),
+                    seed: Box::new(self.session.retarget(self.session.target.clone())),
                 });
                 let _ = ufo::system_skills::sync(&self.home, &self.session);
                 false
@@ -828,11 +820,10 @@ impl Wire {
         }
     }
 
-    /// Everything queued goes out as one post, each message recorded and echoed to the member.
+    /// Everything queued goes out as one post, each message echoed to the member.
     fn take_queue(&mut self) -> PostBody {
         let joined: Vec<String> = self.queue.drain(..).collect();
         for message in &joined {
-            self.record(message);
             let _ = self.evt.send(WireEvent::MemberEcho(message.clone()));
         }
         self.detached = false;
@@ -888,30 +879,18 @@ impl Wire {
         };
         let _ = self.evt.send(WireEvent::Dir(Directive::Note(note)));
     }
-
-    fn record(&mut self, first_message: &str) {
-        if self.recorded || self.session.workspace_url.is_none() {
-            return;
-        }
-        self.recorded = true;
-        record_conversation(
-            &self.home.root,
-            &PastConversation {
-                channel: self.session.channel.clone(),
-                opened_epoch: epoch_seconds(),
-                first_message: first_message.to_string(),
-            },
-        );
-    }
 }
 
 // ── tty mode ────────────────────────────────────────────────────────────────────────────────────
 
 enum LoopEvent {
     Term(TermEvent),
-    Wire(WireEvent),
+    /// One event off a wire, tagged with the generation of the conversation it serves.
+    Wire(u32, WireEvent),
     Clip(ClipEntry, Result<Clip, String>),
     Pr(Option<pr::Pr>),
+    /// One conversation fetch answered, tagged with the fetch's generation.
+    Conversations(u32, Result<Vec<ConversationRow>, String>),
     StdinClosed,
 }
 
@@ -933,21 +912,195 @@ fn attach_dropped(app: &mut App, source: &std::path::Path, home: &std::path::Pat
     }
 }
 
-fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
-    let host = session
+/// The loop's hold on the conversation on the wire now: the wire's command and event lanes, the
+/// prompts its stream raised, the stop and send lanes prepared for it, and the name the footer
+/// shows. Opening another conversation replaces it whole, and the old wire's late words carry a
+/// generation the loop no longer answers to.
+struct Live {
+    generation: u32,
+    wired: bool,
+    cmd: Sender<WireCmd>,
+    evt: Sender<WireEvent>,
+    gate: Gate,
+    stop: Option<Stop>,
+    stop_requested: bool,
+    sends: Option<SendLane>,
+    listening: bool,
+    label: String,
+}
+
+impl Live {
+    /// No conversation yet: the page is open on launch with nothing behind it.
+    fn unwired(evt_tx: &Sender<LoopEvent>) -> Live {
+        let (cmd, _) = channel::<WireCmd>();
+        Live {
+            generation: 0,
+            wired: false,
+            cmd,
+            evt: wire_sender(evt_tx.clone(), 0),
+            gate: Gate::default(),
+            stop: None,
+            stop_requested: false,
+            sends: None,
+            listening: false,
+            label: String::new(),
+        }
+    }
+
+    /// A wire on `target` as generation `generation`, opening with `first` when it is not empty.
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        generation: u32,
+        seed: &Session,
+        target: Target,
+        runtime: &OpRuntime,
+        home: &config::Home,
+        evt_tx: &Sender<LoopEvent>,
+        first: String,
+        label: String,
+    ) -> Live {
+        let evt = wire_sender(evt_tx.clone(), generation);
+        let (cmd, cmd_rx) = channel::<WireCmd>();
+        let wire = Wire {
+            session: seed.retarget(target),
+            runtime: runtime.clone(),
+            home: home.clone(),
+            evt: evt.clone(),
+            cmd: cmd_rx,
+            queue: VecDeque::new(),
+            op_reply: None,
+            poll: None,
+            listen: None,
+            heed_listen: true,
+            detached: false,
+            opened: false,
+            install: false,
+            installed_this_run: false,
+            pause: RECONNECT_PAUSE,
+        };
+        thread::spawn(move || wire.run(first));
+        Live {
+            generation,
+            wired: true,
+            cmd,
+            evt,
+            gate: Gate::default(),
+            stop: None,
+            stop_requested: false,
+            sends: None,
+            listening: false,
+            label,
+        }
+    }
+}
+
+/// Open the conversation page over the transcript and ask for its first list; signed out, there
+/// is no workspace to list and the member is told so.
+fn show_page(app: &mut App, lister: Option<&Lister>, back: bool, evt: &Sender<LoopEvent>) {
+    match lister {
+        Some(lister) => {
+            let fetch = app.open_conversations(back);
+            fetch_conversations(lister.clone(), fetch, evt.clone());
+        }
+        None => app.note("Sign in to list conversations."),
+    }
+}
+
+/// Read one page of the member's conversations off the loop; the answer lands as an event
+/// carrying the fetch's generation.
+fn fetch_conversations(lister: Lister, fetch: Fetch, evt: Sender<LoopEvent>) {
+    thread::spawn(move || {
+        let result = lister.list(&fetch.search);
+        let _ = evt.send(LoopEvent::Conversations(fetch.generation, result));
+    });
+}
+
+/// Where a page pick leads: a listed row resumes the member's own terminal conversation on its
+/// channel, so this terminal is its sandbox again, or joins any other by id, keeping the sandbox
+/// it has; words typed into the page's entry bar open a fresh terminal conversation with them.
+struct Opening {
+    target: Target,
+    label: String,
+    read_only: Option<String>,
+}
+
+impl Opening {
+    fn listed(row: &ConversationRow) -> Opening {
+        Opening {
+            target: match &row.channel {
+                Some(channel) => Target::Channel(channel.clone()),
+                None => Target::Conversation(row.id.clone()),
+            },
+            label: row.channel.clone().unwrap_or_else(|| row.title.clone()),
+            read_only: (!row.postable).then(|| surface_word(&row.surface)),
+        }
+    }
+
+    fn fresh() -> Opening {
+        let channel = random_channel();
+        Opening {
+            target: Target::Channel(channel.clone()),
+            label: channel,
+            read_only: None,
+        }
+    }
+}
+
+/// Leave the conversation on the wire for `opening`: the transcript starts over and a wire of
+/// the next generation opens it; whatever the old wire still says is nobody's.
+#[allow(clippy::too_many_arguments)]
+fn open_conversation(
+    app: &mut App,
+    opening: Opening,
+    live: Live,
+    seed: &Session,
+    runtime: &OpRuntime,
+    home: &config::Home,
+    evt_tx: &Sender<LoopEvent>,
+    first: String,
+    workspace_url: Option<&str>,
+) -> Live {
+    let _ = live.cmd.send(WireCmd::Shutdown);
+    app.reset_conversation(&opening.target, opening.label.clone(), opening.read_only);
+    if !first.is_empty() {
+        app.begin_turn();
+    }
+    update_resume(workspace_url, opening.target.label(), true);
+    Live::start(
+        live.generation + 1,
+        seed,
+        opening.target,
+        runtime,
+        home,
+        evt_tx,
+        first,
+        opening.label,
+    )
+}
+
+fn run_tty(
+    seed: Session,
+    runtime: OpRuntime,
+    home: config::Home,
+    first: String,
+    pick: bool,
+) -> i32 {
+    let host = seed
         .workspace_url
         .clone()
-        .unwrap_or_else(|| session.gateway_url.clone());
+        .unwrap_or_else(|| seed.gateway_url.clone());
     let host = host
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_string();
-    let channel_name = session.channel.clone();
+    let label = seed.target.label().to_string();
     let cwd = runtime.cwd.clone();
     let stash_home = home.root.clone();
     let pr_cwd = runtime.cwd.clone();
-    let workspace_url = session.workspace_url.clone();
+    let mut latest_workspace = seed.workspace_url.clone();
+    let mut lister = seed.lister();
+    let mut seed = seed;
 
     let (raw, probe) = ui::RawGuard::enter();
     let theme = ui::theme::Theme::detect(false, probe.scheme);
@@ -956,11 +1109,10 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         &home.root,
         theme,
         host,
-        channel_name.clone(),
+        label.clone(),
         cwd,
     );
     let (evt_tx, evt_rx) = channel::<LoopEvent>();
-    let (cmd_tx, cmd_rx) = channel::<WireCmd>();
 
     for key in probe.typeahead {
         let _ = evt_tx.send(LoopEvent::Term(TermEvent::Key(key)));
@@ -977,49 +1129,48 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         }
     });
 
-    let stop_evt = evt_tx.clone();
     let pr_tx = evt_tx.clone();
     thread::spawn(move || pr::watch(&pr_cwd, |found| pr_tx.send(LoopEvent::Pr(found)).is_ok()));
-    let wire_evt = evt_tx;
-    let wire = Wire {
-        session,
-        runtime,
-        home,
-        evt: wire_sender(wire_evt),
-        cmd: cmd_rx,
-        queue: VecDeque::new(),
-        op_reply: None,
-        poll: None,
-        listen: None,
-        heed_listen: true,
-        detached: false,
-        recorded: false,
-        opened: false,
-        install: false,
-        installed_this_run: false,
-        pause: RECONNECT_PAUSE,
-    };
-    let first_for_wire = first.clone();
-    thread::spawn(move || wire.run(first_for_wire));
 
-    app.masthead();
-    if !first.is_empty() {
-        app.begin_turn();
+    let mut pending_first = first;
+    let mut live = if pick {
+        Live::unwired(&evt_tx)
+    } else {
+        let first = std::mem::take(&mut pending_first);
+        app.set_live_target(seed.target.clone());
+        app.masthead();
+        if !first.is_empty() {
+            app.begin_turn();
+        }
+        Live::start(
+            1,
+            &seed,
+            seed.target.clone(),
+            &runtime,
+            &home,
+            &evt_tx,
+            first,
+            label,
+        )
+    };
+    if pick {
+        let fetch = app.open_conversations(false);
+        if let Some(lister) = lister.clone() {
+            fetch_conversations(lister, fetch, evt_tx.clone());
+        }
     }
     app.paint();
-    let mut gate = Gate::default();
-    let mut stop: Option<Stop> = None;
-    let mut stop_requested = false;
-    let mut sends: Option<SendLane> = None;
     let mut clip_pending = false;
-    let mut listening = false;
-    let mut latest_workspace = workspace_url;
-    let mut latest_channel = channel_name;
     let code = loop {
         let event = match evt_rx.recv_timeout(TICK) {
             Ok(event) => event,
             Err(RecvTimeoutError::Timeout) => {
                 app.tick();
+                if let (Some(lister), Some(fetch)) =
+                    (lister.clone(), app.conversations_due_fetch(Instant::now()))
+                {
+                    fetch_conversations(lister, fetch, evt_tx.clone());
+                }
                 app.paint();
                 continue;
             }
@@ -1030,12 +1181,12 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                 match app.on_key(key) {
                     Reply::None => {}
                     Reply::Attach(source) => {
-                        attach_dropped(&mut app, &source, &stash_home, &latest_channel)
+                        attach_dropped(&mut app, &source, &stash_home, &live.label)
                     }
                     Reply::Clipboard(entry) => {
                         if !clip_pending {
                             clip_pending = true;
-                            let notify = stop_evt.clone();
+                            let notify = evt_tx.clone();
                             thread::spawn(move || {
                                 let _ = notify.send(LoopEvent::Clip(entry, clipboard::read()));
                             });
@@ -1044,90 +1195,123 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     Reply::Send(text) => {
                         if app.is_working() {
                             app.push_queued(&text);
-                            match sends.clone() {
+                            match live.sends.clone() {
                                 Some(lane) => {
-                                    send_instant(lane, text, stop_evt.clone(), cmd_tx.clone())
+                                    send_instant(lane, text, live.evt.clone(), live.cmd.clone())
                                 }
                                 None => {
-                                    let _ = cmd_tx.send(WireCmd::Say(text));
+                                    let _ = live.cmd.send(WireCmd::Say(text));
                                 }
                             }
-                        } else if listening {
+                        } else if live.listening {
                             // The wire may be mid-bounce, so the message rides the send lane
                             // rather than waiting for that stream to end.
                             app.begin_turn();
-                            match sends.clone() {
+                            match live.sends.clone() {
                                 Some(lane) => {
                                     app.push_queued(&text);
-                                    send_instant(lane, text, stop_evt.clone(), cmd_tx.clone())
+                                    send_instant(lane, text, live.evt.clone(), live.cmd.clone())
                                 }
                                 None => {
-                                    let _ = cmd_tx.send(WireCmd::Say(text));
+                                    let _ = live.cmd.send(WireCmd::Say(text));
                                 }
                             }
                         } else {
                             app.begin_turn();
-                            let _ = cmd_tx.send(WireCmd::Say(text));
+                            let _ = live.cmd.send(WireCmd::Say(text));
                         }
                     }
                     Reply::Choice(choice) => {
-                        let Some((prompt, _)) = gate.questions.pop_front() else {
+                        let Some((prompt, _)) = live.gate.questions.pop_front() else {
                             continue;
                         };
-                        gate.answers.push(if gate.many {
+                        live.gate.answers.push(if live.gate.many {
                             format!("{prompt}: {choice}")
                         } else {
                             choice
                         });
-                        if let Some((next_prompt, options)) = gate.questions.front() {
+                        if let Some((next_prompt, options)) = live.gate.questions.front() {
                             if options.is_empty() {
                                 app.ask_prompt(&next_prompt.clone());
                             } else {
                                 app.choose(&next_prompt.clone(), &options.clone());
                             }
                         } else {
-                            let reply = gate.answers.join("\n");
-                            gate.answers.clear();
+                            let reply = live.gate.answers.join("\n");
+                            live.gate.answers.clear();
                             app.begin_turn();
-                            let _ = cmd_tx.send(WireCmd::Say(reply));
+                            let _ = live.cmd.send(WireCmd::Say(reply));
                         }
                     }
                     Reply::ChoiceCancelled => break 0,
                     Reply::Secret(value) => {
-                        if let Some((sealed, slot, _)) = gate.secrets.pop_front() {
-                            let _ = cmd_tx.send(WireCmd::SecretValue {
+                        if let Some((sealed, slot, _)) = live.gate.secrets.pop_front() {
+                            let _ = live.cmd.send(WireCmd::SecretValue {
                                 sealed,
                                 slot,
                                 value,
                             });
                         }
-                        if let Some((_, _, prompt)) = gate.secrets.front() {
+                        if let Some((_, _, prompt)) = live.gate.secrets.front() {
                             app.secret_begin(&prompt.clone());
                         } else {
-                            settle(&mut app, &mut gate);
+                            settle(&mut app, &mut live.gate);
                         }
                     }
                     Reply::Stop => {
-                        if let Some(prepared) = stop.take() {
-                            stop_instant(prepared, stop_evt.clone());
+                        if let Some(prepared) = live.stop.take() {
+                            stop_instant(prepared, live.evt.clone());
                         } else {
-                            stop_requested = true;
+                            live.stop_requested = true;
                         }
                     }
-                    Reply::Recall { text, arrival_id } => match sends.clone() {
-                        Some(lane) => retract_instant(lane, text, arrival_id, stop_evt.clone()),
+                    Reply::Recall { text, arrival_id } => match live.sends.clone() {
+                        Some(lane) => retract_instant(lane, text, arrival_id, live.evt.clone()),
                         None => app.retracted(&text, &arrival_id, false),
                     },
                     Reply::Detach => {
                         // A detached member left the turn: its frames must not re-open the
                         // presentation, and their next message takes the queueing lane that
                         // rejoins the turn.
-                        listening = false;
-                        stop_requested = false;
-                        let _ = cmd_tx.send(WireCmd::Detach);
+                        live.listening = false;
+                        live.stop_requested = false;
+                        let _ = live.cmd.send(WireCmd::Detach);
                         app.end_turn(false);
                         app.note("Detached; the turn continues, and a new message rejoins it.");
                         app.ask_prompt("");
+                    }
+                    Reply::OpenConversations => {
+                        show_page(&mut app, lister.as_ref(), live.wired, &evt_tx)
+                    }
+                    Reply::CloseConversations => {}
+                    Reply::Open(row) => {
+                        app.mark_seen(&row);
+                        live = open_conversation(
+                            &mut app,
+                            Opening::listed(&row),
+                            live,
+                            &seed,
+                            &runtime,
+                            &home,
+                            &evt_tx,
+                            std::mem::take(&mut pending_first),
+                            latest_workspace.as_deref(),
+                        );
+                        clip_pending = false;
+                    }
+                    Reply::NewChat(text) => {
+                        live = open_conversation(
+                            &mut app,
+                            Opening::fresh(),
+                            live,
+                            &seed,
+                            &runtime,
+                            &home,
+                            &evt_tx,
+                            text,
+                            latest_workspace.as_deref(),
+                        );
+                        clip_pending = false;
                     }
                     Reply::Exit => break 0,
                 }
@@ -1135,7 +1319,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             }
             LoopEvent::Term(TermEvent::Paste(text)) => {
                 if let Reply::Attach(source) = app.on_paste(text) {
-                    attach_dropped(&mut app, &source, &stash_home, &latest_channel);
+                    attach_dropped(&mut app, &source, &stash_home, &live.label);
                 }
                 app.paint();
             }
@@ -1150,7 +1334,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     }
                     Ok(Clip::Image(bytes)) => {
                         if entry == ClipEntry::Compose {
-                            match clipboard::stash_image(&bytes, &stash_home, &latest_channel) {
+                            match clipboard::stash_image(&bytes, &stash_home, &live.label) {
                                 Ok(path) => app.paste_image(&path),
                                 Err(error) => app.note(&error),
                             }
@@ -1160,7 +1344,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     }
                     Ok(Clip::Text(text)) => {
                         if let Reply::Attach(source) = app.on_paste(text) {
-                            attach_dropped(&mut app, &source, &stash_home, &latest_channel);
+                            attach_dropped(&mut app, &source, &stash_home, &live.label);
                         }
                     }
                     Ok(Clip::Empty) => app.note("The clipboard holds nothing to paste."),
@@ -1172,7 +1356,31 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                 app.paint();
             }
             LoopEvent::Term(TermEvent::Mouse(mouse)) => {
-                app.on_mouse(mouse);
+                let opening = match app.on_mouse(mouse) {
+                    Reply::Open(row) => {
+                        app.mark_seen(&row);
+                        Some(Opening::listed(&row))
+                    }
+                    Reply::OpenConversations => {
+                        show_page(&mut app, lister.as_ref(), live.wired, &evt_tx);
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(opening) = opening {
+                    live = open_conversation(
+                        &mut app,
+                        opening,
+                        live,
+                        &seed,
+                        &runtime,
+                        &home,
+                        &evt_tx,
+                        std::mem::take(&mut pending_first),
+                        latest_workspace.as_deref(),
+                    );
+                    clip_pending = false;
+                }
                 app.paint();
             }
             LoopEvent::Term(TermEvent::FocusGained) => app.set_focus(true),
@@ -1183,12 +1391,17 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                 app.paint();
             }
             LoopEvent::StdinClosed => {}
-            LoopEvent::Wire(wire_event) => match wire_event {
+            LoopEvent::Conversations(generation, result) => {
+                app.conversations_loaded(generation, result);
+                app.paint();
+            }
+            LoopEvent::Wire(generation, _) if generation != live.generation => {}
+            LoopEvent::Wire(_, wire_event) => match wire_event {
                 WireEvent::Dir(directive) => {
-                    if listening && !app.is_working() && wakes_display(&directive) {
+                    if live.listening && !app.is_working() && wakes_display(&directive) {
                         app.begin_turn();
                     }
-                    apply_directive(&mut app, &mut gate, directive);
+                    apply_directive(&mut app, &mut live.gate, directive);
                     app.paint();
                 }
                 WireEvent::OpStarted(op) => {
@@ -1213,9 +1426,15 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     app.reconnecting(attempt, RECONNECT_ATTEMPTS, retry_in_s);
                     app.paint();
                 }
-                WireEvent::WorkspaceChanged { url, channel } => {
+                WireEvent::WorkspaceChanged {
+                    url,
+                    channel,
+                    seed: signed_in,
+                } => {
                     latest_workspace = Some(url.clone());
-                    latest_channel = channel.clone();
+                    live.label = channel.clone();
+                    lister = signed_in.lister();
+                    seed = *signed_in;
                     let host = url
                         .trim_start_matches("https://")
                         .trim_start_matches("http://")
@@ -1224,21 +1443,21 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     app.set_endpoint(host, channel);
                 }
                 WireEvent::Stoppable(prepared) => {
-                    if stop_requested {
-                        stop_requested = false;
-                        stop_instant(prepared, stop_evt.clone());
+                    if live.stop_requested {
+                        live.stop_requested = false;
+                        stop_instant(prepared, live.evt.clone());
                     } else {
-                        stop = Some(prepared);
+                        live.stop = Some(prepared);
                     }
                 }
-                WireEvent::Sendable(lane) => sends = Some(lane),
+                WireEvent::Sendable(lane) => live.sends = Some(lane),
                 WireEvent::Sent { text, ack } => {
                     if ack.opened {
                         if !app.is_working() {
                             app.begin_turn();
                         }
                         app.queued_sent(&text);
-                        let _ = cmd_tx.send(WireCmd::Wake);
+                        let _ = live.cmd.send(WireCmd::Wake);
                     } else if ack.arrival_id.is_empty() {
                         app.settle_queued(&text);
                     } else {
@@ -1258,32 +1477,32 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     continues,
                     listening: armed,
                 } => {
-                    listening = armed;
-                    if let Some(code) = gate.exit.take() {
+                    live.listening = armed;
+                    if let Some(code) = live.gate.exit.take() {
                         break code;
                     }
                     if continues {
                         app.paint();
                         continue;
                     }
-                    stop_requested = false;
-                    if !gate.secrets.is_empty() {
+                    live.stop_requested = false;
+                    if !live.gate.secrets.is_empty() {
                         // Only the stream that delivered the prompts opens the entry: an idle
                         // bounce ending here must not reset what the member is typing.
                         if !app.collecting_secret() {
                             app.end_turn(false);
-                            let prompt = gate.secrets.front().map(|(_, _, p)| p.clone());
+                            let prompt = live.gate.secrets.front().map(|(_, _, p)| p.clone());
                             if let Some(prompt) = prompt {
                                 app.secret_begin(&prompt);
                             }
                         }
-                    } else if armed && !gate.asked && gate.questions.is_empty() {
+                    } else if armed && !live.gate.asked && live.gate.questions.is_empty() {
                         // An idle bounce: the prompt already stands, and the wire reconnects on
                         // its own.
                         if app.is_working() {
                             app.end_turn(false);
                         }
-                    } else if !settle(&mut app, &mut gate) {
+                    } else if !settle(&mut app, &mut live.gate) {
                         break 0;
                     }
                     app.paint();
@@ -1296,10 +1515,12 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             },
         }
     };
-    let _ = cmd_tx.send(WireCmd::Shutdown);
+    let _ = live.cmd.send(WireCmd::Shutdown);
     app.close();
     drop(raw);
-    print_resume(latest_workspace.as_deref(), &latest_channel, true);
+    if live.wired {
+        print_resume(latest_workspace.as_deref(), &live.label, true);
+    }
     code
 }
 
@@ -1368,11 +1589,13 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
     }
 }
 
-fn wire_sender(tx: Sender<LoopEvent>) -> Sender<WireEvent> {
+/// The lane a wire's events ride into the loop, each tagged with `generation` — the conversation
+/// the wire serves, so a wire left behind for another conversation is heard by nobody.
+fn wire_sender(tx: Sender<LoopEvent>, generation: u32) -> Sender<WireEvent> {
     let (wire_tx, wire_rx) = channel::<WireEvent>();
     thread::spawn(move || {
         for event in wire_rx {
-            if tx.send(LoopEvent::Wire(event)).is_err() {
+            if tx.send(LoopEvent::Wire(generation, event)).is_err() {
                 return;
             }
         }
@@ -1387,12 +1610,12 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
     let (evt_tx, evt_rx) = channel::<LoopEvent>();
     let (cmd_tx, cmd_rx) = channel::<WireCmd>();
     let workspace_url = session.workspace_url.clone();
-    let mut latest_channel = session.channel.clone();
+    let mut latest_channel = session.target.label().to_string();
     let wire = Wire {
         session,
         runtime,
         home,
-        evt: wire_sender(evt_tx),
+        evt: wire_sender(evt_tx, 0),
         cmd: cmd_rx,
         queue: VecDeque::new(),
         op_reply: None,
@@ -1400,7 +1623,6 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
         listen: None,
         heed_listen: false,
         detached: false,
-        recorded: false,
         opened: false,
         install: false,
         installed_this_run: false,
@@ -1413,10 +1635,11 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
     let mut latest_workspace = workspace_url;
     let code = loop {
         let event = match evt_rx.recv() {
-            Ok(LoopEvent::Wire(event)) => event,
+            Ok(LoopEvent::Wire(_, event)) => event,
             Ok(LoopEvent::Term(_))
             | Ok(LoopEvent::Clip(..))
             | Ok(LoopEvent::Pr(_))
+            | Ok(LoopEvent::Conversations(..))
             | Ok(LoopEvent::StdinClosed) => continue,
             Err(_) => break 0,
         };
@@ -1449,7 +1672,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
             WireEvent::OpStarted(_) | WireEvent::OpFinished(..) => {}
             WireEvent::MemberEcho(_) => {}
             WireEvent::Reconnecting { .. } => {}
-            WireEvent::WorkspaceChanged { url, channel } => {
+            WireEvent::WorkspaceChanged { url, channel, .. } => {
                 latest_workspace = Some(url);
                 latest_channel = channel;
             }
@@ -1520,13 +1743,14 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
 // ── json mode ───────────────────────────────────────────────────────────────────────────────────
 
 fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
-    let channel_name = session.channel.clone();
+    let channel_name = session.target.label().to_string();
     let workspace_url = session.workspace_url.clone();
     let (evt_tx, evt_rx) = channel::<LoopEvent>();
     let (cmd_tx, cmd_rx) = channel::<WireCmd>();
 
     let stdin_tx = evt_tx.clone();
-    let send_evt = evt_tx.clone();
+    let wire_evt = wire_sender(evt_tx, 0);
+    let send_evt = wire_evt.clone();
     thread::spawn(move || {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
@@ -1545,7 +1769,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
         session,
         runtime,
         home,
-        evt: wire_sender(evt_tx),
+        evt: wire_evt,
         cmd: cmd_rx,
         queue: VecDeque::new(),
         op_reply: None,
@@ -1553,7 +1777,6 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
         listen: None,
         heed_listen: false,
         detached: false,
-        recorded: false,
         opened: false,
         install: false,
         installed_this_run: false,
@@ -1624,14 +1847,17 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                     Err(event) => emit_json(&event),
                 }
             }
-            LoopEvent::Term(_) | LoopEvent::Clip(..) | LoopEvent::Pr(_) => {}
+            LoopEvent::Term(_)
+            | LoopEvent::Clip(..)
+            | LoopEvent::Pr(_)
+            | LoopEvent::Conversations(..) => {}
             LoopEvent::StdinClosed => {
                 stdin_open = false;
                 if !in_turn {
                     return exit_code.unwrap_or(0);
                 }
             }
-            LoopEvent::Wire(wire_event) => match wire_event {
+            LoopEvent::Wire(_, wire_event) => match wire_event {
                 WireEvent::Dir(directive) => {
                     if let Directive::Exit(code) = &directive {
                         exit_code = Some(*code);
@@ -1646,7 +1872,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                 }
                 WireEvent::MemberEcho(_) => {}
                 WireEvent::Reconnecting { .. } => {}
-                WireEvent::WorkspaceChanged { url, channel } => {
+                WireEvent::WorkspaceChanged { url, channel, .. } => {
                     emit_json(&driver.signed_in(&url, &channel));
                 }
                 WireEvent::Stoppable(_) => {}
@@ -1688,8 +1914,6 @@ fn emit_json(event: &jsonio::Event) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
 
     #[test]
@@ -1743,7 +1967,7 @@ mod tests {
             session: Session::new(
                 "https://gw".into(),
                 None,
-                "abc".into(),
+                Target::Channel("abc".into()),
                 None,
                 "sid".into(),
                 None,
@@ -1764,7 +1988,6 @@ mod tests {
             listen,
             heed_listen: true,
             detached: false,
-            recorded: false,
             opened: false,
             install: false,
             installed_this_run: false,
@@ -2025,34 +2248,6 @@ mod tests {
             vec!["note:Skipped s1"],
             "an empty secret names the slot it skipped instead of reaching the wire"
         );
-    }
-
-    #[test]
-    fn an_onboarding_conversation_is_never_recorded() {
-        let (mut wire, _cmd, _evt) = listening_wire(None);
-        let home = env::temp_dir().join(format!("ufo-record-test-{}", process::id()));
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&home).expect("a scratch home");
-        wire.home = config::Home { root: home.clone() };
-        wire.record("first words");
-        assert!(
-            !wire.recorded,
-            "a session with no workspace records nothing"
-        );
-        assert!(list_conversations(&home).is_empty());
-        wire.session.workspace_url = Some("https://w.example".into());
-        wire.record("first words");
-        assert!(wire.recorded);
-        let logged = list_conversations(&home);
-        assert_eq!(logged.len(), 1);
-        assert_eq!(logged[0].first_message, "first words");
-        wire.record("second words");
-        assert_eq!(
-            list_conversations(&home).len(),
-            1,
-            "only the conversation's first message is recorded"
-        );
-        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -201,13 +201,109 @@ pub enum PostBody {
     },
 }
 
+/// Where a session's posts land: the member's own terminal conversation, keyed by the channel this
+/// client chose, or a conversation the member joined by id — on any surface, in its own sandbox,
+/// so it stages no ops and syncs no local skills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Channel(String),
+    Conversation(String),
+}
+
+impl Target {
+    /// The path under `/surface/ufo/` this target posts to.
+    pub fn path(&self) -> String {
+        match self {
+            Target::Channel(channel) => channel.clone(),
+            Target::Conversation(id) => format!("conversation/{id}"),
+        }
+    }
+
+    /// The name the footer, the title bar, and the resume hint show.
+    pub fn label(&self) -> &str {
+        match self {
+            Target::Channel(name) | Target::Conversation(name) => name,
+        }
+    }
+
+    /// The channel, where this target is a terminal conversation of the member's own.
+    pub fn channel(&self) -> Option<&str> {
+        match self {
+            Target::Channel(channel) => Some(channel),
+            Target::Conversation(_) => None,
+        }
+    }
+}
+
+/// One conversation the member may open, as the workspace lists it: `channel` names the member's
+/// own terminal conversations, which resume rather than join; `postable` is false where the
+/// surface takes no message from here.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConversationRow {
+    pub id: String,
+    pub title: String,
+    pub surface: String,
+    pub surface_label: Option<String>,
+    pub speaker: Option<String>,
+    pub agent: String,
+    pub last_at: f64,
+    pub postable: bool,
+    pub channel: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ConversationList {
+    conversations: Vec<ConversationRow>,
+}
+
+/// Reads the member's conversation list on its own connection, off the wire thread, so the held
+/// stream is never disturbed and the list never waits on it.
+#[derive(Clone)]
+pub struct Lister {
+    url: String,
+    session_id: String,
+    token: Option<String>,
+}
+
+impl Lister {
+    /// GET the conversations the member may open, narrowed by `search` when it is not empty.
+    pub fn list(&self, search: &str) -> Result<Vec<ConversationRow>, String> {
+        let mut request = build_agent()
+            .get(&self.url)
+            .set("x-ufo-session", &self.session_id)
+            .set("x-ufo-script", env!("CARGO_PKG_VERSION"));
+        if !search.is_empty() {
+            request = request.query("q", search);
+        }
+        if let Some(token) = &self.token {
+            request = request.set("authorization", &format!("Bearer {token}"));
+        }
+        let response = match request.call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(format!(
+                    "listing conversations failed ({code}): {}",
+                    response.into_string().unwrap_or_default().trim()
+                ))
+            }
+            Err(error) => return Err(format!("lost connection ({error})")),
+        };
+        let body = response
+            .into_string()
+            .map_err(|error| format!("lost connection ({error})"))?;
+        serde_json::from_str::<ConversationList>(&body)
+            .map(|listed| listed.conversations)
+            .map_err(|error| format!("the conversation list did not parse: {error}"))
+    }
+}
+
 /// One member session on the wire: endpoint state, persistent connections, and the since cursor.
 /// The pooled agent is built by the thread that first posts, and dropped once idle: reading the
 /// system trust store costs tens of milliseconds, and the main thread is setting up the terminal.
 pub struct Session {
     pub gateway_url: String,
     pub workspace_url: Option<String>,
-    pub channel: String,
+    pub target: Target,
     pub token: Option<String>,
     pub session_id: String,
     pub cwd: Option<String>,
@@ -246,7 +342,7 @@ impl Session {
     pub fn new(
         gateway_url: String,
         workspace_url: Option<String>,
-        channel: String,
+        target: Target,
         token: Option<String>,
         session_id: String,
         cwd: Option<String>,
@@ -256,7 +352,7 @@ impl Session {
         Session {
             gateway_url,
             workspace_url,
-            channel,
+            target,
             token,
             session_id,
             cwd,
@@ -281,6 +377,27 @@ impl Session {
         self.no_internet = no_internet;
         self.environment = environment;
         self
+    }
+
+    /// A fresh session on `target` with this one's sign-in and runtime choices: its own
+    /// connection, no cursor — what a conversation opened from the list starts on.
+    pub fn retarget(&self, target: Target) -> Session {
+        Session {
+            gateway_url: self.gateway_url.clone(),
+            workspace_url: self.workspace_url.clone(),
+            target,
+            token: self.token.clone(),
+            session_id: self.session_id.clone(),
+            cwd: self.cwd.clone(),
+            since: None,
+            installed: self.installed,
+            tty: self.tty,
+            model: self.model.clone(),
+            no_internet: self.no_internet,
+            environment: self.environment.clone(),
+            agent: OnceCell::new(),
+            last_post: std::time::Instant::now(),
+        }
     }
 
     /// Resolve a file-valued environment before the first turn: upload each local path named
@@ -378,13 +495,13 @@ impl Session {
                 format!(
                     "{}/surface/ufo/{}",
                     workspace.trim_end_matches('/'),
-                    self.channel
+                    self.target.path()
                 )
             }
             None => format!(
                 "{}/v1/onboard/{}",
                 self.gateway_url.trim_end_matches('/'),
-                self.channel
+                self.target.label()
             ),
         }
     }
@@ -392,6 +509,20 @@ impl Session {
     /// The base URL the member is talking to, for error reporting.
     pub fn base(&self) -> &str {
         self.workspace_url.as_deref().unwrap_or(&self.gateway_url)
+    }
+
+    /// The reader of the member's conversation list — None on an onboarding stream, which has no
+    /// workspace to list.
+    pub fn lister(&self) -> Option<Lister> {
+        let workspace = self.workspace_url.as_deref()?;
+        Some(Lister {
+            url: format!(
+                "{}/surface/ufo/conversations",
+                workspace.trim_end_matches('/')
+            ),
+            session_id: self.session_id.clone(),
+            token: self.token.clone(),
+        })
     }
 
     /// POST one request and stream its directives as they arrive.
@@ -500,10 +631,14 @@ impl Session {
             .workspace_url
             .as_deref()
             .ok_or("no workspace to fetch system skills from")?;
+        let channel = self
+            .target
+            .channel()
+            .ok_or("a joined conversation runs no local skills")?;
         let url = format!(
             "{}/surface/ufo/{}/skills",
             workspace.trim_end_matches('/'),
-            self.channel
+            channel
         );
         let mut request = self.request("GET", &url);
         if let Some(etag) = current {
@@ -542,10 +677,14 @@ impl Session {
             .workspace_url
             .as_deref()
             .ok_or("no workspace to fetch from")?;
+        let channel = self
+            .target
+            .channel()
+            .ok_or("a joined conversation stages no ops")?;
         let url = format!(
             "{}/surface/ufo/{}/op/{}",
             workspace.trim_end_matches('/'),
-            self.channel,
+            channel,
             op_id
         );
         let mut request = self.agent().get(&url);
@@ -582,7 +721,7 @@ impl Session {
         if let Some(token) = &self.token {
             request = request.set("authorization", &format!("Bearer {token}"));
         }
-        if self.workspace_url.is_some() {
+        if self.workspace_url.is_some() && self.target.channel().is_some() {
             if let Some(cwd) = &self.cwd {
                 request = request.set("x-ufo-cwd", cwd);
             }
@@ -1110,11 +1249,11 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_switches_on_workspace() {
+    fn endpoint_switches_on_workspace_and_target() {
         let mut session = Session::new(
             "https://gw".into(),
             None,
-            "onboard".into(),
+            Target::Channel("onboard".into()),
             None,
             "sid".into(),
             None,
@@ -1123,8 +1262,66 @@ mod tests {
         );
         assert_eq!(session.endpoint(), "https://gw/v1/onboard/onboard");
         session.workspace_url = Some("https://ws/".into());
-        session.channel = "abc".into();
+        session.target = Target::Channel("abc".into());
         assert_eq!(session.endpoint(), "https://ws/surface/ufo/abc");
+        session.target = Target::Conversation("c0ffee".into());
+        assert_eq!(
+            session.endpoint(),
+            "https://ws/surface/ufo/conversation/c0ffee"
+        );
+        assert_eq!(
+            session.lister().expect("a signed-in list").url,
+            "https://ws/surface/ufo/conversations"
+        );
+    }
+
+    #[test]
+    fn a_joined_conversation_sends_no_cwd_and_stages_nothing() {
+        let session = Session::new(
+            "https://gw".into(),
+            Some("https://ws".into()),
+            Target::Conversation("c0ffee".into()),
+            Some("tok".into()),
+            "sid".into(),
+            Some("/work".into()),
+            false,
+            true,
+        );
+        let request = session.request("POST", &session.endpoint());
+        assert!(request.header("x-ufo-cwd").is_none());
+        assert!(request.header("authorization").is_some());
+        let staged = session.fetch_staged("op-1", &std::env::temp_dir().join("never"));
+        assert_eq!(
+            staged,
+            Err("a joined conversation stages no ops".to_string())
+        );
+        let skills = session.fetch_system_skills(None, &std::env::temp_dir().join("never"));
+        assert_eq!(
+            skills.err(),
+            Some("a joined conversation runs no local skills".to_string())
+        );
+    }
+
+    #[test]
+    fn a_conversation_list_parses_its_rows() {
+        let body = r#"{"conversations":[{"id":"c1","title":"Deploy plan","surface":"web",
+            "surface_label":null,"speaker":null,"agent":"assistant","last_at":1700000000.5,
+            "postable":true,"channel":null}]}"#;
+        let listed: ConversationList = serde_json::from_str(body).expect("rows");
+        assert_eq!(
+            listed.conversations,
+            vec![ConversationRow {
+                id: "c1".into(),
+                title: "Deploy plan".into(),
+                surface: "web".into(),
+                surface_label: None,
+                speaker: None,
+                agent: "assistant".into(),
+                last_at: 1_700_000_000.5,
+                postable: true,
+                channel: None,
+            }]
+        );
     }
 
     #[test]
@@ -1132,7 +1329,7 @@ mod tests {
         let session = Session::new(
             "https://gw".into(),
             None,
-            "onboard".into(),
+            Target::Channel("onboard".into()),
             None,
             "sid".into(),
             None,
@@ -1215,7 +1412,7 @@ mod tests {
         Session::new(
             base.clone(),
             Some(base),
-            "abc".into(),
+            Target::Channel("abc".into()),
             Some("tok".into()),
             "sid".into(),
             None,

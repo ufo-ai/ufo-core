@@ -109,48 +109,88 @@ pub fn elapsed(ran: Duration) -> String {
     }
 }
 
+/// The key that opens the conversation list, drawn at the footer's right end as a reminder and
+/// a click target. Plain narrow characters: a menu glyph here is drawn double width by some
+/// terminals, which wraps the row.
+pub const LIST_HINT: &str = "⌃L list";
+/// The dock's rules stop a cell short of the right edge; the hint ends with them.
+const HINT_INSET: usize = 1;
+
+/// The click targets a footer carries: the PR link's columns, and the list hint's.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FooterHits {
+    pub pr: Option<Range<usize>>,
+    pub list: Option<Range<usize>>,
+}
+
 /// The dock's last line: the workspace this client is talking to, the channel the conversation
-/// sits in, and the working directory's PR when one exists and fits, padded across `width`. The
-/// PR label carries OSC 8 markers so the terminal keeps it a link; the returned columns are its
-/// click target. Nothing where there is no host to state.
+/// sits in, the working directory's PR when one exists and fits, and — under a conversation,
+/// where `hint` is set — `LIST_HINT` at the right end, padded across `width`. The PR label
+/// carries OSC 8 markers so the terminal keeps it a link; the returned columns are the click
+/// targets. Nothing where there is no host to state.
 pub fn footer(
     theme: &Theme,
     width: u16,
     workspace_host: &str,
     channel: &str,
     pr: Option<&Pr>,
-) -> (Line<'static>, Option<Range<usize>>) {
+    hint: bool,
+) -> (Line<'static>, FooterHits) {
     if workspace_host.is_empty() {
-        return (Line::raw(""), None);
+        return (Line::raw(""), FooterHits::default());
     }
+    let width = width as usize;
+    let separator = wrap::width(SEPARATOR);
+    let hint = if hint && width > separator + wrap::width(LIST_HINT) + HINT_INSET {
+        wrap::width(LIST_HINT)
+    } else {
+        0
+    };
+    let room = if hint > 0 {
+        width - HINT_INSET - hint - separator
+    } else {
+        width
+    };
     let channel = wrap::clip(channel, CHANNEL_COLS);
     let stated = if channel.is_empty() {
         workspace_host.to_string()
     } else {
         format!("{workspace_host}{SEPARATOR}{channel}")
     };
-    if let Some(pr) = pr {
+    let mut spans = Vec::new();
+    let mut used;
+    let mut hits = FooterHits::default();
+    let linked = pr.and_then(|pr| {
         let label = format!("PR #{}", pr.number);
-        let at = wrap::width(&stated) + wrap::width(SEPARATOR);
+        let at = wrap::width(&stated) + separator;
         let full = at + wrap::width(&label);
-        if full <= width as usize {
-            let line = Line::from(vec![
-                Span::styled(format!("{stated}{SEPARATOR}"), theme.muted),
-                Span::styled(
-                    format!("{}{label}{}", osc::link_open(&pr.url), osc::LINK_CLOSE),
-                    theme.pr,
-                ),
-                Span::raw(" ".repeat(width as usize - full)),
-            ]);
-            return (line, Some(at..full));
+        (full <= room).then_some((pr, label, at, full))
+    });
+    match linked {
+        Some((pr, label, at, full)) => {
+            spans.push(Span::styled(format!("{stated}{SEPARATOR}"), theme.muted));
+            spans.push(Span::styled(
+                format!("{}{label}{}", osc::link_open(&pr.url), osc::LINK_CLOSE),
+                theme.pr,
+            ));
+            hits.pr = Some(at..full);
+            used = full;
+        }
+        None => {
+            let text = wrap::clip(&stated, room).to_string();
+            used = wrap::width(&text);
+            spans.push(Span::styled(text, theme.muted));
         }
     }
-    let text = wrap::clip(&stated, width as usize);
-    let pad = (width as usize).saturating_sub(wrap::width(text));
-    (
-        Line::styled(format!("{text}{}", " ".repeat(pad)), theme.muted),
-        None,
-    )
+    if hint > 0 {
+        let end = width - HINT_INSET;
+        spans.push(Span::raw(" ".repeat(end - used - hint)));
+        spans.push(Span::styled(LIST_HINT.to_string(), theme.muted));
+        hits.list = Some(end - hint..end);
+        used = end;
+    }
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    (Line::from(spans), hits)
 }
 
 /// Terminal-integration escape emissions around a turn. Every function answers the bytes to
@@ -330,33 +370,53 @@ mod tests {
     }
 
     #[test]
-    fn footer_states_the_host_and_the_clipped_channel() {
-        let (line, pr) = footer(&theme(), 40, "acme.ufo.dev", "engineering-standup", None);
+    fn footer_states_the_host_and_the_clipped_channel_with_the_list_hint_at_the_end() {
+        let (line, hits) = footer(
+            &theme(),
+            40,
+            "acme.ufo.dev",
+            "engineering-standup",
+            None,
+            true,
+        );
         assert_eq!(
             line.to_string(),
-            format!("{:<40}", "acme.ufo.dev · engineer")
+            format!("{:<32}{LIST_HINT} ", "acme.ufo.dev · engineer")
         );
         assert_eq!(line.width(), 40);
-        assert_eq!(pr, None);
+        assert_eq!(
+            hits,
+            FooterHits {
+                pr: None,
+                list: Some(32..39),
+            }
+        );
     }
 
     #[test]
     fn footer_without_a_channel_is_the_host_alone() {
-        let (line, _) = footer(&theme(), 20, "acme.ufo.dev", "", None);
-        assert_eq!(line.to_string(), format!("{:<20}", "acme.ufo.dev"));
+        let (line, _) = footer(&theme(), 30, "acme.ufo.dev", "", None, true);
+        assert_eq!(
+            line.to_string(),
+            format!("{:<22}{LIST_HINT} ", "acme.ufo.dev")
+        );
     }
 
     #[test]
-    fn footer_clips_to_the_width() {
-        let (line, _) = footer(&theme(), 10, "acme.ufo.dev", "general", None);
+    fn footer_clips_the_host_before_the_hint_and_drops_the_hint_when_nothing_fits() {
+        let (line, hits) = footer(&theme(), 20, "acme.ufo.dev", "general", None, true);
+        assert_eq!(line.to_string(), format!("acme.ufo.   {LIST_HINT} "));
+        assert_eq!(hits.list, Some(12..19));
+        let (line, hits) = footer(&theme(), 10, "acme.ufo.dev", "general", None, true);
         assert_eq!(line.to_string(), "acme.ufo.d");
+        assert_eq!(hits.list, None);
     }
 
     #[test]
     fn footer_without_a_host_is_nothing() {
-        let (line, pr) = footer(&theme(), 40, "", "general", None);
+        let (line, hits) = footer(&theme(), 40, "", "general", None, true);
         assert!(line.to_string().is_empty());
-        assert_eq!(pr, None);
+        assert_eq!(hits, FooterHits::default());
     }
 
     #[test]
@@ -365,17 +425,33 @@ mod tests {
             number: 1892,
             url: "https://github.com/acme/repo/pull/1892".to_string(),
         };
-        let (line, columns) = footer(&theme(), 40, "acme.ufo.dev", "general", Some(&pr));
+        let (line, hits) = footer(&theme(), 44, "acme.ufo.dev", "general", Some(&pr), true);
         assert_eq!(
             line.to_string(),
             format!(
-                "acme.ufo.dev · general · {}PR #1892{}{}",
+                "acme.ufo.dev · general · {}PR #1892{}{}{LIST_HINT} ",
                 osc::link_open(&pr.url),
                 osc::LINK_CLOSE,
-                " ".repeat(40 - 33)
+                " ".repeat(44 - 1 - 33 - 7)
             )
         );
-        assert_eq!(columns, Some(25..33));
+        assert_eq!(
+            hits,
+            FooterHits {
+                pr: Some(25..33),
+                list: Some(36..43),
+            }
+        );
+    }
+
+    #[test]
+    fn footer_under_the_page_carries_no_list_hint() {
+        let (line, hits) = footer(&theme(), 40, "acme.ufo.dev", "general", None, false);
+        assert_eq!(
+            line.to_string(),
+            format!("{:<40}", "acme.ufo.dev · general")
+        );
+        assert_eq!(hits, FooterHits::default());
     }
 
     #[test]
@@ -384,12 +460,13 @@ mod tests {
             number: 1892,
             url: "https://github.com/acme/repo/pull/1892".to_string(),
         };
-        let (line, columns) = footer(&theme(), 30, "acme.ufo.dev", "general", Some(&pr));
+        let (line, hits) = footer(&theme(), 36, "acme.ufo.dev", "general", Some(&pr), true);
         assert_eq!(
             line.to_string(),
-            format!("{:<30}", "acme.ufo.dev · general")
+            format!("{:<28}{LIST_HINT} ", "acme.ufo.dev · general")
         );
-        assert_eq!(columns, None);
+        assert_eq!(hits.pr, None);
+        assert_eq!(hits.list, Some(28..35));
     }
 
     #[test]

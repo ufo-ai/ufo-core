@@ -193,7 +193,13 @@ from ufo.runtime.turns.transcript import (
     TranscriptDecodeError as TranscriptDecodeError,
 )
 from ufo.schema.records import (
+    EXTENSION_SURFACE_PREFIX as EXTENSION_SURFACE_PREFIX,
+)
+from ufo.schema.records import (
     MEMBER_ADMISSION as MEMBER_ADMISSION,
+)
+from ufo.schema.records import (
+    PORTAL_SURFACE as PORTAL_SURFACE,
 )
 from ufo.schema.records import (
     AskQuestion as AskQuestion,

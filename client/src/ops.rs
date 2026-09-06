@@ -28,6 +28,7 @@ struct ReadBackParams {
 
 /// Session-stable op state: the scratch workdir walk enumerations land in and the directory the
 /// member launched from.
+#[derive(Clone)]
 pub struct OpRuntime {
     pub workdir: PathBuf,
     pub cwd: PathBuf,
@@ -216,7 +217,7 @@ mod tests {
         Session::new(
             "http://127.0.0.1:1".into(),
             Some("http://127.0.0.1:1".into()),
-            "abc".into(),
+            crate::wire::Target::Channel("abc".into()),
             None,
             "sid".into(),
             None,

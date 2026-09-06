@@ -1,8 +1,9 @@
 """The ufo extension's manifest: one live surface on the core seam, the terminal wire the `ufo`
 shell client renders. No credential slots — the member's bearer is verified against the env
 `UFO_TOKEN_SECRET`, not a workspace slot — and no config knob: installed means mounted, like web.
-It declares one route (the held per-channel stream) and no writeback delivery: it admits without
-writeback and tails the hub in that same route."""
+It declares the held stream twice over — per channel, and per conversation the member joins by
+id — beside the read projection that lists those conversations, and no writeback delivery: it
+admits without writeback and tails the hub in the same routes."""
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.surfaces import SurfaceSpec

@@ -2,7 +2,11 @@
 
 This crate builds `ufo`, the terminal program a person uses to talk to their workspace assistant.
 Run it in a terminal, type a message, and the reply is rendered where you typed — text, diffs, code
-with syntax colors, tool activity, and a picker for resuming an earlier conversation.
+with syntax colors, and tool activity. Ctrl+L lists every conversation you can open — from the
+terminal, the portal, or Slack — under the mark, with the entry bar still at the bottom: typing
+there and pressing Enter starts a new chat, Up reaches the search line and then the list, and Enter
+on a row opens it. A click opens a row too, Esc returns to the conversation you left, and the list
+refreshes every five seconds while it is up, with a row drawn bold once its conversation moves.
 
 The client is also the assistant's hands on your machine. When the assistant needs to read a file,
 write one, edit one, search a tree, or run a command, the request arrives over the same connection
@@ -17,13 +21,18 @@ drive it. `--remote` leaves the current directory on the member's machine and ru
 in the workspace's configured sandbox.
 
 ```
-ufo [--resume [id]] [--remote] [--json] [message...]
+ufo [--resume ID] [--remote] [--json] [message...]
 ufo login | logout
 ```
 
 Sign-in happens in the conversation itself the first time you run it: answer the prompts, and the
 client keeps the credential, workspace, and system skill cache under `$UFO_HOME` (`~/.ufo` by
 default). `ufo login` starts sign-in over, and `ufo logout` forgets it.
+
+`ufo` with no message opens on the list of your chats. `--resume` with a channel resumes one of
+your own terminal conversations, and with a conversation id joins a conversation from any surface.
+A terminal conversation runs in the directory you are in; a joined conversation keeps the sandbox it
+already has, so file and command requests in it never reach your machine.
 
 ## Run it in development
 
@@ -55,7 +64,7 @@ CI builds that release for each supported platform.
 | Variable | What it does |
 |---|---|
 | `UFO_URL` | Base URL of the gateway the client signs in against. Defaults to the hosted service. |
-| `UFO_HOME` | Directory holding the credential, current workspace, conversation list, and system skill cache. Defaults to `~/.ufo`. |
+| `UFO_HOME` | Directory holding the credential, current workspace, input history, and system skill cache. Defaults to `~/.ufo`. |
 | `WORKSPACE_URL` | Talks to one workspace directly, instead of the one stored after sign-in. |
 | `UFO_CHANNEL` | Names the conversation to join instead of starting a fresh one. |
 | `UFO_PLAIN` | Any value forces the plain line renderer. `NO_COLOR` and `TERM=dumb` do the same. |

@@ -1,4 +1,4 @@
-//! One fuzzy-filtered select list: the `choose` menu, the resume picker, and the `@`-path
+//! One fuzzy-filtered select list: the `choose` menu, the conversation page, and the `@`-path
 //! completion popup are all this state machine under different item sources.
 
 use std::cmp::Reverse;
@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -54,6 +54,7 @@ pub enum PickKey {
 /// The picker: items, the typed filter, and the selection.
 pub struct Picker {
     items: Vec<String>,
+    bold: Vec<bool>,
     pub filter: String,
     pub selected: usize,
     visible: Vec<usize>,
@@ -64,11 +65,19 @@ impl Picker {
     pub fn new(items: Vec<String>) -> Picker {
         let visible = (0..items.len()).collect();
         Picker {
+            bold: vec![false; items.len()],
             items,
             filter: String::new(),
             selected: 0,
             visible,
             page: PAGE_ROWS,
+        }
+    }
+
+    /// Draw the item at `index` bold — what a caller marks a row it wants the eye to land on.
+    pub fn set_bold(&mut self, index: usize, bold: bool) {
+        if let Some(slot) = self.bold.get_mut(index) {
+            *slot = bold;
         }
     }
 
@@ -155,12 +164,21 @@ impl Picker {
         self.visible.get(self.selected).copied()
     }
 
-    /// A window of at most `max_rows` lines: the selection marked, matched characters accented,
-    /// and a muted `(i/n)` line closing the window when the list outruns it.
-    pub fn render(&self, theme: &Theme, width: u16, max_rows: usize) -> Vec<Line<'static>> {
-        if self.visible.is_empty() || max_rows == 0 {
-            return Vec::new();
+    /// Select the item at `index` in the items the picker was built from, where the filter still
+    /// shows it; false leaves the selection where it was.
+    pub fn select_index(&mut self, index: usize) -> bool {
+        match self.visible.iter().position(|&at| at == index) {
+            Some(row) => {
+                self.selected = row;
+                true
+            }
+            None => false,
         }
+    }
+
+    /// The window `render` draws in `max_rows`: the first visible row shown and how many rows the
+    /// items take, one row held back for the `(i/n)` line when the list outruns the window.
+    fn window(&self, max_rows: usize) -> (usize, usize) {
         let overflow = self.visible.len() > max_rows;
         let rows = if overflow {
             max_rows.saturating_sub(1).max(1)
@@ -171,6 +189,44 @@ impl Picker {
             .selected
             .saturating_sub(rows / 2)
             .min(self.visible.len().saturating_sub(rows));
+        (start, rows)
+    }
+
+    /// The item drawn `offset` rows below the window's first line, in the items the picker was
+    /// built from — what a click on that row names. None past the items shown.
+    pub fn index_at(&self, offset: usize, max_rows: usize) -> Option<usize> {
+        if self.visible.is_empty() || max_rows == 0 {
+            return None;
+        }
+        let (start, rows) = self.window(max_rows);
+        if offset >= rows {
+            return None;
+        }
+        self.visible.get(start + offset).copied()
+    }
+
+    /// A window of at most `max_rows` lines: the selection marked, matched characters accented,
+    /// and a muted `(i/n)` line closing the window when the list outruns it.
+    pub fn render(&self, theme: &Theme, width: u16, max_rows: usize) -> Vec<Line<'static>> {
+        self.draw(theme, width, max_rows, true)
+    }
+
+    /// The same window with no row marked — the selection sits somewhere outside the list.
+    pub fn render_unmarked(
+        &self,
+        theme: &Theme,
+        width: u16,
+        max_rows: usize,
+    ) -> Vec<Line<'static>> {
+        self.draw(theme, width, max_rows, false)
+    }
+
+    fn draw(&self, theme: &Theme, width: u16, max_rows: usize, marked: bool) -> Vec<Line<'static>> {
+        if self.visible.is_empty() || max_rows == 0 {
+            return Vec::new();
+        }
+        let overflow = self.visible.len() > max_rows;
+        let (start, rows) = self.window(max_rows);
         let budget = (width as usize).saturating_sub(MARKER.width());
         let mut lines = Vec::new();
         for (row, &index) in self.visible.iter().enumerate().skip(start).take(rows) {
@@ -178,8 +234,11 @@ impl Picker {
             let hits = fuzzy_match(&self.filter, item)
                 .map(|(_, at)| at)
                 .unwrap_or_default();
-            let selected = row == self.selected;
-            let base = if selected { theme.selected } else { theme.text };
+            let selected = marked && row == self.selected;
+            let mut base = if selected { theme.selected } else { theme.text };
+            if self.bold[index] {
+                base = base.add_modifier(Modifier::BOLD);
+            }
             let mut spans = vec![Span::styled(
                 if selected { MARKER } else { INDENT }.to_string(),
                 base,
@@ -439,6 +498,80 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ufo-picker-{tag}-{stamp}"));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn selecting_by_item_index_follows_the_filter() {
+        let mut picker = Picker::new(vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        assert!(picker.select_index(2));
+        assert_eq!(picker.current(), Some("gamma"));
+        picker.set_filter("a");
+        assert!(picker.select_index(2));
+        assert_eq!(picker.current(), Some("gamma"));
+        assert!(!picker.select_index(9));
+        assert_eq!(picker.current(), Some("gamma"));
+        let unmarked = rendered(&picker.render_unmarked(&theme(), 40, 5));
+        assert!(
+            unmarked.iter().all(|row| row.starts_with(INDENT)),
+            "{unmarked:?}"
+        );
+    }
+
+    #[test]
+    fn a_bold_item_is_drawn_bold_wherever_the_window_puts_it() {
+        let items: Vec<String> = (0..20).map(|n| format!("item {n:02}")).collect();
+        let mut picker = Picker::new(items);
+        picker.set_bold(2, true);
+        picker.set_bold(9, true);
+        picker.set_bold(99, true);
+        let emphasized = |lines: &[Line<'static>]| -> Vec<bool> {
+            lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+                })
+                .collect()
+        };
+        assert_eq!(
+            emphasized(&picker.render_unmarked(&theme(), 40, 5)),
+            vec![false, false, true, false, false],
+            "rows 0..4 and the (i/n) line"
+        );
+        let marked = emphasized(&picker.render(&theme(), 40, 5));
+        assert_eq!(marked[1..], [false, true, false, false], "{marked:?}");
+        picker.selected = 9;
+        let window = emphasized(&picker.render_unmarked(&theme(), 40, 5));
+        assert_eq!(window.iter().filter(|bold| **bold).count(), 1, "{window:?}");
+    }
+
+    #[test]
+    fn a_row_offset_names_the_item_the_window_draws_there() {
+        let items: Vec<String> = (0..20).map(|n| format!("item {n:02}")).collect();
+        let mut picker = Picker::new(items);
+        assert_eq!(picker.index_at(0, 5), Some(0));
+        assert_eq!(picker.index_at(3, 5), Some(3));
+        assert_eq!(
+            picker.index_at(4, 5),
+            None,
+            "the last row is the (i/n) line"
+        );
+        picker.selected = 10;
+        let drawn = rendered(&picker.render(&theme(), 40, 5));
+        let first = drawn[0].trim_start_matches(['❯', ' ']).to_string();
+        assert_eq!(
+            picker.index_at(0, 5).map(|at| format!("item {at:02}")),
+            Some(first)
+        );
+        picker.set_filter("item 1");
+        assert_eq!(picker.index_at(0, 5), picker.current_index());
+        picker.step(1);
+        assert_eq!(picker.index_at(1, 5), picker.current_index());
+        assert!(picker
+            .current()
+            .is_some_and(|item| item.starts_with("item 1")));
+        assert_eq!(Picker::new(Vec::new()).index_at(0, 5), None);
     }
 
     #[test]

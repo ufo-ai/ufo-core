@@ -1,17 +1,16 @@
 //! What a member waits for before anything is on screen: the binary loading, its statics
 //! initializing, and the arguments parsing. `--help` is the one path that reaches the screen
 //! without the wire, so it is the whole cost and nothing else. Beside it sit the two loads a first
-//! screen can pay — the syntax assets a fenced code block needs, and the conversation log
-//! `--resume` reads.
+//! screen can pay — the syntax assets a fenced code block needs, and the rows the conversation
+//! page draws from the list the workspace answers.
 
-use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
-use ufo::ui::history::{list_conversations, record_conversation, PastConversation};
+use ufo::ui::conversations::row_text;
+use ufo::wire::ConversationRow;
 
 fn main() {
     divan::main();
@@ -38,27 +37,31 @@ fn load_the_syntax_assets() {
     ));
 }
 
-#[divan::bench(args = [10, 500])]
-fn list_the_resume_conversations(bencher: divan::Bencher, rows: usize) {
-    let home = logged(rows);
-    bencher.bench(|| divan::black_box(list_conversations(&home)));
-    let _ = fs::remove_dir_all(&home);
+#[divan::bench(args = [10, 300])]
+fn draw_the_conversation_rows(bencher: divan::Bencher, rows: usize) {
+    let listed = listed(rows);
+    bencher.bench(|| {
+        divan::black_box(
+            listed
+                .iter()
+                .map(|row| row_text(row, 1_700_000_000, true))
+                .collect::<Vec<String>>(),
+        )
+    });
 }
 
-fn logged(rows: usize) -> PathBuf {
-    let home =
-        std::env::temp_dir().join(format!("ufo-bench-history-{rows}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&home);
-    fs::create_dir_all(&home).expect("a scratch home");
-    for row in 0..rows {
-        record_conversation(
-            &home,
-            &PastConversation {
-                channel: format!("host.{row}"),
-                opened_epoch: 1_700_000_000 + row as u64,
-                first_message: format!("conversation {row} opened with a question"),
-            },
-        );
-    }
-    home
+fn listed(rows: usize) -> Vec<ConversationRow> {
+    (0..rows)
+        .map(|row| ConversationRow {
+            id: format!("00000000-0000-4000-8000-{row:012}"),
+            title: format!("conversation {row} opened with a question"),
+            surface: if row % 2 == 0 { "slack" } else { "web" }.to_string(),
+            surface_label: (row % 2 == 0).then(|| "#general".to_string()),
+            speaker: (row % 3 == 0).then(|| "Nate Ford".to_string()),
+            agent: if row % 5 == 0 { "notes" } else { "assistant" }.to_string(),
+            last_at: 1_699_000_000.0 + row as f64,
+            postable: true,
+            channel: None,
+        })
+        .collect()
 }

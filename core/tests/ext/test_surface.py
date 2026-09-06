@@ -3081,6 +3081,18 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
     )
     assert {entry.summary.id for entry in other_agent} == {walled}
 
+    lanes = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=50, member_admitted=True
+    )
+    assert lanes == ()
+    await _seed_conversation_turn(
+        workspace_id, mine, agent_id, seq=1, inbound="hello", speaker_member_id=member_id
+    )
+    spoken = await context.list_agent_conversations(
+        agent_id, member_id, admin=False, limit=50, member_admitted=True
+    )
+    assert [entry.summary.id for entry in spoken] == [mine]
+
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_search_never_answers_for_a_conversation_the_member_may_not_read(

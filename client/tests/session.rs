@@ -33,6 +33,7 @@ struct Served {
     gateway: Gateway,
     arrived: std::sync::mpsc::Receiver<()>,
     skills_arrived: std::sync::mpsc::Receiver<()>,
+    listings_arrived: std::sync::mpsc::Receiver<()>,
 }
 
 /// The scripted gateway, still serving.
@@ -61,6 +62,8 @@ impl Gateway {
 #[derive(Debug)]
 struct Request {
     system_skills: bool,
+    conversations: bool,
+    path: String,
     body: String,
     op_header: Option<String>,
     slot_header: Option<String>,
@@ -75,11 +78,18 @@ struct Request {
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
+    serve_with(script, r#"{"conversations":[]}"#)
+}
+
+/// The scripted gateway beside a conversation list it answers every listing GET with, outside the
+/// script — the client reads the list whenever the page opens, and no exchange is spent on it.
+fn serve_with(script: Vec<Exchange>, listing: &'static str) -> Served {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.set_nonblocking(true).expect("nonblocking");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (arrival, arrived) = std::sync::mpsc::channel();
     let (skill_arrival, skills_arrived) = std::sync::mpsc::channel();
+    let (listing_arrival, listings_arrived) = std::sync::mpsc::channel();
     let (last, served_out) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
@@ -112,6 +122,17 @@ fn serve(script: Vec<Exchange>) -> Served {
                                 b"HTTP/1.1 304 Not Modified\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                             )
                             .expect("respond to system skills");
+                        continue;
+                    }
+                    if request.conversations {
+                        let _ = listing_arrival.send(());
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{listing}",
+                            listing.len()
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("respond to the conversation list");
                         continue;
                     }
                     break (stream, request);
@@ -163,6 +184,7 @@ fn serve(script: Vec<Exchange>) -> Served {
         },
         arrived,
         skills_arrived,
+        listings_arrived,
     }
 }
 
@@ -198,6 +220,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     let (
         headers_end,
         system_skills,
+        conversations,
+        path,
         content_length,
         op_header,
         slot_header,
@@ -219,11 +243,17 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
             continue;
         };
         let head = String::from_utf8_lossy(&raw[..end]).to_string();
-        let system_skills = head.lines().next().is_some_and(|line| {
-            let mut fields = line.split_ascii_whitespace();
-            fields.next() == Some("GET")
-                && fields.next().is_some_and(|path| path.ends_with("/skills"))
-        });
+        let mut request_line = head.lines().next().unwrap_or("").split_ascii_whitespace();
+        let method = request_line.next().unwrap_or("");
+        let path = request_line
+            .next()
+            .unwrap_or("")
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let system_skills = method == "GET" && path.ends_with("/skills");
+        let conversations = method == "GET" && path.ends_with("/conversations");
         let mut length = 0usize;
         let mut op = None;
         let mut slot = None;
@@ -274,6 +304,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         break (
             end + 4,
             system_skills,
+            conversations,
+            path,
             length,
             op,
             slot,
@@ -296,6 +328,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     }
     Some(Request {
         system_skills,
+        conversations,
+        path,
         body: String::from_utf8_lossy(&raw[headers_end..]).to_string(),
         op_header,
         slot_header,
@@ -553,6 +587,7 @@ fn spawn_on_a_pty(
     workspace: Option<&str>,
     truecolor: bool,
     size: (u16, u16),
+    channel: Option<&str>,
 ) -> (std::fs::File, std::process::Child) {
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
@@ -579,12 +614,14 @@ fn spawn_on_a_pty(
         .current_dir(home)
         .env("UFO_URL", url)
         .env("UFO_HOME", home)
-        .env("UFO_CHANNEL", "e2e-tty")
         .env("TERM", "xterm-256color")
         .env("TMPDIR", &scratch_tmp)
         .env("PATH", path)
         .env_remove("NO_COLOR")
         .env_remove("UFO_PLAIN");
+    if let Some(channel) = channel {
+        command.env("UFO_CHANNEL", channel);
+    }
     if truecolor {
         command.env("COLORTERM", "truecolor");
     }
@@ -644,7 +681,7 @@ const DARK_PROMPT: &str = "38;2;255;135;255";
 #[cfg(unix)]
 const LIGHT_PROMPT: &str = "38;2;162;28;175";
 #[cfg(unix)]
-const PROMPT_GLYPH: &str = "\u{203a}";
+const PROMPT_GLYPH: &str = "\u{276f}";
 #[cfg(unix)]
 const SPINNER_FIRST: &str = "\u{280b}";
 #[cfg(unix)]
@@ -669,7 +706,8 @@ struct Played {
 
 #[cfg(unix)]
 fn play_the_terminal(url: &str, home: &std::path::Path, terminal: Terminal) -> Played {
-    let (keys, child) = spawn_on_a_pty(url, &["go"], home, Some(url), true, SCREEN);
+    let (keys, child) =
+        spawn_on_a_pty(url, &["go"], home, Some(url), true, SCREEN, Some("e2e-tty"));
     let mut reader = keys.try_clone().expect("the leader duplicates");
     let mut writer = keys.try_clone().expect("the leader duplicates");
     let tape = Arc::new(Mutex::new(Tape::default()));
@@ -774,6 +812,7 @@ impl Played {
 }
 
 #[cfg(unix)]
+/// The terminal the client starts on, played from the pty leader, on the `e2e-tty` channel.
 fn run_client_on_pty(
     url: &str,
     args: &[&str],
@@ -781,7 +820,31 @@ fn run_client_on_pty(
     workspace: Option<&str>,
     size: (u16, u16),
 ) -> OnPty {
-    let (keys, child) = spawn_on_a_pty(url, args, home, workspace, false, size);
+    run_on_pty(url, args, home, workspace, size, Some("e2e-tty"))
+}
+
+#[cfg(unix)]
+/// The client started bare, as a member opens it: no message and no channel, so it opens on the
+/// chats page.
+fn run_home_on_pty(
+    url: &str,
+    home: &std::path::Path,
+    workspace: Option<&str>,
+    size: (u16, u16),
+) -> OnPty {
+    run_on_pty(url, &[], home, workspace, size, None)
+}
+
+#[cfg(unix)]
+fn run_on_pty(
+    url: &str,
+    args: &[&str],
+    home: &std::path::Path,
+    workspace: Option<&str>,
+    size: (u16, u16),
+    channel: Option<&str>,
+) -> OnPty {
+    let (keys, child) = spawn_on_a_pty(url, args, home, workspace, false, size, channel);
     let mut reader = keys.try_clone().expect("the leader duplicates");
     let painted = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&painted);
@@ -3357,6 +3420,289 @@ fn a_replayed_enter_sends_what_was_typed_into_the_probe() {
     assert_eq!(
         requests[1].body, "hi",
         "the Enter typed into the probe sends its line: {requests:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+const SLACK_THREAD: &str = "5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f";
+#[cfg(unix)]
+const TEXTS_THREAD: &str = "7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081";
+#[cfg(unix)]
+const LISTING: &str = r##"{"conversations":[
+{"id":"5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f","title":"Who owns the pager","surface":"slack","surface_label":"#eng","speaker":"Nate Ford","agent":"assistant","last_at":1700000000.0,"postable":true,"channel":null},
+{"id":"6c2f5d2b-ad2f-4a4b-9a2f-1e3c4d5e6f70","title":"list files","surface":"ufo","surface_label":null,"speaker":null,"agent":"assistant","last_at":1699990000.0,"postable":true,"channel":"abc123"},
+{"id":"7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081","title":"remind me at 5","surface":"imessage","surface_label":null,"speaker":null,"agent":"assistant","last_at":1699980000.0,"postable":false,"channel":null}
+]}"##;
+
+#[cfg(unix)]
+fn wait_for(session: &OnPty, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let screen = session.screen();
+        if screen.contains(needle) {
+            return screen;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{needle} never painted: {screen}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Bare `--resume` opens on the conversation page. Typing narrows it and Enter joins the row by
+/// id: history replays, then a typed message posts to that same conversation and no directory is
+/// claimed, because a joined conversation keeps the sandbox it has.
+#[cfg(unix)]
+#[test]
+fn the_conversation_page_joins_a_thread_by_id_and_posts_into_it() {
+    let served = serve_with(
+        vec![
+            Exchange {
+                delay_ms: 0,
+                status: 200,
+                reply_lines: &["you\tWho owns the pager", "say\tNate does.", "ask\t>"],
+            },
+            Exchange {
+                delay_ms: 0,
+                status: 200,
+                reply_lines: &["sent\tturn-2\t1\t", "txt\tI do.", "exit\t0"],
+            },
+        ],
+        LISTING,
+    );
+    let home = scratch_home("tty-page-join");
+    let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
+    let page = wait_for(&session, "Who owns the pager");
+    assert!(page.contains("UFO Chats"), "{page}");
+    assert!(page.contains("Slack #eng"), "{page}");
+    assert!(page.contains("Nate Ford"), "{page}");
+    assert!(
+        page.contains("New chat \u{276f}"),
+        "the entry bar stays: {page}"
+    );
+    assert_eq!(
+        page.matches("\u{2597}\u{259F}\u{2588}\u{2599}\u{2596}")
+            .count(),
+        3,
+        "the mark heads the page: {page}"
+    );
+    session.press(b"\x1b[A");
+    session.press(b"pager");
+    let narrowed = session.screen();
+    assert!(!narrowed.contains("list files"), "{narrowed}");
+    session.press(b"\r");
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the join reaches the gateway");
+    let opened = wait_for(&session, "Nate does.");
+    assert!(opened.contains("Who owns the pager"), "{opened}");
+    assert!(!opened.contains("Enter opens."), "{opened}");
+    session.press(b"I do, this week.");
+    session.press(b"\r");
+    let requests = served.gateway.requests();
+    session.reaped();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(
+        requests[0].path,
+        format!("/surface/ufo/conversation/{SLACK_THREAD}")
+    );
+    assert_eq!(requests[0].body, "");
+    assert!(requests[0].cwd_header.is_none(), "{requests:?}");
+    assert_eq!(requests[1].path, requests[0].path);
+    assert_eq!(requests[1].body, "I do, this week.");
+    assert!(requests[1].cwd_header.is_none(), "{requests:?}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A row for one of the member's own terminal conversations resumes on its channel, naming the
+/// directory the client stands in — this terminal is its sandbox again.
+#[cfg(unix)]
+#[test]
+fn a_terminal_row_resumes_on_its_channel_with_the_directory() {
+    let served = serve_with(
+        vec![Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["you\tlist files", "say\tdone", "exit\t0"],
+        }],
+        LISTING,
+    );
+    let home = scratch_home("tty-page-resume");
+    let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
+    wait_for(&session, "list files");
+    session.press(b"\x1b[A");
+    session.press(b"list files");
+    session.press(b"\r");
+    let requests = served.gateway.requests();
+    session.reaped();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].path, "/surface/ufo/abc123");
+    assert_eq!(requests[0].body, "");
+    assert!(requests[0].cwd_header.is_some(), "{requests:?}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Ctrl+L lists over a running conversation and Esc returns to it with the transcript intact. The
+/// script holds one exchange the client never reaches, so the gateway is still listening when the
+/// page asks for its list.
+#[cfg(unix)]
+#[test]
+fn ctrl_l_lists_from_a_conversation_and_esc_returns_to_it() {
+    let served = serve_with(
+        vec![
+            Exchange {
+                delay_ms: 0,
+                status: 200,
+                reply_lines: &["say\thello there", "ask\t>"],
+            },
+            Exchange {
+                delay_ms: 0,
+                status: 200,
+                reply_lines: &["exit\t0"],
+            },
+        ],
+        LISTING,
+    );
+    let home = scratch_home("tty-page-toggle");
+    let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url), SCREEN);
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the opening message reaches the gateway");
+    wait_for(&session, "hello there");
+    session.press(b"\x0c");
+    let page = wait_for(&session, "Who owns the pager");
+    assert!(page.contains("UFO Chats"), "{page}");
+    assert!(page.contains("New chat \u{276f}"), "{page}");
+    assert!(!page.contains("hello there"), "{page}");
+    served
+        .listings_arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the page asked for its list");
+    served
+        .listings_arrived
+        .recv_timeout(Duration::from_secs(8))
+        .expect("the page asked again within its refresh interval");
+    session.press(b"\x1b");
+    let back = wait_for(&session, "hello there");
+    assert!(!back.contains("UFO Chats"), "{back}");
+    let (row, col) = locate(&back, "\u{2303}L");
+    session.press(click(row, col).as_bytes());
+    let reopened = wait_for(&session, "UFO Chats");
+    assert!(
+        !reopened.contains("\u{2303}L"),
+        "the page carries no hint: {reopened}"
+    );
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    served.gateway.done();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Typing on the page writes into the entry bar under `New chat`, and Enter opens a fresh
+/// terminal conversation on a channel of its own with those words as its first message, in the
+/// directory the client stands in.
+#[cfg(unix)]
+#[test]
+fn typing_on_the_page_starts_a_new_chat() {
+    let served = serve_with(
+        vec![Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tgot it", "exit\t0"],
+        }],
+        LISTING,
+    );
+    let home = scratch_home("tty-page-new");
+    let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
+    wait_for(&session, "Who owns the pager");
+    session.press(b"hello there");
+    let typed = session.screen();
+    assert!(typed.contains("New chat \u{276f} hello there"), "{typed}");
+    session.press(b"\r");
+    let requests = served.gateway.requests();
+    session.reaped();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let channel = requests[0]
+        .path
+        .strip_prefix("/surface/ufo/")
+        .expect("a channel path");
+    assert_eq!(channel.len(), 32, "{requests:?}");
+    assert!(
+        channel.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "{requests:?}"
+    );
+    assert_ne!(channel, "e2e-tty");
+    assert_eq!(requests[0].body, "hello there");
+    assert!(requests[0].cwd_header.is_some(), "{requests:?}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A click on a row opens it, the same as Enter on the selection.
+#[cfg(unix)]
+#[test]
+fn a_click_on_the_page_opens_the_row_under_it() {
+    let served = serve_with(
+        vec![Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["you\tlist files", "say\tdone", "exit\t0"],
+        }],
+        LISTING,
+    );
+    let home = scratch_home("tty-page-click");
+    let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
+    let page = wait_for(&session, "list files");
+    let (row, _) = locate(&page, "list files");
+    session.press(click(row, 4).as_bytes());
+    let requests = served.gateway.requests();
+    session.reaped();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].path, "/surface/ufo/abc123");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A conversation on a surface that takes no message from here opens to read, states where to
+/// reply, and lets nothing typed leave.
+#[cfg(unix)]
+#[test]
+fn a_read_only_conversation_opens_and_takes_no_message() {
+    let served = serve_with(
+        vec![Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["you\tremind me at 5", "say\tSet.", "ask\t>"],
+        }],
+        LISTING,
+    );
+    let home = scratch_home("tty-page-read-only");
+    let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
+    wait_for(&session, "remind me at 5");
+    session.press(b"\x1b[A");
+    session.press(b"remind");
+    session.press(b"\r");
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the join reaches the gateway");
+    let opened = wait_for(&session, "Set.");
+    assert!(
+        opened.contains("This conversation is read-only here. Reply in iMessage to continue it."),
+        "{opened}"
+    );
+    session.press(b"at 6 instead");
+    session.press(b"\r");
+    thread::sleep(Duration::from_millis(500));
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    let requests = served.gateway.done();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(
+        requests[0].path,
+        format!("/surface/ufo/conversation/{TEXTS_THREAD}")
     );
     let _ = std::fs::remove_dir_all(&home);
 }

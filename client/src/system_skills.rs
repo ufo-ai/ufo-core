@@ -49,7 +49,7 @@ pub fn sync(home: &Home, session: &Session) -> Result<(), String> {
     if std::env::var_os(SYSTEM_SKILLS_BAKED_ENV).is_some() {
         return Ok(());
     }
-    if session.workspace_url.is_none() {
+    if session.workspace_url.is_none() || session.target.channel().is_none() {
         return Ok(());
     }
     let root = home.root.join(SKILLS_DIR);
@@ -428,6 +428,7 @@ fn posix_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::Target;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use zip::write::SimpleFileOptions;
@@ -481,7 +482,7 @@ mod tests {
         let session = Session::new(
             "invalid".to_string(),
             Some("invalid".to_string()),
-            "channel".to_string(),
+            Target::Channel("channel".to_string()),
             None,
             "session".to_string(),
             None,
@@ -752,7 +753,7 @@ mod tests {
         let session = Session::new(
             url.clone(),
             Some(url),
-            "channel".to_string(),
+            Target::Channel("channel".to_string()),
             None,
             "session".to_string(),
             None,

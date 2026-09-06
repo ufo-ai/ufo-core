@@ -27,7 +27,15 @@ or severed-stream resume whose cursor may stand mid-turn, so it always drains th
 A send (`x-ufo-send`) is the one POST that holds nothing: it admits its body, answers with the
 `sent` ack, and returns. It is the request a member's second message rides while their first turn
 still runs — admission speed rather than the held stream's next boundary — and the consequences
-reach them down the stream they are already holding."""
+reach them down the stream they are already holding.
+
+A channel is the member's own terminal conversation. The client also lists every conversation the
+member reaches — on any surface, with any agent they may open — and joins one by its id through the
+same held stream: history replays, the tail follows, a message admits a turn as this member. A
+joined Slack or terminal conversation carries the comment notice the portal sends, so the surface
+it lives on announces who spoke from elsewhere; the member's own portal and extension conversations
+admit plainly; every other surface reads only. No terminal is claimed for a joined conversation —
+it keeps the sandbox it has."""
 
 import asyncio
 import hashlib
@@ -40,10 +48,10 @@ from functools import partial
 from typing import Any
 from uuid import UUID
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
@@ -63,10 +71,14 @@ from ufo.sdk.hub import (
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
+    EXTENSION_SURFACE_PREFIX,
+    PORTAL_SURFACE,
+    AgentSummary,
     ConnectRequestInvalid,
     Conversation,
     CredentialPrompt,
     CredentialRequestInvalid,
+    ListedConversation,
     RuntimeAttestation,
     RuntimeIdentity,
     SurfaceAuth,
@@ -109,6 +121,17 @@ QUEUE_KEY_SEPARATOR = ":"
 RUNTIME_ID_HEX_CHARS = 32
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
 STALE_CLIENT_MESSAGE = "Updated ufo. Run ufo again."
+COMMENT_SURFACES = frozenset({"slack", SURFACE_UFO})
+CONVERSATION_LIST_LIMIT = 100
+CONVERSATION_ROWS_MAX = 300
+MAX_SEARCH_CHARS = 200
+SURFACE_WORDS = {
+    PORTAL_SURFACE: "the portal",
+    "slack": "Slack",
+    "imessage": "iMessage",
+    SURFACE_UFO: "the terminal",
+}
+READ_ONLY_MESSAGE = "This conversation is read-only here. Reply in {surface} to continue it."
 
 # Hold a live stream open just under the shell's `curl --max-time 90`, so a turn that outruns the
 # hold ends on `poll` (the shell reconnects) rather than the client's own timeout truncating it.
@@ -257,6 +280,7 @@ def directives_for(
     files: tuple[SharedFile, ...] = (),
     exits: bool = True,
     runtime: RuntimeIdentity | None = None,
+    comments: bool = True,
 ) -> tuple[bytes, ...]:
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool-run
     activity is a retained `note` carrying its activity kind, while the running cost meter is a
@@ -266,7 +290,9 @@ def directives_for(
     the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
     mid-turn learns the agent has taken that message up. A reply the turn delivered mid-flight says
     itself (`say`): the member has been sent those words, and they never rode the token stream. The
-    same frame carries a linked notice when a member comments from the portal. A turn the fleet
+    same frame carries a linked notice when a member comments from the portal — said unless
+    `comments` is off, which is how the stream that admitted a comment keeps from reading the
+    member their own words back. A turn the fleet
     resumed after the process running it died narrates that as a `note`, on the frame — a client's
     notes already carry every other thing the turn is doing, so this one needs no grace to keep it
     clear of the answer."""
@@ -302,7 +328,8 @@ def directives_for(
         case Resumed():
             return (directive("note", RESUMED_NOTE),)
         case Reply():
-            return (directive("say", frame.text),) if frame.text else ()
+            said = frame.text and (comments or not frame.is_comment)
+            return (directive("say", frame.text),) if said else ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 
@@ -408,6 +435,7 @@ async def _render_stream_frame(
     files: Callable[[], Awaitable[tuple[SharedFile, ...]]] | None,
     exits: bool,
     runtime: RuntimeIdentity | None,
+    comments: bool,
 ) -> _RenderedFrame:
     collect: tuple[CredentialPrompt, ...] = ()
     if (
@@ -441,6 +469,7 @@ async def _render_stream_frame(
         shared,
         exits=exits,
         runtime=runtime,
+        comments=comments,
     )
     streamed = streamed or bool(lines and isinstance(frame, TextDelta))
     terminated = isinstance(frame, Terminal | Parked)
@@ -499,6 +528,7 @@ async def stream_directives(
     moved_on: Callable[[], Awaitable[bool]] | None = None,
     exits: bool = True,
     runtime: RuntimeIdentity | None = None,
+    comments: bool = True,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -596,6 +626,7 @@ async def stream_directives(
                     files,
                     exits,
                     runtime,
+                    comments,
                 )
                 streamed = rendered.streamed
                 for line in rendered.lines:
@@ -719,6 +750,31 @@ class _ChannelTurn:
     sent: bytes | None = None
     resumed: bool = False
     op_id: str = ""
+    commented: bool = False
+
+
+@dataclass(frozen=True)
+class _Plain:
+    """The member's message enters as their own turn, nothing announced."""
+
+
+@dataclass(frozen=True)
+class _Comment:
+    """The message enters with the notice the surface the conversation lives on announces under
+    `author` before the agent's reply — what the portal sends into a Slack or terminal thread,
+    carried here for a thread the terminal joined by id."""
+
+    author: str
+
+
+@dataclass(frozen=True)
+class _ReadOnly:
+    """No message enters here; the member is told which surface to reply in."""
+
+    surface: str
+
+
+type _Posting = _Plain | _Comment | _ReadOnly
 
 
 async def _channel_op_reply(
@@ -768,6 +824,7 @@ async def _channel_message(
     cwd: str,
     stale: bool,
     marked: bool,
+    posting: _Posting,
 ) -> Response | _ChannelTurn:
     body = (await request.body()).decode("utf-8", "replace").strip()
     if not body:
@@ -784,6 +841,14 @@ async def _channel_message(
         return _ChannelTurn(turn_id, resumed=True)
     if stale:
         return PlainTextResponse(_client_update())
+    comment: str | None
+    match posting:
+        case _ReadOnly(surface):
+            return PlainTextResponse(_read_only(surface), status_code=403)
+        case _Comment(author):
+            comment = f"{author} commented: {body}"
+        case _Plain():
+            comment = None
     if len(body.encode()) > MAX_MESSAGE_BYTES:
         return PlainTextResponse("message too large", status_code=413)
     try:
@@ -799,6 +864,7 @@ async def _channel_message(
             body,
             context=_turn_context(email, request),
             speaker_member_id=member_id,
+            comment=comment,
             runtime_config=runtime_config,
         )
     except ValueError as error:
@@ -809,7 +875,11 @@ async def _channel_message(
         "1" if admitted.opened_run else "0",
         "" if admitted.arrival_id is None else str(admitted.arrival_id),
     )
-    return _ChannelTurn(admitted.turn_id, note=note, sent=sent)
+    return _ChannelTurn(admitted.turn_id, note=note, sent=sent, commented=comment is not None)
+
+
+def _read_only(surface: str) -> str:
+    return READ_ONLY_MESSAGE.format(surface=SURFACE_WORDS.get(surface, surface))
 
 
 @dataclass(frozen=True)
@@ -854,6 +924,7 @@ class _ChannelStream:
             moved_on=self._moved_on,
             exits=not self.marked,
             runtime=self.ctx.runtime,
+            comments=not self.turn.commented,
         )
         return StreamingResponse(
             self._bound(history, directives),
@@ -923,11 +994,58 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         return PlainTextResponse("x-ufo-cwd must be an absolute path", status_code=400)
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
+    return await _serve(ctx, request, conversation_id, member_id, email, cwd, _Plain())
+
+
+async def conversation(ctx: SurfaceContext, request: Request) -> Response:
+    """The held stream on a conversation the member joins by id — one the list named, on whatever
+    surface and with whatever agent it lives. The same requests the channel takes mean the same
+    here: an empty body replays history and tails, a message admits a turn as this member, a stop
+    ends the running one, a send admits without holding. What differs is what the id may name and
+    how a message enters: the agent must be one the member reaches and the conversation one they
+    read, and a message enters a Slack or terminal thread with the notice the portal sends, a
+    portal or extension conversation of their own plainly, and any other surface not at all. No
+    terminal is claimed — a joined conversation keeps the sandbox it has — so a claim and an op
+    reply, which only a channel's terminal answers, are refused."""
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    email, member_id = authenticated
+    if member_id is None:
+        return PlainTextResponse("no member holds this bearer", status_code=403)
+    sealed = request.headers.get(SECRET_HEADER)
+    if sealed:
+        return await _fulfill_secret(ctx, request, member_id, sealed)
+    if _utf8_header(request, CWD_HEADER):
+        return PlainTextResponse(
+            "a conversation joined by id keeps its own sandbox", status_code=400
+        )
+    if request.headers.get(OP_HEADER, "").strip():
+        return PlainTextResponse("a joined conversation asks no terminal ops", status_code=400)
+    try:
+        conversation_id = UUID(request.path_params["conversation_id"])
+    except ValueError:
+        return PlainTextResponse("no such conversation", status_code=404)
+    joined = await _joined_conversation(ctx, member_id, email, conversation_id)
+    if joined is None:
+        return PlainTextResponse("no such conversation", status_code=404)
+    return await _serve(ctx, request, conversation_id, member_id, email, "", joined)
+
+
+async def _serve(
+    ctx: SurfaceContext,
+    request: Request,
+    conversation_id: UUID,
+    member_id: UUID | None,
+    email: str,
+    cwd: str,
+    posting: _Posting,
+) -> Response:
     stale = _stale_client(request)
     if request.headers.get(SEND_HEADER, "").strip():
         if stale:
             return PlainTextResponse("ufo update required", status_code=409)
-        return await _send(ctx, request, conversation_id, member_id, email, cwd)
+        return await _send(ctx, request, conversation_id, member_id, email, cwd, posting)
     if UNSEND_HEADER in request.headers:
         unsend = request.headers[UNSEND_HEADER].strip()
         return await _unsend(ctx, request, conversation_id, member_id, unsend)
@@ -939,13 +1057,155 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         resolution = await _channel_stop(ctx, request, conversation_id, stale)
     else:
         resolution = await _channel_message(
-            ctx, request, conversation_id, member_id, email, cwd, stale, marked
+            ctx, request, conversation_id, member_id, email, cwd, stale, marked, posting
         )
     if isinstance(resolution, Response):
         return resolution
     return await _ChannelStream(
         ctx, request, conversation_id, member_id, cwd, marked, resolution
     ).response()
+
+
+async def _reachable_agents(ctx: SurfaceContext, member_id: UUID) -> tuple[AgentSummary, ...]:
+    """The agents a member reaches from the terminal: every workspace-visible one, the ones they
+    own, and the ones a member-private extension conversation opened to them. The portal's own
+    grants are the portal's and widen nothing here."""
+    opened = await ctx.member_extension_agent_ids(member_id)
+    return tuple(
+        agent
+        for agent in await ctx.list_agents()
+        if agent.visibility == "workspace"
+        or agent.owner_member_id == member_id
+        or agent.id in opened
+    )
+
+
+async def _joined_conversation(
+    ctx: SurfaceContext, member_id: UUID, email: str, conversation_id: UUID
+) -> _Posting | None:
+    """How a message enters the conversation the id names, or None where the member reaches no such
+    conversation: its agent is behind the wall, its content is not theirs to read, or no member
+    message ever opened a turn in it — a machine lane is joined by nobody."""
+    agent_id = await ctx.conversation_agent(conversation_id)
+    if agent_id is None or agent_id not in {a.id for a in await _reachable_agents(ctx, member_id)}:
+        return None
+    listed = await ctx.list_agent_conversations(
+        agent_id,
+        member_id,
+        admin=False,
+        limit=1,
+        conversation_id=conversation_id,
+        member_admitted=True,
+    )
+    if not listed:
+        return None
+    return _posting(listed[0], member_id, email)
+
+
+def _posting(entry: ListedConversation, member_id: UUID, email: str) -> _Posting:
+    surface = entry.summary.surface
+    own = entry.audience == str(conversation_audience(member_id))
+    if own and (surface == PORTAL_SURFACE or surface.startswith(EXTENSION_SURFACE_PREFIX)):
+        return _Plain()
+    if surface in COMMENT_SURFACES and (own or entry.audience == str(SHARED_AUDIENCE)):
+        return _Comment(_comment_author(entry, email, own))
+    return _ReadOnly(surface)
+
+
+def _comment_author(entry: ListedConversation, email: str, own: bool) -> str:
+    if own:
+        return "You"
+    speaker = next((who for who in entry.speakers if who.email == email), None)
+    if speaker is None or speaker.sender is None:
+        return email
+    return speaker.sender.removesuffix(f" ({email})")
+
+
+class ConversationRow(BaseModel):
+    """One conversation as the terminal lists it. `speaker` is who opened it when that was
+    somebody else; `channel` is set for the member's own terminal conversations, which the client
+    resumes on their channel rather than joining by id, so the terminal it stands in is the
+    sandbox again."""
+
+    id: UUID
+    title: str
+    surface: str
+    surface_label: str | None
+    speaker: str | None
+    agent: str
+    last_at: float
+    postable: bool
+    channel: str | None
+
+
+class ConversationList(BaseModel):
+    conversations: tuple[ConversationRow, ...]
+
+
+async def conversations(ctx: SurfaceContext, request: Request) -> Response:
+    """The conversations the member may open from the terminal, newest activity first: their own
+    and the workspace-shared ones on every surface, for every agent they reach, bounded. `q`
+    narrows in the query, so a thread that fell off the bound is still found by its words. A
+    machine lane — a homepage seed, the portal's prepared-intent queue — and a conversation with
+    no title yet are absent, as they are from the portal's rail."""
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    email, member_id = authenticated
+    if member_id is None:
+        return PlainTextResponse("no member holds this bearer", status_code=403)
+    search = request.query_params.get("q", "").strip()[:MAX_SEARCH_CHARS] or None
+    rows: list[ConversationRow] = []
+    for agent in await _reachable_agents(ctx, member_id):
+        listed = await ctx.list_agent_conversations(
+            agent.id,
+            member_id,
+            admin=False,
+            limit=CONVERSATION_LIST_LIMIT,
+            search=search,
+            member_admitted=True,
+        )
+        rows.extend(
+            _conversation_row(entry, agent.name, member_id, email)
+            for entry in listed
+            if entry.title
+        )
+    rows.sort(key=lambda row: row.last_at, reverse=True)
+    return Response(
+        content=ConversationList(
+            conversations=tuple(rows[:CONVERSATION_ROWS_MAX])
+        ).model_dump_json(),
+        media_type="application/json",
+    )
+
+
+def _conversation_row(
+    entry: ListedConversation, agent: str, member_id: UUID, email: str
+) -> ConversationRow:
+    own = entry.audience == str(conversation_audience(member_id))
+    spoke = own or any(who.email == email for who in entry.speakers)
+    opener = entry.speakers[0] if entry.speakers else None
+    speaker = None
+    if not spoke and opener is not None:
+        speaker = (
+            opener.email
+            if opener.sender is None
+            else opener.sender.removesuffix(f" ({opener.email})")
+        )
+    channel = None
+    if own and entry.summary.surface == SURFACE_UFO:
+        channel = entry.summary.queue_key.removeprefix(f"{email}{QUEUE_KEY_SEPARATOR}")
+    return ConversationRow(
+        id=entry.summary.id,
+        title=entry.title,
+        surface=entry.summary.surface,
+        surface_label=entry.surface_label,
+        speaker=speaker,
+        agent=agent,
+        last_at=(entry.summary.last_turn_at or entry.summary.created_at).timestamp(),
+        postable=not isinstance(_posting(entry, member_id, email), _ReadOnly),
+        channel=channel,
+    )
 
 
 async def _send(
@@ -955,6 +1215,7 @@ async def _send(
     member_id: UUID | None,
     email: str,
     cwd: str,
+    posting: _Posting,
 ) -> Response:
     """Admit one message and answer it, holding nothing. The member's stream is a second request
     already tailing this conversation, so the consequences have somewhere to arrive and this one
@@ -980,6 +1241,14 @@ async def _send(
     body = (await request.body()).decode("utf-8", "replace").strip()
     if not body:
         return PlainTextResponse("a send carries a message", status_code=400)
+    comment: str | None
+    match posting:
+        case _ReadOnly(surface):
+            return PlainTextResponse(_read_only(surface), status_code=403)
+        case _Comment(author):
+            comment = f"{author} commented: {body}"
+        case _Plain():
+            comment = None
     if len(body.encode()) > MAX_MESSAGE_BYTES:
         return PlainTextResponse("message too large", status_code=413)
     try:
@@ -998,6 +1267,7 @@ async def _send(
             ),
             context=_turn_context(email, request),
             speaker_member_id=member_id,
+            comment=comment,
             runtime_config=runtime_config,
         )
     except ValueError as error:
@@ -1190,6 +1460,8 @@ async def workspace_listing(ctx: SurfaceContext, request: Request) -> Response:
 ROUTES = (
     SurfaceRoute(method="POST", path="environment/document", handler=store_environment),
     SurfaceRoute(method="POST", path="environment/file", handler=store_environment_file),
+    SurfaceRoute(method="GET", path="conversations", handler=conversations),
+    SurfaceRoute(method="POST", path="conversation/{conversation_id}", handler=conversation),
     SurfaceRoute(method="POST", path="{channel}", handler=channel),
     SurfaceRoute(method="GET", path="{channel}/op/{op_id}", handler=op_body),
     SurfaceRoute(method="GET", path="{channel}/skills", handler=system_skills),
