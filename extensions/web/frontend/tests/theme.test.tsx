@@ -272,6 +272,18 @@ test("the working pulse yields to reduced motion in the built sheet", () => {
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
 });
 
+/** What spells the throbber's characters is the sheet, so a keyframe, the tick it is stepped on, the
+ *  dot that keyframe belongs to, and the column running a tick early are read off the built bytes: a
+ *  build that dropped any of them would leave a live line standing on nine resting dots. */
+test("the throbber's spelling survives the build", () => {
+  const css = packedStyles();
+  expect(css).toContain("@keyframesthrob-1{0%{opacity:1}37.5%{opacity:var(--opacity-muted-strong)}87.5%{opacity:1}}");
+  expect(css).toContain("[data-throb]circle{opacity:var(--opacity-muted-strong);animation-duration:.8s;animation-timing-function:step-end;animation-iteration-count:infinite}");
+  expect(css).toContain('[data-throb]circle[data-cell="1"]{animation-name:throb-1}');
+  expect(css).toContain("[data-throb]circle[data-ahead]{animation-delay:-.1s}");
+  expect(css).toContain("@media(prefers-reduced-motion:reduce){[data-throb]circle{animation:none!important}");
+});
+
 /** The waiting mark is timing, not decoration: it reserves its box from the first frame and paints
  *  nothing until the threshold, so a screen that answers before then leaves no trace on the way
  *  past. The whole of that is one delay and a backwards fill in the built sheet, and neither is
@@ -289,8 +301,9 @@ test("the waiting mark holds its threshold in the built sheet", () => {
  *  threshold is when the mark appears rather than how it moves. */
 test("stillness shortens the waiting fade and leaves its threshold standing", () => {
   const css = packedStyles();
-  expect(css).toContain("animation-duration:.01ms!important");
-  expect(css).not.toContain("animation-delay");
+  expect(css).toContain(
+    "@media(prefers-reduced-motion:reduce){*,:before,:after{transition-duration:.01ms!important;animation-duration:.01ms!important}}",
+  );
   expect(css).toContain("[data-part=skeleton]{animation:var(--animate-waiting)}");
 });
 

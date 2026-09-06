@@ -279,8 +279,9 @@ test("the waiting mark holds its threshold in the built sheet", () => {
  *  threshold is when the mark appears rather than how it moves. */
 test("stillness shortens the waiting fade and leaves its threshold standing", () => {
   const css = packedStyles();
-  expect(css).toContain("animation-duration:.01ms!important");
-  expect(css).not.toContain("animation-delay");
+  expect(css).toContain(
+    "@media(prefers-reduced-motion:reduce){*,:before,:after{transition-duration:.01ms!important;animation-duration:.01ms!important}}",
+  );
   expect(css).toContain("[data-part=skeleton]{animation:var(--animate-waiting)}");
 });
 

@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { IconCheck, IconChevronRight, IconGridDots } from "@tabler/icons-react";
+import { IconCheck, IconChevronRight } from "@tabler/icons-react";
 
 import {
   Attachment,
@@ -640,6 +640,75 @@ export function Meta({ children }: { children: ReactNode }) {
   );
 }
 
+/** The nine dots of the throbber, in the order they are drawn: where each one sits in the icon's own
+ *  24-unit box, which dot of the braille cell it carries, and whether it stands in the column that
+ *  runs a tick ahead of the rest. */
+const THROB_DOTS = [
+  { x: 5, y: 5, cell: 1 },
+  { x: 12, y: 5, cell: 4 },
+  { x: 19, y: 5, cell: 1, ahead: true },
+  { x: 5, y: 12, cell: 2 },
+  { x: 12, y: 12, cell: 5 },
+  { x: 19, y: 12, cell: 2, ahead: true },
+  { x: 5, y: 19, cell: 3 },
+  { x: 12, y: 19, cell: 6 },
+  { x: 19, y: 19, cell: 3, ahead: true },
+];
+
+/** The glyph at the head of a line the turn is still on: the nine round dots the line has always
+ *  carried, pulsing as they always have, and lit to spell one braille character per tick through
+ *  ⠋⠙⠹⠸⠼⠴⠦⠧.
+ *
+ *  A braille cell is six dots, two columns of three; the grid is nine, three columns of three. So a
+ *  character stands in the left two columns of the grid, written the way braille is written — dots
+ *  1, 2, 3 down the left column, dots 4, 5, 6 down the one beside it — and the right-hand column
+ *  holds the first column of the character coming next. A character therefore reaches the right edge
+ *  of the grid a tick before it is read at the left of it, and the run travels across the dots.
+ *
+ *  The dots are drawn here rather than taken from the icon set, because each one has to say which
+ *  dot of the cell it carries for the theme to light it, and because a dot has to be round: a cell
+ *  drawn as a braille character is drawn by whatever font answers for braille, which squares the
+ *  dots off. The circles keep the grid's own geometry — the same nine places in the same 24-unit
+ *  box, the same stroke — so the line is the icon it always was.
+ *
+ *  Nothing is swapped in and nothing is redrawn: the dots stand where they are and only their ink
+ *  changes, so the words beside them hold still. `theme.css` carries the six keyframes, one per dot
+ *  of the cell, and `tests/throb.test.tsx` reads them back into the eight characters. It carries no
+ *  words of its own: the line says what it is doing beside it, so a member hears the step rather
+ *  than the spelling. */
+function Throbber() {
+  return (
+    <svg
+      aria-hidden
+      data-throb
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      // The dots are centred on the words rather than on the line they sit in. A line box carries
+      // the room a descender needs, so its middle falls a pixel below the middle of the letters
+      // being read, and the grid centred in that box hangs the same pixel low against them. The
+      // pixel is taken back here, which puts the middle of the nine dots on the middle of the
+      // letters beside them — measured against the built sheet, the dots centre on the band the
+      // lowercase runs through rather than on the descender's room.
+      className="-translate-y-px shrink-0 animate-working motion-reduce:animate-none"
+    >
+      {THROB_DOTS.map((dot) => (
+        <circle
+          key={dot.x + "-" + dot.y}
+          cx={dot.x}
+          cy={dot.y}
+          r={1}
+          data-cell={dot.cell}
+          data-ahead={dot.ahead === true ? "" : undefined}
+        />
+      ))}
+    </svg>
+  );
+}
+
 /** The reply's activity disclosure, and while the turn runs the one line saying what the agent is
  *  doing. Live it leads with what is happening — `Awaiting N subagents` while runs are open, else
  *  the current step; settled it states `Completed N steps`: the reply's own steps, a run counting as
@@ -696,12 +765,7 @@ function Activity({
           />
         }
       >
-        {live ? (
-          <IconGridDots
-            aria-hidden
-            className="shrink-0 animate-working motion-reduce:animate-none"
-          />
-        ) : null}
+        {live ? <Throbber /> : null}
         <MarkerContent className={live ? "text-ink" : undefined}>{summary}</MarkerContent>
         {steps ? (
           <IconChevronRight

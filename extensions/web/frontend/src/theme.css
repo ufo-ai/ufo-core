@@ -1027,6 +1027,147 @@
     animation: glyph-out var(--duration-glyph) var(--ease-control) var(--delay-glyph) both;
   }
 
+  /* The nine dots at the head of a live activity line spell braille, a character per tick. A cell is
+     six dots, two columns of three, and the grid is three columns of three — so a character stands
+     in the left two columns of the grid, cell column beside cell column, exactly as braille is
+     written. The right-hand column is the next character's left column, so a character is seen once
+     at the right edge and read a tick later where the cell begins — which is what carries the run
+     across the grid, right to left.
+
+     That leaves the right-hand column saying exactly what the left one will say a tick later, so the
+     two share their keyframes and the right takes a tick off its delay rather than keyframes of its
+     own. The six keyframes are the six dots of the cell, over the eight cells ⠋⠙⠹⠸⠼⠴⠦⠧: `throb-1`
+     carries dot 1, `throb-2` dot 2, and so on. Each holds its value to the next step, so a stop is
+     written only where that dot changes.
+
+     The dots are lit rather than moved: the grid is the icon's own, drawn where it always was, and
+     the words beside it are never rewritten. Which dot carries which part of the cell is stated on
+     the dot in `messages.tsx`, and `tests/throb.test.tsx` reads these keyframes back through those
+     statements into cells and holds them to the eight, so a dot that changed places fails there
+     rather than spelling something else. */
+  @keyframes throb-1 {
+    from {
+      opacity: 1;
+    }
+
+    37.5% {
+      opacity: var(--opacity-muted-strong);
+    }
+
+    87.5% {
+      opacity: 1;
+    }
+  }
+
+  @keyframes throb-2 {
+    from {
+      opacity: 1;
+    }
+
+    12.5% {
+      opacity: var(--opacity-muted-strong);
+    }
+
+    75% {
+      opacity: 1;
+    }
+  }
+
+  @keyframes throb-3 {
+    from {
+      opacity: var(--opacity-muted-strong);
+    }
+
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @keyframes throb-4 {
+    from {
+      opacity: 1;
+    }
+
+    62.5% {
+      opacity: var(--opacity-muted-strong);
+    }
+  }
+
+  @keyframes throb-5 {
+    from {
+      opacity: var(--opacity-muted-strong);
+    }
+
+    12.5% {
+      opacity: 1;
+    }
+
+    75% {
+      opacity: var(--opacity-muted-strong);
+    }
+  }
+
+  @keyframes throb-6 {
+    from {
+      opacity: var(--opacity-muted-strong);
+    }
+
+    25% {
+      opacity: 1;
+    }
+  }
+
+  /* The left column of the grid is the cell's left column — dots 1, 2, 3 down it — and the middle
+     column is the cell's right column, dots 4, 5, 6. Each dot says which dot of the cell it carries,
+     so the keyframe it runs is read off the dot itself rather than off its place among its
+     neighbours. */
+  [data-throb] circle {
+    opacity: var(--opacity-muted-strong);
+    animation-duration: 0.8s;
+    animation-timing-function: step-end;
+    animation-iteration-count: infinite;
+  }
+
+  [data-throb] circle[data-cell="1"] {
+    animation-name: throb-1;
+  }
+
+  [data-throb] circle[data-cell="2"] {
+    animation-name: throb-2;
+  }
+
+  [data-throb] circle[data-cell="3"] {
+    animation-name: throb-3;
+  }
+
+  [data-throb] circle[data-cell="4"] {
+    animation-name: throb-4;
+  }
+
+  [data-throb] circle[data-cell="5"] {
+    animation-name: throb-5;
+  }
+
+  [data-throb] circle[data-cell="6"] {
+    animation-name: throb-6;
+  }
+
+  /* The right-hand column is the left one a tick early: the next character's first column, standing
+     beside the character being read. */
+  [data-throb] circle[data-ahead] {
+    animation-delay: -0.1s;
+  }
+
+  /* A member who asked for less motion is left with the grid standing still. The global
+     reduced-motion rule cuts every duration to a hundredth of a millisecond, which on a run that
+     repeats for ever is the fastest flicker on the surface rather than the calm it was asked for, so
+     the run is stopped outright and it takes the same weight to say so. */
+  @media (prefers-reduced-motion: reduce) {
+    [data-throb] circle {
+      animation: none !important;
+    }
+  }
+
   /* The foot of a pane that has more below it, faded into the surface so the last line does not
      end at a hard edge. It is laid over the pane rather than masked into it: a mask dims the
      element it is set on — the words the member is reading *and* the scrollbar beside them — and
