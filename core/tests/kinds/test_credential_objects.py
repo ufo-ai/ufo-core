@@ -22,7 +22,7 @@ from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget, Manifest
 from ufo.runtime.objects import AdminRequired, VerbNotSupported
-from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
@@ -253,6 +253,8 @@ async def test_clearing_a_slot_is_owner_gated(db: None) -> None:
         args = delete_tool.input_model.model_validate(
             {"kind": CREDENTIAL_KIND, "name": "sample-api"}
         )
+        with pytest.raises(SpeakerRequired, match="requested_by"):
+            await delete_tool.handler(_tool_context(workspace_id), args)
         with pytest.raises(AdminRequired):
             await delete_tool.handler(_tool_context(workspace_id, joiner), args)
         await _text(

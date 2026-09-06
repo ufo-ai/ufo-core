@@ -138,7 +138,8 @@ class MemberObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        if not await ctx.agent_is_main() or ctx.speaker_member_id is None:
+        speaker = ctx.require_speaker(MEMBER_ADMIN_GATE)
+        if not await ctx.agent_is_main():
             raise AdminRequired(MEMBER_ADMIN_GATE)
         if old is None:
             raise VerbNotSupported(MEMBER_CREATE)
@@ -152,11 +153,7 @@ class MemberObjects:
                 .where(tables.workspace.c.id == ws_current().workspace_id)
                 .with_for_update()
             )
-            if not await member_is_admin(
-                connection,
-                ws_current().workspace_id,
-                ctx.speaker_member_id,
-            ):
+            if not await member_is_admin(connection, ws_current().workspace_id, speaker):
                 raise AdminRequired(MEMBER_ADMIN_GATE)
             row = (
                 await connection.execute(
@@ -329,7 +326,8 @@ class AddMember:
     invitation email is delivered from."""
 
     async def add(self, ctx: ToolContext, args: AddMemberInput) -> ToolResult:
-        if ctx.speaker_member_id is None or not await ctx.agent_is_main():
+        speaker = ctx.require_speaker(ADD_MEMBER_GATE)
+        if not await ctx.agent_is_main():
             raise AdminRequired(ADD_MEMBER_GATE)
         if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
             raise AdminRequired(ADD_MEMBER_ROOM)
@@ -342,9 +340,7 @@ class AddMember:
                 .where(tables.workspace.c.id == ws_current().workspace_id)
                 .with_for_update()
             )
-            if not await member_is_admin(
-                connection, ws_current().workspace_id, ctx.speaker_member_id
-            ):
+            if not await member_is_admin(connection, ws_current().workspace_id, speaker):
                 raise AdminRequired(ADD_MEMBER_GATE)
             await self._absent(connection, email)
             await create_member(
@@ -352,7 +348,7 @@ class AddMember:
                 ws_current().workspace_id,
                 email,
                 is_admin=args.admin,
-                invited_by=ctx.speaker_member_id if args.notify else None,
+                invited_by=speaker if args.notify else None,
             )
         role = "a workspace admin" if args.admin else "a workspace member"
         told = " They will get an email with a link to sign in." if args.notify else ""

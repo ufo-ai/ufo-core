@@ -1,6 +1,6 @@
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -18,7 +18,7 @@ from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF, MEMBER_KIND
 from ufo.runtime.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, create_member
 from ufo.runtime.surfaces.admission import Admission
-from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import (
     Audience,
@@ -227,6 +227,26 @@ async def test_member_get_reports_role_and_seat_and_delete_is_refused(db: None) 
                     }
                 ),
             )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_managing_members_without_a_speaker_asks_who_is_asking(db: None) -> None:
+    """Who is speaking is answered before what they may do. A call that names no member reads
+    `SpeakerRequired`, which a `requested_by` ref repairs, where it used to read `AdminRequired` —
+    an authority the model cannot obtain and never retries."""
+    workspace_id, main_agent, _, _, member_id = await _seed()
+    speakerless = replace(_context(workspace_id, main_agent, member_id), speaker_member_id=None)
+    with ws(workspace_id):
+        with pytest.raises(SpeakerRequired, match="requested_by"):
+            await _tool("object_apply").handler(
+                speakerless,
+                _tool("object_apply").input_model.model_validate(
+                    {"manifest": _manifest(member_id, True)}
+                ),
+            )
+        with pytest.raises(SpeakerRequired, match="requested_by"):
+            await _add(speakerless, email="newhire@example.com")
+    assert await _member_row(workspace_id, "newhire@example.com") is None
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

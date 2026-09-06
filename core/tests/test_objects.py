@@ -494,7 +494,7 @@ async def test_widget_delete_gates_on_the_owner(db: None) -> None:
         args = delete_tool.input_model.model_validate(
             {"kind": sample.WIDGET_KIND, "name": "guarded"}
         )
-        with pytest.raises(AdminRequired):
+        with pytest.raises(SpeakerRequired, match="requested_by"):
             await delete_tool.handler(_tool_context(workspace_id), args)
         with pytest.raises(AdminRequired):
             await delete_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)

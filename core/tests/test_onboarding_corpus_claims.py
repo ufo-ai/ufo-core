@@ -337,7 +337,10 @@ CLAIMS = (
         corpus="references/capabilities.md",
         phrase="never a subagent",
         source=MEMBERS,
-        pattern=r"if not await ctx\.agent_is_main\(\) or ctx\.speaker_member_id is None",
+        pattern=(
+            r"ctx\.require_speaker\(MEMBER_ADMIN_GATE\)\n"
+            r"\s+if not await ctx\.agent_is_main\(\):"
+        ),
     ),
     Claim(
         claim="an admin can add a teammate before that teammate ever signs in",
