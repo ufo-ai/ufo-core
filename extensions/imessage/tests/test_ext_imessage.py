@@ -911,7 +911,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     assert await _claimed_phones() == [(phone, member_id, "opt-in")]
     assert conversation.member_id == member_id
     assert conversation.queue_key == queue_key(f"iMessage;-;{phone}", direct=True)
-    assert conversation.surface_label == "Direct message"
+    assert conversation.surface_label == "DM"
     assert len(turns) == 1
     assert member_message_text(turns[0].inbound) == "Please summarize this."
     assert turns[0].speaker_member_id == member_id

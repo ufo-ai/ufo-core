@@ -3476,7 +3476,11 @@ fn the_conversation_page_joins_a_thread_by_id_and_posts_into_it() {
     let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
     let page = wait_for(&session, "Who owns the pager");
     assert!(page.contains("UFO Chats"), "{page}");
-    assert!(page.contains("Slack #eng"), "{page}");
+    assert!(page.contains("#eng"), "{page}");
+    assert!(
+        !page.contains("Slack #eng"),
+        "a room stands by its own name: {page}"
+    );
     assert!(page.contains("Nate Ford"), "{page}");
     assert!(
         page.contains("New chat \u{276f}"),

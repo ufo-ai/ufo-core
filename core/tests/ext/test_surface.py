@@ -3182,7 +3182,7 @@ async def test_a_search_never_answers_for_a_conversation_the_member_may_not_read
         queue_key="theirs",
         audience=str(conversation_audience(owner_id)),
         member_id=owner_id,
-        surface_label="Direct message",
+        surface_label="DM",
     )
     await _seed_conversation_turn(
         workspace_id,
@@ -3201,7 +3201,7 @@ async def test_a_search_never_answers_for_a_conversation_the_member_may_not_read
         agent_id, admin_id, admin=True, limit=50, search="owner@example.com"
     )
     by_origin = await context.list_agent_conversations(
-        agent_id, admin_id, admin=True, limit=50, search="Direct message"
+        agent_id, admin_id, admin=True, limit=50, search="DM"
     )
 
     assert by_words == ()

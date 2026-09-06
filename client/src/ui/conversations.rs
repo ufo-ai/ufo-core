@@ -482,9 +482,9 @@ fn is_current(row: &ConversationRow, target: &Target) -> bool {
     }
 }
 
-/// One row as the list states it: where the conversation lives, how long since it moved, what it
-/// is called, who opened it when that was somebody else, and which agent when it is not the main
-/// one.
+/// One row as the list states it: where the conversation came in — the room's own name when the
+/// surface gave it one, else the surface — how long since it moved, what it is called, who opened
+/// it when that was somebody else, and which agent when it is not the main one.
 pub fn row_text(row: &ConversationRow, now_seconds: u64) -> String {
     let origin = wrap::clip(&origin(row), ORIGIN_WIDTH).to_string();
     let age = age(row.last_at as u64, now_seconds);
@@ -503,11 +503,11 @@ pub fn row_text(row: &ConversationRow, now_seconds: u64) -> String {
     text
 }
 
+/// Where a conversation came in: the name the surface gave it (`#ops`), else the surface itself.
 fn origin(row: &ConversationRow) -> String {
-    let word = surface_word(&row.surface);
     match &row.surface_label {
-        Some(label) => format!("{word} {label}"),
-        None => word,
+        Some(label) => label.clone(),
+        None => surface_word(&row.surface),
     }
 }
 
@@ -625,7 +625,7 @@ mod tests {
         slack.last_at = (now - 3 * DAY) as f64;
         assert_eq!(
             row_text(&slack, now),
-            "Slack #eng         3d  Who owns the pager  Nate Ford"
+            "#eng               3d  Who owns the pager  Nate Ford"
         );
         let web = row("c2", "Deploy plan", "web", "notes");
         assert_eq!(

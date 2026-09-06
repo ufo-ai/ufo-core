@@ -304,7 +304,7 @@ class ImessageSurface:
         conversation_id = await ctx.conversation_for(
             queue_key(message.conversation_id, direct=message.direct),
             audience,
-            label="Direct message" if message.direct else "Group chat",
+            label="DM" if message.direct else "Group chat",
         )
         attached = (
             await self._downloaded_files(ctx, provider, conversation_id, message.attachments)

@@ -718,7 +718,7 @@ test("a row from another surface draws its glyph and states the surface's own na
   const slack = {
     ...CHAT_ROW,
     surface: "slack",
-    surface_label: "Direct message",
+    surface_label: "DM",
     title: "Slack question",
   };
   holdRailShown(EVERY_SURFACE);
@@ -729,7 +729,7 @@ test("a row from another surface draws its glyph and states the surface's own na
   expect(railRow.textContent).toBe("Slack question");
   expect(railRow.querySelector(".tabler-icon-brand-slack")).not.toBeNull();
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Direct message");
+  expect((await screen.findByRole("tooltip")).textContent).toBe("DM");
 });
 
 test("a cli row draws the terminal glyph and reads as Terminal, never as the surface's own name", async () => {
@@ -859,13 +859,13 @@ test("an origin rail row opens a live comment chat", async () => {
   const slack = {
     ...CHAT_ROW,
     surface: "slack",
-    surface_label: "Direct message",
+    surface_label: "DM",
     title: "Slack question",
   };
   const linked = {
     id: CONVO_ID,
     surface: "slack",
-    surface_label: "Direct message",
+    surface_label: "DM",
     audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
     member_email: MEMBER.email,
     description: "",

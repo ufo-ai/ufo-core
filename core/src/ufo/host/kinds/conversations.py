@@ -375,8 +375,8 @@ CONVERSATION_OBJECT = ObjectKind(
         'lists such rows only under the explicit filter {"private": true}; a channel shared with '
         "another organization never widens. "
         "Filter or order a listing on `surface` and on `surface_label`, the surface's own name for "
-        "where the conversation runs — a Slack channel as `#general`, a Slack DM as `Direct "
-        "message`. A conversation whose surface names no origin carries no `surface_label`. "
+        "where the conversation runs — a Slack channel as `#general`, a Slack DM as `DM`. A "
+        "conversation whose surface names no origin carries no `surface_label`. "
         "A member listing also carries `title`, `mine`, `speaker`, and `last_at` — order by "
         "`last_at` desc for the newest activity first. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
