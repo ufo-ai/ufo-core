@@ -1084,8 +1084,10 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
         args = apply_tool.input_model.model_validate({"manifest": manifest})
         with pytest.raises(AdminRequired):
             await apply_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)
-        with pytest.raises(SpeakerRequired):
+        with pytest.raises(SpeakerRequired) as speakerless_apply:
             await apply_tool.handler(_tool_context(workspace_id), args)
+        assert AGENT_EDIT_GATE in str(speakerless_apply.value)
+        assert "requested_by" in str(speakerless_apply.value)
 
         prompt_write = apply_tool.input_model.model_validate(
             {
@@ -1525,9 +1527,10 @@ async def test_agent_kind_creates_owned_by_any_speaking_member_and_refuses_delet
             )
         assert str(promptless.value) == AGENT_PROMPT_REQUIRED
         speakerless_ctx = _tool_context(workspace_id, speaker_member_id=None, agent_id=agent_id)
-        with pytest.raises(ValueError) as speakerless_refusal:
+        with pytest.raises(SpeakerRequired) as speakerless_refusal:
             await apply_tool.handler(speakerless_ctx, create_input("second-agent", full))
-        assert str(speakerless_refusal.value) == AGENT_CREATE_GATE
+        assert AGENT_CREATE_GATE in str(speakerless_refusal.value)
+        assert "requested_by" in str(speakerless_refusal.value)
         created = json.loads(
             await _text(
                 tools,

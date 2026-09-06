@@ -455,18 +455,15 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         self._require_current_generation(name, owner, expected_generation, "reading")
         if owner is None:
             return None
-        if not self._visible(
-            owner, authority_member_id(ctx.authority), await ctx.speaker_is_admin()
-        ):
+        is_admin = await ctx.speaker_is_admin()
+        if not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         status = await self._status(ctx, name, owner)
         current = await self._owner(ctx, name)
         self._require_current_generation(name, current, expected_generation, "reading")
         if current is None:
             return None
-        if not self._visible(
-            current, authority_member_id(ctx.authority), await ctx.speaker_is_admin()
-        ):
+        if not self._visible(current, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         return status
 
@@ -488,8 +485,8 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         if not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         self._require_current_generation(name, owner, expected_generation, "editing")
-        if self.mutate_requires_speaker and ctx.speaker_member_id is None:
-            raise SpeakerRequired(self.mutate_gate)
+        if self.mutate_requires_speaker:
+            ctx.require_speaker(self.mutate_gate)
         if not self._owned(owner, authority_member_id(ctx.authority)) and (
             not is_admin
             or old is None
@@ -512,8 +509,8 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         is_admin = await ctx.speaker_is_admin()
         if not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
-        if self.delete_requires_speaker and ctx.speaker_member_id is None:
-            raise SpeakerRequired(self.delete_gate)
+        if self.delete_requires_speaker:
+            ctx.require_speaker(self.delete_gate)
         if not self._owned(owner, authority_member_id(ctx.authority)) and not is_admin:
             raise AdminRequired(self.delete_gate)
         await self._delete_owned(ctx, name, owner)

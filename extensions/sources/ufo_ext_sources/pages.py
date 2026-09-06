@@ -227,7 +227,7 @@ class PageObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        if not await ctx.speaking_admin(PAGE_FORGET_GATE):
+        if not await ctx.require_speaking_admin(PAGE_FORGET_GATE):
             raise AdminRequired(PAGE_FORGET_GATE)
         page = await self._find(ctx, name)
         if page is None:

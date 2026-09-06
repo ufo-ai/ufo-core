@@ -651,7 +651,7 @@ async def rebuild_page_facts_handler(ctx: ToolContext, args: RebuildPageFactsInp
     the beginning."""
     if ctx.ext is None:
         raise RuntimeError("rebuild_page_facts dispatched without its ExtensionContext")
-    if not await ctx.speaking_admin(REBUILD_ADMIN_ONLY):
+    if not await ctx.require_speaking_admin(REBUILD_ADMIN_ONLY):
         raise ValueError(REBUILD_ADMIN_ONLY)
     await ctx.ext.store.delete(DERIVE_CURSOR_KEY)
     return ToolResult(content=(TextContent(text=REBUILD_QUEUED),))

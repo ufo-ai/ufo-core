@@ -53,8 +53,9 @@ from ufo.runtime.billing.balance import (
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.manifest import JobFault
 from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.objects import AdminRequired
 from ufo.runtime.surfaces.admission import Admission
-from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
@@ -919,9 +920,9 @@ async def test_billing_requires_a_speaking_admin(
     providers = _Providers()
     monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
 
-    with pytest.raises(ValueError, match="only a workspace admin"):
+    with pytest.raises(AdminRequired):
         await _manage_billing(workspace_id, tmp_path, mate_id, mate_id, "portal")
-    with pytest.raises(ValueError, match="speaking member"):
+    with pytest.raises(SpeakerRequired, match="requested_by"):
         await _manage_billing(workspace_id, tmp_path, None, None, "portal")
 
     assert providers.requests == []

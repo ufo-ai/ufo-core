@@ -153,7 +153,7 @@ class CredentialObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        if not await ctx.speaking_admin(UNSET_GATE):
+        if not await ctx.require_speaking_admin(UNSET_GATE):
             raise AdminRequired(UNSET_GATE)
         slot = self._named()[name]
         async with workspace_tx() as connection:

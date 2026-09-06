@@ -76,7 +76,7 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer
-from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.context import SpeakerRequired, ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -251,7 +251,7 @@ def _message(
 
 
 async def _tool_context(
-    workspace_id: UUID, member_id: UUID, root: Path, public_base_url: str | None = None
+    workspace_id: UUID, member_id: UUID | None, root: Path, public_base_url: str | None = None
 ) -> ToolContext:
     """A tool call inside a real turn: the connect tool shares the opt-in QR as an artifact of the
     turn it runs in, which is a row like any other."""
@@ -446,6 +446,20 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None, tmp_pat
     assert before == "project:old"
     assert json.loads(connected.content[0].text)["state"] == "pending"
     assert after == "project:new"
+
+
+async def test_connect_asks_for_the_member_before_it_asks_for_an_admin(
+    db: None, tmp_path: Path
+) -> None:
+    """A call nobody is bound to reads the repair it can make — name the member — instead of a
+    provider refusal it cannot act on."""
+    workspace_id, _admin_id = await _seed()
+    speakerless = await _tool_context(workspace_id, None, tmp_path)
+    with ws(workspace_id), pytest.raises(SpeakerRequired, match="requested_by"):
+        await ImessageConnect(provider=lambda _base: RecordingProvider()).run(
+            speakerless,
+            ImessageConnectInput(phone_number="+14155550123"),
+        )
 
 
 def test_spectrum_configured_needs_both_halves_of_the_project_pair(

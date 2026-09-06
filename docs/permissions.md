@@ -95,6 +95,12 @@ that disclose or revoke access declare speaker-required mutation on the shared o
 (`core/src/ufo/runtime/objects.py`), and `speaker_is_admin` is false whenever `speaker_member_id` is None
 (`core/src/ufo/runtime/tools/context.py`), so background work can never exercise admin authority either.
 
+A gate asks one of two helpers on `ToolContext`, never its own null test: `require_speaker(gate)`
+returns the bound member or raises `SpeakerRequired` naming `requested_by`, and
+`require_speaking_admin(gate)` asks that question first and then answers whether the speaker is an
+admin, so each gate raises its own admin refusal (`AdminRequired`) on a False. A speakerless call
+therefore reads the repair it can make, instead of an admin refusal it cannot.
+
 ## Tenancy
 
 `with ws(workspace_id)` binds a contextvar every scoped capability reads; `with agent(agent_id)`

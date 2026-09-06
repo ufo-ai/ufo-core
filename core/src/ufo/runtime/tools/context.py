@@ -344,6 +344,8 @@ ADMIN_GATE_NEEDS_A_SPEAKER = (
     "then answers to its own gate: {gate}"
 )
 
+CREDENTIAL_AUTHORIZATION_GATE = "a workspace admin authorizes a credential slot"
+
 CALL_NEEDS_A_SPEAKER = (
     "this call names no member, so name the member who is asking with `requested_by`"
 )
@@ -769,7 +771,7 @@ class ToolContext:
             )
         return self.speaker_member_id
 
-    async def speaking_admin(self, gate: str) -> bool:
+    async def require_speaking_admin(self, gate: str) -> bool:
         """The same answer, with the speaker question asked first. `speaker_is_admin` answers False
         for a call nobody is bound to, so a gate that reads it alone tells a call that merely
         omitted `requested_by` that only an admin may act — a refusal naming a repair the model
@@ -817,15 +819,14 @@ class ToolContext:
         return requests.open_authorization(sealed, self.turn.workspace_id, member_id, slot)
 
     async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
-        if self.speaker_member_id is None:
-            raise SpeakerRequired("credential authorization requires a speaking member")
+        speaker = self.require_speaker(CREDENTIAL_AUTHORIZATION_GATE)
         if self.ext is None or slot not in self.ext.credentials.declared:
             raise ValueError(f"this extension does not declare credential slot {slot!r}")
         if self.requestable_credentials is None:
             raise ValueError("no credential key is configured — this deploy cannot store secrets")
         if not await self.speaker_is_admin():
             raise ValueError("only a workspace admin can authorize credential slots")
-        return self.requestable_credentials, self.speaker_member_id
+        return self.requestable_credentials, speaker
 
     async def connector_account(self, provider: str, account_id: str | None = None) -> str:
         """The broker's connected-account id a connector tool passes to the broker's server-side

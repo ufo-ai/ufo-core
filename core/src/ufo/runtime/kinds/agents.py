@@ -38,7 +38,7 @@ from ufo.runtime.objects import (
     UnknownObject,
     VerbNotSupported,
 )
-from ufo.runtime.tools.context import SpeakerRequired, TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.runtime.turns.contracts import check_declared_schema
 from ufo.runtime.workspace import ws_current
@@ -410,8 +410,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
         configuration, owned by the member who asked for it. The (workspace, name) unique
         constraint arbitrates a concurrent create of the same name; the loser reads back as a name
         refusal, not a second row."""
-        if ctx.speaker_member_id is None:
-            raise SpeakerRequired(AGENT_CREATE_GATE)
+        speaker = ctx.require_speaker(AGENT_CREATE_GATE)
         if spec.prompt is None or not spec.prompt.strip():
             raise ValueError(AGENT_PROMPT_REQUIRED)
         _known_model(ctx, spec.model, spec.reasoning)
@@ -445,7 +444,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                         icon=spec.icon if spec.icon is not None else auto_agent_icon(name, taken),
                         input_schema=spec.input_schema,
                         output_schema=spec.output_schema,
-                        owner_member_id=ctx.speaker_member_id,
+                        owner_member_id=speaker,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -557,8 +556,7 @@ class RestoreApplication:
         if ctx.target is None or ctx.target.name is None:
             raise RuntimeError("restore_application dispatched without its archived agent target")
         archived_name = ctx.target.name
-        if ctx.speaker_member_id is None:
-            raise SpeakerRequired(AGENT_RESTORE_GATE)
+        speaker = ctx.require_speaker(AGENT_RESTORE_GATE)
         validate_object_name(args.new_name)
         try:
             archived_id = UUID(archived_name.removeprefix(ARCHIVED_AGENT_NAME_PREFIX))
@@ -579,7 +577,7 @@ class RestoreApplication:
             ).one_or_none()
         if row is None or (row.archived_at is None and row.name != args.new_name):
             raise UnknownObject(f"no archived app named {archived_name!r}")
-        owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
+        owned = row.owner_member_id is not None and speaker == row.owner_member_id
         if not owned and not await ctx.speaker_is_admin():
             raise UnknownObject(f"no archived app named {archived_name!r}")
         result = ToolResult(

@@ -446,7 +446,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
         if owner is None or not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
         owned = self._owned(owner, authority_member_id(ctx.authority))
-        if not owned and not await ctx.speaking_admin(RESYNC_GATE):
+        if not owned and not await ctx.require_speaking_admin(RESYNC_GATE):
             raise AdminRequired(RESYNC_GATE)
         binding = await _binding_named(ctx.ext, name)
         if binding is None:

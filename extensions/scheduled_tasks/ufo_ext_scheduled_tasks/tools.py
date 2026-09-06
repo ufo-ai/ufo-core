@@ -405,10 +405,11 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             raise ValueError(f"scheduled task {name!r} changed while editing")
         schedule = validated_schedule or existing.schedule
         if existing.created_by_member_id is None:
-            if not await ctx.speaking_admin(SCHEDULE_GATE):
+            if not await ctx.require_speaking_admin(SCHEDULE_GATE):
                 raise AdminRequired(SCHEDULE_GATE)
-        elif existing.created_by_member_id != acting_member and not await ctx.speaking_admin(
-            SCHEDULE_GATE
+        elif (
+            existing.created_by_member_id != acting_member
+            and not await ctx.require_speaking_admin(SCHEDULE_GATE)
         ):
             raise AdminRequired(SCHEDULE_GATE)
         next_run_at = now if spec.run_now else next_fire(schedule, now)

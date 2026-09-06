@@ -251,7 +251,7 @@ async def _derive_manifest_identity(
             missing=missing,
         )
     bot_token = await ctx.ext.credentials.get(SLACK_BOT_TOKEN_SLOT)
-    if not await ctx.speaking_admin(CONNECT_ADMIN_ONLY):
+    if not await ctx.require_speaking_admin(CONNECT_ADMIN_ONLY):
         raise ValueError(CONNECT_ADMIN_ONLY)
     try:
         return await SlackIdentityResolver(ctx.blob, bot_token).resolve()

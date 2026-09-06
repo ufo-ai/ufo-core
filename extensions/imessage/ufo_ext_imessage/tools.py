@@ -53,6 +53,7 @@ def opt_in_qr(assigned_phone_number: str, opt_in_code: str) -> bytes:
 
 
 IMESSAGE_CONNECT_ACTION = "imessage_connect"
+IMESSAGE_CONNECT_GATE = "a member connects their own phone to iMessage"
 
 
 def _display_phone(phone_number: str) -> str:
@@ -113,10 +114,7 @@ class ImessageConnect:
     async def run(self, ctx: ToolContext, args: ImessageConnectInput) -> ToolResult:
         """Bind this deploy's provider to the workspace and stage one member's phone claim."""
         assert ctx.ext is not None
-        if ctx.speaker_member_id is None:
-            return _result(
-                "not_connected", "A signed-in workspace member must request this connection."
-            )
+        speaker = ctx.require_speaker(IMESSAGE_CONNECT_GATE)
         try:
             provider = self.provider(ctx.ext.public_base_url)
         except ProviderNotConfigured:
@@ -131,7 +129,7 @@ class ImessageConnect:
         claimed = await ctx.ext.installations.reserve_address(
             SURFACE_IMESSAGE,
             args.phone_number,
-            ctx.speaker_member_id,
+            speaker,
             datetime.now(UTC) + PHONE_CLAIM_TTL,
         )
         if claimed is AddressClaimState.TAKEN:
@@ -146,7 +144,7 @@ class ImessageConnect:
                 f"That phone is connected. Text {_display_phone(assigned_phone_number)} from it.",
                 assigned_phone_number=assigned_phone_number,
             )
-        key = claim_key(ctx.speaker_member_id, args.phone_number)
+        key = claim_key(speaker, args.phone_number)
         stored = await ctx.ext.store.get(key)
         claim = read_claim(stored)
         if claim is None:

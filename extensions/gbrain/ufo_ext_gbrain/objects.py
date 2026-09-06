@@ -285,7 +285,7 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
         if owner is None or not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {GBRAIN_KIND} object named {name!r}")
         owned = self._owned(owner, authority_member_id(ctx.authority))
-        if not owned and not await ctx.speaking_admin(RESYNC_GATE):
+        if not owned and not await ctx.require_speaking_admin(RESYNC_GATE):
             raise AdminRequired(RESYNC_GATE)
         registered = await _registered_named(ctx.ext, name)
         if registered is None:

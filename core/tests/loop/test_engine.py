@@ -169,7 +169,13 @@ from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.memory import MemoryMatch, MemorySearch
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.object_scope import ObjectActionTarget
-from ufo.runtime.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
+from ufo.runtime.objects import (
+    AdminRequired,
+    BoundKind,
+    ObjectKind,
+    ObjectVerbs,
+    object_registry,
+)
 from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
 from ufo.runtime.queue import (
     _agent_actions,
@@ -4718,11 +4724,11 @@ async def test_request_credentials_gates_on_admin_key_and_declared_slots(
             requestable_credentials=requestable,
         )
 
-    with pytest.raises(ValueError, match="speaking member"):
+    with pytest.raises(SpeakerRequired, match="requested_by"):
         await request_credentials_handler(context(None, requests), args)
     with pytest.raises(ValueError, match="no credential key"):
         await request_credentials_handler(context(owner, None), args)
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(AdminRequired):
         await request_credentials_handler(context(joiner, requests), args)
     undeclared = RequestCredentialsInput.model_validate(
         {

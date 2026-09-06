@@ -79,13 +79,13 @@ from ufo.runtime.media.preview_renderer import (
     ARTIFACT_PREVIEW_MEDIA_TYPE,
     ARTIFACT_PREVIEW_SUFFIXES,
 )
+from ufo.runtime.objects import AdminRequired
 from ufo.runtime.skills.runtime import load_skills, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
     ImageContent,
     SpawnModelRejected,
     SpawnPayloadRejected,
-    SpeakerRequired,
     TextContent,
     ToolContext,
     ToolResult,
@@ -1100,6 +1100,9 @@ async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResu
     return ToolResult(content=(TextContent(text=text),))
 
 
+CONNECT_GRANT_GATE = "an account is connected for the member the grant belongs to"
+CREDENTIAL_FILL_GATE = "a workspace admin fills a workspace-global credential slot"
+CREDENTIAL_FILL_ADMIN_ONLY = "only a workspace admin can fill credential slots"
 CONNECT_ACCOUNT_DIRECTIVE = (
     "Tell the member to use the private connection control in your reply, then end your turn — "
     "the authorization URL never appears in this conversation."
@@ -1135,13 +1138,12 @@ async def _grantee_agent_id(ctx: ToolContext, name: str) -> UUID | None:
 
 async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult:
     """Leave a provider-validated private OAuth handoff for the speaking member."""
-    if ctx.speaker_member_id is None:
-        raise SpeakerRequired("connect requires a speaking member to gate the grant")
+    speaker = ctx.require_speaker(CONNECT_GRANT_GATE)
     grantee = await _grantee_agent_id(ctx, args.agent.strip())
     await installed_connect_flow().validate_provider(args.provider)
     request = ConnectRequest(
         provider=args.provider,
-        requester_member_id=ctx.speaker_member_id,
+        requester_member_id=speaker,
         shared=args.shared,
         grantee_agent_id=grantee,
     )
@@ -1166,15 +1168,14 @@ async def request_credentials_handler(
     fulfills against the seal. Ends the turn like ask_user — the member returns once entered. Slots
     are workspace-global, so only an admin may fill them; a non-admin speaker, an undeclared slot,
     or a deploy without a credential key raises, surfacing as a recoverable tool error."""
-    if ctx.speaker_member_id is None:
-        raise SpeakerRequired("collecting credentials requires a speaking member")
+    speaker = ctx.require_speaker(CREDENTIAL_FILL_GATE)
     if ctx.requestable_credentials is None:
         raise ValueError("no credential key is configured — this deploy cannot store secrets")
-    if not await ctx.speaker_is_admin():
-        raise ValueError("only a workspace admin can fill credential slots")
+    if not await ctx.require_speaking_admin(CREDENTIAL_FILL_GATE):
+        raise AdminRequired(CREDENTIAL_FILL_ADMIN_ONLY)
     sealed = ctx.requestable_credentials.seal(
         ctx.turn.workspace_id,
-        ctx.speaker_member_id,
+        speaker,
         tuple(prompt.slot for prompt in args.prompts),
     )
     request = CredentialRequest(reason=args.reason, prompts=args.prompts, sealed=sealed)

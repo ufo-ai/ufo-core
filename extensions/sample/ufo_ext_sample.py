@@ -522,7 +522,7 @@ class WidgetStore:
         value = await ext.store.get(WIDGET_KEY_PREFIX + name)
         if value is not None:
             self._require_current(name, StoredWidget.model_validate(value), expected_generation)
-        if not await ctx.speaking_admin(WIDGET_DELETE_GATE):
+        if not await ctx.require_speaking_admin(WIDGET_DELETE_GATE):
             raise AdminRequired(WIDGET_DELETE_GATE)
         await ext.store.delete(WIDGET_KEY_PREFIX + name)
 

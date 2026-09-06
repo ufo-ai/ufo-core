@@ -1295,8 +1295,10 @@ async def test_connect_handoff_refuses_a_request_whose_agent_is_gone(db: None) -
 
 
 async def test_connect_account_without_a_speaker_is_refused() -> None:
+    """The grant belongs to the member who asked, so the tool asks the shared helper for one. The
+    class is `SpeakerRequired` and the refusal names `requested_by`, which is what a retry sets."""
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), None)
-    with pytest.raises(ValueError, match="speaking member"):
+    with pytest.raises(SpeakerRequired, match="requested_by"):
         await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
 
 

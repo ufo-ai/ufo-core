@@ -75,7 +75,7 @@ from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.jobs import JobFault, JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection, RouteSpec
 from ufo.sdk.o11y import log, warn
-from ufo.sdk.objects import WORKSPACE_KIND
+from ufo.sdk.objects import WORKSPACE_KIND, AdminRequired
 from ufo.sdk.seats import (
     member_by_email,
     member_is_admin,
@@ -83,7 +83,6 @@ from ufo.sdk.seats import (
 from ufo.sdk.tools import (
     ActionPresentation,
     ObjectBinding,
-    SpeakerRequired,
     TextContent,
     ToolContext,
     ToolDef,
@@ -133,6 +132,8 @@ INGEST_TIMEOUT_SECONDS = 30
 BACKFILL_WINDOW_DAYS = 7
 FLOOR_KEY = "ship_floor"
 
+BILLING_GATE = "a workspace admin manages billing"
+BILLING_ADMIN_ONLY = "only a workspace admin can manage billing"
 BILLING_KEY = "billing"
 BILLING_TIMEOUT_SECONDS = 30
 MANAGE_BILLING_TOOL = "manage_billing"
@@ -421,10 +422,8 @@ async def _billing_autopay(
 
 
 async def _admin_billing(ctx: ToolContext) -> ExtensionContext:
-    if ctx.speaker_member_id is None:
-        raise SpeakerRequired("billing requires a speaking member")
-    if not await ctx.speaker_is_admin():
-        raise ValueError("only a workspace admin can manage billing")
+    if not await ctx.require_speaking_admin(BILLING_GATE):
+        raise AdminRequired(BILLING_ADMIN_ONLY)
     assert ctx.ext is not None
     return ctx.ext
 
