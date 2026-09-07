@@ -222,6 +222,12 @@ jobs:
       TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
       EVAL_MODEL: ${{ matrix.model }}
       EVAL_REASONING: ${{ matrix.reasoning }}
+      # The two ends of the preview wire, read by the shards the matrix marks: serve refuses to
+      # boot when its config names a preview service and this token is unset, and `ufo-egress`
+      # relays the synthetic preview host to this address. The token is the local service's own, so
+      # it is generated here rather than held as a secret — nothing outside this job reaches it.
+      UFO_PREVIEW_TOKEN: nightly-preview-token
+      UFO_EGRESS_PREVIEW_DAEMON: 127.0.0.1:8930
     steps:
       - uses: actions/checkout@v4
 
@@ -263,6 +269,24 @@ jobs:
           cat "$RUNNER_TEMP/shard/ufo.toml" "$RUNNER_TEMP/shard/matrix.toml"
         env:
           MATRIX_LABEL: ${{ matrix.label }}
+
+      # Only the shards the matrix marks: every paginated document read and every rasterized
+      # attachment routes through this service, and a shard without it has its samples excluded
+      # rather than failed, so the suite reports 0 of 0 and the sweep reads as if it measured
+      # something. The image is the deploy's own, built here so no registry pull is needed.
+      - name: Start the preview service
+        if: matrix.preview
+        run: |
+          docker build -t ufo-preview-eval servers/preview
+          docker run --rm -d --name preview-eval -p 127.0.0.1:8930:8930 \
+            -e UFO_PREVIEW_LISTEN=0.0.0.0:8930 \
+            -e UFO_PREVIEW_TOKEN="$UFO_PREVIEW_TOKEN" \
+            -e UFO_PREVIEW_ALLOW_LOCAL=1 ufo-preview-eval
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8930/_health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8930/_health
 
       # Deadlined on the step, not the job: a job GitHub cancels at its own ceiling takes the
       # upload below with it, while a step that ends leaves the records this shard did produce.

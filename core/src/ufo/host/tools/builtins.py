@@ -403,6 +403,13 @@ def _require_str(value: object, field: str) -> str:
     return value
 
 
+DOCUMENT_KINDS = ("pdf", "pptx", "docx", "xlsx")
+"""The kinds `read` sends to the render service, each answering with text and page images. The
+`read` description names every one of them, held there by
+`test_the_read_description_names_every_document_kind_it_reads`: a kind the handler dispatches and
+the description omits is a capability the model is told it does not have."""
+
+
 def _document_result(result: dict[str, object]) -> ToolResult:
     lines: list[str] = []
     text = result.get("text")
@@ -418,7 +425,7 @@ def _document_result(result: dict[str, object]) -> ToolResult:
         and returned > 0
     ):
         kind = result.get("type")
-        if kind not in ("pdf", "pptx", "docx", "xlsx"):
+        if kind not in DOCUMENT_KINDS:
             raise RuntimeError("ufo fs read returned an unknown document type")
         unit = "slides" if kind == "pptx" else "pages"
         footer = f"[{kind} {unit} {start}-{start + returned - 1} of {total}]"
@@ -466,7 +473,7 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
                 ),
             )
         )
-    if result.get("type") in ("pdf", "pptx", "docx", "xlsx"):
+    if result.get("type") in DOCUMENT_KINDS:
         return _document_result(result)
     if result.get("is_empty"):
         return ToolResult(content=(TextContent(text="(file is empty)"),))
@@ -1197,9 +1204,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description=(
             "Reads a file by absolute path. Returns up to 2000 lines by default; use "
             "offset/limit for large files. Lines longer than 2000 chars are truncated. For "
-            "images: returns visual content for analysis. For PDFs: extracts text and renders "
-            "page images (default 20 pages). For PPTX: renders slides as images (default 20 "
-            "slides). Cannot read binary files."
+            "images: returns visual content for analysis. For PDF, DOCX and XLSX: extracts text "
+            "and renders page images (default 20 pages). For PPTX: renders slides as images "
+            "(default 20 slides)."
         ),
         input_model=ReadInput,
         handler=read_handler,

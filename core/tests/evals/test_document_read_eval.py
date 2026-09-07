@@ -1,4 +1,4 @@
-"""The paginated document cases grade the page the agent asked for, not the render behind it."""
+"""The document cases grade the page the read tool returned, not the render behind it."""
 
 from pathlib import Path
 
@@ -46,28 +46,50 @@ async def test_the_docx_case_passes_when_the_paginated_read_answers() -> None:
     assert verdict.passed
 
 
-async def test_the_docx_case_fails_when_no_page_was_asked_for() -> None:
+async def test_the_docx_case_passes_when_one_plain_read_returns_the_whole_document() -> None:
+    """These fixtures hold two pages and the read window defaults to twenty, so a read carrying no
+    offset comes back with page two in it. Demanding `offset=2` failed the shortest trajectory that
+    answers the question — one call — and no case's words ask the model to page."""
+    verdict = await DOCX_CASE.grader(
+        _output(
+            ToolInvocation(
+                "read",
+                {"file_path": DOCX_PATH},
+                f"page one\n\n{PAGE_TWO}\n\n[docx pages 1-2 of 2]",
+                True,
+            )
+        )
+    )
+
+    assert verdict.passed
+
+
+async def test_the_docx_case_fails_when_the_page_came_from_a_shell_instead_of_read() -> None:
+    """The answer grader cannot tell an unzip from a read, so the trajectory grader holds it: the
+    capability under test is `read` on a docx, not the words appearing somewhere in the turn."""
     verdict = await DOCX_CASE.grader(
         _output(ToolInvocation("bash", {"command": "unzip -p fixture.docx"}, PAGE_TWO, True))
     )
 
     assert not verdict.passed
-    assert f"did not read {DOCX_PATH} from page 2" in verdict.reason
+    assert f"did not read {DOCX_PATH}" in verdict.reason
 
 
-async def test_the_docx_case_fails_when_another_page_was_asked_for() -> None:
+async def test_the_docx_case_fails_when_a_read_succeeds_without_the_page() -> None:
+    """A read that came back without the heading did not carry the page, whatever else it did."""
     verdict = await DOCX_CASE.grader(
         _output(
-            ToolInvocation("read", {"file_path": DOCX_PATH, "offset": 1}, TUNNEL_502, True, True)
+            ToolInvocation("read", {"file_path": DOCX_PATH, "offset": 1}, "page one only", True),
+            ToolInvocation("bash", {"command": "unzip -p fixture.docx"}, PAGE_TWO, True),
         )
     )
 
     assert not verdict.passed
     assert not verdict.excluded
-    assert f"did not read {DOCX_PATH} from page 2" in verdict.reason
+    assert f"read {DOCX_PATH} without returning" in verdict.reason
 
 
-async def test_the_docx_case_fails_rather_than_excludes_when_no_page_was_asked_for() -> None:
+async def test_the_docx_case_fails_rather_than_excludes_when_the_page_came_from_a_shell() -> None:
     """Only the environment excludes. A model that never asked for the page is graded on it."""
     verdict = await DOCX_CASE.grader(
         _output(ToolInvocation("bash", {"command": "unzip -p fixture.docx"}, PAGE_TWO, True))

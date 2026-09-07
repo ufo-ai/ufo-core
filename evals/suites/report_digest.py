@@ -7,17 +7,19 @@ and date the reader is already shown."""
 import re
 
 from evals.harness.capability import CapabilityCase
-from evals.harness.scorers import Predicate, combine, predicate_scorer, skill_scorer
+from evals.harness.scorers import Predicate, predicate_scorer
 
-MAX_POINTS = 3
-MAX_TITLE_WORDS = 12
-MAX_SUMMARY_WORDS = 18
+MAX_POINTS = 2
+MAX_TITLE_WORDS = 10
+MAX_SUMMARY_WORDS = 15
 MAX_POINT_WORDS = 10
 
 REPLY_SHAPE = (
     "Reply with exactly these lines and nothing else: one 'Title: <line>', one "
     "'Summary: <line>', and a 'Point: <line> | Actor: <person>' line for each point your entry "
-    "carries, leaving the actor empty when the report names no person for that line."
+    "carries, leaving the actor empty when the report names no person for that line. The title "
+    f"takes {MAX_TITLE_WORDS} words or fewer, the summary {MAX_SUMMARY_WORDS} or fewer, and each "
+    f"point {MAX_POINT_WORDS} or fewer; the entry carries at most {MAX_POINTS} points."
 )
 POINT_LINE = re.compile(r"^\s*point:\s*(.*?)\s*(?:\|\s*actor:\s*(.*))?$", re.IGNORECASE)
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
@@ -107,21 +109,18 @@ CASES = (
         "Write the digest entry for this report. It is already published and pasted below — do "
         "not open it again, and do not write a report of your own. I run the platform team.\n\n"
         f"{WEEKLY_REPORT}\n\n{REPLY_SHAPE}",
-        combine(
-            skill_scorer("report-digest", "research-report"),
-            predicate_scorer(
+        predicate_scorer(
+            (
+                *_bounds(WEEKLY_GENRE),
                 (
-                    *_bounds(WEEKLY_GENRE),
-                    (
-                        "every actor is a person the report attributed",
-                        lambda text: set(filter(None, _actors(text))) <= set(WEEKLY_PEOPLE),
-                    ),
-                    (
-                        "at least two of the attributed people are named",
-                        lambda text: sum(person in text for person in WEEKLY_PEOPLE) >= 2,
-                    ),
-                )
-            ),
+                    "every actor is a person the report attributed",
+                    lambda text: set(filter(None, _actors(text))) <= set(WEEKLY_PEOPLE),
+                ),
+                (
+                    "at least two of the attributed people are named",
+                    lambda text: sum(person in text for person in WEEKLY_PEOPLE) >= 2,
+                ),
+            )
         ),
         digest_tag="skill:report-digest-attributed-findings",
         rubric=(
@@ -138,14 +137,11 @@ CASES = (
         "Write the digest entry for this report. It is already published and pasted below — do "
         "not open it again, and do not write a report of your own. I own our pricing and "
         f"packaging.\n\n{MARKET_REPORT}\n\n{REPLY_SHAPE}",
-        combine(
-            skill_scorer("report-digest", "research-report"),
-            predicate_scorer(
-                (
-                    *_bounds(MARKET_GENRE),
-                    ("no point names an actor", lambda text: not any(_actors(text))),
-                )
-            ),
+        predicate_scorer(
+            (
+                *_bounds(MARKET_GENRE),
+                ("no point names an actor", lambda text: not any(_actors(text))),
+            )
         ),
         digest_tag="skill:report-digest-outside-companies",
         rubric=(

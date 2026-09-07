@@ -31,6 +31,7 @@ from ufo.harness.sandbox.session import (
 from ufo.host.ext.loader import skill_registry
 from ufo.host.tools.builtins import (
     BUILTIN_TOOLS,
+    DOCUMENT_KINDS,
     FILE_TOOL_RESULT_MAX_CHARS,
     READ_FIRST_HINT,
     REQUEST_CREDENTIALS_TOOL_DEF,
@@ -219,6 +220,16 @@ def _check_registry_get_returns_named_tool() -> None:
 
 def _check_builtin_tools_are_trusted_by_default() -> None:
     assert all(tool.untrusted is False for tool in BUILTIN_TOOLS)
+
+
+def test_the_read_description_names_every_document_kind_it_reads() -> None:
+    """`read` dispatches every DOCUMENT_KINDS entry to the render service, so a kind the
+    description leaves out is a capability the model is told it does not have — it reaches for
+    a shell instead and the read never happens."""
+    described = next(tool.description for tool in BUILTIN_TOOLS if tool.name == "read").lower()
+
+    for kind in DOCUMENT_KINDS:
+        assert kind in described, kind
 
 
 def _check_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round() -> None:

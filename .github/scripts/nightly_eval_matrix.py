@@ -29,6 +29,7 @@ from evals.stack import (
     APP_SUITES,
     CREATION_SUITES,
     DOCKER_BACKEND,
+    DOCUMENT_RENDER_SUITES,
     HOMEPAGE_SUITES,
 )
 from ufo.config import DEFAULT_AUTO_MODEL
@@ -44,6 +45,10 @@ CONCURRENCY = 4
 SHARD_WEIGHT = 45
 DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 PUBLIC_BASE_URL = "http://evals.invalid"
+PREVIEW_SERVICE = "127.0.0.1:8930"
+"""Where a preview-needing shard's proxy relays the synthetic preview host. The workflow starts the
+service on this port for exactly the shards the matrix marks, and serve refuses to boot with the
+key set and no `UFO_PREVIEW_TOKEN`, so a shard cannot run half-wired."""
 SMOKE_PROBE = "basics"
 SMOKE_SUITES = (
     SMOKE_PROBE,
@@ -231,6 +236,14 @@ def write(shard: Shard, directory: Path, model: str, reasoning: ReasoningEffort)
     reasoning_override = (
         None if reasoning == DEFAULT_REASONING_EFFORT or app_suite_shard else reasoning
     )
+    sandbox = {
+        **({"backend": DOCKER_BACKEND} if app_page_shard else {}),
+        **(
+            {"preview_service": PREVIEW_SERVICE}
+            if not DOCUMENT_RENDER_SUITES.isdisjoint(shard.suites)
+            else {}
+        ),
+    }
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "ufo.toml"
     config.write_text(
@@ -241,7 +254,7 @@ def write(shard: Shard, directory: Path, model: str, reasoning: ReasoningEffort)
                 "connect": {"public_base_url": PUBLIC_BASE_URL},
                 "models": {"auto_model": model},
                 "pack": {"name": shard.pack},
-                **({"sandbox": {"backend": DOCKER_BACKEND}} if app_page_shard else {}),
+                **({"sandbox": sandbox} if sandbox else {}),
                 **arm.knobs,
             }
         )
@@ -309,6 +322,7 @@ def main(argv: list[str] | None = None) -> None:
                             else FIXED_MODEL_LABEL
                         ),
                         "reasoning": job.reasoning,
+                        "preview": not DOCUMENT_RENDER_SUITES.isdisjoint(job.shard.suites),
                     }
                     for job in sweep_jobs(args.smoke, args.reasoning)
                 ]

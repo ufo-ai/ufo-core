@@ -3,7 +3,12 @@ import re
 from pathlib import Path
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
-from evals.suites.business_goal import ASK_TOOL, GOALS, _goal_thread_scorer
+from evals.suites.business_goal import ASK_TOOL, GOALS, WORK_TOOLS, _goal_thread_scorer
+from ufo.host.ext.loader import load_manifests
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.tools.bridge import BRIDGE_TOOL_NAMES
+
+WORK_TOOL = min(WORK_TOOLS)
 
 FIRST_RUN_VIEW = (
     Path(__file__).resolve().parents[3] / "extensions/web/frontend/src/views/FirstRun.tsx"
@@ -22,7 +27,7 @@ def _output(
     asked_first: bool = False,
 ) -> CapabilityOutput:
     ask = (_call(ASK_TOOL, {"questions": questions}),) if questions is not None else ()
-    work = (_call("web_search", {"query": "pricing"}),) if worked else ()
+    work = (_call(WORK_TOOL, {"query": "pricing"}),) if worked else ()
     calls = (
         *(ask if asked_first else ()),
         *work,
@@ -67,15 +72,27 @@ def test_two_questions_fail() -> None:
     assert verdict.reason == "asked 2 questions, expected at most one"
 
 
-def test_a_question_carrying_options_is_a_menu() -> None:
+def test_one_question_carrying_options_still_passes() -> None:
+    """`options` is a first-class field of the ask, and the opening the first run sends forbids
+    only asking more than one thing. A deterministic ban on it charged the model for using the
+    product as built, and no case's words told it not to."""
     verdict = asyncio.run(
         _goal_thread_scorer()(
             _output(questions=[{"question": "Which stage?", "options": ["Leads", "Conversion"]}])
         )
     )
 
-    assert not verdict.passed
-    assert verdict.reason == "offered the member a menu"
+    assert verdict.passed
+
+
+def test_every_work_tool_is_a_tool_the_product_registers() -> None:
+    """The scorer credits a first step only for a name in WORK_TOOLS, so a name no tool answers to
+    reads as "took no first step" however well the turn went."""
+    registered = {tool.name for tool in BUILTIN_TOOLS} | set(BRIDGE_TOOL_NAMES)
+    for manifest in load_manifests():
+        registered |= {tool.name for tool in (manifest.tools or ())}
+
+    assert not WORK_TOOLS - registered
 
 
 def test_applying_an_object_on_an_unread_thread_fails() -> None:

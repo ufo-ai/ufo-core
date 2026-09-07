@@ -58,6 +58,12 @@ CREATION_SUITES = frozenset({"new_application"})
 HOMEPAGE_SUITES = frozenset({"app_home_change"})
 APP_PAGE_SUITES = APP_SUITES | CREATION_SUITES | HOMEPAGE_SUITES
 SANDBOX_IMAGE_SUITES = APP_PAGE_SUITES | {"red_after_green", "repeated_input_coherence"}
+DOCUMENT_RENDER_SUITES = frozenset({"document_read", "non_refusal"})
+"""Suites that reach the preview service, so a shard running one needs `sandbox.preview_service`
+and the deploy behind it. `document_read` asks for a page of a docx or xlsx, which every paginated
+read routes through the service; `non_refusal` opens on posters the composer rasterizes to show the
+member what they sent. A shard without it does not fail loudly — the proxy refuses the tunnel, the
+sample is excluded as an environment the case does not describe, and the suite scores 0 of 0."""
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 ISOLATED_EXTERNAL_BILLING_JOBS = (
     "metronome:usage_shipper",

@@ -28,7 +28,7 @@ APPLY_TOOL = "object_apply"
 
 WORK_TOOLS = frozenset(
     {
-        "web_search",
+        "search_web",
         "fetch_url",
         "search_vertical",
         "memory_search",
@@ -155,7 +155,9 @@ GOALS = (
 
 def _goal_thread_scorer() -> Grader:
     """The contract every goal thread holds to, whichever goal it opened on: work before any
-    question, one bare question at most, and nothing durable applied on a turn nobody is reading."""
+    question, one question at most, and nothing durable applied on a turn nobody is reading. Each
+    of those is a sentence the opening sends, so a thread is charged only for words it was given;
+    whether a question should also carry no menu is the `automate-operations` rubric's to judge."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         worked = [
@@ -177,16 +179,12 @@ def _goal_thread_scorer() -> Grader:
             if not isinstance(questions, list) or len(questions) > 1:
                 held = len(questions) if isinstance(questions, list) else 0
                 return CapabilityVerdict(False, f"asked {held} questions, expected at most one")
-            if any(
-                isinstance(question, dict) and question.get("options") for question in questions
-            ):
-                return CapabilityVerdict(False, "offered the member a menu")
         if any(call.name == APPLY_TOOL and call.succeeded for call in output.calls):
             return CapabilityVerdict(False, "applied an object on a thread nobody is reading")
-        return CapabilityVerdict(True, "worked first, then asked at most one bare question")
+        return CapabilityVerdict(True, "worked first, then asked at most one question")
 
     return DescribedGrader(
-        "does the first step before asking, and asks at most one question without a menu",
+        "does the first step before asking, and asks at most one question",
         grade,
     )
 
