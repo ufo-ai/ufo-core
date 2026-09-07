@@ -271,6 +271,24 @@ class CapabilityOutput:
     def tools(self) -> tuple[str, ...]:
         return tuple(call.call for call in self.calls)
 
+    @property
+    def child_calls(self) -> tuple[ToolInvocation, ...]:
+        """What the children called: `calls` less the parent's own, each accounted for once.
+
+        `calls` carries the parent's calls with every descendant's appended, so a grader reading it
+        for "what the worker did" also reads the parent. Both are re-merged when a follow-up turn
+        extends the case, so the children's calls are not a positional suffix."""
+        remaining = list(self.own_calls)
+        children: list[ToolInvocation] = []
+        for call in self.calls:
+            for index, mine in enumerate(remaining):
+                if mine is call or (mine.call_id and mine.call_id == call.call_id):
+                    del remaining[index]
+                    break
+            else:
+                children.append(call)
+        return tuple(children)
+
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
 type CapabilityFollowup = Callable[[CapabilityOutput], Awaitable[str | None]]

@@ -940,7 +940,7 @@ async def _homepage_journey_failure(
     )
     if parent_work:
         return f"the Opus application parent entered the build loop: {', '.join(parent_work)}"
-    if failure := _application_worker_tool_failure(output.calls):
+    if failure := _application_worker_tool_failure(output.child_calls):
         return failure
     async with workspace_tx() as connection:
         homepage = (

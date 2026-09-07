@@ -1937,7 +1937,6 @@ def _application_builder_scorer() -> Grader:
             "start_server",
             "js_repl",
             *DEPLOY_TOOLS,
-            HOMEPAGE_ACTION,
             "action:site:build_website",
             "write",
             "edit",
@@ -1971,7 +1970,7 @@ def _application_builder_scorer() -> Grader:
                 "the worker must write one SVG design before app.tsx",
                 failed,
             )
-        if any(call.call == HOMEPAGE_ACTION for call in output.calls):
+        if any(call.call == HOMEPAGE_ACTION for call in output.child_calls):
             return CapabilityVerdict(False, "the worker tried to bind its own homepage", failed)
         return CapabilityVerdict(
             True,
