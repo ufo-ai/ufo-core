@@ -1,0 +1,108 @@
+name = "app-homepage-flow-and-audit"
+base = "HEAD"
+suites = ["new_application"]
+cases = [
+  "A11-named-shows-the-design",
+  "A12-guided-shows-the-design",
+  "A14-world-clock-shows-the-design",
+]
+repeats = 2
+concurrency = 3
+max_stacks = 2
+budget_usd = 60.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+# Three things learned from one recorded run and one recorded wireframe, measured together because
+# they are one story: the drawing is made, shown, chosen, then built.
+#
+# The suite already graded that trajectory and the skill never described it — its failures read
+# "design 1 was not shared before its choice". The parent held `share_file` and was never told to
+# use it, so a member approved a description of a drawing they had not seen.
+#
+# The wireframe took about eighty steps. Twenty-five read the audit script, which measures and does
+# not explain; about fifteen tried to see the drawing, which `read` shows as an image and nothing
+# said so. Two wrote the design.
+#
+# Read it on the design-flow verdicts and on child rounds per case: two children in one recorded
+# case ran 101 and 95 rounds, 856 of that case's 1105 seconds.
+[[arm]]
+name = "before-the-flow"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/application-homepage/SKILL.md"
+old = """## Who runs this
+
+The build happens in the `ufo_application_builder` child, never in your own turn. It is pinned to a
+cheap model with an exact tool set, which is what keeps a page from costing a member's turn: a turn
+that writes `app.tsx` itself is paying Opus rates for a Gemini job and holds none of the guards.
+
+**Asked for a page** — by a member, by the seed, or by the portal — spawn the builder once and stop:
+
+```
+spawn("profile:ufo_application_builder",
+      {objective: <the application's own prompt in full, then what the page shows and who reads
+                   it>})                                          -> deployed, site, site_url
+```
+
+One spawn hosts the page. Bind what it hosted (see Bind) and reply with the link. Do not read its
+source, run its script, or repair its page — the deploy audited it.
+
+A wireframe the member approves first is **the create flow's** pass, not this one, and
+create-application drives it. Ask for a drawing here only when the member asked to see the shape
+before it is built: say so in the objective, share what comes back, and the spawn that follows says
+**build and host** — never the wireframe objective again, or the child stops at a drawing twice and
+the page is never hosted. A turn nobody speaks on cannot ask at all.
+
+The objective opens with the application's own prompt pasted verbatim — its whole text, word for
+word, the same text the create applied. A brief written from it is not it: the page has to be built
+from the words the member confirmed, and the child reads nothing else about the app. Everything
+about the page goes after the prompt, in the objective itself — never staged in a file, which is
+the child's work and not yours.
+
+**If you are the builder child**, the rest of this skill is yours. Draw, then host the page —
+unless the objective asks you for the wireframe alone, where you stop after Draw and finish
+`designed` with `design_path` set to the SVG you wrote. Answering `designed` to an objective that
+wanted a page leaves the member with nothing.
+
+"""
+new = """## Who runs this
+
+The build happens in the `ufo_application_builder` child, never in your own turn. It is pinned to a
+cheap model with an exact tool set, which is what keeps a page from costing a member's turn: a turn
+that writes `app.tsx` itself is paying Opus rates for a Gemini job and holds none of the guards.
+
+Spawn the builder with an objective saying what the page shows and who reads it. Bind what it
+hosted (see Bind) and reply with the link. Do not read its source, run its script, or repair its
+page — the deploy audited it.
+
+**If you are the builder child**, the rest of this skill is yours. Draw, then host the page —
+unless the objective asks you for the wireframe alone, where you stop after Draw and finish
+`designed` with `design_path` set to the SVG you wrote. Answering `designed` to an objective that
+wanted a page leaves the member with nothing.
+
+"""
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/application-homepage/SKILL.md"
+old = """It writes `design.png` beside the SVG. `read` that file: it is your drawing as a member will see
+it, and reading it is how you look at your own work — you have no other way, and building one
+costs more than the drawing did.
+
+A non-zero exit names"""
+new = """A non-zero exit names"""
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/application-homepage/SKILL.md"
+old = """- Never read the audit script. It measures; it does not explain, and its refusal already names
+  the region and the pixels — everything a repair needs. One recorded drawing spent twenty-five
+  steps reading it and produced no better SVG for them.
+- Do not deploy"""
+new = """- Do not deploy"""

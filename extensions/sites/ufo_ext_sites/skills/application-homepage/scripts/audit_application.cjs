@@ -7,8 +7,8 @@
 // body, large-text or Kit quiet-label floor from that evidence. A page whose text all clears 4.5:1
 // reports no text entry at all.
 //
-// Usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <lane-width> [<application-design.svg>]
-//        node app-audit.cjs --design <lane-width> <application-design.svg> [preview.png]
+// Usage: node audit_application.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <lane-width> [<application-design.svg>]
+//        node audit_application.cjs --design <lane-width> <application-design.svg> [preview.png]
 // The design is measured from the file itself, so the design a deploy is held to is the design
 // sitting beside the source it hosts. A project with no design beside it is audited as a page.
 // The lane width is always passed and never defaulted here: `application_audit.py` holds the one
@@ -1888,13 +1888,15 @@ async function interactiveDocument(frame) {
   });
 }
 
+const SELF = path.basename(process.argv[1] || 'audit_application.cjs');
+
 async function main() {
   if (process.argv[2] === '--design') {
     const laneWidth = Number(process.argv[3]);
     if (!Number.isInteger(laneWidth) || laneWidth <= 0 || !process.argv[4] ||
         process.argv.length < 5 || process.argv.length > 6) {
       console.error(
-        'usage: node app-audit.cjs --design <lane-width> <application-design.svg> [preview.png]'
+        `usage: node ${SELF} --design <lane-width> <application-design.svg> [preview.png]`
       );
       process.exit(2);
     }
@@ -1909,7 +1911,7 @@ async function main() {
       !Number.isInteger(laneWidth) || laneWidth <= 0 ||
       process.argv.length < 9 || process.argv.length > 10) {
     console.error(
-      'usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <lane-width> [<application-design.svg>]'
+      `usage: node ${SELF} <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <lane-width> [<application-design.svg>]`
     );
     process.exit(2);
   }

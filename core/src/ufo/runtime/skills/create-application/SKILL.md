@@ -1,6 +1,6 @@
 ---
 name: create-application
-description: Load when a member asks to create a new application of their own, including an underspecified app, a separate assistant for one job, or an app that watches and acts. Not for a page, website, dashboard, or browser app.
+description: Load when a member asks for an app or application — by default that means a ufo app, one that lives on the Apps screen and is run by its own agent, with its own prompt and homepage. Not a page or site they host outside ufo, which is website-building.
 ---
 # New application
 
@@ -94,20 +94,20 @@ Every application builds a homepage: the page members open on the Apps screen, w
 what it is for, what it watches, its recent work, and what it needs. The design pass settles what
 this app's page reports and how it is laid out.
 
-Finish the name and complete application prompt, then `load_skill("application-homepage")` and
-spawn the builder for the drawing:
+Finish the name and complete application prompt, then `load_skill("application-homepage")` — it
+holds how a page is built — and take the drawing yourself:
 
 ```
 spawn("profile:ufo_application_builder",
-      {objective: <the name and the complete prompt>, phase: "design"})
+      {objective: <the whole application prompt, then what the page shows, and that you want the
+                   wireframe alone for the member to approve>})   -> designed, design_path
+share_file({files: [{file_path: <design_path>}]})
+ask_user(`Build it`, `Change the design`)
 ```
 
-Check the SVG it returns with the skill's own script, then `share_file` the SVG and the
-`design.png` beside it. End with `ask_user`: `Build it`, `Change the design`.
-
-On `Change the design`, spawn the design phase once more with the same prompt and the member's
-requested change appended as `Member revision: …`. One page and at most two wireframes are the
-whole design pass.
+What the builder returns is finished work — it drew, measured, and repaired the drawing before
+answering. Share it as it came. On `Change the design`, spawn the wireframe once more with the
+member's change appended; one page and at most two wireframes are the whole design pass.
 
 ## Create it
 
@@ -137,11 +137,14 @@ the same one.
 ## Build the homepage
 
 The accepted design is already in this conversation's sandbox, so the build runs here rather than
-in the new application's own empty one:
+in the new application's own empty one. Spawn the builder again — and this objective says **build
+and host**, never the wireframe objective a second time, or the child stops at a drawing and the
+member never gets a page:
 
 ```
 spawn("profile:ufo_application_builder",
-      {objective: <the name and the complete prompt>, phase: "build"})
+      {objective: <the whole application prompt, then: build and host the page from the accepted
+                   design already at /workspace/ufo-app, and finish `deployed`>})
 ```
 
 Then bind what it hosted to the application you just made:

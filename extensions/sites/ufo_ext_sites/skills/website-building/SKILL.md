@@ -1,6 +1,6 @@
 ---
 name: website-building
-description: Load when a member asks to build a website, landing page, browser game, internal reference page, board, notes page, brief, or dashboard, including requests with missing content or data. Not an app's own homepage — "your homepage" is application-homepage.
+description: Load when a member asks for a page or site hosted outside ufo — a website, landing page, browser game, board, notes page, dashboard, or a build that runs its own server. Not an app or application, which by default is a ufo app (create-application).
 metadata:
   depends:
   - ufo-style

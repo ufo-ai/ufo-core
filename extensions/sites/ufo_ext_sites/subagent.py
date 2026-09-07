@@ -51,9 +51,22 @@ class WebsiteBuildingTask(BaseModel):
     objective: str = Field(
         description="Freeform task governed by the shared delivery register.",
     )
-    task_name: str | None = None
-    preload_skills: tuple[str, ...] | None = None
-    extended_context: bool | None = None
+    task_name: str | None = Field(
+        default=None,
+        description="Short, user-friendly name for this build, e.g. 'Landing page'.",
+    )
+    preload_skills: tuple[str, ...] | None = Field(
+        default=None,
+        description="Skill names to preload into the child's context before its first round, so "
+        "it starts with their instructions in hand instead of spending a round on load_skill — "
+        'e.g. ("website-building",) for any web build.',
+    )
+    extended_context: bool | None = Field(
+        default=None,
+        description="A flag, not a place for context: true runs the child under the main agent's "
+        "round ceiling instead of its own, for unusually large or multi-page builds. What the "
+        "child needs to know goes in `objective`.",
+    )
 
 
 class WebsiteBuildingResult(BaseModel):

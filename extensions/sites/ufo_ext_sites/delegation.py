@@ -20,12 +20,12 @@ from ufo_ext_sites.subagent import WEBSITE_BUILDING_NAME
 
 BUILD_WEBSITE_TOOL = "build_website"
 BUILD_WEBSITE_DESCRIPTION = (
-    "Delegates a website, web app, dashboard, or web game build to a focused subagent that builds "
-    "it, brings it up, validates it against a real browser, and deploys it. The child works in "
-    "this conversation's sandbox, so what it builds is here afterwards and the link it registers "
-    "is this conversation's; an app needing a backend, or a site that would replace the one "
-    "already up here under a new name, comes back for you to host. "
-    "Include ALL context in the objective — the child has no history."
+    'Delegates a website, dashboard, or web game (never an "app") build to a focused subagent '
+    "that builds it, brings it up, validates it against a real browser, and deploys it. The child "
+    "works in this conversation's sandbox, so what it builds is here afterwards and the link it "
+    "registers is this conversation's; a build needing a backend, or a site that would replace "
+    "the one already up here under a new name, comes back for you to host. Include ALL context "
+    "in the objective — the child has no history."
 )
 
 

@@ -32,6 +32,7 @@ from ufo_ext_sites.application_homepage import (
     APPLICATION_BUILDER_NAME,
     APPLICATION_SOURCE_PATH,
     ApplicationBuildResult,
+    ApplicationBuildStatus,
     ApplicationBuildTask,
 )
 from ufo_ext_sites.store import SourceManifest, hosted_site
@@ -53,6 +54,7 @@ from evals.suites.app_audit_probe import app_audit
 from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
+from ufo.harness.untrusted import unwall
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.kinds.agents import AGENT_KIND
@@ -504,7 +506,7 @@ def _created_application_identity(
         if call.name != "object_apply" or not call.succeeded:
             continue
         try:
-            result = _ObjectApplyResult.model_validate_json(call.result)
+            result = _ObjectApplyResult.model_validate_json(unwall(call.result))
         except ValueError:
             try:
                 manifest = yaml.safe_load(str(call.input.get("manifest", "")))
@@ -560,19 +562,33 @@ def _interviews(output: CapabilityOutput) -> tuple[int, ...]:
     return tuple(index for index in _asks(output) if index < applies[0][0]) if applies else ()
 
 
-def _builder_spawns(output: CapabilityOutput, phase: str) -> tuple[tuple[int, ToolInvocation], ...]:
-    """The successful builder spawns of one phase, with the round each was made in."""
+def _carries(whole: str, part: str) -> bool:
+    """Whether `whole` carries every word of `part`, in order, whatever its line breaks.
 
+    An objective quotes a prompt into a longer brief, so it wraps that text at its own columns
+    while the stored prompt keeps the ones its YAML block scalar had. Holding the two to identical
+    newlines measures the wrapping and not whether the words the member confirmed were carried."""
+    return " ".join(part.split()) in " ".join(whole.split())
+
+
+def _builder_spawns(
+    output: CapabilityOutput, status: ApplicationBuildStatus
+) -> tuple[tuple[int, ToolInvocation], ...]:
+    """Builder spawns whose child finished with this status.
+
+    The task carries no phase — where a build stops is said in the objective — so what a spawn was
+    is read from what it returned, which is what the member got either way."""
     spawns: list[tuple[int, ToolInvocation]] = []
     for index, call in enumerate(output.calls):
         if call.name != SPAWN_TOOL or not call.succeeded:
             continue
-        payload = call.arguments.get("payload")
-        if (
-            call.arguments.get("target") == BUILDER_TARGET
-            and isinstance(payload, dict)
-            and payload.get("phase") == phase
-        ):
+        if call.arguments.get("target") != BUILDER_TARGET:
+            continue
+        try:
+            result = ApplicationBuildResult.model_validate_json(unwall(call.result))
+        except ValueError:
+            continue
+        if result.status == status:
             spawns.append((index, call))
     return tuple(spawns)
 
@@ -591,7 +607,7 @@ def _design_pass_failure(
     create = applies[0][0]
     asks = tuple(index for index in _asks(output) if index < create)
     preview_calls = tuple(
-        (index, call) for index, call in _builder_spawns(output, "design") if index < create
+        (index, call) for index, call in _builder_spawns(output, "designed") if index < create
     )
     parent_website_skill = any(
         index < create
@@ -630,7 +646,7 @@ def _design_pass_failure(
     for position, (render, call) in enumerate(preview_calls):
         try:
             task = ApplicationBuildTask.model_validate(call.arguments["payload"])
-            result = ApplicationBuildResult.model_validate_json(call.result)
+            result = ApplicationBuildResult.model_validate_json(unwall(call.result))
         except (KeyError, ValueError):
             return f"design {position + 1} returned no structured build result"
         if result.status != "designed" or not result.design_path.endswith(".svg"):
@@ -656,12 +672,12 @@ def _accepted_design(
     if application is None:
         return None, failure
     previews: list[tuple[int, ToolInvocation, ApplicationBuildTask, ApplicationBuildResult]] = []
-    for index, call in _builder_spawns(output, "design"):
+    for index, call in _builder_spawns(output, "designed"):
         if index >= application.create_index:
             continue
         try:
             contract = ApplicationBuildTask.model_validate(call.arguments["payload"])
-            result = ApplicationBuildResult.model_validate_json(call.result)
+            result = ApplicationBuildResult.model_validate_json(unwall(call.result))
         except (KeyError, ValueError):
             continue
         if result.status == "designed":
@@ -895,7 +911,7 @@ async def _homepage_journey_failure(
     if created is None:
         return failure or "no durable application exists"
     application = created.application
-    builds = _builder_spawns(output, "build")
+    builds = _builder_spawns(output, "deployed")
     if len(builds) != 1:
         return f"the create turn made {len(builds)} successful build spawns"
     build_index, build = builds[0]
@@ -903,12 +919,12 @@ async def _homepage_journey_failure(
         return "the homepage was built before the application was created"
     try:
         task = ApplicationBuildTask.model_validate(build.arguments["payload"])
-        result = ApplicationBuildResult.model_validate_json(build.result)
+        result = ApplicationBuildResult.model_validate_json(unwall(build.result))
     except (KeyError, ValueError):
         return "the build spawn returned no structured result"
     if result.status != "deployed":
         return f"the build result was {result.status}: {result.blocker}"
-    if application.prompt not in task.objective:
+    if not _carries(task.objective, application.prompt):
         return "the Gemini task omitted the created application's instructions"
     binds = tuple(
         call for call in output.own_calls if call.call == HOMEPAGE_ACTION and call.succeeded
@@ -1061,7 +1077,7 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
         for call in calls
     ):
         return CapabilityVerdict(False, f"never loaded {SKILL!r}")
-    previews = _builder_spawns(outcome.output, "design")
+    previews = _builder_spawns(outcome.output, "designed")
     if not previews:
         return CapabilityVerdict(False, "generated no wireframe, so the member saw nothing")
     shares = tuple(
@@ -1069,7 +1085,7 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
     )
     for position, (index, preview) in enumerate(previews):
         try:
-            result = ApplicationBuildResult.model_validate_json(preview.result)
+            result = ApplicationBuildResult.model_validate_json(unwall(preview.result))
         except ValueError:
             return CapabilityVerdict(False, f"wireframe {position + 1} returned no design result")
         if result.status != "designed" or not result.design_path.endswith(".svg"):
@@ -1092,7 +1108,7 @@ async def _graded_shows_the_design_early(outcome: ScenarioOutcome) -> Capability
     if not visible.passed:
         return visible
     calls = outcome.output.calls
-    preview_index, preview = _builder_spawns(outcome.output, "design")[0]
+    preview_index, preview = _builder_spawns(outcome.output, "designed")[0]
     if any(
         call.name == SPAWN_TOOL
         and not call.succeeded
@@ -1339,7 +1355,7 @@ async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
         return CapabilityVerdict(False, f"the journey retained {len(outcome.followups)} build(s)")
     build_statuses: list[str] = []
     for followup in outcome.followups:
-        calls = tuple(call for index, call in _builder_spawns(followup, "build") if index >= 0)
+        calls = tuple(call for index, call in _builder_spawns(followup, "deployed") if index >= 0)
         if not calls:
             return CapabilityVerdict(
                 False,

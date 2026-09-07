@@ -95,7 +95,10 @@ from ufo_ext_sites.application_audit import (
     validate_application_design,
     validate_application_source,
 )
-from ufo_ext_sites.application_homepage import APPLICATION_AUDIT_SCRIPT_PATH
+from ufo_ext_sites.application_homepage import (
+    APPLICATION_AUDIT_SCRIPT_PATH,
+    PAGE_REFUSAL_OPENING,
+)
 from ufo_ext_sites.objects import SITE_KIND, effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
 from ufo_ext_sites.source import (
@@ -449,13 +452,16 @@ START_SERVER_DESCRIPTION = (
 DEPLOY_WEBSITE_DESCRIPTION = (
     "Serve a website folder and host it at a permanent link the member can open. Pass the "
     "directory containing the built static output (index.html). Returns site_url — the deliverable "
-    "— beside the sandbox-local url. Re-deploying the same site_name updates it behind that link."
+    "— beside the sandbox-local url. Re-deploying the same site_name updates it behind that link. "
+    'This hosts a site outside ufo. A bare "app" means a ufo app — one that lives on the Apps '
+    "screen, run by its own agent — which create-application makes, never this."
 )
 PUBLISH_WEBSITE_DESCRIPTION = (
-    "Publish a web app that runs a server: install its dependencies, run run_command with $PORT "
-    "set to the port this probes, and host it at a permanent link. Returns site_url — the "
+    "Publish a built project that runs a server: install its dependencies, run run_command with "
+    "$PORT set to the port this probes, and host it at a permanent link. Returns site_url — the "
     "deliverable — beside the sandbox-local url. A folder of built files with no server of its "
-    "own is deploy_website's."
+    'own is deploy_website\'s. Both host outside ufo. A bare "app" means a ufo app, one that '
+    "lives on the Apps screen, which create-application makes, never this."
 )
 NO_EXTENSION_CONTEXT = "the website tools dispatched without their ExtensionContext"
 SITE_NEEDS_AN_OWNER = "a hosted site needs an owner: no member is acting on this turn"
@@ -1113,7 +1119,8 @@ class ApplicationPageRefused(RuntimeError):
 
     def __init__(self, verdict: ApplicationAuditVerdict) -> None:
         super().__init__(
-            "This page cannot be hosted yet. Repair it and deploy again:\n"
+            PAGE_REFUSAL_OPENING
+            + "\n"
             + "\n".join(f"- {issue.message}" for issue in verdict.issues)
         )
         self.verdict = verdict

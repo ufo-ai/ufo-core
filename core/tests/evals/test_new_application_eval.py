@@ -44,7 +44,7 @@ def _design_outcome(
 ) -> ScenarioOutcome:
     preview_input = {
         "target": new_application.BUILDER_TARGET,
-        "payload": {"objective": "world-clock", "phase": "design"},
+        "payload": {"objective": "world-clock"},
     }
     design = b"<svg><text>World clock</text></svg>"
     preview_result = json.dumps(

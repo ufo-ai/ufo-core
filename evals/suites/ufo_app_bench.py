@@ -95,6 +95,7 @@ from evals.suites.app_audit_probe import AUDIT_DIGEST, AppAudit, app_audit
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
+from ufo.harness.untrusted import unwall
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.workspace import ws
@@ -1907,7 +1908,7 @@ def _application_builder_scorer() -> Grader:
         if not delegations[0].succeeded:
             return CapabilityVerdict(False, "the worker spawn failed", failed)
         try:
-            result = ApplicationBuildResult.model_validate_json(delegations[0].result)
+            result = ApplicationBuildResult.model_validate_json(unwall(delegations[0].result))
         except ValueError:
             return CapabilityVerdict(False, "the worker returned no structured result", failed)
         if result.status != "deployed":
@@ -2035,7 +2036,7 @@ def _delivery_scorer() -> Grader:
         result = None
         if len(delegations) == 1:
             try:
-                result = ApplicationBuildResult.model_validate_json(delegations[0].result)
+                result = ApplicationBuildResult.model_validate_json(unwall(delegations[0].result))
             except ValueError:
                 pass
         accepted = bool(

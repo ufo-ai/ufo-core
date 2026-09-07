@@ -27,6 +27,7 @@ from ufo_ext_sites.application_audit import (
     MAX_MESSAGE_CHARS,
     MEASURED_VIEWS,
     NARROW_WIDTH,
+    PAGE_CLASS_REFUSALS,
     ApplicationAuditRegion,
     ApplicationAuditReport,
     ApplicationDesign,
@@ -48,6 +49,7 @@ from ufo_ext_sites.application_homepage import (
     APPLICATION_HOMEPAGE_SKILL,
     APPLICATION_SKILL_DIR,
     APPLICATION_TEMPLATE_DIR,
+    PAGE_REFUSAL_OPENING,
     ApplicationBuildResult,
 )
 from ufo_ext_sites.delegation import BuildWebsiteInput
@@ -895,9 +897,9 @@ def test_the_application_builder_profile_holds_generic_tools_and_one_site_action
     assert profile.connector_read_only is True
     # The same ceiling its sibling site builder runs under: a runaway's backstop, not a budget.
     assert profile.max_rounds == APPLICATION_BUILDER_ROUND_LIMIT
-    assert profile.input_model.model_validate(
-        {"objective": "build it", "phase": "design"}
-    ).preload_skills == (APPLICATION_HOMEPAGE_SKILL,)
+    assert profile.input_model.model_validate({"objective": "build it"}).preload_skills == (
+        APPLICATION_HOMEPAGE_SKILL,
+    )
     with pytest.raises(ValidationError):
         profile.input_model.model_validate({"objective": "build it", "phase": "qa"})
 
@@ -1456,7 +1458,10 @@ def test_the_lane_width_is_named_once_and_every_copy_of_it_is_watched() -> None:
     # The measured-view table is held against NARROW_WIDTH by the app-bench artifact test; what is
     # gated here is that the design lane has no width of its own to drift.
     assert "DESIGN_INITIAL_VIEWPORT" not in script
-    assert "usage: node app-audit.cjs --design <lane-width> <application-design.svg>" in script
+    assert "usage: node ${SELF} --design <lane-width> <application-design.svg>" in script
+    # The eval copies this script to app-audit.cjs and the skill ships it as
+    # audit_application.cjs, so a name written into the usage line is wrong in one of the two.
+    assert "app-audit.cjs" not in script
     skill = (APPLICATION_SKILL_DIR / "SKILL.md").read_text()
     widths = re.findall(r"\b(\d{3,4}) px\b|--design (\d+)\b", skill)
     printed = {int(value) for pair in widths for value in pair if value}
@@ -1489,6 +1494,52 @@ def test_a_build_result_carries_the_evidence_its_status_claims() -> None:
             {"status": "designed", "design_path": APPLICATION_DESIGN_PATH}
         ).design_path
         == APPLICATION_DESIGN_PATH
+    )
+
+
+def test_the_skill_names_every_class_the_deploy_refuses() -> None:
+    """The audit refuses four class patterns outright. A pattern the skill leaves unmentioned is
+    one the child meets as a refusal, and a refusal costs a whole deploy to learn — two of the four
+    recorded in one run were `space-y-` and a `className` template literal, neither of which the
+    skill named. The reason text is what the child reads either way, so the skill carries it."""
+
+    skill = " ".join((APPLICATION_SKILL_DIR / "SKILL.md").read_text().split())
+    for _pattern, reason in PAGE_CLASS_REFUSALS:
+        assert " ".join(reason.split()) in skill, f"the skill never tells the child: {reason}"
+
+
+def test_a_deploy_refusal_cannot_be_handed_back_as_a_blocker() -> None:
+    """`BUILDER_CONTRACT` says a refusal lists the repairs to make and deploy again. Two recorded
+    builds answered `blocked` with the refusal pasted into the blocker instead, and each time the
+    parent took the repair on itself — 205 calls, then 105. The result refuses it, so the child
+    reads an error it can still act on rather than the member reading a page that is not there."""
+
+    refused = f"ApplicationPageRefused: {PAGE_REFUSAL_OPENING}\n- light 360px lacks a region"
+    with pytest.raises(ValidationError, match="a deploy refusal is not a blocker"):
+        ApplicationBuildResult.model_validate({"status": "blocked", "blocker": refused})
+
+    stands = "the connector holds no account for this workspace"
+    assert (
+        ApplicationBuildResult.model_validate({"status": "blocked", "blocker": stands}).blocker
+        == stands
+    )
+
+
+def test_a_design_answers_with_the_drawing_and_not_its_picture() -> None:
+    """The audit renders `design.png` beside the SVG so the child can look at its own work, and a
+    child that answered with the picture handed its parent a file the design pass cannot carry
+    forward. The drawing is the SVG; the error reaches the child as one it can still fix."""
+
+    with pytest.raises(ValidationError, match="design_path is the wireframe you wrote"):
+        ApplicationBuildResult.model_validate(
+            {"status": "designed", "design_path": "/workspace/ufo-app/design.png"}
+        )
+
+    assert (
+        ApplicationBuildResult.model_validate(
+            {"status": "deployed", "site": "clock", "site_url": "https://ufo.test/clock"}
+        ).design_path
+        == ""
     )
 
 

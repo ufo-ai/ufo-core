@@ -18,7 +18,7 @@
  *  non-production one compiles the page against `ufo/kit/jsx-dev-runtime` — a specifier the kit has
  *  no entry for, which the bare `ufo/kit` alias then resolves to a path inside `kit.js`. The page a
  *  member deploys is production output whatever the shell around it says. */
-import { cpSync, mkdirSync, readdirSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 
 const HERE = new URL("./", import.meta.url).pathname;
 const KIT = new URL("./sdk/kit.js", import.meta.url).pathname;
@@ -26,6 +26,11 @@ const KIT = new URL("./sdk/kit.js", import.meta.url).pathname;
  *  the source a later read pulls back, and the next deploy writes both again. Everything else the
  *  directory carries — the page, its design — is the member's and rides along. */
 const DEPLOY_WRITTEN = new Set(["vite.config.ts", "preview.html"]);
+/** The mode the carried source is left at. A project scaffolded out of the read-only skills
+ *  tree arrives at 0444, and `cpSync` copies the mode it finds: carried unchanged, the first
+ *  deploy's own output is what the next deploy cannot overwrite, and a Rebuild that pulls this
+ *  source back gets files it cannot edit. */
+const SOURCE_MODE = 0o644;
 
 export default {
   base: "./",
@@ -40,10 +45,13 @@ export default {
     {
       name: "ufo-carry-source",
       closeBundle() {
+        rmSync(`${HERE}dist/src`, { recursive: true, force: true });
         mkdirSync(`${HERE}dist/src`, { recursive: true });
         for (const entry of readdirSync(HERE, { withFileTypes: true })) {
-          if (entry.isFile() && !DEPLOY_WRITTEN.has(entry.name))
+          if (entry.isFile() && !DEPLOY_WRITTEN.has(entry.name)) {
             cpSync(`${HERE}${entry.name}`, `${HERE}dist/src/${entry.name}`);
+            chmodSync(`${HERE}dist/src/${entry.name}`, SOURCE_MODE);
+          }
         }
       },
     },

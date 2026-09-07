@@ -1812,7 +1812,7 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
         ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
         ToolInvocation(
             "spawn",
-            {"target": f"profile:{APPLICATION_BUILDER_NAME}", "payload": {"phase": "build"}},
+            {"target": f"profile:{APPLICATION_BUILDER_NAME}", "payload": {"objective": "build it"}},
             result,
             has_result=True,
         ),
@@ -2244,7 +2244,10 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
             ToolInvocation(
                 "spawn",
-                {"target": f"profile:{APPLICATION_BUILDER_NAME}", "payload": {"phase": "build"}},
+                {
+                    "target": f"profile:{APPLICATION_BUILDER_NAME}",
+                    "payload": {"objective": "build it"},
+                },
                 blocked,
                 has_result=True,
             ),
@@ -3139,7 +3142,7 @@ def test_every_design_mode_caller_passes_the_one_lane_width() -> None:
     command = audit.command
     assert f"--design {NARROW_WIDTH} " in command
     usage = AUDIT_CONTENT.decode()
-    assert "node app-audit.cjs --design <lane-width> <application-design.svg>" in usage
+    assert "node ${SELF} --design <lane-width> <application-design.svg>" in usage
 
     root = Path(__file__).parents[3]
     named = re.compile(r"NARROW_WIDTH|APPLICATION_DESIGN_WIDTH|\b360\b")
