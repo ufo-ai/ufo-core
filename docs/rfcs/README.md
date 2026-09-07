@@ -41,6 +41,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0040](0040-daytona-carrier.md) | Daytona carrier — a second cloud backend, provider-routed | superseded |
 | [0041](0041-core-rust-port.md) | Core in Rust, extensions as components | proposed |
 | [0042](0042-object-bound-actions.md) | Object-bound actions — progressive capability discovery through workspace objects | proposed |
+| [0045](0045-open-agent-module.md) | Open agent module — two repos, one internal RPC | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working
