@@ -52,7 +52,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.blob import FilesystemBlobStore, S3BlobStore
+from ufo.blob import S3BlobStore
 from ufo.db import workspace_tx
 from ufo.harness.o11y import log
 from ufo.harness.sandbox.preview import PREVIEW_HOST
@@ -82,6 +82,8 @@ from ufo.runtime.media.preview_renderer import (
 from ufo.runtime.objects import AdminRequired
 from ufo.runtime.skills.runtime import load_skills, loaded_context
 from ufo.runtime.tools.context import (
+    ARTIFACT_PUT_TTL_SECONDS,
+    SHARE_PREFLIGHT_TIMEOUT_SECONDS,
     AmbiguousSpawnTarget,
     ImageContent,
     SpawnModelRejected,
@@ -90,6 +92,8 @@ from ufo.runtime.tools.context import (
     ToolContext,
     ToolResult,
     UnknownSpawnTarget,
+    measure_file,
+    store_artifact,
 )
 from ufo.runtime.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
@@ -111,11 +115,6 @@ READ_FIRST_HINT = " Call read on {path} first, then repeat this call."
 FILE_PATH_JSON_MAX_CHARS = 10_000
 FILE_TOOL_RESULT_MAX_CHARS = 20_000
 ARTIFACT_FALLBACK_NAME = "download"
-SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
-SHA256_DIGEST_PREFIX = "sha256:"
-ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
-ARTIFACT_PUT_TTL_SECONDS = 900
-ARTIFACT_PUT_TIMEOUT_SECONDS = 900
 ARTIFACT_PREVIEW_TIMEOUT_SECONDS = 330
 ARTIFACT_PREVIEW_DETAIL_CHARS = 500
 
@@ -126,26 +125,6 @@ SHARE_PACK_CMD = (
     'name=$(basename "$root")\n'
     'tar -czf {archive} -C "$(dirname "$root")" {exclude} "$name"'
 )
-
-SHARE_PREFLIGHT_CMD = (
-    "p={path}\n"
-    '[ -f "$p" ] && [ ! -L "$p" ] || {{ printf %s "$p is not a regular file" >&2; exit 1; }}\n'
-    'size=$(wc -c < "$p" | tr -d " ") || exit 1\n'
-    'digest=$(openssl dgst -sha256 "$p") || exit 1\n'
-    "digest=${{digest##* }}\n"
-    'kept=$(head -c 4096 "$p" | tr -d "\\000" | wc -c | tr -d " ")\n'
-    'seen=$(head -c 4096 "$p" | wc -c | tr -d " ")\n'
-    'text=true; [ "$kept" = "$seen" ] || text=false\n'
-    'printf \'{{"size":%d,"digest":"sha256:%s","is_text":%s}}\' "$size" "$digest" "$text"\n'
-)
-"""Measure a produced file's size, sha256 and text-ness with tools every carrier has — `wc`,
-`openssl`, `head`, `tr` — so the same one command runs in the container and on a member's own
-machine, where no baked `ufo` client or usable `python3` exists. The size and digest bind the S3
-presigned PUT (§`_store_artifact`), so a file changing between the measure and the upload fails at
-S3 rather than landing as a self-consistent lie. A symlink at the target is refused, the one
-containment the share path needs: the bytes it copies out must be the file the agent named, not a
-link's target."""
-
 
 MAX_REQUESTED_SLOTS = 4
 SPAWN_TOOL = "spawn"
@@ -612,43 +591,6 @@ async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(result)),))
 
 
-async def _store_artifact(
-    ctx: ToolContext, scoped: str, key: str, size_bytes: int, digest: str
-) -> None:
-    """Put the preflighted file under `key`, by the one route the store offers.
-
-    S3: serve mints a presigned PUT bound to `size_bytes` and `digest`, and the sandbox uploads to
-    it over the egress proxy — the bytes go sandbox → S3 and never cross this process, and S3
-    refuses any body that is not the measured one, so a file still being written between the
-    preflight and the upload fails loudly instead of landing as a self-consistent lie. The URL is an
-    argv element of one `curl`, which is what the sandbox already does to stage a connector's file
-    inputs; binding it to those measurements is what makes holding it worth nothing beyond this one
-    upload. A non-2xx carries S3's own error document on stdout, so a failure names its cause.
-
-    Filesystem: there is no URL to sign, so the bytes stream out of the container through the
-    carrier and into the store in bounded chunks."""
-    match ctx.blob.backend:
-        case S3BlobStore():
-            if size_bytes > ARTIFACT_PUT_MAX_BYTES:
-                raise ValueError(
-                    f"{scoped} is {size_bytes} bytes; a shared file is capped at "
-                    f"{ARTIFACT_PUT_MAX_BYTES} bytes"
-                )
-            checksum = b64encode(bytes.fromhex(digest.removeprefix(SHA256_DIGEST_PREFIX))).decode()
-            url = await ctx.blob.presigned_put(key, size_bytes, checksum, ARTIFACT_PUT_TTL_SECONDS)
-            put = await ctx.sandbox.bash(
-                f"curl -sS --fail-with-body -T {shell_path(scoped)} "
-                f"-H {shlex.quote(f'x-amz-checksum-sha256: {checksum}')} "
-                f"--url {shlex.quote(url)}",
-                timeout_s=ARTIFACT_PUT_TIMEOUT_SECONDS,
-            )
-            if put.exit_code != 0:
-                detail = put.stdout.strip() or put.stderr.strip()
-                raise RuntimeError(detail or f"uploading {scoped} to the artifact store failed")
-        case FilesystemBlobStore():
-            await ctx.blob.put_stream(key, ctx.sandbox.read_file(scoped))
-
-
 @dataclass(frozen=True)
 class ArtifactPreview:
     """The rendered picture of a shared document, as a second blob beside the file's own bytes."""
@@ -860,15 +802,7 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec, artifact_id: UUI
     source = scoped if packed is None else packed
     default_name = normalized if packed is None else f"{PurePosixPath(normalized).name}.tar.gz"
     source_suffix = PurePosixPath(normalized).suffix if packed is None else ".tar.gz"
-    preflight = await ctx.sandbox.bash(
-        SHARE_PREFLIGHT_CMD.format(path=shell_path(source)),
-        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
-    )
-    if preflight.exit_code != 0:
-        raise RuntimeError(
-            preflight.stderr.strip() or f"artifact preflight failed for {spec.file_path}"
-        )
-    stat = json.loads(preflight.stdout)
+    measured = await measure_file(ctx.sandbox, source)
     basename = PurePosixPath((spec.name or default_name).replace("\\", "/")).name
     safe_name = basename if basename not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
     if (
@@ -879,7 +813,9 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec, artifact_id: UUI
         safe_name += source_suffix
     key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{safe_name}"
     try:
-        await _store_artifact(ctx, source, key, int(stat["size"]), str(stat["digest"]))
+        await store_artifact(
+            ctx.sandbox, ctx.blob, source, key, measured.size_bytes, measured.digest
+        )
         preview = await _shared_preview(ctx, source, safe_name, artifact_id, False)
     except BaseException:
         await _discard_artifact(ctx, key)
@@ -887,9 +823,9 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec, artifact_id: UUI
     return _StagedShare(
         safe_name=safe_name,
         key=key,
-        size_bytes=int(stat["size"]),
-        digest=str(stat["digest"]),
-        is_text=bool(stat["is_text"]),
+        size_bytes=measured.size_bytes,
+        digest=measured.digest,
+        is_text=measured.is_text,
         subject=spec.subject,
         preview=preview,
         request_fingerprint=_share_request_fingerprint(spec),

@@ -41,7 +41,9 @@ extension tool also gets `ext`, its owning extension's workspace-scoped Extensio
 tool gets `ext=None`."""
 
 import asyncio
+import json
 import shlex
+from base64 import b64encode
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -53,7 +55,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.blob import S3BlobStore, WorkspaceBlobStore
+from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
@@ -92,6 +94,29 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
 
 SHARED_BYTES_LIMIT = 256 * 1024
+SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
+SHA256_DIGEST_PREFIX = "sha256:"
+ARTIFACT_PUT_MAX_BYTES = 5 * 1024 * 1024 * 1024
+ARTIFACT_PUT_TTL_SECONDS = 900
+ARTIFACT_PUT_TIMEOUT_SECONDS = 900
+SHARE_PREFLIGHT_CMD = (
+    "p={path}\n"
+    '[ -f "$p" ] && [ ! -L "$p" ] || {{ printf %s "$p is not a regular file" >&2; exit 1; }}\n'
+    'size=$(wc -c < "$p" | tr -d " ") || exit 1\n'
+    'digest=$(openssl dgst -sha256 "$p") || exit 1\n'
+    "digest=${{digest##* }}\n"
+    'kept=$(head -c 4096 "$p" | tr -d "\\000" | wc -c | tr -d " ")\n'
+    'seen=$(head -c 4096 "$p" | wc -c | tr -d " ")\n'
+    'text=true; [ "$kept" = "$seen" ] || text=false\n'
+    'printf \'{{"size":%d,"digest":"sha256:%s","is_text":%s}}\' "$size" "$digest" "$text"\n'
+)
+"""Measure a produced file's size, sha256 and text-ness with tools every carrier has — `wc`,
+`openssl`, `head`, `tr` — so the same one command runs in the container and on a member's own
+machine, where no baked `ufo` client or usable `python3` exists. The size and digest bind the S3
+presigned PUT (§`store_artifact`), so a file changing between the measure and the upload fails at
+S3 rather than landing as a self-consistent lie. A symlink at the target is refused, the one
+containment the share path needs: the bytes it copies out must be the file the agent named, not a
+link's target."""
 PREVIEW_SIZE_TIMEOUT_SECONDS = 30
 PREVIEW_PUT_TTL_SECONDS = 900
 PREVIEW_PUT_TIMEOUT_SECONDS = 300
@@ -496,6 +521,69 @@ def _speaker_required(
     return SpeakerRequired(
         f"{subject} is a member's private account{note}, and this call does not carry that member"
     )
+
+
+@dataclass(frozen=True)
+class MeasuredFile:
+    """A produced file as the sandbox measured it: the size and sha256 an upload is bound to, and
+    whether its first window reads as text."""
+
+    size_bytes: int
+    digest: str
+    is_text: bool
+
+
+async def measure_file(sandbox: Sandbox, scoped: str) -> MeasuredFile:
+    """Measure one workspace file in the sandbox with `SHARE_PREFLIGHT_CMD`. A path with no regular
+    file behind it fails loud with the sandbox's own words."""
+    preflight = await sandbox.bash(
+        SHARE_PREFLIGHT_CMD.format(path=shell_path(scoped)),
+        timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    if preflight.exit_code != 0:
+        raise RuntimeError(preflight.stderr.strip() or f"artifact preflight failed for {scoped}")
+    stat = json.loads(preflight.stdout)
+    return MeasuredFile(
+        size_bytes=int(stat["size"]), digest=str(stat["digest"]), is_text=bool(stat["is_text"])
+    )
+
+
+async def store_artifact(
+    sandbox: Sandbox, blob: WorkspaceBlobStore, scoped: str, key: str, size_bytes: int, digest: str
+) -> None:
+    """Put the measured file under `key`, by the one route the store offers — the route a shared
+    file and a report the closing reply carries by path both take.
+
+    S3: serve mints a presigned PUT bound to `size_bytes` and `digest`, and the sandbox uploads to
+    it over the egress proxy — the bytes go sandbox → S3 and never cross this process, and S3
+    refuses any body that is not the measured one, so a file still being written between the
+    preflight and the upload fails loudly instead of landing as a self-consistent lie. The URL is an
+    argv element of one `curl`, which is what the sandbox already does to stage a connector's file
+    inputs; binding it to those measurements is what makes holding it worth nothing beyond this one
+    upload. A non-2xx carries S3's own error document on stdout, so a failure names its cause.
+
+    Filesystem: there is no URL to sign, so the bytes stream out of the container through the
+    carrier and into the store in bounded chunks."""
+    match blob.backend:
+        case S3BlobStore():
+            if size_bytes > ARTIFACT_PUT_MAX_BYTES:
+                raise ValueError(
+                    f"{scoped} is {size_bytes} bytes; a shared file is capped at "
+                    f"{ARTIFACT_PUT_MAX_BYTES} bytes"
+                )
+            checksum = b64encode(bytes.fromhex(digest.removeprefix(SHA256_DIGEST_PREFIX))).decode()
+            url = await blob.presigned_put(key, size_bytes, checksum, ARTIFACT_PUT_TTL_SECONDS)
+            put = await sandbox.bash(
+                f"curl -sS --fail-with-body -T {shell_path(scoped)} "
+                f"-H {shlex.quote(f'x-amz-checksum-sha256: {checksum}')} "
+                f"--url {shlex.quote(url)}",
+                timeout_s=ARTIFACT_PUT_TIMEOUT_SECONDS,
+            )
+            if put.exit_code != 0:
+                detail = put.stdout.strip() or put.stderr.strip()
+                raise RuntimeError(detail or f"uploading {scoped} to the artifact store failed")
+        case FilesystemBlobStore():
+            await blob.put_stream(key, sandbox.read_file(scoped))
 
 
 @dataclass(frozen=True)

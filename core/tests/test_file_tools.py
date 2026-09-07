@@ -40,7 +40,6 @@ from ufo.harness.sandbox.session import (
     sandbox_runtime_root,
 )
 from ufo.host.ext.loader import HookChain
-from ufo.host.tools import builtins
 from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.compaction import Compaction
@@ -53,6 +52,7 @@ from ufo.runtime.engine import (
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, ArtifactClaims, verify_artifact_url
 from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.tools import context as tool_context
 from ufo.runtime.tools.context import (
     ImageContent,
     SpawnResult,
@@ -859,7 +859,7 @@ async def test_share_file_refuses_a_file_over_the_artifact_cap(
     rather than half-uploading one."""
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
-    monkeypatch.setattr(builtins, "ARTIFACT_PUT_MAX_BYTES", 8)
+    monkeypatch.setattr(tool_context, "ARTIFACT_PUT_MAX_BYTES", 8)
     await ctx.sandbox.write_file("oversize.bin", b"nine byte")
 
     with pytest.raises(ValueError, match="capped at 8 bytes"):

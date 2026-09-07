@@ -1,13 +1,16 @@
 """The spans a round marks — `<reply-to message="…">` replies spoken mid-turn and the
-`<artifact name="…">` write-up a closing answer carries — and the redaction that keeps their markup
-off every surface.
+`<artifact path="…"/>` tag naming the file a closing answer carries — and the redaction that keeps
+their markup off every surface.
 
 `marked_replies` reads the reply spans out of a completed round's text and returns the text the
-window keeps, the same words with the markup gone. `marked_artifacts` reads the artifact spans out
-of a closing answer and returns the answer without them: a body is a file beside the reply, never
-words in it. `SpanRedaction` does both incrementally over the live delta stream, where a chunk
-boundary falls anywhere. Malformed markup reaches no member: a stray closer and a nested opener are
-stripped, and an opener no closer answered delivers nothing."""
+window keeps, the same words with the markup gone. `marked_artifacts` reads the artifact tags out
+of a closing answer and returns the answer without them: the file a tag names lands beside the
+reply, never words in it. `SpanRedaction` does both incrementally over the live delta stream, where
+a chunk boundary falls anywhere. Malformed markup reaches no member: a stray closer and a nested
+opener are stripped, a reply no closer answered delivers nothing, and an artifact tag that does not
+close itself carries nothing. The tag's earlier form, a `name` opener closed by `</artifact>` around
+the write-up, is withheld and stripped the same way, so a transcript the release being replaced
+wrote reads as the member read it."""
 
 import re
 from dataclasses import dataclass, field
@@ -22,10 +25,14 @@ REPLY_SPAN = re.compile(f"{REPLY_OPENER.pattern}(.*?){re.escape(REPLY_CLOSER)}",
 REPLY_MARKUP = re.compile(rf"<{REPLY_TAG}(?:\s[^<>]*)?>|{re.escape(REPLY_CLOSER)}")
 
 ARTIFACT_TAG = "artifact"
+ARTIFACT_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+path="([^"<>]*)"\s*/>')
 ARTIFACT_CLOSER = f"</{ARTIFACT_TAG}>"
-ARTIFACT_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+name="([^"<>]*)"\s*>')
+ARTIFACT_BODY_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+name="[^"<>]*"\s*>')
+ARTIFACT_BODY_SPAN = re.compile(
+    rf"{ARTIFACT_BODY_OPENER.pattern}.*?{re.escape(ARTIFACT_CLOSER)}", re.DOTALL
+)
 ARTIFACT_SPAN = re.compile(
-    rf"\s*{ARTIFACT_OPENER.pattern}(.*?){re.escape(ARTIFACT_CLOSER)}", re.DOTALL
+    rf"\s*(?:{ARTIFACT_OPENER.pattern}|{ARTIFACT_BODY_SPAN.pattern})", re.DOTALL
 )
 ARTIFACT_MARKUP = re.compile(rf"<{ARTIFACT_TAG}(?:\s[^<>]*)?>|{re.escape(ARTIFACT_CLOSER)}")
 ARTIFACT_FALLBACK_NAME = "artifact"
@@ -34,6 +41,9 @@ ARTIFACT_DEFAULT_SUFFIX = ".md"
 
 @dataclass(frozen=True)
 class _Tag:
+    """A span's markup: its opener, the closer that ends it — empty for a tag that closes itself —
+    and the prefixes a growing tail may still become."""
+
     opener: re.Pattern[str]
     closer: str
     head: str
@@ -42,8 +52,9 @@ class _Tag:
 
 SPAN_TAGS = (
     _Tag(REPLY_OPENER, REPLY_CLOSER, f"<{REPLY_TAG}", re.compile(rf"<{REPLY_TAG}\s[^<>]*")),
+    _Tag(ARTIFACT_OPENER, "", f"<{ARTIFACT_TAG}", re.compile(rf"<{ARTIFACT_TAG}\s[^<>]*")),
     _Tag(
-        ARTIFACT_OPENER,
+        ARTIFACT_BODY_OPENER,
         ARTIFACT_CLOSER,
         f"<{ARTIFACT_TAG}",
         re.compile(rf"<{ARTIFACT_TAG}\s[^<>]*"),
@@ -63,11 +74,11 @@ class MarkedReply:
 
 @dataclass(frozen=True)
 class MarkedArtifact:
-    """One artifact a closing answer carried: the download name its tag gave it and its body, the
-    file's whole text."""
+    """One artifact a closing answer carried: the /workspace file its tag named, and the download
+    name it takes — the file's own."""
 
     name: str
-    body: str
+    path: str
 
 
 def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
@@ -83,15 +94,18 @@ def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
 
 
 def marked_artifacts(text: str) -> tuple[tuple[MarkedArtifact, ...], str]:
-    """The answer's closed artifact spans in the order the model wrote them, and the answer with
-    every span and every trace of the markup removed — the whitespace that led into a span goes
-    with it. A span with nothing in it carries no file. A name is its last path segment, `artifact`
-    when the tag named none, and a name with no extension is a Markdown file."""
+    """The answer's artifact tags in the order the model wrote them, and the answer with every tag
+    and every trace of the markup removed — the whitespace that led into a tag goes with it. A tag
+    naming no path carries no file. A name is the path's last segment, `artifact` when it has none,
+    and a name with no extension is a Markdown file. A transcript the release being replaced wrote
+    holds the tag's earlier form, `<artifact name="…">` to `</artifact>` with the write-up inside;
+    that span is stripped like the rest and carries nothing, since its file already stands beside
+    the reply it closed."""
     artifacts: list[MarkedArtifact] = []
     for match in ARTIFACT_SPAN.finditer(text):
-        body = match.group(2).strip()
-        if body:
-            artifacts.append(MarkedArtifact(name=_artifact_name(match.group(1)), body=body + "\n"))
+        path = match.group(1)
+        if path is not None and path.strip():
+            artifacts.append(MarkedArtifact(name=_artifact_name(path), path=path.strip()))
     return tuple(artifacts), ARTIFACT_MARKUP.sub("", ARTIFACT_SPAN.sub("", text))
 
 
@@ -136,7 +150,7 @@ class SpanRedaction:
                 match, tag = opened
                 published.append(self.held[: match.start()])
                 self.held = self.held[match.end() :]
-                self.closer = tag.closer
+                self.closer = tag.closer or None
                 continue
             settled = _settled_chars(self.held)
             published.append(self.held[:settled])

@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from test_engine import RecordingHub, _engine, _queue_arrival, _seed_turn
+from test_engine import RecordingHub, _engine, _queue_arrival, _seed_turn, _turn_status
 from test_surface import (
     SURFACE,
     RecordingSurface,
@@ -44,7 +44,7 @@ from test_turn_lifecycle import (
 from ufo_ext_ufo.surface import directives_for
 from ufo_testsupport.stream_gate import GatingHub, release_when_running
 
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import (
@@ -56,9 +56,11 @@ from ufo.harness.models.interface import (
     Usage,
 )
 from ufo.harness.replies import MarkedReply, marked_artifacts
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.billing.balance import balance_park_message, credit, set_reserve
-from ufo.runtime.engine import FORCE_FINAL_PROMPT
+from ufo.runtime.engine import FORCE_FINAL_PROMPT, TurnEngine
 from ufo.runtime.ext import surface as surface_module
 from ufo.runtime.ext.surface import (
     WRITEBACK_DELIVERED,
@@ -443,14 +445,50 @@ REPORT_BODY = (
 CARRYING_ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
 
 
-def _carried(answer: str, name: str = REPORT_NAME, body: str = REPORT_BODY) -> str:
-    return f'{answer}\n\n<artifact name="{name}">\n{body}\n</artifact>\n'
+def _carried(answer: str, name: str = REPORT_NAME) -> str:
+    return f'{answer}\n\n<artifact path="/workspace/{name}"/>\n'
+
+
+async def _local_sandbox(conversation_id: UUID, workspace: Path) -> SandboxSession:
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=conversation_id,
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(workspace),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token",
+        )
+    )
+    return SandboxSession(carrier=carrier, handle=handle)
+
+
+async def _carrying_engine(
+    turn: Turn,
+    model: object,
+    tmp_path: Path,
+    *,
+    hub: RecordingHub | None = None,
+    member_id: UUID | None = None,
+) -> TurnEngine:
+    """An engine whose sandbox is a local carrier over a workspace holding the report the tag names,
+    with the workspace-scoped store production hands it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    (workspace / REPORT_NAME).write_text(REPORT_BODY + "\n")
+    engine = _engine(turn, model, tmp_path, member_id=member_id)
+    return replace(
+        engine,
+        hub=engine.hub if hub is None else hub,
+        sandbox=await _local_sandbox(turn.conversation_id, workspace),
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+    )
 
 
 @dataclass
 class CarryingModel:
-    """Closes the turn with an answer that carries its write-up in an artifact tag, streamed in
-    chunks that split the tag's markup."""
+    """Closes the turn with an answer that carries its write-up by the tag naming its /workspace
+    file, streamed in chunks that split the tag's markup."""
 
     text: str = _carried(CARRYING_ANSWER)
 
@@ -476,13 +514,14 @@ async def _shared(turn_id: UUID) -> list[sa.Row]:
 async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_beside_the_reply(
     db: None, tmp_path: Path
 ) -> None:
-    """The tag's body is a `details` share of the turn, the terminal reply is the answer without
-    it, the live stream never carried the body or the markup, and the window keeps the answer as
-    written so a later ask for the file finds its words."""
+    """The file the tag names is a `details` share of the turn — measured and stored by the route
+    `share_file` takes, under its own name — the terminal reply is the answer without the tag, the
+    live stream never carried the markup, and the window keeps the answer as written so a later ask
+    for the file finds its path."""
     turn = await _seed_turn("queued", None)
     with ws(turn.workspace_id):
         hub = RecordingHub()
-        engine = replace(_engine(turn, CarryingModel(), tmp_path), hub=hub)
+        engine = await _carrying_engine(turn, CarryingModel(), tmp_path, hub=hub)
         frame = await engine.run()
         rows = await _shared(turn.id)
         stored = await engine.transcript.read()
@@ -502,7 +541,7 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
         for message in stored.messages
         if message.role == "assistant"
     ]
-    assert any(f'<artifact name="{REPORT_NAME}">' in text and REPORT_BODY in text for text in said)
+    assert any(f'<artifact path="/workspace/{REPORT_NAME}"/>' in text for text in said)
 
 
 async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_once(
@@ -515,7 +554,7 @@ async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_
     member = await _conversation_member(turn.conversation_id)
     with ws(turn.workspace_id):
         model = CarryingArrivingModel(turn=turn, member_id=member)
-        engine = _engine(turn, model, tmp_path, member_id=member)
+        engine = await _carrying_engine(turn, model, tmp_path, member_id=member)
         frame = await engine.run()
         rows = await _shared(turn.id)
         keys = sorted(entry.key for entry in await engine.blob.list(ARTIFACT_KEY_PREFIX))
@@ -550,7 +589,7 @@ async def test_a_replayed_terminal_keeps_the_bytes_its_landed_rows_point_at(
     write's rows point at stay, because a row is what keeps them."""
     turn = await _seed_turn("queued", None)
     with ws(turn.workspace_id):
-        engine = _engine(turn, CarryingModel(), tmp_path)
+        engine = await _carrying_engine(turn, CarryingModel(), tmp_path)
         frame = await engine.run()
         rows = await _shared(turn.id)
         carried, _delivered = marked_artifacts(_carried(CARRYING_ANSWER))
@@ -1039,3 +1078,66 @@ async def test_a_spoken_reply_and_the_closing_reply_reach_a_durable_surface_in_o
     assert [text for _id, _ref, text in recorder.spoken] == [SPAN_TEXT]
     assert recorder.posted == [UUID(turn_id)]
     assert [row.status for row in await _replies(UUID(turn_id))] == [WRITEBACK_DELIVERED]
+
+
+async def test_a_path_the_sandbox_cannot_serve_costs_the_report_and_never_the_answer(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A path with no regular file behind it, or one that leaves /workspace, stages nothing and is
+    logged; the answer the model wrote still reaches the member, since a failed terminal would lose
+    it with nothing a re-run could recover."""
+    turn = await _seed_turn("queued", None)
+    text = (
+        f"{CARRYING_ANSWER}\n\n"
+        '<artifact path="/workspace/missing.md"/>\n<artifact path="../outside.md"/>\n'
+    )
+    with ws(turn.workspace_id):
+        engine = await _carrying_engine(turn, CarryingModel(text=text), tmp_path)
+        with caplog.at_level(logging.WARNING, logger="ufo"):
+            frame = await engine.run()
+        rows = await _shared(turn.id)
+        status = await _turn_status(turn.id)
+
+    assert frame is not None
+    assert (frame.status, frame.text, rows, status) == ("done", CARRYING_ANSWER + "\n", [], "done")
+    missed = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "turn.carried_file_unavailable"
+    ]
+    assert [(m["path"], m["error_class"]) for m in missed] == [
+        ("/workspace/missing.md", "RuntimeError"),
+        ("../outside.md", "ValueError"),
+    ]
+
+
+async def test_a_store_that_refuses_the_bytes_costs_the_report_and_never_the_answer(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The file measured, but the store would not take it: the report is logged as unavailable and
+    the answer still delivers, the same as for a path the sandbox cannot serve."""
+    turn = await _seed_turn("queued", None)
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    with ws(turn.workspace_id):
+        engine = await _carrying_engine(turn, CarryingModel(), tmp_path)
+        store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=store_root))
+        engine = replace(engine, blob=store)
+        store_root.chmod(0o500)
+        try:
+            with caplog.at_level(logging.WARNING, logger="ufo"):
+                frame = await engine.run()
+        finally:
+            store_root.chmod(0o700)
+        rows = await _shared(turn.id)
+
+    assert frame is not None
+    assert (frame.status, frame.text, rows) == ("done", CARRYING_ANSWER + "\n", [])
+    missed = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "turn.carried_file_unavailable"
+    ]
+    assert [(m["path"], m["error_class"]) for m in missed] == [
+        (f"/workspace/{REPORT_NAME}", "PermissionError")
+    ]

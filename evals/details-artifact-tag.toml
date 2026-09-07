@@ -30,13 +30,11 @@ name = "previous-carrier"
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = '''When detail crosses the chosen register's inline boundary, put it in one artifact and never
-duplicate its body inline. For a member, the artifact is a tag at the end of the closing message
-holding the whole write-up in Markdown under its file name:
+duplicate its body inline. For a member, the artifact is a Markdown file in /workspace — one you
+wrote, or one a subagent wrote in your sandbox — carried by a tag at the end of the closing message,
+under the file's own name:
 
-<artifact name="nightly-runner-queue.md">
-# Nightly runner: cron or a queue
-...
-</artifact>
+<artifact path="/workspace/nightly-runner-queue.md"/>
 
 The member's surface offers the file as a download beside the reply, so the reply says nothing about
 where the write-up is or that it can be sent, and never names a /workspace path, as text or as a
@@ -70,13 +68,13 @@ there and name its absolute path without share_file.'''
 path = "extensions/research/ufo_ext_research/skills/research-report/SKILL.md"
 old = '''### Where the report goes
 
-**The report rides the closing message as its artifact tag, `<artifact name="<topic>.md">` to
-`</artifact>`. Share it with `share_file` only when the user asked for a file, a document, or a
-format.**
+**Write the report to `/workspace/<topic>.md` and carry it in the closing message as
+`<artifact path="/workspace/<topic>.md"/>`; as a subagent, name that path in your result instead.
+Share it with `share_file` only when the user asked for a file, a document, or a format.**
 
 - Derive the filename from the query topic: `<topic>.md`
 - Use lowercase kebab-case for filenames
-- The chat response carries a brief summary — the full report lives in the tag
+- The chat response carries a brief summary — the full report lives in the file
 - When a file is asked for, share it so the user can view the rendered report
 '''
 new = '''### Where the report goes
@@ -94,8 +92,9 @@ for a file or a format, or when they ask for proof, evidence, or a fuller explan
 
 [[arm.replacements]]
 path = "extensions/research/ufo_ext_research/skills/research-report/SKILL.md"
-old = '''- [ ] Report carried in the closing message's `<artifact name="<topic>.md">` tag, and shared only
-      when the user asked for a file, a document, or a format
+old = '''- [ ] Report written to `/workspace/<topic>.md`, carried in the closing message's
+      `<artifact path="…"/>` tag, and shared only when the user asked for a file, a document, or
+      a format
 '''
 new = '''- [ ] Report written to a `<topic>.md` file, named in the chat response, and shared only when the
       user asked for a file or asked for proof or a fuller explanation
@@ -106,16 +105,12 @@ name = "no-example"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
-old = '''holding the whole write-up in Markdown under its file name:
+old = '''the file's own name:
 
-<artifact name="nightly-runner-queue.md">
-# Nightly runner: cron or a queue
-...
-</artifact>
+<artifact path="/workspace/nightly-runner-queue.md"/>
 
 The member's surface'''
-new = '''holding the whole write-up in Markdown under its file name, `<artifact name="topic.md">` to
-`</artifact>`. The member's surface'''
+new = '''the file's own name, `<artifact path="/workspace/topic.md"/>`. The member's surface'''
 
 [[arm]]
 name = "no-silence-clause"

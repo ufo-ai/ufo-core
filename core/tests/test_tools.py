@@ -34,7 +34,6 @@ from ufo.host.tools.builtins import (
     FILE_TOOL_RESULT_MAX_CHARS,
     READ_FIRST_HINT,
     REQUEST_CREDENTIALS_TOOL_DEF,
-    SHARE_PREFLIGHT_CMD,
     SpawnInput,
     _file_tool_result,
 )
@@ -44,6 +43,7 @@ from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
 from ufo.runtime.subagents import SubagentRegistry, Subagents
 from ufo.runtime.tools.context import (
+    SHARE_PREFLIGHT_CMD,
     SHARED_BYTES_LIMIT,
     Spawn,
     SpawnModelRejected,

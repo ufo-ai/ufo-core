@@ -129,6 +129,7 @@ from ufo.harness.sandbox.session import (
     TOOL_OUTPUT_DIRNAME,
     Sandbox,
     SandboxProviderUnavailable,
+    workspace_path,
 )
 from ufo.harness.sandbox.terminal import TerminalAbsent, TerminalGone
 from ufo.harness.untrusted import wall
@@ -199,6 +200,8 @@ from ufo.runtime.tools.context import (
     ToolContext,
     UntrustedContentError,
     clipped,
+    measure_file,
+    store_artifact,
 )
 from ufo.runtime.tools.registry import (
     OBJECT_ACTION_TOOL,
@@ -2551,24 +2554,43 @@ class TurnEngine:
     async def _stage_carried_artifacts(
         self, carried: tuple[MarkedArtifact, ...]
     ) -> tuple[_CarriedFile, ...]:
-        """Put each carried artifact's bytes in the blob store ahead of the commit that lands its
+        """Put each carried file's bytes in the blob store ahead of the commit that lands its
         `details` row: the row lands in the commit's own transaction, so a writeback claimed the
-        instant the turn is terminal finds it. The key is the turn, attempt and span position, as a
-        spoken reply's identity is, so a replayed run puts the same bytes under the same key and
-        the rows it already landed keep them."""
+        instant the turn is terminal finds it. The tag names a /workspace file, measured and stored
+        by the route `share_file` takes, so a report the turn or another agent wrote crosses as
+        written. A file that cannot be staged — a path that leaves /workspace or has no regular
+        file behind it, a file over the carried bound, a store that refuses the bytes — costs the
+        report and is logged, never the answer: the words the model wrote still deliver, since a
+        failed terminal would lose them with nothing a re-run could recover. The key is the turn,
+        attempt and tag position, as a spoken reply's identity is, so a replayed run puts the same
+        bytes under the same key and the rows it already landed keep them."""
         staged = []
         for index, artifact in enumerate(carried):
-            data = artifact.body.encode()
-            if len(data) > SHARED_BYTES_LIMIT:
-                raise ValueError(
-                    f"carried artifact {artifact.name!r} exceeds {SHARED_BYTES_LIMIT} bytes"
-                )
             artifact_id = uuid5(
                 NAMESPACE_URL, f"{self.turn.id}/{self.attempt}/{ARTIFACT_TAG}/{index}"
             )
             key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{artifact.name}"
-            await self.blob.put(key, data)
-            staged.append(_CarriedFile(key=key, filename=artifact.name, size_bytes=len(data)))
+            try:
+                scoped = workspace_path(artifact.path)
+                measured = await measure_file(self.sandbox, scoped)
+                if measured.size_bytes > SHARED_BYTES_LIMIT:
+                    raise ValueError(
+                        f"carried artifact {artifact.name!r} exceeds {SHARED_BYTES_LIMIT} bytes"
+                    )
+                await store_artifact(
+                    self.sandbox, self.blob, scoped, key, measured.size_bytes, measured.digest
+                )
+            except Exception as error:
+                warn(
+                    "turn.carried_file_unavailable",
+                    turn_id=str(self.turn.id),
+                    path=artifact.path,
+                    error_class=type(error).__name__,
+                )
+                continue
+            staged.append(
+                _CarriedFile(key=key, filename=artifact.name, size_bytes=measured.size_bytes)
+            )
         return tuple(staged)
 
     async def _discard_unreferenced(

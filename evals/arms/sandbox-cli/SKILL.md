@@ -46,5 +46,5 @@ until it is shared. Save the finished artifact, then share the exact path only w
 share trigger from the delivery register: the user asked for a file, a document, or a format, or for
 a copy of the write-up or a new revision of a file you already shared.
 A verb alone is not a trigger — "send", "give me", and "write up" name the delivery, so answer inline
-and leave the file in `/workspace` unshared. Without `share_file` in your tool set, the workspace is
-the handoff: name the path in your result, and the parent shares it.
+and carry the file by its path in the closing message's artifact tag. Without `share_file` in your
+tool set, the workspace is the handoff: name the path in your result, and the parent carries it.

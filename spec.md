@@ -688,16 +688,17 @@ reads it only under `member_context_read`.
   publishes an `ArtifactsChanged` frame, so the live surface reads and draws the file before the
   terminal frame; the terminal read remains the durable recovery path. A shared file carries a
   `role`. A `file` came through `share_file`: a surface that can attach attaches it, and it is an
-  `artifact` object. A `details` file is the write-up the closing reply carried in an
-  `<artifact name="…">` tag — the engine stages its bytes, lands the `details` row in the
-  transaction that commits the terminal, and delivers the reply without the tag — so every surface offers
+  `artifact` object. A `details` file is the write-up the closing reply carried: a Markdown file
+  the turn wrote to the workspace, named by an `<artifact path="/workspace/…"/>` tag — the engine
+  stages its bytes by the measure-and-store route `share_file` takes, lands the `details` row in
+  the transaction that commits the terminal, and delivers the reply without the tag — so every surface offers
   it beside the reply as an Open detailed report link under the answer and above the attachments,
   none attaches it, and no artifacts listing names it. In the portal the link opens the report in
   the side sheet; from Slack and iMessage it is the portal address of the conversation carrying the
   file's id (`#/c/<conversation>?report=<artifact id>`), read under the presser's own session and
   posted with unfurling off, falling back to the TTL download where the deploy has no portal or
   the conversation is a room the portal shows nobody; the terminal prints its link line. The
-  model's window keeps the answer with its tag, so a later ask for the file has the words; every
+  model's window keeps the answer with its tag, so a later ask for the file has its path; every
   surface reads the transcript through `read_transcript`, which drops the spans. A child turn's
   answer keeps its tag as text for the parent that reads it. A subagent's answer keeps
   its tag as text for its parent. The held stream is also

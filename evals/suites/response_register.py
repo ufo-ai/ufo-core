@@ -282,6 +282,7 @@ def carried_report_scorer(
     report_min_words: int,
     report_min_headers: int,
     expected_name: str = "",
+    expected_body: bytes = b"",
 ) -> Grader:
     """A standalone chat summary, plus one Markdown report the reply carried in its artifact tag
     and no file sent.
@@ -290,7 +291,9 @@ def carried_report_scorer(
     paying: a dispute clipped to its verdict and an analysis clipped to a stub both still fail. The
     summary keeps its own budget, so the substance cannot move into the message instead. A file
     shared for an ask that named none fails the case, and so does a reply that carried no report:
-    the surface has nothing to offer beside it. `expected_name` pins the name a revision reuses."""
+    the surface has nothing to offer beside it. `expected_name` pins the name a revision reuses;
+    `expected_body` pins the bytes, for a write-up that already stood in the workspace and must
+    cross as written."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         summary = measure(output.response.strip())
@@ -339,6 +342,8 @@ def carried_report_scorer(
             report = carried[0]
             if expected_name and report.name != expected_name:
                 failures.append(f"carried {report.name} instead of reusing {expected_name}")
+            if expected_body and report.content != expected_body:
+                failures.append("carried report differs from the file it stands for")
             try:
                 report_shape = measure(report.content.decode())
             except UnicodeDecodeError:
@@ -373,12 +378,13 @@ def carried_report_scorer(
         )
 
     reuse = f" under the name {expected_name}" if expected_name else ""
+    verbatim = " with the workspace file's own bytes" if expected_body else ""
     return DescribedGrader(
         f"a carried delivery: a plain chat summary of at least {summary_min_words} and at most "
         f"{summary_max_words} words over at most {summary_max_lines} lines without a workspace "
         f"path or member-unreachable Markdown link, plus exactly one Markdown report of at least "
         f"{report_min_words} words under at least {report_min_headers} section headers, carried in "
-        f"the reply's artifact tag{reuse} and never sent as a file",
+        f"the reply's artifact tag{reuse}{verbatim} and never sent as a file",
         grade,
     )
 
@@ -892,10 +898,9 @@ def _file(path: str, body: str) -> WorkspaceFile:
 
 
 def _carried(report: WorkspaceFile) -> str:
-    """A seeded assistant message's artifact tag: the report as the closing reply carried it, under
-    the name a follow-up ask reuses."""
-    name = PurePosixPath(report.path).name
-    return f'<artifact name="{name}">\n{report.content.decode()}</artifact>'
+    """A seeded assistant message's artifact tag: the report as the closing reply carried it, naming
+    the workspace file a follow-up ask reuses — the case stages that file too."""
+    return f'<artifact path="/workspace/{report.path}"/>'
 
 
 CHANGE_NOTE = _file(
@@ -1511,6 +1516,25 @@ CASES = (
         ),
     ),
     CapabilityCase(
+        "report-existing-file-carried-by-path",
+        "The nightly runner write-up is finished in the workspace as nightly-runner-queue.md. Give "
+        "me the conclusion.",
+        carried_report_scorer(
+            summary_min_words=15,
+            summary_max_words=100,
+            summary_max_lines=5,
+            report_min_words=150,
+            report_min_headers=3,
+            expected_name="nightly-runner-queue.md",
+            expected_body=NIGHTLY_RUNNER_REPORT.content,
+        ),
+        digest_tag="register:report-existing-file-carried-by-path",
+        workspace_files=(NIGHTLY_RUNNER_REPORT,),
+        rubric=(
+            "The summary states the write-up's recommendation and the one fact that decides it.",
+        ),
+    ),
+    CapabilityCase(
         "report-tradeoff-analysis",
         "Put together an analysis for the team on whether we should move our nightly job runner "
         "from cron to an event-driven queue. Cover the tradeoffs, the failure modes we would take "
@@ -1650,6 +1674,7 @@ CASES = (
             expected_name="nightly-runner-queue.md",
         ),
         digest_tag="register:report-then-file-requested",
+        workspace_files=(NIGHTLY_RUNNER_REPORT,),
         prior_messages=(
             "give me an analysis of whether we should move the nightly job runner off cron",
             "Move the jobs that have a real upstream event onto a queue, and keep cron for those "
@@ -1674,6 +1699,7 @@ CASES = (
             expected_name="dedup-null-emails.md",
         ),
         digest_tag="register:dispute-evidence-requested",
+        workspace_files=(DEDUP_EVIDENCE,),
         prior_messages=(
             "Closing the dedup ticket. Our unique index on (tenant_id, email) already prevents two "
             "rows with a NULL email for the same tenant, since Postgres treats NULLs as equal "

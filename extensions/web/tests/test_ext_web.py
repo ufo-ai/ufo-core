@@ -5094,9 +5094,9 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
                 Message(
                     role="assistant",
                     content=(
-                        "Move the jobs onto a queue.\n\n"
-                        '<artifact name="plan.md">\n# Plan\n\n'
-                        "Move the event-driven jobs.\n</artifact>\n"
+                        'Move the jobs onto a queue.\n\n<artifact path="/workspace/plan.md"/>\n'
+                        '<artifact name="earlier.md">\n# Earlier\n\nA span the release '
+                        "being replaced wrote.\n</artifact>\n"
                     ),
                 ),
             ),

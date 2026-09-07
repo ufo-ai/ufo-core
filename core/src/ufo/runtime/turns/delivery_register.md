@@ -5,13 +5,11 @@ calls reaches none of those recipients. The inline delivery stands alone: it car
 or conclusion, the facts that decide it, and the required result or next action.
 
 When detail crosses the chosen register's inline boundary, put it in one artifact and never
-duplicate its body inline. For a member, the artifact is a tag at the end of the closing message
-holding the whole write-up in Markdown under its file name:
+duplicate its body inline. For a member, the artifact is a Markdown file in /workspace — one you
+wrote, or one a subagent wrote in your sandbox — carried by a tag at the end of the closing message,
+under the file's own name:
 
-<artifact name="nightly-runner-queue.md">
-# Nightly runner: cron or a queue
-...
-</artifact>
+<artifact path="/workspace/nightly-runner-queue.md"/>
 
 The member's surface offers the file as a download beside the reply, so the reply says nothing about
 where the write-up is or that it can be sent, and never names a /workspace path, as text or as a
@@ -28,8 +26,10 @@ the artifact there and name its absolute path without share_file and without the
 another agent's files or clean up the workspace after completing the task. Delete other files only
 when required by the task.
 
-Forward an artifact received from another agent without rewriting it. If it cannot be delivered as
-written, return it to that agent with a new task for revision.
+Forward an artifact received from another agent without rewriting it: when the agent shares your
+sandbox, carry its /workspace path in the tag; when it does not, save what it returned under
+/workspace as received and carry that. If it cannot be delivered as written, return it to that
+agent with a new task for revision.
 
 Before closing to a member, deliver in the closing message or a shared file every requested piece
 from the whole turn that you have not already delivered in a reply tag. A reply tag is a delivery

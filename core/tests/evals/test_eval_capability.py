@@ -253,16 +253,13 @@ async def test_a_judge_fault_of_our_own_still_raises() -> None:
 
 def test_the_rebuilt_answer_drops_the_artifact_span_the_window_keeps() -> None:
     """The transcript keeps the closing answer with its artifact tag, so a later ask for the file
-    has the words; the member read the answer without it, and the engine landed the body as a file
-    beside the reply — so the grader-visible answer is the text without the span."""
+    has its path; the member read the answer without it, and the engine landed the named file
+    beside the reply — so the grader-visible answer is the text without the tag."""
     messages = (
         Message(role="user", content="should we move?"),
         Message(
             role="assistant",
-            content=(
-                "Move the jobs onto a queue.\n\n"
-                '<artifact name="plan.md">\n# Plan\n\nMove the event-driven jobs.\n</artifact>\n'
-            ),
+            content=('Move the jobs onto a queue.\n\n<artifact path="/workspace/plan.md"/>\n'),
         ),
     )
 

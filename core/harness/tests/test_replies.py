@@ -14,9 +14,9 @@ from ufo.harness.replies import (
 
 MESSAGE = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
 OTHER = UUID("b6f0c2de-0d7a-5a2f-9f5e-8f6b2ad1c4e7")
-REPORT = "# Nightly runner\n\nMove the event-driven jobs onto a queue.\n\n## Costs\n\nOne service."
+REPORT_PATH = "/workspace/nightly-runner-queue.md"
 ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
-CARRIED = f'{ANSWER}\n\n<artifact name="nightly-runner-queue.md">\n{REPORT}\n</artifact>\n'
+CARRIED = f'{ANSWER}\n\n<artifact path="{REPORT_PATH}"/>\n'
 
 
 def _span(message: str, body: str) -> str:
@@ -67,44 +67,38 @@ def test_reply_markup_leaves_an_artifact_tag_in_the_window() -> None:
 
 def test_a_closing_answer_yields_its_artifact_and_the_words_without_it() -> None:
     artifacts, delivered = marked_artifacts(CARRIED)
-    assert artifacts == (MarkedArtifact(name="nightly-runner-queue.md", body=REPORT + "\n"),)
+    assert artifacts == (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),)
     assert delivered == ANSWER + "\n"
 
 
 def test_artifacts_keep_their_order_and_an_empty_one_carries_nothing() -> None:
     text = (
-        '<artifact name="a.md">first</artifact>'
-        '<artifact name="b.md">  </artifact>'
-        '<artifact name="c.csv">x,y</artifact> done'
+        '<artifact path="/workspace/a.md"/>'
+        '<artifact path="  "/>'
+        '<artifact path="/workspace/out/c.csv"/> done'
     )
     artifacts, delivered = marked_artifacts(text)
-    assert [(artifact.name, artifact.body) for artifact in artifacts] == [
-        ("a.md", "first\n"),
-        ("c.csv", "x,y\n"),
+    assert [(artifact.name, artifact.path) for artifact in artifacts] == [
+        ("a.md", "/workspace/a.md"),
+        ("c.csv", "/workspace/out/c.csv"),
     ]
     assert delivered == " done"
 
 
 def test_an_artifact_name_is_its_leaf_and_defaults_to_markdown() -> None:
     text = (
-        '<artifact name="/workspace/reports/q3.md">a</artifact>'
-        '<artifact name="plan">b</artifact>'
-        '<artifact name="">c</artifact>'
-        '<artifact name="..">d</artifact>'
+        '<artifact path="/workspace/reports/q3.md"/>'
+        '<artifact path="/workspace/plan"/>'
+        '<artifact path=".."/>'
     )
     artifacts, _ = marked_artifacts(text)
-    assert [artifact.name for artifact in artifacts] == [
-        "q3.md",
-        "plan.md",
-        "artifact.md",
-        "artifact.md",
-    ]
+    assert [artifact.name for artifact in artifacts] == ["q3.md", "plan.md", "artifact.md"]
 
 
-def test_stray_artifact_markup_is_stripped_and_an_unclosed_span_stays_prose() -> None:
-    artifacts, delivered = marked_artifacts('Done.</artifact> <artifact name="x.md">half a report')
+def test_a_tag_that_does_not_close_itself_is_stripped_and_carries_nothing() -> None:
+    artifacts, delivered = marked_artifacts('Done. <artifact path="/workspace/x.md"> half a report')
     assert artifacts == ()
-    assert delivered == "Done. half a report"
+    assert delivered == "Done.  half a report"
 
 
 def test_a_stream_publishes_narration_at_every_chunk_size_and_never_the_span() -> None:
@@ -129,9 +123,7 @@ def test_a_stream_withholds_an_artifact_span_at_every_chunk_size() -> None:
 
 
 def test_a_stream_redacts_a_reply_and_an_artifact_in_one_round() -> None:
-    text = (
-        f'Working. {_span(str(MESSAGE), "spoken")} then <artifact name="x.md">body</artifact> end'
-    )
+    text = f'Working. {_span(str(MESSAGE), "spoken")} then <artifact path="/workspace/x.md"/> end'
     redaction = SpanRedaction()
     published = "".join(redaction.feed(char) for char in text)
     assert published == "Working.  then  end"
@@ -152,3 +144,20 @@ def test_stream_redaction_handles_partial_unclosed_and_stray_markup() -> None:
     assert SpanRedaction().feed("a <b> c <artifice> d") == "a <b> c <artifice> d"
     assert SpanRedaction().feed("done <artifact") == "done "
     assert SpanRedaction().feed("text</artifact>more") == "textmore"
+
+
+def test_the_earlier_body_span_is_stripped_and_carries_nothing() -> None:
+    earlier = f'{ANSWER}\n\n<artifact name="x.md">\n# Nightly\n\nMove the jobs.\n</artifact>\n'
+    assert marked_artifacts(earlier) == ((), ANSWER + "\n")
+    both = f'{CARRIED}<artifact name="x.md">body</artifact>\n'
+    assert marked_artifacts(both) == (
+        (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),),
+        ANSWER + "\n",
+    )
+    for size in (1, 5, 512):
+        redaction = SpanRedaction()
+        published = "".join(
+            redaction.feed(earlier[start : start + size]) for start in range(0, len(earlier), size)
+        )
+        assert published == ANSWER + "\n\n\n"
+        assert "Nightly" not in published
