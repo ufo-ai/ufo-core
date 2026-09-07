@@ -621,6 +621,7 @@ def delegation_only_scorer(forbidden: tuple[str, ...], *, reads_allowed: bool = 
         )
         evidence: JsonObject = {
             "ownTools": list(output.own_tools),
+            "ownCallIds": [call.call_id for call in output.own_calls],
             "checkouts": list(checkouts),
             "checkoutCalls": [call.name for call in offending],
         }

@@ -591,6 +591,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "tokens": sample_output.tokens,
                 "costMicroUsd": sample_output.cost_micro_usd,
                 "ownTools": list(sample_output.own_tools),
+                "ownCallIds": [call.call_id for call in sample_output.own_calls],
                 "handoffs": [handoff.model_dump(mode="json") for handoff in sample_output.handoffs]
                 or None,
                 "timing": (
