@@ -7,7 +7,7 @@ spoken: a tool call never enters a delivered reply, so no redaction stands betwe
 member. What the model sees back is one line, plus the reason when a fence refuses, which is what
 makes the fences steerable rather than silent.
 
-Four refusals are structural. A turn carrying workspace authority names no member, and a
+Five refusals are structural. A turn carrying workspace authority names no member, and a
 notification nobody is the recipient of is not one. The Notification agent's own turns cannot
 post: an inbox that mails itself is the loop this whole design must be unable to enter. A spawned
 turn cannot post: it was started by another turn to do that turn's work, so what it finds belongs to
@@ -18,9 +18,17 @@ member's own conversation — cannot post either, so a delivery can never raise 
 itself; that turn is not spawned but admitted into a conversation the member already reads, so the
 fence there is the exact turn id the delivery recorded.
 
+The fifth is the subject itself: one carrying an identifier minted per event is refused. The
+subject is the fold key and a uuid is unique by construction, so such a subject can never fold and
+every repeat opens a row of its own. Saying so in the field's description was not enough — a turn
+reading pages reached for the page id it had in hand — and the fold is what stands between a member
+and four hundred rows about one sync.
+
 The inbox is the agent this extension provisioned, found by that provision and never by
 name — a member's own agent may hold `notification`, and the shipped one then lands on a
 free variant."""
+
+import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -59,6 +67,15 @@ NOTIFY_INSIDE_A_SPAWN = (
     "this turn was spawned to do another turn's work; report what you found in your result, and "
     "the turn that spawned you raises what is worth raising"
 )
+MINTED_PER_EVENT = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\b[0-9a-f]{32}\b",
+    re.IGNORECASE,
+)
+NOTIFY_UNSTABLE_SUBJECT = (
+    "{found!r} is minted per event, so a subject holding it can never fold and every repeat opens "
+    "a row of its own. Name the thing itself, as `<source>/<id>`: the pull request as "
+    "`github/3132`, the thread as `gmail/<thread id>`, the source as `source/stripe`"
+)
 NOTIFY_INSIDE_A_DELIVERY = (
     "this turn is delivering a notification; it does not raise one about that"
 )
@@ -76,8 +93,10 @@ class NotifyInput(BaseModel):
         min_length=1,
         max_length=SUBJECT_MAX,
         description=(
-            "The stable thing this is about, as a ref where one exists (`source/<name>`, "
-            "`issue/1801`). Two messages naming one subject fold into one."
+            "The stable thing this is about, as `<source>/<id>` where one exists "
+            "(`github/3132`, `gmail/<thread id>`, `source/stripe`). Two messages naming one "
+            "subject fold into one, so an identifier minted per event — a page id, a turn id — "
+            "is refused."
         ),
     )
     body: str = Field(
@@ -106,6 +125,9 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
         return _refusal(NOTIFY_NEEDS_A_MEMBER)
     if ctx.turn.spawned:
         return _refusal(NOTIFY_INSIDE_A_SPAWN)
+    minted = MINTED_PER_EVENT.search(args.subject)
+    if minted is not None:
+        return _refusal(NOTIFY_UNSTABLE_SUBJECT.format(found=minted.group(0)))
     ext = _require_ext(ctx.ext)
     store = NotificationStore(ext)
     if await store.is_delivery_turn(ctx.turn.id):

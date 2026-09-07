@@ -21,6 +21,7 @@ from ufo_ext_app_notification.notify_tool import (
     NOTIFY_SELF,
     NOTIFY_TOOL,
     NOTIFY_TOOL_NAME,
+    NOTIFY_UNSTABLE_SUBJECT,
     NotifyInput,
     notify,
 )
@@ -443,3 +444,39 @@ def test_every_agent_holds_notify_and_the_notification_agent_does_not() -> None:
     }
     assert NOTIFICATION_AGENT.spec.visibility == "workspace"
     assert NOTIFICATION_AGENT.icon == "bell"
+
+
+async def test_a_subject_minted_per_event_is_refused_and_a_stable_one_folds(db: None) -> None:
+    """The subject is the fold key, so an identifier minted per event can never fold: every repeat
+    opens a row of its own, which is the flood the fold exists to prevent. The field's description
+    said as much and the first live sweep still reached for the page id it had in hand, so the
+    refusal is what holds. It names what to use instead, and a stable subject folds as it always
+    did."""
+    workspace_id, member_id, agent_id, _inbox_id, conversation_id = await _seed()
+    ext = context_for(NAME, frozenset(), member_context_read=True)
+    with ws(workspace_id), agent(agent_id):
+        ctx = _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id)
+        dashed = await notify(
+            ctx,
+            NotifyInput(
+                subject="page/e715af2f-4ccc-537f-9444-092e0a092a5b", body="CI failed on a PR"
+            ),
+        )
+        bare = await notify(
+            ctx,
+            NotifyInput(subject="notification/a123f8411ae74b7bbfdc656e8fa0b92a", body="x"),
+        )
+        first = await notify(ctx, NotifyInput(subject="github/3132", body="CI failed"))
+        again = await notify(ctx, NotifyInput(subject="github/3132", body="CI failed again"))
+        rows = await NotificationStore(ext).rows()
+
+    assert dashed.is_error is True
+    assert "e715af2f-4ccc-537f-9444-092e0a092a5b" in dashed.content[0].text
+    assert "github/3132" in dashed.content[0].text
+    assert bare.is_error is True
+    assert bare.content[0].text == NOTIFY_UNSTABLE_SUBJECT.format(
+        found="a123f8411ae74b7bbfdc656e8fa0b92a"
+    )
+    assert first.is_error is False
+    assert again.is_error is False
+    assert [(row.subject, row.occurrences) for row in rows] == [("github/3132", 2)]
