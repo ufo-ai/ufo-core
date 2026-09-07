@@ -167,12 +167,13 @@ class TextChunker:
 
     @staticmethod
     def _count_words(text: str) -> int:
-        non_whitespace = len(re.sub(r"\s", "", text))
+        words = text.split()
+        non_whitespace = sum(map(len, words))
         if non_whitespace == 0:
             return 0
-        if len(CJK_CHARS.findall(text)) / non_whitespace >= CJK_DENSITY_THRESHOLD:
+        if sum(1 for _ in CJK_CHARS.finditer(text)) / non_whitespace >= CJK_DENSITY_THRESHOLD:
             return non_whitespace
-        return len(WORD_RUNS.findall(text))
+        return len(words)
 
     def _cap_by_chars(self, text: str) -> list[str]:
         if len(text) <= self.max_chars:
