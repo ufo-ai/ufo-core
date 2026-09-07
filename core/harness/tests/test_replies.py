@@ -16,7 +16,7 @@ MESSAGE = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
 OTHER = UUID("b6f0c2de-0d7a-5a2f-9f5e-8f6b2ad1c4e7")
 REPORT_PATH = "/workspace/nightly-runner-queue.md"
 ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
-CARRIED = f'{ANSWER}\n\n<artifact path="{REPORT_PATH}" text="Open detailed report"/>\n'
+CARRIED = f'{ANSWER}\n\n<artifact path="{REPORT_PATH}"/>\n'
 
 
 def _span(message: str, body: str) -> str:
@@ -67,21 +67,8 @@ def test_reply_markup_leaves_an_artifact_tag_in_the_window() -> None:
 
 def test_a_closing_answer_yields_its_artifact_and_the_words_without_it() -> None:
     artifacts, delivered = marked_artifacts(CARRIED)
-    assert artifacts == (
-        MarkedArtifact("nightly-runner-queue.md", REPORT_PATH, "Open detailed report"),
-    )
+    assert artifacts == (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),)
     assert delivered == ANSWER + "\n"
-
-
-def test_the_link_text_is_one_bounded_line_or_none() -> None:
-    def text(tag: str) -> str | None:
-        return marked_artifacts(tag)[0][0].text
-
-    assert text('<artifact path="/workspace/a.md"/>') is None
-    assert text('<artifact path="/workspace/a.md" text=""/>') is None
-    assert text('<artifact path="/workspace/a.md" text=" Open  the\nplan "/>') == "Open the plan"
-    assert text(f'<artifact path="/workspace/a.md" text="{"x" * 81}"/>') is None
-    assert text(f'<artifact path="/workspace/a.md" text="{"x" * 80}"/>') == "x" * 80
 
 
 def test_artifacts_keep_their_order_and_an_empty_one_carries_nothing() -> None:
@@ -164,7 +151,7 @@ def test_the_earlier_body_span_is_stripped_and_carries_nothing() -> None:
     assert marked_artifacts(earlier) == ((), ANSWER + "\n")
     both = f'{CARRIED}<artifact name="x.md">body</artifact>\n'
     assert marked_artifacts(both) == (
-        (MarkedArtifact("nightly-runner-queue.md", REPORT_PATH, "Open detailed report"),),
+        (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),),
         ANSWER + "\n",
     )
     for size in (1, 5, 512):

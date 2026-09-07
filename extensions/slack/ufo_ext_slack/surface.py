@@ -4088,7 +4088,7 @@ async def _details_link_line(
     ctx: SurfaceContext, conversation_id: UUID, artifact: SharedArtifact
 ) -> str:
     url = await ctx.report_url(conversation_id, artifact) or ctx.artifact_link(artifact)
-    return f"[{artifact.subject or DETAILS_LINK_TEXT}]({url})" if url else artifact.filename
+    return f"[{DETAILS_LINK_TEXT}]({url})" if url else artifact.filename
 
 
 def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str:

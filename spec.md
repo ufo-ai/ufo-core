@@ -688,8 +688,7 @@ reads it only under `member_context_read`.
   terminal frame; the terminal read remains the durable recovery path. A shared file carries a
   `role`. A `file` came through `share_file`: a surface that can attach attaches it, and it is an
   `artifact` object. A `details` file is the write-up the closing reply carried: a Markdown file
-  the turn wrote to the workspace, named by an `<artifact path="/workspace/…" text="…"/>` tag whose
-  text is the link the member clicks (Open detailed report, never the file's name) — the engine
+  the turn wrote to the workspace, named by an `<artifact path="/workspace/…"/>` tag — the engine
   stages its bytes by the measure-and-store route `share_file` takes, lands the `details` row in
   the transaction that commits the terminal, and delivers the reply without the tag — so every surface offers
   it beside the reply as an Open detailed report link under the answer and above the attachments,

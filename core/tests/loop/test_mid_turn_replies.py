@@ -446,7 +446,7 @@ CARRYING_ANSWER = "Move the event-driven jobs onto a queue and keep cron for the
 
 
 def _carried(answer: str, name: str = REPORT_NAME) -> str:
-    return f'{answer}\n\n<artifact path="/workspace/{name}" text="Open the plan"/>\n'
+    return f'{answer}\n\n<artifact path="/workspace/{name}"/>\n'
 
 
 async def _local_sandbox(conversation_id: UUID, workspace: Path) -> SandboxSession:
@@ -529,9 +529,9 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
 
     assert frame is not None
     assert (frame.status, frame.text) == ("done", CARRYING_ANSWER + "\n")
-    assert [
-        (row.filename, row.role, row.media_type, row.size_bytes, row.subject) for row in rows
-    ] == [(REPORT_NAME, "details", "text/markdown", len(REPORT_BODY) + 1, "Open the plan")]
+    assert [(row.filename, row.role, row.media_type, row.size_bytes) for row in rows] == [
+        (REPORT_NAME, "details", "text/markdown", len(REPORT_BODY) + 1)
+    ]
     assert bytes_stored == (REPORT_BODY + "\n").encode()
     streamed = "".join(f.text for f in hub.frames if isinstance(f, TextDelta))
     assert streamed == CARRYING_ANSWER + "\n\n\n"
@@ -541,9 +541,7 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
         for message in stored.messages
         if message.role == "assistant"
     ]
-    assert any(
-        f'<artifact path="/workspace/{REPORT_NAME}" text="Open the plan"/>' in text for text in said
-    )
+    assert any(f'<artifact path="/workspace/{REPORT_NAME}"/>' in text for text in said)
 
 
 async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_once(

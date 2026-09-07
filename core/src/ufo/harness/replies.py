@@ -25,8 +25,7 @@ REPLY_SPAN = re.compile(f"{REPLY_OPENER.pattern}(.*?){re.escape(REPLY_CLOSER)}",
 REPLY_MARKUP = re.compile(rf"<{REPLY_TAG}(?:\s[^<>]*)?>|{re.escape(REPLY_CLOSER)}")
 
 ARTIFACT_TAG = "artifact"
-ARTIFACT_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+path="([^"<>]*)"(?:\s+text="([^"<>]*)")?\s*/>')
-ARTIFACT_TEXT_MAX_CHARS = 80
+ARTIFACT_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+path="([^"<>]*)"\s*/>')
 ARTIFACT_CLOSER = f"</{ARTIFACT_TAG}>"
 ARTIFACT_BODY_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+name="[^"<>]*"\s*>')
 ARTIFACT_BODY_SPAN = re.compile(
@@ -75,13 +74,11 @@ class MarkedReply:
 
 @dataclass(frozen=True)
 class MarkedArtifact:
-    """One artifact a closing answer carried: the /workspace file its tag named, the download name
-    it takes — the file's own — and the words the member clicks to open it, None when the tag named
-    none and the surface says its own."""
+    """One artifact a closing answer carried: the /workspace file its tag named, and the download
+    name it takes — the file's own."""
 
     name: str
     path: str
-    text: str | None = None
 
 
 def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
@@ -100,20 +97,15 @@ def marked_artifacts(text: str) -> tuple[tuple[MarkedArtifact, ...], str]:
     """The answer's artifact tags in the order the model wrote them, and the answer with every tag
     and every trace of the markup removed — the whitespace that led into a tag goes with it. A tag
     naming no path carries no file. A name is the path's last segment, `artifact` when it has none,
-    and a name with no extension is a Markdown file. The tag's `text` is the link the member reads,
-    one line of at most `ARTIFACT_TEXT_MAX_CHARS`; a longer or empty one is no text. A transcript
-    the release being replaced wrote holds the tag's earlier form, `<artifact name="…">` to
-    `</artifact>` with the write-up inside; that span is stripped like the rest and carries nothing,
-    since its file already stands beside the reply it closed."""
+    and a name with no extension is a Markdown file. A transcript the release being replaced wrote
+    holds the tag's earlier form, `<artifact name="…">` to `</artifact>` with the write-up inside;
+    that span is stripped like the rest and carries nothing, since its file already stands beside
+    the reply it closed."""
     artifacts: list[MarkedArtifact] = []
     for match in ARTIFACT_SPAN.finditer(text):
         path = match.group(1)
         if path is not None and path.strip():
-            artifacts.append(
-                MarkedArtifact(
-                    name=_artifact_name(path), path=path.strip(), text=_link_text(match.group(2))
-                )
-            )
+            artifacts.append(MarkedArtifact(name=_artifact_name(path), path=path.strip()))
     return tuple(artifacts), ARTIFACT_MARKUP.sub("", ARTIFACT_SPAN.sub("", text))
 
 
@@ -127,11 +119,6 @@ def _named_message(named: str) -> UUID | None:
 def _artifact_name(named: str) -> str:
     name = contained_leaf(named.strip(), ARTIFACT_FALLBACK_NAME)
     return name if "." in name else name + ARTIFACT_DEFAULT_SUFFIX
-
-
-def _link_text(named: str | None) -> str | None:
-    text = " ".join((named or "").split())
-    return text if 0 < len(text) <= ARTIFACT_TEXT_MAX_CHARS else None
 
 
 @dataclass

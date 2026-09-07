@@ -7,10 +7,9 @@ or conclusion, the facts that decide it, and the required result or next action.
 When detail crosses the chosen register's inline boundary, put it in one artifact and never
 duplicate its body inline. For a member, the artifact is a Markdown file in /workspace — one you
 wrote, or one a subagent wrote in your sandbox — carried by a tag at the end of the closing message,
-under the file's own name. The tag's text is the link the member clicks: for a report, Open detailed
-report; never the file's name.
+under the file's own name:
 
-<artifact path="/workspace/nightly-runner-queue.md" text="Open detailed report"/>
+<artifact path="/workspace/nightly-runner-queue.md"/>
 
 The member's surface offers the file as a download beside the reply, so the reply says nothing about
 where the write-up is or that it can be sent, and never names a /workspace path, as text or as a

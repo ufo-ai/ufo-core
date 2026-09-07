@@ -515,7 +515,7 @@ function CarriedReport({ file, onOpen }: { file: ChatFile; onOpen: () => void })
         TAP_FLOOR,
       )}
     >
-      {file.subject || "Open detailed report"}
+      Open detailed report
     </button>
   );
 }
