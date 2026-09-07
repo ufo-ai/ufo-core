@@ -21,7 +21,9 @@ failure — a member challenging a sentence in the agent's own artifact — a fo
 can answer, a member answering a question the agent asked, a member calling off work the agent
 committed to (which is a reply, never silence: the team's answer to "nevermind" is a short
 affirmation), a message writing a decision word of its own, which is that member's text and never
-the answer, and a member answering the agent's question after a mention lifted an earlier stop.
+the answer, a member answering the agent's question after a mention lifted an earlier stop, and a
+new ask in a thread whose only stop-shaped words are the agent's own report that it paused a
+stream — a member's stop silences the thread, the agent's account of its own act never does.
 
 The recorded thread is the one the issue names, C0BJURDE76E ts=1788662458.679999, verbatim from
 Slack as the surface reads it, and its cases are its actual decisions: two replies into a
@@ -121,6 +123,10 @@ VENDOR_RECONCILE_STARTED = (
     "vendor-feed-counts-vs-invoices.md with the four vendors matched."
 )
 VENDOR_RECONCILE_DROPPED = "Dropped. vendor-feed-counts-vs-invoices.md is unchanged."
+VENDOR_RECONCILE_ALERTS_HELD = (
+    "Paused the nightly vendor-feed alerts for these five feeds while the reconcile runs, so "
+    "nothing posts in here from them. First pass: two of the five disagree with the invoices."
+)
 VENDOR_RECONCILE_RERUN = (
     "harbor_point against last night's snapshot: 12,410 feed rows against 12,388 invoiced. Do you "
     "want the 22 unmatched rows listed?"
@@ -643,6 +649,22 @@ CASES = (
                 ALEX, f"<@{BOT_USER_ID}> actually rerun just harbor_point against the snapshot"
             ),
             _agent(VENDOR_RECONCILE_RERUN),
+        ),
+        REPLY,
+    ),
+    SilenceCase(
+        "new-ask-after-the-agent-said-it-paused-a-stream",
+        _member(ALEX, "which two of the five disagreed with the invoices?"),
+        (
+            _member(
+                MARSHALL,
+                f"<@{BOT_USER_ID}> reconcile the vendor feed row counts against the invoice totals",
+            ),
+            _agent(VENDOR_RECONCILE_QUESTION),
+            _member(MARSHALL, "the production snapshot"),
+            _agent(VENDOR_RECONCILE_ALERTS_HELD),
+            _member(ALEX, f"<@{MARSHALL}> are the invoices in the shared drive yet?"),
+            _member(MARSHALL, "harbor_point is still with finance"),
         ),
         REPLY,
     ),

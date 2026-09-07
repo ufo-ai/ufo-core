@@ -73,6 +73,7 @@ ANSWER_CASES = (
     "member-calls-off-work-the-agent-committed-to",
     "a-decision-word-inside-a-message-for-the-agent",
     "a-mention-after-a-stop-lifts-it",
+    "new-ask-after-the-agent-said-it-paused-a-stream",
     "recorded-no-implement-it-after-a-mention-lifted-the-stop",
 )
 STOPS = ("actually nevermind, drop it", "stop ufo")
@@ -197,7 +198,7 @@ def test_the_thread_history_is_what_every_case_hands_the_decision() -> None:
 
 
 def test_the_suite_holds_both_halves_and_cannot_be_gamed_by_either() -> None:
-    assert len(CASES) == 21
+    assert len(CASES) == 22
     assert {case.name for case in CASES} == set(SILENT_CASES) | set(ANSWER_CASES)
     assert len({case.name for case in CASES}) == len(CASES)
     assert len({case.message.text for case in CASES}) == len(CASES)
@@ -237,6 +238,22 @@ def test_a_stop_holds_until_a_message_names_the_agent() -> None:
         stopped = next(index for index, entry in enumerate(lifted) if entry.text in STOPS)
         assert any(f"<@{BOT_USER_ID}>" in entry.text for entry in lifted[stopped:]), name
         assert lifted[-1].own, name
+
+
+def test_only_a_members_stop_can_silence_the_thread() -> None:
+    """The control for whose stop counts: the agent's own message reports that it paused a stream,
+    and nothing a member wrote calls the agent off. So the new ask that follows is owed a reply, and
+    a gate that read the agent's own account of its act as a stop would drop it."""
+    control = BY_NAME["new-ask-after-the-agent-said-it-paused-a-stream"]
+    assert control.expected == "REPLY"
+    paused = next(entry for entry in control.history if entry.text.startswith("Paused the nightly"))
+    assert paused.own
+    assert all(entry.own or entry.text not in STOPS for entry in control.history)
+    assert control.history.index(paused) < len(control.history) - 1
+    assert all(
+        f"<@{BOT_USER_ID}>" not in entry.text
+        for entry in control.history[control.history.index(paused) :]
+    )
 
 
 def test_the_recorded_thread_is_read_whole_and_its_stop_sits_inside_the_window() -> None:

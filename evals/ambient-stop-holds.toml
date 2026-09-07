@@ -19,7 +19,7 @@ sandbox = { backend = "local" }
 
 # The ambient reply gate reads one prompt, so every arm is a cut of it measured on the whole
 # slack_silence suite: the three stop cases and their lift control are what the stop rule claims to
-# move, the two exchanges between members are what the statement rule claims to move, and the nine
+# move, the two exchanges between members are what the statement rule claims to move, and the ten
 # earlier cases are the controls neither may regress. The control arm is the base prompt with every
 # rule standing.
 
@@ -32,12 +32,14 @@ name = "no-stop-rule"
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/ambient_reply.py"
 old = """
-    "1. An earlier message in `history` — not the new message itself — told the agent to stop, "
-    "drop it, be quiet, or stay out of the thread, and no message after that one names the agent "
-    "-> NO_REPLY. The stop holds over everything that follows it — a question the agent could "
-    "answer, a correction of its work, more talk between the members — and only a message naming "
-    "the agent lifts it. The stop itself, when it is the new message, is answered once, under rule "
-    "2.\\n"
+    "1. An earlier message in `history` that a member wrote — one with `own` false, and not the "
+    "new message itself — told the agent to stop, drop it, be quiet, or stay out of the thread, "
+    "and no message after that one names the agent -> NO_REPLY. The stop holds over everything "
+    "that follows it — a question the agent could answer, a correction of its work, more talk "
+    "between the members — and only a message naming the agent lifts it. The agent's own message "
+    "is never that stop: a message with `own` true saying the agent stopped, paused, dropped, or "
+    "is holding something reports an act of its own, and the messages after it are decided by the "
+    "rules below. The stop itself, when it is the new message, is answered once, under rule 2.\\n"
 """
 new = """
 """
