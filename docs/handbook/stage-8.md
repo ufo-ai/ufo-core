@@ -1,352 +1,936 @@
-# Runtime fleet coordination and crash recovery  `stage-8`
+# Turn admission, durable queuing, and live update streams  `stage-8`
 
-This stage is behind-the-scenes support for a running fleet of serve processes. A serve process is a live worker that can pick up and run conversations or workflows. The job here is to make sure the fleet knows which workers are alive, which work is claimed, and what to do when something stops halfway through.
+This stage is the traffic control room for conversations. A “turn” means one unit of agent work, such as answering a user message or reacting to an internal event. When something new arrives, admission.py is the trusted front door. It checks that the account can use the system, the delivery is not a duplicate, the right agent is attached, and only one turn for the conversation runs at a time. ambient_reply.py adds a social filter for group chats: if someone replies in a thread without clearly inviting the agent, it can skip starting a costly unwanted turn.
 
-`runtime_instance.py` is the fleet’s attendance sheet and cleanup crew. Each running process records that it is alive so other processes do not mistake it for a dead one. It also runs background repairs. If a workflow was cancelled, abandoned, or left in an uncertain state after a crash, this code finds it and moves it toward a safe restart or cleanup. It also fixes “child” work that was launched by a “parent” turn when the parent crashed or was cancelled.
-
-`delivery.py` is a fallback mail carrier for child-agent results. Normally a child’s finished result is handed back directly to the parent conversation. If that handoff was missed, this file finds the result and delivers it so the parent can continue.
+Once a turn is waiting, dispatch.py decides when it is safe to start the next one and sends it to the background worker queue. While the turn runs, hub.py broadcasts live progress, like a radio channel for text, status, costs, and results. hub_tail.py helps clients follow that channel reliably, checking storage too so late or reconnecting viewers still see the ending. stream_hub.py extends the same live updates across many server processes using Redis Streams.
 
 ## Files in this stage
 
-### Fleet liveness and recovery
-Tracks live runtime instances and repairs workflows or delegated child-agent results left behind by crashes, cancellations, or missed handoffs.
+### Turn admission gates
+These files decide whether an incoming message or ambient thread activity should become a queued turn.
 
-### `core/src/ufo/runtime/runtime_instance.py`
+### `core/src/ufo/runtime/surfaces/admission.py`
 
-`orchestration` · `background during serve process runtime`
+`orchestration` · `request handling and background turn admission`
 
-A serve process is one running copy of the service. This file gives each process a “seat” in the database and keeps that seat fresh with a heartbeat, like a worker regularly tapping a badge reader to prove they are still in the building. Other background loops use those heartbeats to decide which work is safe to recover.
+A “turn” is one unit of work for an agent in a conversation: a member message, a scheduled event, or an internal follow-up. This file decides whether that turn may start now, must wait, should be merged into a turn already running, or must be refused. Without this single admission point, different callers could accidentally bypass spend limits, start two turns in the same conversation at once, switch a conversation to the wrong agent, or create duplicate work when a message is retried.
 
-The main pieces are small repeated sweeps. `Heartbeat` updates this process’s row every few seconds and deletes it during graceful shutdown. `ExecutorRecovery` looks for DBOS workflows that are still pending under an executor id whose heartbeat is stale or missing, then asks DBOS to recover them. DBOS is the durable workflow system here: it records workflow progress so work can resume after failures.
+The main class, Admission, works like a guarded reception desk. It locks the conversation row in the database so only one admission decision assigns the next sequence number at a time. It first checks whether the request is a duplicate, then checks member “watermarks” used to avoid races between timers and human replies. If a turn is already live, it usually stores the new message as an inbound arrival for that live turn instead of starting a second run. If no live turn can take it, it creates a new turn row, applies seat and spending rules, registers durable writeback when needed, and enqueues runnable work into DBOS, the background workflow queue.
 
-`CancelReconciler` spreads cancellation down a turn tree. A “turn” is a unit of conversation or agent work. Cancelling one turn only marks that turn; this reconciler finds descendant turns that should also stop and cancels them safely.
-
-`StrandedTurnReconciler` fixes a different stuck state: a turn marked running, but whose workflow attempt no longer exists or can no longer advance. After a grace period, it cancels those turns so the conversation does not wait forever on work nobody can complete.
+Small wrapper classes expose safer versions of this power: surfaces can only admit member messages, while internal jobs can invoke turns without pretending to be members.
 
 #### Function details
 
-##### `record_fleet_seat`  (lines 42–57)
+##### `_refused`  (lines 166–177)
 
 ```
-async def record_fleet_seat(instance_id: UUID) -> None
+def _refused(holds_work_already_done: bool, message: str) -> tuple[TurnStatus, TerminalFrame | None]
 ```
 
-**Purpose**: This creates the database row that says, “this serve process exists.” It is written before DBOS starts so the process is not mistaken for dead while it is booting.
+**Purpose**: Decides what a refusal should mean for a turn. If the system already accepted and paid for work, it parks the turn so it can resume later; otherwise it cancels the turn with a readable explanation.
 
-**Data flow**: It receives the process instance id. It opens an owner database transaction, inserts a `runtime_instance` row with no workspace attached, stamps the current time as the heartbeat and creation time, then logs that the fleet seat was recorded.
+**Data flow**: It receives a flag saying whether work has already been done and a refusal message. It turns that into either a parked status with no final reply, or a cancelled status with a terminal frame containing the message.
 
-**Call relations**: This is the first part of the liveness story. Later, `Heartbeat.beat` keeps this row fresh, and `ExecutorRecovery._live_executors` reads these rows to decide which executors are still alive.
+**Call relations**: Admission._create_turn and Admission._authority_refusal call this when seats, billing, or caps say a turn cannot proceed. It supplies the final status those callers write into the turn row.
 
-*Call graph*: 3 external calls (insert, owner_tx, log).
-
-
-##### `Heartbeat.run`  (lines 70–80)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: This is the repeating heartbeat loop for one serve process. It keeps calling `beat` so the database continues to show that the process is alive.
-
-**Data flow**: It uses the `Heartbeat` object’s instance id. Each loop tries to update the heartbeat through `Heartbeat.beat`; if a database error happens, it logs the failure instead of stopping; then it waits for the configured heartbeat interval and tries again.
-
-**Call relations**: This loop drives `Heartbeat.beat` for as long as the process is running. Its steady updates are what keep `ExecutorRecovery.sweep` from recovering work that still belongs to a live process.
-
-*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
+*Call graph*: called by 2 (_authority_refusal, _create_turn); 1 external calls (__init__).
 
 
-##### `Heartbeat.beat`  (lines 82–92)
+##### `Admission.admit_member`  (lines 188–232)
 
 ```
-async def beat(self) -> None
+async def admit_member(self, workspace_id: UUID, conversation_id: UUID, body: str, speaker_member_id: UUID | None, idempotency_key: str | None=None, context: TurnContext | None=None, intent: ToolInten
 ```
 
-**Purpose**: This writes one fresh liveness stamp for the current process. It is the actual database update behind the heartbeat loop.
+**Purpose**: Admits a message that came from a member-facing surface, such as a chat or panel. It validates that prepared intents and comments are well formed, then sends the message through the shared admission path.
 
-**Data flow**: It reads the instance id from the `Heartbeat` object. It opens an owner database transaction and updates that process’s `runtime_instance` row so `heartbeat_at` and `updated_at` become the current database time. It returns nothing, but the database row is now fresh.
+**Data flow**: It receives workspace and conversation identifiers, the message body, the speaker member, optional duplicate key, context, prepared intent, comment, and runtime settings. It converts the speaker into execution authority, calls the core admission routine, wakes any live turn that received the message, optionally publishes the comment to the hub, and returns an Admitted result telling the surface what happened.
 
-**Call relations**: `Heartbeat.run` calls this every few seconds. `ExecutorRecovery._live_executors` later reads the updated timestamp to decide that this executor should not be recovered by another process.
+**Call relations**: This is the public member-message entrance into Admission._admit. After _admit commits the database changes, it calls Admission._wake_live_turn so listeners learn about folded arrivals, and it may publish a Reply frame for surface comments.
 
-*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
-
-
-##### `Heartbeat.retire`  (lines 94–100)
-
-```
-async def retire(self) -> None
-```
-
-**Purpose**: This removes the process’s liveness row during a clean shutdown. It lets peers see immediately that the process has left, instead of waiting for its heartbeat to become stale.
-
-**Data flow**: It reads the instance id from the `Heartbeat` object. It opens an owner database transaction and deletes the matching `runtime_instance` row. The database no longer advertises this process as alive.
-
-**Call relations**: The serve shutdown path calls this through `core/src/ufo/serve._stop_executor`. It is the graceful counterpart to heartbeat expiry: instead of timing out, the process actively gives up its seat.
-
-*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
+*Call graph*: calls 2 internal fn (_admit, _wake_live_turn); 4 external calls (__init__, model_dump_json, span, authority_from_member_id).
 
 
-##### `ExecutorRecovery.run`  (lines 120–126)
+##### `Admission.redispatch`  (lines 234–340)
 
 ```
-async def run(self) -> None
+async def redispatch(self, workspace_id: UUID, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None
 ```
 
-**Purpose**: This is the repeating loop that looks for workflows abandoned by dead processes. It makes crash recovery happen automatically without a human restarting each job.
+**Purpose**: Re-admits an inbound message that was left waiting after a turn ended. This keeps messages from being lost when the turn they arrived on failed, stopped, or ended before consuming them.
 
-**Data flow**: It uses the configured recovery interval. Each cycle waits, calls `ExecutorRecovery.sweep`, logs database or DBOS workflow errors if they occur, and keeps looping rather than dying on one failed tick.
+**Data flow**: It reads the ended turn and the oldest still-unconsumed inbound message from the database. If needed, it stamps that message with a redispatch idempotency key, rebuilds its context and runtime settings, calls the shared admission routine as already-accepted work, wakes any live turn, and returns the id of a newly opened turn or None if the message only folded into an existing turn or nothing was pending.
 
-**Call relations**: This loop is the driver for `ExecutorRecovery.sweep`. Every serve process can run it, so any surviving process can recover work left behind by another one.
+**Call relations**: Workflow exits and member stop paths use this to continue conversation work after a turn ends. It hands the actual decision back to Admission._admit, then uses Admission._wake_live_turn and, for member-founded redispatches, publishes an Absorbed frame to the hub.
 
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
-
-
-##### `ExecutorRecovery.sweep`  (lines 128–136)
-
-```
-async def sweep(self) -> None
-```
-
-**Purpose**: This finds executors that have pending workflow work but no fresh heartbeat, then asks DBOS to recover that work. In plain terms, it finds tasks assigned to workers who appear to be gone and puts those tasks back into motion.
-
-**Data flow**: It asks `_pending_executors` for executor ids attached to pending DBOS workflows, and `_live_executors` for executor ids with fresh database heartbeats. It subtracts live executors from pending executors. For each remaining stranded executor, it calls DBOS recovery in a worker thread and logs how many workflows were recovered.
-
-**Call relations**: `ExecutorRecovery.run` calls this on a schedule. It relies on `Heartbeat.beat` having kept live process rows fresh, and it hands stranded executor ids to DBOS so the durable workflow system can re-dispatch their work.
-
-*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
+*Call graph*: calls 2 internal fn (_admit, _wake_live_turn); 8 external calls (__init__, model_validate, model_validate, select, update, workspace_tx, authority_from_member_id, turn_authority).
 
 
-##### `ExecutorRecovery._pending_executors`  (lines 138–150)
+##### `Admission.invoke`  (lines 342–428)
 
 ```
-async def _pending_executors(self) -> set[str]
+async def invoke(self, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, authority: ExecutionAuthority, holds
 ```
 
-**Purpose**: This gathers the executor ids currently holding pending DBOS workflows. These are the candidates that might need recovery if their executor is no longer alive.
+**Purpose**: Admits an internal turn, such as a scheduled fire, extension callback, or subagent result. It preserves the authority of the work that caused the invocation, so internal work cannot silently gain or lose permissions.
 
-**Data flow**: It asks DBOS for up to the configured scan limit of workflows whose status is `PENDING`, without loading their full inputs or outputs. If the result hits the limit, it logs that the scan may have more to see. It returns a set of executor id strings found on those workflow records.
+**Data flow**: It receives the target conversation and asserted agent, message, idempotency key, context, authority, admission options, optional member-wait watermarks, and runtime settings. It calls the shared admission routine; if a member has spoken after the supplied watermarks, it returns None instead of starting work. Otherwise it wakes any live turn and returns the admitted turn id.
 
-**Call relations**: `ExecutorRecovery.sweep` calls this before comparing against live executors. Its output is only a candidate list; `_live_executors` is used next to avoid touching work that still belongs to a healthy process.
+**Call relations**: Internal jobs and extension workflows call this rather than admit_member. It delegates all real admission decisions to Admission._admit and uses Admission._wake_live_turn afterward for arrivals folded into a live run.
 
-*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
-
-
-##### `ExecutorRecovery._live_executors`  (lines 152–162)
-
-```
-async def _live_executors(self) -> set[str]
-```
-
-**Purpose**: This reads the database to find process ids whose heartbeat is still recent. These are treated as live executors and are protected from recovery.
-
-**Data flow**: It computes a cutoff time by subtracting the stale window from the current time. It opens an owner database transaction, selects `runtime_instance` rows with `heartbeat_at` newer than that cutoff, and returns their ids as strings.
-
-**Call relations**: `ExecutorRecovery.sweep` calls this alongside `_pending_executors`. The difference between the two sets tells the sweep which executors are likely dead and safe to recover.
-
-*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
+*Call graph*: calls 2 internal fn (_admit, _wake_live_turn).
 
 
-##### `CancelReconciler.run`  (lines 186–192)
+##### `Admission._wake_live_turn`  (lines 430–436)
 
 ```
-async def run(self) -> None
+async def _wake_live_turn(self, admitted: Admitted) -> None
 ```
 
-**Purpose**: This is the repeating loop that spreads cancellation from a cancelled turn to its dependent descendants. It makes cancellation eventually cover the whole affected branch, even if the original canceller only stopped one turn.
+**Purpose**: Notifies a running turn that a new arrival was queued for it. This lets a live stream or worker notice the message after the database transaction has safely committed.
 
-**Data flow**: It uses the configured cancel reconciliation interval. Each cycle waits, calls `CancelReconciler.sweep`, logs database or DBOS errors if they happen, and continues looping.
+**Data flow**: It receives an Admitted result. If that result names an arrival that did not open a new run, and a hub is available, it publishes an ArrivalQueued event for the turn; otherwise it does nothing.
 
-**Call relations**: This loop drives `CancelReconciler.sweep`. Running it in every serve process means cancellation cleanup does not depend on the same process that originally issued the cancel surviving.
+**Call relations**: Admission.admit_member, Admission.invoke, and Admission.redispatch call this after the admission commit. It is the small bridge from durable database state to live in-memory listeners.
 
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
-
-
-##### `CancelReconciler.sweep`  (lines 194–201)
-
-```
-async def sweep(self) -> None
-```
-
-**Purpose**: This finds live turns that sit underneath a cancelled ancestor and cancels them one by one. It is the practical step that turns a parent cancellation into descendant cancellations.
-
-**Data flow**: It opens an owner database transaction and runs `_orphans_query` to get affected turn ids and workspace ids. For each row, it enters that workspace context, calls `cancel_one_turn` to cancel the turn safely, and logs when a turn was actually cancelled.
-
-**Call relations**: `CancelReconciler.run` calls this on a schedule. It depends on `_orphans_query` to identify the right descendants, and it hands each selected turn to the shared cancellation primitive `cancel_one_turn` so cancellation uses the same safe path as other parts of the system.
-
-*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
+*Call graph*: called by 3 (admit_member, invoke, redispatch); 1 external calls (__init__).
 
 
-##### `CancelReconciler._orphans_query`  (lines 203–243)
+##### `Admission._admit`  (lines 438–644)
 
 ```
-def _orphans_query(self) -> sa.Select
+async def _admit(self, workspace_id: UUID, conversation_id: UUID, asserted_agent_id: UUID | None, body: str, speaker_member_id: UUID | None, idempotency_key: str | None, context: TurnContext | None, a
 ```
 
-**Purpose**: This builds the database query that finds non-terminal turns with a cancelled ancestor. It is careful to follow only parent links where cancellation should really flow.
+**Purpose**: Performs the central admission decision for every kind of inbound work. It is where duplicate keys, agent binding, member checks, folding into live turns, turn creation, queue ordering, comments, and final enqueue decisions come together.
 
-**Data flow**: It starts from every turn whose status is not terminal. Using a recursive database query, it walks upward through each turn’s dependent parents until it either finds a cancelled ancestor or reaches a boundary where cancellation should not cross. It returns a query that selects the live descendant turn id and workspace id for every match.
+**Data flow**: It receives all details about the proposed turn or message. Inside one workspace database transaction, it locks the conversation, checks the bound agent and archived state, validates the speaker, deduplicates retries, checks member-wait watermarks, tries to fold into a live turn, creates or reuses a turn if needed, marks whether it may dispatch now, records comments, and then finishes by emitting metrics and enqueueing runnable work outside the transaction.
 
-**Call relations**: `CancelReconciler.sweep` calls this to know what to cancel. During query construction it calls `_dependent_parent`, which encodes the rule for whether a parent turn counts as part of the same cancellation chain.
+**Call relations**: Admission.admit_member, Admission.invoke, and Admission.redispatch all feed into this method. It coordinates Admission._validate_member_watermarks, _deduplicate, _guard_member_watermark, _fold_live, _create_turn, _record_comment, and _finish_admission in that order as needed.
 
-*Call graph*: calls 1 internal fn (_dependent_parent); called by 1 (sweep); 1 external calls (select).
-
-
-##### `CancelReconciler._dependent_parent`  (lines 245–255)
-
-```
-def _dependent_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement
-```
-
-**Purpose**: This expresses the rule for when a turn’s parent should be followed during cancellation lookup. It prevents cancellation from crossing into independent spawned agents, while still following dependent subagent or intent relationships.
-
-**Data flow**: It receives a turn table or turn-like database alias. It returns a SQL expression: if the turn has a subagent profile or came from intent admission, use its `parent_turn_id`; otherwise return null, which stops the ancestor walk.
-
-**Call relations**: `CancelReconciler._orphans_query` uses this while building its recursive search. This small rule decides the shape of the cancellation tree that `CancelReconciler.sweep` will act on.
-
-*Call graph*: called by 1 (_orphans_query); 3 external calls (case, null, or_).
+*Call graph*: calls 7 internal fn (_create_turn, _deduplicate, _finish_admission, _fold_live, _guard_member_watermark, _record_comment, _validate_member_watermarks); called by 3 (admit_member, invoke, redispatch); 8 external calls (__init__, __init__, __init__, exists, select, update, workspace_tx, uuid4).
 
 
-##### `StrandedTurnReconciler.run`  (lines 289–295)
+##### `Admission._guard_member_watermark`  (lines 646–681)
 
 ```
-async def run(self) -> None
+async def _guard_member_watermark(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, deduped: _ExistingTurn | None, turn_watermark: int | None, arrival_watermark: int | None
 ```
 
-**Purpose**: This is the repeating loop that looks for running turns whose workflow can no longer move them forward. It prevents conversations from being stuck forever on work that has silently disappeared or already ended elsewhere.
+**Purpose**: Stops an internal invocation from resuming a wait if a member has already replied. This prevents races where both a timer and a human answer try to continue the same waiting work.
 
-**Data flow**: It uses the configured stranded-turn interval. Each cycle waits, calls `StrandedTurnReconciler.sweep`, logs database or DBOS errors if they occur, and keeps looping.
+**Data flow**: It receives a database connection, conversation identity, any already-deduplicated turn, and two sequence watermarks. If the request is new and both watermarks are present, it checks whether any non-cancelled member turn or member arrival has appeared after them. If so, it raises a private exception that makes the caller return None.
 
-**Call relations**: This loop drives `StrandedTurnReconciler.sweep`. Like the other reconcilers, it runs in serve processes as background repair work.
+**Call relations**: Admission._admit calls this after deduplication and before creating or folding work. Admission.invoke catches the resulting _SupersededByMember signal and treats it as a clean “the member won the race” outcome.
 
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
-
-
-##### `StrandedTurnReconciler.sweep`  (lines 297–313)
-
-```
-async def sweep(self) -> None
-```
-
-**Purpose**: This finds old running turns with claimed workflow attempts, checks whether those attempts are still active in DBOS, and cancels turns whose attempts are gone or no longer advancing.
-
-**Data flow**: It runs `_claimed_query` in an owner database transaction to get running turns older than the grace period. If the scan reaches the limit, it logs that fact. It asks `_advancing_attempts` which listed workflow attempts are still pending, enqueued, or delayed in DBOS. For each turn whose attempt is not advancing, it enters the turn’s workspace, calls `cancel_one_turn`, and logs successful reconciliation.
-
-**Call relations**: `StrandedTurnReconciler.run` calls this on a schedule. It uses `_claimed_query` to find possible stuck rows and `_advancing_attempts` to avoid cancelling work that DBOS still knows how to run.
-
-*Call graph*: calls 2 internal fn (_advancing_attempts, _claimed_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
+*Call graph*: called by 1 (_admit); 3 external calls (exists, execute, select).
 
 
-##### `StrandedTurnReconciler._claimed_query`  (lines 315–332)
+##### `Admission._validate_member_watermarks`  (lines 684–688)
 
 ```
-def _claimed_query(self) -> sa.Select
+def _validate_member_watermarks(turn_watermark: int | None, arrival_watermark: int | None) -> None
 ```
 
-**Purpose**: This builds the database query for running turns that are old enough to inspect for stranding. The grace period avoids mistaking a freshly claimed turn for a stuck one.
+**Purpose**: Checks that member-wait watermarks are supplied as a pair. A member message can become either a turn or an arrival, so one number alone would leave half the race unchecked.
 
-**Data flow**: It computes a cutoff time from the current time minus the grace window. It returns a query selecting turn id, workspace id, and running workflow attempt for turns that are `RUNNING`, have a non-empty `running_attempt`, were last updated before the cutoff, and are ordered oldest first up to the scan limit.
+**Data flow**: It receives the turn sequence watermark and the inbound-arrival sequence watermark. If exactly one is missing, it raises a ValueError; if both are present or both absent, it returns normally.
 
-**Call relations**: `StrandedTurnReconciler.sweep` calls this before checking DBOS. Its output is the candidate list; `_advancing_attempts` then separates still-active workflow attempts from truly stranded ones.
+**Call relations**: Admission._admit calls this at the start of the shared path. This protects the later Admission._guard_member_watermark query from being asked an incomplete question.
 
-*Call graph*: called by 1 (sweep); 3 external calls (now, timedelta, select).
+*Call graph*: called by 1 (_admit).
 
 
-##### `StrandedTurnReconciler._advancing_attempts`  (lines 334–345)
+##### `Admission._finish_admission`  (lines 690–722)
 
 ```
-async def _advancing_attempts(self, attempts: list[str]) -> set[str]
+async def _finish_admission(self, workspace_id: UUID, conversation_id: UUID, surface: str, turn_id: UUID, status: TurnStatus | None, admitted: Admitted, counted_source: TurnAdmissionSource | None, fol
 ```
 
-**Purpose**: This asks DBOS which workflow attempts are still capable of advancing. It protects live or queued work from being cancelled by the stranded-turn sweep.
+**Purpose**: Performs the after-commit side of admission: counting newly admitted turns and offering runnable turns to the background queue. It keeps database decision-making separate from external queue calls.
 
-**Data flow**: It receives a list of workflow attempt ids. If the list is empty, it returns an empty set immediately so it does not accidentally query the whole workflow store. Otherwise it asks the DBOS client for workflows with those ids whose status is pending, enqueued, or delayed, and returns the matching workflow ids as a set.
+**Data flow**: It receives the chosen turn, its status, the Admitted result, metric source, folded parked turn information, dispatch flag, and optional workflow id. It emits an admission metric when a new turn was counted, enqueues resumed parked turns or queued turns that are ready to run, and returns the same Admitted result.
 
-**Call relations**: `StrandedTurnReconciler.sweep` calls this after finding candidate running turns. The sweep uses the returned set as a keep-alive list: attempts in the set are skipped, while attempts not in the set may be cancelled.
+**Call relations**: Admission._admit calls this after the transaction closes. It calls Admission._enqueue when work should be offered to DBOS and uses a fresh workflow id when resuming a previously claimed parked turn.
 
-*Call graph*: called by 1 (sweep).
+*Call graph*: calls 1 internal fn (_enqueue); called by 1 (_admit); 2 external calls (emit_metric, uuid4).
 
 
-### `core/src/ufo/runtime/delivery.py`
+##### `Admission._deduplicate`  (lines 724–841)
 
-`domain_logic` · `background scheduled result-delivery sweep`
+```
+async def _deduplicate(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, idempotency_key: str | None, runtime_config: TurnRuntimeConfig | None, inbound: _In
+```
 
-When one agent delegates work to a child agent, the parent expects to be woken up when the child finishes. Usually that happens as part of the child’s normal run. But some endings happen from the outside, such as cancellation by another process, or a crash after the database was updated but before the wake-up was sent. Without this file, the child could be marked finished forever while the parent keeps waiting with no way to notice.
+**Purpose**: Interprets an idempotency key, which is a caller-provided retry key meaning “this is the same message as before.” It makes repeated deliveries join the work already admitted instead of creating duplicate turns or duplicate arrivals.
 
-`DeliverySweep` is a background sweep, like a clerk checking a tray for messages that never got delivered. It looks in durable database state for child turns that are finished but still marked as needing result delivery. It groups those children by the parent conversation, so if several children finish around the same time, the parent can be woken once for the batch instead of repeatedly.
+**Data flow**: It receives the database connection, target conversation and agent, idempotency key, runtime config, inbound message, and optional comment. If no key exists, it passes the inbound message through. If the key already belongs to a turn, it returns that existing turn. If it belongs to an inbound arrival, it either points the caller at the live or consumed turn, or deletes an orphaned arrival and returns its saved body, context, speaker, and timestamp for re-admission.
 
-The sweep also uses a cooldown. If a conversation was just woken by a delivered child, it skips that conversation for this pass and leaves its still-pending children for the next tick. This prevents a fast loop where a woken parent immediately starts more children that wake it again.
+**Call relations**: Admission._admit calls this before any new admission decision. When a duplicate already has a settled destination, this method may call Admission._record_comment and return an already-complete Admitted result so _admit can stop early.
 
-If the parent agent has been archived, delivery is skipped rather than blocking the whole sweep. The child result stays pending, so restoring the agent later can still receive what it was owed.
+*Call graph*: calls 1 internal fn (_record_comment); called by 1 (_admit); 10 external calls (__init__, __init__, __init__, model_validate, model_validate, replace, delete, execute, select, authority_from_member_id).
+
+
+##### `Admission._fold_live`  (lines 843–1025)
+
+```
+async def _fold_live(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, conversation_member_id: UUID | None, surface: str, agent_id: UUID, archived: bool, member_admission:
+```
+
+**Purpose**: Tries to attach a new message to the conversation’s currently live turn instead of starting another turn. This enforces the rule that a conversation should have one active turn reading new arrivals at a time.
+
+**Data flow**: It reads the oldest non-terminal turn in the conversation, compares runtime config and authority, checks seats, spend cap, and balance, and decides whether the live turn can absorb the new inbound message. If it can, it inserts an inbound_message row with its own sequence and idempotency key. It may simply return an admitted arrival, record a balance-hold notice, or move a parked turn back to queued so it can run again.
+
+**Call relations**: Admission._admit calls this before creating a new turn when folding is allowed. It calls Admission._record_comment for accepted folded messages and Admission._record_park_notice when a balance problem should be visible to a durable surface.
+
+*Call graph*: calls 2 internal fn (_record_comment, _record_park_notice); called by 1 (_admit); 17 external calls (__init__, __init__, __init__, __init__, __init__, model_validate, execute, insert, or_, select (+7 more)).
+
+
+##### `Admission._create_turn`  (lines 1027–1174)
+
+```
+async def _create_turn(self, connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, conversation_member_id: UUID | None, surface: str, agent_id: UUID, archived: bool, member_admission
+```
+
+**Purpose**: Creates a new turn row when the message cannot or should not fold into a live turn. It applies the first hard gates for authority, seats, spending caps, and balance before deciding whether the turn is queued, parked, or cancelled.
+
+**Data flow**: It receives the locked database connection, conversation and agent details, admission kind, authority, idempotency key, runtime settings, and inbound message. It assigns the next conversation sequence, derives a stable turn id, inherits subagent identity when needed, checks authority and billing, inserts the turn row, sets the conversation title if missing, registers durable writeback rows, records a park notice if balance held the member message, and returns the new turn id, sequence, status, and source.
+
+**Call relations**: Admission._admit calls this when there is no deduplicated existing turn and no folded parked turn. It uses Admission._authority_refusal, _refused, _reply_context, and Admission._record_park_notice to prepare the row it writes.
+
+*Call graph*: calls 4 internal fn (_authority_refusal, _record_park_notice, _refused, _reply_context); called by 1 (_admit); 15 external calls (__init__, __init__, __init__, __init__, model_dump, execute, insert, select, update, current_traceparent (+5 more)).
+
+
+##### `Admission._authority_refusal`  (lines 1176–1195)
+
+```
+async def _authority_refusal(self, connection: AsyncConnection, workspace_id: UUID, authority: ExecutionAuthority, archived: bool, member_admission: bool, holds_work_already_done: bool) -> tuple[TurnS
+```
+
+**Purpose**: Checks non-billing reasons a turn is not allowed: archived apps, unresolved member speakers, and missing seats. These checks run before spend decisions so strangers or unseated members do not get folded into live work.
+
+**Data flow**: It receives the database connection, workspace, execution authority, archived flag, whether this is member admission, and whether work has already been accepted. It returns None when authority is acceptable, or a status and optional terminal frame explaining cancellation or parking.
+
+**Call relations**: Admission._create_turn calls this before spending checks. It uses _refused for seat refusals that may need to park already-accepted work, and creates direct terminal messages for archived apps or unresolved speakers.
+
+*Call graph*: calls 1 internal fn (_refused); called by 1 (_create_turn); 3 external calls (__init__, __init__, authority_member_id).
+
+
+##### `Admission._record_park_notice`  (lines 1197–1229)
+
+```
+async def _record_park_notice(self, connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, notice: str) -> None
+```
+
+**Purpose**: Writes a one-time visible notice explaining that a turn is parked because of balance or credit. This avoids a durable surface going silent when the turn is not terminal and therefore has no final reply yet.
+
+**Data flow**: It receives a connection, workspace id, turn id, and notice text. It inserts a mid-turn reply row with a deterministic id, and does nothing if that same notice already exists.
+
+**Call relations**: Admission._create_turn calls this when a newly created member turn is parked for balance. Admission._fold_live calls it when another member message folds into a turn already held by balance.
+
+*Call graph*: called by 2 (_create_turn, _fold_live); 2 external calls (execute, mid_turn_reply_id_for).
+
+
+##### `Admission._record_comment`  (lines 1231–1274)
+
+```
+async def _record_comment(self, connection: AsyncConnection, workspace_id: UUID, admitted: Admitted, comment: str | None, message_ref: UUID | None=None) -> Admitted
+```
+
+**Purpose**: Stores a surface comment as a mid-turn reply tied to the turn or arrival it comments on. It makes comments durable and avoids duplicating the same comment on retries.
+
+**Data flow**: It receives a connection, workspace id, current Admitted result, optional comment text, and optional message reference. If there is no comment, it returns the original result. Otherwise it builds a stable comment id, inserts the comment if absent, and returns an updated Admitted result containing the comment id only when a new row was written.
+
+**Call relations**: Admission._admit uses this near the end of normal admission, while Admission._deduplicate and Admission._fold_live use it when a retry or folded arrival still needs to attach a comment.
+
+*Call graph*: called by 3 (_admit, _deduplicate, _fold_live); 3 external calls (__init__, execute, mid_turn_reply_id_for).
+
+
+##### `Admission._enqueue`  (lines 1276–1323)
+
+```
+async def _enqueue(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID, workflow_id: str | None=None) -> None
+```
+
+**Purpose**: Offers a queued turn to DBOS, the workflow queue that runs turn workers. It also repairs the database marker if the queue offer is cancelled or fails, so another attempt can happen later.
+
+**Data flow**: It reads the turn’s parent and admission source to choose the correct queue name, builds enqueue options with the workflow name, workflow id, and app version, and calls DBOS. If the coroutine is cancelled or another exception occurs, it clears dispatch_enqueued_at on the still-queued turn and logs deferred enqueue errors.
+
+**Call relations**: Admission._finish_admission calls this whenever a turn should start running now or a parked turn has been resumed. This is the boundary between admission’s database state and the external background execution system.
+
+*Call graph*: called by 1 (_finish_admission); 5 external calls (select, update, workspace_tx, log, turn_queue_for).
+
+
+##### `_reply_context`  (lines 1329–1340)
+
+```
+def _reply_context(inbound: _Inbound, surface: str, durable: frozenset[str]) -> dict[str, object]
+```
+
+**Purpose**: Builds the context stored on a new turn, including where its reply is expected to go. This gives later background work a simple fact it cannot reliably infer by itself.
+
+**Data flow**: It receives the inbound message, conversation surface name, and set of durable surfaces. It decides that replies reach the durable surface, the member’s conversation, or nobody, then writes that value into a TurnContext and returns it as a JSON-ready dictionary.
+
+**Call relations**: Admission._create_turn calls this while inserting a new turn row. The stored context later tells execution and delivery code whether a reply has an audience.
+
+*Call graph*: called by 1 (_create_turn); 1 external calls (__init__).
+
+
+##### `AdmissionInvoker.invoke`  (lines 1351–1381)
+
+```
+async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, authority: ExecutionAuthority, holds_work_already_don
+```
+
+**Purpose**: Provides a workspace-bound wrapper for internal invocation. Callers using this object do not need to pass the workspace id and cannot claim a message was spoken by a member.
+
+**Data flow**: It receives a conversation, agent, message, optional idempotency key and context, authority, admission flags, member-wait watermarks, and runtime config. It forwards those values with the stored workspace id to Admission.invoke and returns that result.
+
+**Call relations**: Jobs and extension workflows receive AdmissionInvoker as their limited admission capability. It is a thin handoff to Admission.invoke.
+
+
+##### `AdmissionInvoker.redispatch`  (lines 1383–1384)
+
+```
+async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None
+```
+
+**Purpose**: Provides a workspace-bound way for internal code to re-admit pending arrivals after a turn ends. It hides the workspace id from the caller.
+
+**Data flow**: It receives a conversation id and the ended turn id. It forwards them, along with the stored workspace id, to Admission.redispatch and returns the new turn id or None.
+
+**Call relations**: Internal workflow code can call this wrapper instead of the full Admission object. The real redispatch behavior lives in Admission.redispatch.
+
+
+##### `AdmissionInvoker.member_reach`  (lines 1386–1434)
+
+```
+async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]
+```
+
+**Purpose**: Finds recent durable conversations through which an internal invoke can reach a particular member. It only returns conversations where that member personally spoke, on that member’s private audience, and whose agent is not archived.
+
+**Data flow**: It receives a member id and a maximum number of results. It queries conversations, turns, and agents in the current workspace, filters to durable surfaces and private member audience, groups by conversation, orders by the member’s latest spoken turn, converts timestamps to timezone-aware values, and returns MemberReach records.
+
+**Call relations**: This belongs to the internal invocation capability because extension or job code may need to choose where to contact a member. It calls _aware to normalize database timestamps before building MemberReach objects.
+
+*Call graph*: calls 1 internal fn (_aware); 4 external calls (__init__, select, workspace_tx, conversation_audience).
+
+
+##### `_aware`  (lines 1437–1438)
+
+```
+def _aware(value: datetime) -> datetime
+```
+
+**Purpose**: Ensures a datetime value carries timezone information. It treats timezone-less database timestamps as UTC.
+
+**Data flow**: It receives a datetime. If the datetime already has timezone information, it returns it unchanged; otherwise it returns a copy marked as UTC.
+
+**Call relations**: AdmissionInvoker.member_reach uses this when turning database rows into MemberReach records, so callers receive consistent timestamp values.
+
+*Call graph*: called by 1 (member_reach); 1 external calls (replace).
+
+
+##### `MemberAdmission.admit`  (lines 1449–1471)
+
+```
+async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None, commen
+```
+
+**Purpose**: Provides a workspace-bound wrapper for surfaces admitting member messages. It limits surfaces to the member-admission path, where speaker and seat checks are enforced.
+
+**Data flow**: It receives the conversation, message, optional duplicate key and context, required speaker member id, optional intent, comment, and runtime config. It forwards everything with the stored workspace id to Admission.admit_member and returns the Admitted result.
+
+**Call relations**: Member-facing surfaces call this instead of the full Admission object. The real admission work is delegated to Admission.admit_member.
+
+
+##### `ConnectResume.resume`  (lines 1499–1534)
+
+```
+async def resume(self, conversation_id: UUID, message: str, *, speaker_member_id: UUID, idempotency_key: str) -> bool
+```
+
+**Purpose**: Writes the result of an external account-connect callback back into the conversation that started it. It returns whether that resume message was actually admitted.
+
+**Data flow**: It receives the target conversation, message, speaker member, and idempotency key. It first checks the conversation’s latest turn lane; if it was a prepared-intent lane, it declines because free text there would create unread work. Otherwise it uses the current workspace and admits the message as the member; failures are logged and return False, success returns True.
+
+**Call relations**: Connect callback code uses this after a grant has already been committed. It calls Admission.admit_member for the actual resume path and logs instead of raising when admission fails, so the callback page can give a cautious answer.
+
+*Call graph*: 4 external calls (select, workspace_tx, log, ws_current).
+
+
+### `core/src/ufo/runtime/turns/ambient_reply.py`
+
+`domain_logic` · `request handling, just before admitting a new ambient thread reply as an agent turn`
+
+In a busy thread, people may talk to each other after the agent has already joined. Without this file, every later reply could become a full agent turn, even if the message was really one person asking another person a question. That is expensive and can make the agent feel intrusive.
+
+This file adds a small “front door” check before a new turn is created. It sends a bounded snapshot of the recent thread to a cheaper model and asks for only one word: REPLY or NO_REPLY. Think of it like a receptionist deciding whether to put a call through, instead of waking the whole team every time the phone rings.
+
+The main data shape is AmbientMessage, which records who spoke, whether it was the agent itself, and the text. AmbientReplyClassifier builds a compact JSON package containing the recent history and the new message, wraps it between clear fence lines, and sends it to the model with detailed rules. The rules cover cases like “someone told the agent to stop,” “someone is correcting the agent,” or “two humans are just talking to each other.”
+
+A key safety choice is that long new messages are not shortened for the decision. If the new message is too long, classification fails instead. The caller can then choose the safer expensive path: admit the turn rather than accidentally ignore someone.
 
 #### Function details
 
-##### `DeliverySweep.run`  (lines 54–72)
+##### `MeteredModel.model`  (lines 111–111)
 
 ```
-async def run(self) -> None
+def model(self) -> str
 ```
 
-**Purpose**: This is the main pass of the delivery sweep. It finds finished child turns whose results have not reached their parent, skips recently woken conversations, and asks the normal subagent result-delivery path to deliver each remaining child result.
+**Purpose**: This property names the model that should be used for the ambient reply decision. It lets the classifier build a model request without knowing the concrete model-access implementation behind it.
 
-**Data flow**: It starts with no inputs beyond the sweep’s configured invoker factory and subagent registry. It reads outstanding finished children from the workspace database, checks which parent conversations were already woken recently, builds a `SubagentResult` delivery helper for the current workspace, then delivers each eligible child. If a parent agent is archived, it quietly skips that child and leaves it pending for a future pass.
+**Data flow**: The classifier reads this property from the supplied model object. The value goes into the outgoing ModelRequest so the completion call uses the intended, billed model.
 
-**Call relations**: This function drives the file’s whole flow. It first calls `DeliverySweep._outstanding` to learn what needs delivery. If there is work, it calls `DeliverySweep._woken_since` using the current time minus the cooldown window, so it can avoid waking the same conversation too often. It then hands each child turn to `SubagentResult`, which is the same delivery route used by the normal event path.
-
-*Call graph*: calls 2 internal fn (_outstanding, _woken_since); 4 external calls (__init__, now, timedelta, ws_current).
+**Call relations**: AmbientReplyClassifier.decide relies on this property when it prepares the one-shot classification request. The actual implementation is supplied elsewhere, because MeteredModel is only a protocol, meaning a small contract that other objects promise to follow.
 
 
-##### `DeliverySweep.candidate_workspaces`  (lines 74–93)
+##### `MeteredModel.complete`  (lines 113–113)
 
 ```
-async def candidate_workspaces(self) -> tuple[UUID, ...]
+async def complete(self, request: ModelRequest) -> str
 ```
 
-**Purpose**: This function tells the scheduler which workspaces are worth running the sweep for. It looks for workspaces that have at least one finished, undelivered child turn whose parent agent is still active.
+**Purpose**: This asynchronous method sends one prepared request to the model and returns the model's text answer. Here, that answer is expected to contain the decision word REPLY or NO_REPLY.
 
-**Data flow**: It opens an owner-level database transaction, which can see across workspaces. It queries turn and agent records for child turns marked pending for result delivery, already terminal, and attached to a non-archived parent agent. It returns the distinct workspace IDs where such work exists.
+**Data flow**: A ModelRequest goes in, containing the prompt, the thread payload, token limits, and reasoning settings. The model provider processes it and returns plain text, which the classifier then reads as the decision.
 
-**Call relations**: A scheduling layer can call this before running the sweep in individual workspaces. Instead of making every workspace run an empty check, this function narrows the work to places where the database says delivery is actually pending.
-
-*Call graph*: 2 external calls (select, owner_tx).
+**Call relations**: AmbientReplyClassifier.decide calls this after building the request. MeteredModel itself does not implement the call; it describes what a real metered model object must provide.
 
 
-##### `DeliverySweep._outstanding`  (lines 95–131)
+##### `_entry`  (lines 116–121)
 
 ```
-async def _outstanding(self) -> dict[UUID, list[Turn]]
+def _entry(message: AmbientMessage) -> dict[str, object]
 ```
 
-**Purpose**: This helper finds the child turns in the current workspace that are finished but whose results have not yet been delivered. It organizes them by the parent conversation that should receive the result.
+**Purpose**: This helper turns one AmbientMessage into the small dictionary form sent to the model. It also trims message text to the per-message history limit so old thread context stays small and predictable.
 
-**Data flow**: It opens a workspace database transaction and queries child turns whose delivery status is pending and whose terminal result exists. It joins each child to its parent turn and parent agent, ignoring archived parent agents. It orders results by parent conversation and child finish time, limits the batch size, converts each database row into a `Turn` record, and returns a dictionary from parent conversation ID to a list of child turns.
+**Data flow**: An AmbientMessage goes in with speaker, own flag, and text. A dictionary comes out with those same fields, except the text is capped at AMBIENT_MESSAGE_CHARS characters.
 
-**Call relations**: `DeliverySweep.run` calls this at the start of a sweep pass. The grouped result lets `run` treat each parent conversation as a unit, so a fan-out of many child results can be drained together instead of waking the same conversation one child at a time.
+**Call relations**: AmbientReplyClassifier._payload calls this for each history message and for the new message. It is the small formatting step that makes every message fit the JSON payload shape the classifier prompt expects.
 
-*Call graph*: called by 1 (run); 3 external calls (model_validate, select, workspace_tx).
+*Call graph*: called by 1 (_payload).
 
 
-##### `DeliverySweep._woken_since`  (lines 133–160)
+##### `AmbientReplyClassifier.decide`  (lines 134–152)
 
 ```
-async def _woken_since(self, cutoff: datetime, conversations: tuple[UUID, ...]) -> frozenset[UUID]
+async def decide(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> AmbientDecision
 ```
 
-**Purpose**: This helper checks which of a set of parent conversations were already woken by a child result after a given cutoff time. It is used to enforce the cooldown between wake-ups.
+**Purpose**: This is the main decision function. It asks the model whether a new ambient message should create an agent turn, and returns either REPLY or NO_REPLY.
 
-**Data flow**: It receives a cutoff timestamp and a set of conversation IDs. It queries the workspace database for delivered child turns linked to parent turns in those conversations, where the child’s delivery timestamp is newer than the cutoff. It returns those conversation IDs as a frozen set, meaning the caller can safely use it as a read-only skip list.
+**Data flow**: It receives the new message and recent thread history. First it rejects a new message that is too long, because deciding from a cut-off version could be misleading. Then it builds a fenced JSON payload, sends it to the configured model inside a ModelRequest, scans the answer for REPLY or NO_REPLY, and returns the last decision word it finds. If the answer cannot be read, it raises an error rather than guessing silently.
 
-**Call relations**: `DeliverySweep.run` calls this after finding outstanding work. The answer tells `run` which conversations to leave alone until the next sweep tick, whether the recent wake-up came from this sweep or from the normal event-based delivery path.
+**Call relations**: This function is called by the chat surface before admitting an ambient reply as a new turn. It calls AmbientReplyClassifier._payload to package the thread, creates the user Message and ModelRequest objects, then hands the request to MeteredModel.complete. Its errors are intentional: the caller can fall back to admitting the turn, which is costly but safer than ignoring a real request.
 
-*Call graph*: called by 1 (run); 2 external calls (select, workspace_tx).
+*Call graph*: calls 1 internal fn (_payload); 2 external calls (__init__, __init__).
+
+
+##### `AmbientReplyClassifier._payload`  (lines 154–170)
+
+```
+def _payload(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> str
+```
+
+**Purpose**: This helper packages the thread context into a clear, safe text block for the model to read. It keeps recent history, includes the new message, and wraps the JSON between fence lines so the model can tell prompt instructions apart from user-written chat text.
+
+**Data flow**: It receives the new message and the history tuple. It keeps only the latest AMBIENT_HISTORY_MESSAGES history items, converts each message through _entry, serializes the result as compact JSON, then chooses a fence string that does not already appear inside the payload. The returned string is the final user content sent to the model.
+
+**Call relations**: AmbientReplyClassifier.decide calls this immediately before making the model request. This function calls _entry to format individual messages and json.dumps to produce the JSON block. Its fenced format supports the system prompt's warning that chat messages are untrusted text, not instructions for the classifier to obey.
+
+*Call graph*: calls 1 internal fn (_entry); called by 1 (decide); 1 external calls (dumps).
+
+
+### Live turn streams
+These files let clients and server processes publish, replay, and watch live progress frames for a running turn.
+
+### `core/src/ufo/runtime/surfaces/hub_tail.py`
+
+`domain_logic` · `request handling`
+
+A “turn” is a unit of work whose progress is streamed to a caller, such as a web client. The hard part is that a caller may start listening after the turn has already begun, or even after another event loop has finished and saved it. This file solves that by listening in two ways at once, like watching both a live scoreboard and the official match record.
+
+The live source is the Hub, which publishes frames as they happen. The durable source is the database, which records whether the turn has ended or is parked. Parked means paused but not finished, usually because something like billing, spending caps, or seat access blocks it.
+
+The central stream, tail_frames, starts a hub subscription and also checks the stored turn state. If the database already says the turn is terminal or parked, it immediately yields that final frame. Otherwise it keeps yielding hub frames while a background poll checks the database once per second. Whichever source first reports a terminal or parked frame ends the stream.
+
+This design favors correctness over perfect live delivery. A missed live token can be redrawn later, but missing the final state would leave a caller waiting forever. The poll is deliberately persistent: a temporary database read failure is logged and retried instead of closing the stream.
+
+#### Function details
+
+##### `tail_frames`  (lines 35–67)
+
+```
+async def tail_frames(hub: Hub, turn_id: UUID, since: str='', billing_url: str | None=None) -> AsyncGenerator[tuple[str, LiveFrame]]
+```
+
+**Purpose**: This is the main async stream for watching one turn. It yields live frames to the caller until the turn reaches a true stopping point: finished terminal output or a parked pause.
+
+**Data flow**: It receives a hub, a turn id, an optional last-seen cursor, and an optional billing URL. It first decides where the live hub stream can safely resume, starts a background hub reader, and checks the database for an already-saved stopping state. If no stored stop exists, it also starts a background database poll. Frames from both sources flow into one queue, then out to the caller; when a Terminal or Parked frame appears, the stream returns and cancels its background tasks.
+
+**Call relations**: HubTailer.tail exposes this generator to the rest of the surface layer. Inside, tail_frames asks the Hub whether a reconnect cursor is still covered, starts _pump to read live hub frames, calls _read_status_frame for the durable state, and starts _poll_status so the database can still end the stream if the hub misses or cannot see the final update.
+
+*Call graph*: calls 4 internal fn (covers, _poll_status, _pump, _read_status_frame); called by 1 (tail); 3 external calls (Queue, ensure_future, gather).
+
+
+##### `_pump`  (lines 70–79)
+
+```
+async def _pump(hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None
+```
+
+**Purpose**: This background worker copies live frames from the Hub into the shared queue used by tail_frames. It filters out internal queue-notification frames that are not meant to be shown to the caller.
+
+**Data flow**: It receives the hub, turn id, starting cursor, and the queue where visible frames should go. It subscribes to the hub from that cursor, skips ArrivalQueued markers, and places all other live frames into the queue with their cursor. If the hub subscription fails, it logs the problem instead of crashing the whole tail.
+
+**Call relations**: tail_frames starts _pump as one of its background tasks. _pump depends on Hub.subscribe for the live feed and hands usable frames back through the queue, where tail_frames later yields them to the caller.
+
+*Call graph*: calls 1 internal fn (subscribe); called by 1 (tail_frames); 1 external calls (log).
+
+
+##### `_poll_status`  (lines 82–94)
+
+```
+async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]], billing_url: str | None) -> None
+```
+
+**Purpose**: This background worker repeatedly checks the database for the turn’s saved end or parked state. It exists because the live hub may not deliver the final frame to a late subscriber or across event loops.
+
+**Data flow**: It receives the turn id, the shared frame queue, and the optional billing URL. Once per interval, it asks _read_status_frame for the durable status frame. If the read fails, it logs the error and tries again later. When a Terminal or Parked frame is found, it puts that frame into the queue with an empty cursor and stops.
+
+**Call relations**: tail_frames starts _poll_status only after an initial database read shows the turn is not already stopped. _poll_status repeatedly calls _read_status_frame and eventually hands a durable stopping frame back to tail_frames through the queue.
+
+*Call graph*: calls 1 internal fn (_read_status_frame); called by 1 (tail_frames); 2 external calls (sleep, log).
+
+
+##### `_read_status_frame`  (lines 97–115)
+
+```
+async def _read_status_frame(turn_id: UUID, billing_url: str | None) -> LiveFrame | None
+```
+
+**Purpose**: This safely asks for the turn’s durable status while respecting cancellation. Its job is to avoid losing an in-progress database read in a way that could leave the caller without the final frame.
+
+**Data flow**: It starts turn_status_frame as its own async task, waits for it behind a shield, and notes if the outer stream is cancelled while the read is still running. When the read finishes, it returns the frame or None. If cancellation happened, it re-raises cancellation at a safe point; if the read itself failed, it passes that failure upward.
+
+**Call relations**: tail_frames uses _read_status_frame for the first immediate durable check, and _poll_status uses it for repeated checks. _read_status_frame delegates the actual database and policy work to turn_status_frame, while adding careful task and cancellation behavior around it.
+
+*Call graph*: calls 1 internal fn (turn_status_frame); called by 2 (_poll_status, tail_frames); 2 external calls (ensure_future, shield).
+
+
+##### `turn_status_frame`  (lines 118–175)
+
+```
+async def turn_status_frame(turn_id: UUID, billing_url: str | None=None) -> LiveFrame | None
+```
+
+**Purpose**: This reads the database and decides whether the turn’s stream should end now. It returns a Terminal frame for completed turns, a Parked frame with a human message for paused turns, or None when the turn is still active.
+
+**Data flow**: It opens a workspace database transaction and looks up the turn’s status, stored terminal frame, workspace, agent, conversation, speaker, and admission information. If a terminal frame is stored, it validates that saved data and wraps it as a Terminal live frame. If the turn is not parked, it returns None. If it is parked, it checks likely reasons in order: seat access, low balance, and spending caps. It returns a Parked frame with the most current message it can determine, falling back to a generic pause message if no specific blocker is found.
+
+**Call relations**: _read_status_frame is the only local function that calls turn_status_frame. turn_status_frame reaches outward to the database layer, seat admission checks, billing balance reading, spending-cap evaluation, and terminal-frame validation so that the stream-ending frame reflects the current durable truth.
+
+*Call graph*: called by 1 (_read_status_frame); 11 external calls (__init__, __init__, __init__, __init__, model_validate, select, workspace_tx, turn_authority, applicable_caps_absent, balance_park_message (+1 more)).
+
+
+##### `HubTailer.tail`  (lines 188–191)
+
+```
+def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
+```
+
+**Purpose**: This is the object-oriented entry point surfaces use to follow a turn. It wraps tail_frames in an async closing context so background work is cleaned up when the caller stops reading.
+
+**Data flow**: It receives a turn id and an optional reconnect cursor. It passes the stored hub and billing URL from the HubTailer instance into tail_frames, then wraps the resulting async generator with a closing helper. The caller receives an async iterator of cursor-and-frame pairs inside a context manager.
+
+**Call relations**: Surface code calls HubTailer.tail instead of importing the hub-tail functions directly. HubTailer.tail hands the real streaming work to tail_frames and uses aclosing so that leaving the caller’s block closes the generator, which triggers tail_frames to cancel its pump and poll tasks.
+
+*Call graph*: calls 1 internal fn (tail_frames); 1 external calls (aclosing).
+
+
+##### `HubTailer.latest_activity`  (lines 193–194)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: This asks the hub for the most recent activity known for a turn. A caller can use it to show or inspect the latest live state without starting a full tail stream.
+
+**Data flow**: It receives a turn id and forwards that id to the hub stored in the HubTailer. The hub returns an Activity object if it knows one, or None if it does not.
+
+**Call relations**: This method is a thin seam between surface code and the Hub. Unlike HubTailer.tail, it does not start polling or streaming; it simply delegates to the hub’s latest_activity lookup.
+
+
+### `extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py`
+
+`io_transport` · `live request handling and cross-process streaming`
+
+When an agent is producing an answer, the user interface needs small live updates: text chunks, tool activity, cost changes, completion notices, and similar events. This file stores those short-lived updates in Redis Streams, which are like append-only message logs. Each turn gets its own stream, so subscribers can replay from a cursor and then keep watching for new frames.
+
+The important idea is that these frames are convenient but not the source of truth. If Redis drops old frames because the stream was trimmed or expired, the system can redraw or recover from the durable turn record elsewhere. This keeps live streaming fast and scalable without making Redis responsible for correctness.
+
+The file also deals with a subtle async issue. An asyncio Redis client is tied to the event loop that created it. Since publishing and subscribing can happen on different loops in the same process, the hub keeps a separate Redis client per running loop, like giving each checkout lane its own card reader instead of sharing one reader across lanes.
+
+Frames are converted to a small JSON form before publishing and rebuilt when read back. Subscribers read in batches, wait briefly when there is nothing new, and continue from the last stream entry they saw. The hub can also check whether a saved cursor is still covered by Redis and peek backward for the latest activity frame.
+
+#### Function details
+
+##### `frame_payload`  (lines 78–84)
+
+```
+def frame_payload(frame: HubFrame) -> dict[str, object]
+```
+
+**Purpose**: Turns one live frame into a plain dictionary that can be safely written to Redis as JSON. It records both what kind of frame it is and the frame's data, so another process can rebuild the right frame type later.
+
+**Data flow**: A HubFrame goes in. The function checks whether it is an Activity frame, which gets a special wire shape for compatibility, or otherwise looks up the frame's kind and asks the model for JSON-ready fields. A dictionary with a kind label and data comes out.
+
+**Call relations**: RedisStreamHub.publish calls this just before writing a frame to Redis. It is the packing step that makes live frame objects portable across processes.
+
+*Call graph*: called by 1 (publish); 2 external calls (__init__, model_dump).
+
+
+##### `frame_from_payload`  (lines 87–97)
+
+```
+def frame_from_payload(payload: dict[str, object]) -> HubFrame
+```
+
+**Purpose**: Rebuilds a live frame object from the dictionary form stored in Redis. This is the unpacking partner to frame_payload.
+
+**Data flow**: A payload dictionary comes in with a kind label and data. The function uses the label to decide which frame class to rebuild, including older or special activity forms for tool calls and skill loading. A HubFrame comes out, or an error is raised if the kind is unknown.
+
+**Call relations**: RedisStreamHub.subscribe uses this when sending stream entries to a caller, and RedisStreamHub.latest_activity uses it after finding an activity entry. It turns raw Redis JSON back into meaningful live update objects.
+
+*Call graph*: called by 2 (latest_activity, subscribe); 2 external calls (__init__, cast).
+
+
+##### `_stream_id`  (lines 100–102)
+
+```
+def _stream_id(entry_id: str) -> tuple[int, int]
+```
+
+**Purpose**: Converts a Redis Stream entry id into two numbers so ids can be compared correctly. Redis ids look like a timestamp plus a sequence number, such as '12345-0'.
+
+**Data flow**: A stream entry id string goes in. The function splits it at the dash, turns the timestamp and sequence parts into integers, and returns them as a pair. That pair can be compared using normal numeric ordering.
+
+**Call relations**: RedisStreamHub.covers uses this helper when deciding whether a stored cursor points to an entry that is still within the retained stream.
+
+*Call graph*: called by 1 (covers).
+
+
+##### `_stream_entries`  (lines 105–114)
+
+```
+def _stream_entries(batch: XReadResponse) -> list[StreamEntry]
+```
+
+**Purpose**: Extracts the actual stream entries from Redis's XREAD response and refuses unexpected response shapes. This prevents the code from silently misreading Redis data.
+
+**Data flow**: A Redis XREAD response goes in. If it is empty, the function returns an empty list. If it has the expected list form, it pulls out the entries for the stream. If Redis returns some other shape, it raises an error instead of guessing.
+
+**Call relations**: RedisStreamHub.subscribe calls this after each Redis read. It acts as a small safety gate between Redis's protocol response and the subscriber loop.
+
+*Call graph*: called by 1 (subscribe).
+
+
+##### `RedisStreamHub._client`  (lines 130–136)
+
+```
+def _client(self) -> Redis
+```
+
+**Purpose**: Returns the Redis client that belongs to the current asyncio event loop, creating it if needed. This avoids sharing one async client across loops, which can break because its internal promises are tied to the loop that made it.
+
+**Data flow**: The hub reads the currently running event loop and checks its internal client map. If a client already exists for that loop, it returns it. If not, it creates a Redis client from the configured URL, stores it under that loop, and returns it.
+
+**Call relations**: Publishing, subscribing, cursor checks, and activity peeking all call this before talking to Redis. It is the common doorway from hub logic to the Redis connection.
+
+*Call graph*: called by 4 (covers, latest_activity, publish, subscribe); 2 external calls (get_running_loop, from_url).
+
+
+##### `RedisStreamHub._stream`  (lines 138–139)
+
+```
+def _stream(self, turn_id: UUID) -> str
+```
+
+**Purpose**: Builds the Redis stream name for a specific turn. This keeps every turn's live frames in its own named stream.
+
+**Data flow**: A turn UUID goes in. The function combines it with the shared stream prefix and returns a Redis key string. It does not touch Redis itself.
+
+**Call relations**: RedisStreamHub.publish, RedisStreamHub.subscribe, RedisStreamHub.covers, and RedisStreamHub.latest_activity all call this so they agree on exactly where a turn's frames live.
+
+*Call graph*: called by 4 (covers, latest_activity, publish, subscribe).
+
+
+##### `RedisStreamHub.publish`  (lines 141–148)
+
+```
+async def publish(self, turn_id: UUID, frame: HubFrame) -> str
+```
+
+**Purpose**: Adds one live frame to the Redis stream for a turn and returns the new stream cursor. A caller uses this when it wants surfaces or other processes to see a fresh live update.
+
+**Data flow**: A turn id and HubFrame go in. The function builds the stream name, converts the frame to JSON, appends it to Redis with a maximum retained length, and refreshes the stream's expiration time. The new Redis entry id comes out as a string cursor.
+
+**Call relations**: This is the writing side of the hub. It relies on _stream for the Redis key, _client for the correct loop-local Redis connection, and frame_payload plus JSON encoding to prepare the frame for transport. RedisStreamHub.subscribe later reads what this writes.
+
+*Call graph*: calls 3 internal fn (_client, _stream, frame_payload); 1 external calls (dumps).
+
+
+##### `RedisStreamHub.subscribe`  (lines 150–174)
+
+```
+async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, HubFrame]]
+```
+
+**Purpose**: Continuously reads live frames for a turn, starting from a cursor if one is provided. It first catches up on retained entries, then waits for new ones.
+
+**Data flow**: A turn id and optional cursor go in. The function turns the cursor into a Redis read position, repeatedly reads batches from the turn's stream, waits briefly when there is no immediate data, and ignores timeout-as-idle cases. For each valid entry, it updates the cursor, decodes the JSON frame, rebuilds the HubFrame, and yields the pair of new cursor and frame.
+
+**Call relations**: This is the reading side of the hub. It uses _stream and _client to reach Redis, _stream_entries to normalize Redis responses, and frame_from_payload to turn stored JSON back into live frames. It consumes the entries written by RedisStreamHub.publish.
+
+*Call graph*: calls 4 internal fn (_client, _stream, _stream_entries, frame_from_payload); 1 external calls (loads).
+
+
+##### `RedisStreamHub.covers`  (lines 176–182)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: Checks whether Redis still has enough retained history for a subscriber to resume from a saved cursor without a gap. If not, the caller knows it should redraw or restart from a safer point.
+
+**Data flow**: A turn id and cursor go in. An empty cursor immediately means false. Otherwise the function reads the oldest retained stream entry from Redis and compares that id with the cursor. It returns true if the cursor is at or after the oldest retained entry, and false if the stream is gone or the cursor is too old.
+
+**Call relations**: This supports reconnect logic around RedisStreamHub.subscribe. It uses _stream to find the turn stream, _client to read Redis, and _stream_id to compare Redis ids in the same way Redis orders them.
+
+*Call graph*: calls 3 internal fn (_client, _stream, _stream_id).
+
+
+##### `RedisStreamHub.latest_activity`  (lines 184–216)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: Looks backward through recent stream entries to find the newest activity frame, such as a tool call or skill load. This gives a quick answer to 'what is the agent currently doing?' without scanning the whole stream.
+
+**Data flow**: A turn id goes in. The function reads the turn stream newest-first in bounded batches, up to a fixed limit. For each entry, it decodes only enough JSON to check the kind. If it finds an activity kind, it rebuilds and returns that Activity frame. If the stream is empty or no recent activity appears within the limit, it returns None.
+
+**Call relations**: This is a helper for status polling or display code that wants the latest meaningful activity. It uses _stream and _client to read Redis, JSON decoding to inspect entries, and frame_from_payload to rebuild only the activity frame it returns.
+
+*Call graph*: calls 3 internal fn (_client, _stream, frame_from_payload); 2 external calls (loads, cast).
+
+
+### `core/src/ufo/runtime/hub.py`
+
+`io_transport` · `active during live turn execution, reconnect replay, and surface tailing`
+
+A running agent turn produces many small updates: text chunks, tool activity, cost ticks, replies, final frames, and notices that new messages were absorbed. This file defines the shapes of those updates and an in-memory hub that fans them out to any live viewers. Think of it like a small radio tower per turn: publishers broadcast frames, subscribers tune in, and late listeners can hear the recent recording before receiving live audio.
+
+The important promise is that publishing never waits for a slow viewer. Each subscriber has a bounded queue. If that queue fills, the oldest waiting frame is dropped for that subscriber, instead of blocking the running turn. At the same time, the hub stores a bounded ring buffer, which is a fixed-size recent-history list, so a client that reconnects with a cursor can replay frames it missed.
+
+The file also defines when memory is kept or released. A still-running turn keeps its replay buffer even if nobody is watching, because a client may disconnect briefly while handing control to the user’s machine. Once a turn reaches a terminal or parked state, the stream can be dropped when there are no subscribers left. Subagent activity is treated carefully: it only mirrors activity onto an already-live root turn and does not recreate an ended stream.
+
+#### Function details
+
+##### `Hub.publish`  (lines 153–153)
+
+```
+async def publish(self, turn_id: UUID, frame: HubFrame) -> str
+```
+
+**Purpose**: This is the interface promise for adding one live frame to a turn’s stream. A caller uses it when something new has happened during a turn and surfaces should be told about it.
+
+**Data flow**: It receives a turn id and a frame, such as a text update or final result. An implementation stores or broadcasts that frame and returns a cursor, which is a small marker the client can save as its place in the stream.
+
+**Call relations**: This protocol method is the shape that hub implementations must follow. Runtime queue code can call it when committing a failed terminal result, without caring whether the backing hub is in-process or provided by another backend.
+
+*Call graph*: called by 1 (_commit_failed_terminal).
+
+
+##### `Hub.subscribe`  (lines 155–155)
+
+```
+def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, HubFrame]]
+```
+
+**Purpose**: This is the interface promise for watching a turn’s live stream. A surface uses it to receive missed frames after a saved cursor and then continue receiving new frames.
+
+**Data flow**: It receives a turn id and optionally a cursor from a previous connection. It produces an asynchronous stream of cursor-and-frame pairs, first replaying newer saved frames and then yielding live updates as they arrive.
+
+**Call relations**: The hub tail surface code calls this while pumping frames to a client. The concrete in-process hub supplies the actual replay and live queue behavior behind this common interface.
+
+*Call graph*: called by 1 (_pump).
+
+
+##### `Hub.covers`  (lines 157–157)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: This is the interface promise for asking whether the hub still has enough history to resume from a cursor without a gap. A reconnecting client uses it to decide whether it can continue smoothly or must redraw from durable state.
+
+**Data flow**: It receives a turn id and a cursor. It checks the retained history for that turn and returns true if the cursor is still within the saved range, otherwise false.
+
+**Call relations**: The tailing logic calls this before deciding how to resume a stream. Implementations answer based on whatever replay store they use.
+
+*Call graph*: called by 1 (tail_frames).
+
+
+##### `Hub.latest_activity`  (lines 159–159)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: This is the interface promise for quickly asking what a running turn is currently doing. It is meant for status views that want one recent activity line without opening a full live subscription.
+
+**Data flow**: It receives a turn id. An implementation looks at recent retained frames and returns the newest activity frame, or nothing if no useful recent activity is available.
+
+**Call relations**: This completes the hub contract alongside publishing, subscribing, and cursor coverage. It lets status-style readers peek at the live stream without joining it.
+
+
+##### `_offer`  (lines 162–165)
+
+```
+def _offer(queue: asyncio.Queue[tuple[str, HubFrame]], item: tuple[str, HubFrame]) -> None
+```
+
+**Purpose**: This helper puts a frame into one subscriber’s queue without ever blocking the publisher. If the subscriber is too far behind, it discards that subscriber’s oldest waiting frame to make room.
+
+**Data flow**: It receives a queue and one cursor-and-frame item. If the queue is full, it removes one old item, then immediately adds the new item; it returns nothing and only changes that queue.
+
+**Call relations**: InProcessHub.publish schedules this helper on each subscriber’s event loop. This keeps delivery safe across different asynchronous loops while preserving the rule that publishing should not wait for slow readers.
+
+
+##### `InProcessHub._stream`  (lines 212–222)
+
+```
+def _stream(self, turn_id: UUID) -> _TurnStream
+```
+
+**Purpose**: This internal helper finds or creates the live state for one turn. It is where a turn gets its replay buffer, subscriber list, and cursor counter.
+
+**Data flow**: It receives a turn id and reads the hub’s dictionaries while the hub lock is already held. If the turn already has a stream, it returns it; otherwise it creates a new stream with a fixed-size replay buffer and starts its sequence number from the last remembered mark.
+
+**Call relations**: InProcessHub.publish and InProcessHub.subscribe call this whenever they need the per-turn stream to exist. It is kept private because callers must hold the lock, which is the guard that stops two threads from changing the same stream state at once.
+
+*Call graph*: called by 2 (publish, subscribe); 2 external calls (__init__, deque).
+
+
+##### `InProcessHub.publish`  (lines 224–243)
+
+```
+async def publish(self, turn_id: UUID, frame: HubFrame) -> str
+```
+
+**Purpose**: This adds one frame to a turn’s stream, saves it for possible replay, and sends it to current subscribers. It is designed so the running turn never gets stuck behind a slow or disconnected viewer.
+
+**Data flow**: It receives a turn id and a frame. Under a lock, it finds the stream, gives the frame the next cursor, saves it in the replay ring, remembers current subscribers, and updates end-of-stream state for terminal or parked frames. After leaving the lock, it schedules delivery of the frame to each subscriber’s queue and returns the cursor.
+
+**Call relations**: This is the main publishing path for the in-memory hub. It uses InProcessHub._stream to get per-turn state and _offer to safely push frames onto subscriber queues. It also enforces the special rule that SubagentActivity cannot create or revive a stream after the root turn is gone.
+
+*Call graph*: calls 1 internal fn (_stream).
+
+
+##### `InProcessHub.subscribe`  (lines 245–272)
+
+```
+async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, HubFrame]]
+```
+
+**Purpose**: This lets a surface follow one turn’s stream. It first replays saved frames after the client’s cursor, then waits for new live frames.
+
+**Data flow**: It receives a turn id and optional cursor. It creates a bounded queue for live frames, registers that queue as a subscriber, snapshots all buffered frames newer than the cursor, yields that replay, and then yields new items from the queue until the subscriber stops. When the subscription ends, it removes the queue and may delete the stream if it is finished and no one is watching.
+
+**Call relations**: Surface tailing code calls this to feed live updates to a client. It uses InProcessHub._stream to attach to the right turn and coordinates with InProcessHub.publish through the same lock, so replayed frames and live frames do not overlap or leave gaps.
+
+*Call graph*: calls 1 internal fn (_stream); 2 external calls (Queue, get_running_loop).
+
+
+##### `InProcessHub.covers`  (lines 274–282)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: This checks whether a saved cursor is still covered by the in-memory replay buffer. It helps decide whether reconnecting can be seamless.
+
+**Data flow**: It receives a turn id and cursor. If there is no cursor, no stream, or no buffered history, it returns false; otherwise it compares the cursor with the earliest retained cursor and returns whether the buffer still reaches back far enough.
+
+**Call relations**: The surface tailing flow asks this before relying on cursor replay. It reads only the hub’s retained buffer and does not create a stream or change any state.
+
+
+##### `InProcessHub.latest_activity`  (lines 284–301)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: This returns the newest recent activity message for a turn, if one is still meaningful. It gives status readers a cheap one-line view without subscribing to the whole stream.
+
+**Data flow**: It receives a turn id. Under the lock, it looks backward through only a limited number of recent buffered frames and returns the first Activity frame it finds; if the turn has no stream or no recent activity frame, it returns nothing.
+
+**Call relations**: This is a read-only peek into the same replay ring used by publishing and subscribing. It deliberately scans only a bounded slice of recent frames, so frequent status polling does not become expensive on turns that are mostly streaming text.
+
+*Call graph*: 1 external calls (islice).
+
+
+### Queued turn dispatch
+This file hands the next eligible queued turn to the background workflow once ordering allows it to run.
+
+### `core/src/ufo/runtime/turns/dispatch.py`
+
+`orchestration` · `between turns, when a turn finishes, parks, is cancelled, or a recovery sweep tries to continue a conversation`
+
+A conversation can receive multiple turns, but only one normal running turn should move forward at a time. This file is the gatekeeper for that rule. Think of it like a single-lane bridge: before letting the next car on, it checks whether another car is already crossing.
+
+The main function opens a database transaction, locks the conversation row so two dispatchers cannot make the same decision at once, and checks whether any turn in that conversation is already marked as running. If one is running, it stops. If not, it finds the earliest queued turn, marks it as offered for dispatch, and then asks DBOS, the workflow runner, to enqueue the work.
+
+The file also protects against duplicate or failed enqueue attempts. If a turn was claimed before, it gets a fresh workflow id, because reusing an old completed id could make the workflow system ignore it. If enqueueing fails, the function clears the dispatch marker in the database so another attempt can happen later, then logs the delay. This matters because turn ordering is not trusted to the queue itself; the database stamp is the source of truth.
+
+#### Function details
+
+##### `dispatch_next_turn`  (lines 28–98)
+
+```
+async def dispatch_next_turn(client: DBOSClient, conversation_id: UUID) -> None
+```
+
+**Purpose**: This function tries to start the next queued turn for one conversation, but only if no turn in that conversation is currently running. It is used when the system needs to continue a conversation after the previous turn has stopped or been set aside.
+
+**Data flow**: It receives a DBOS client, which can place work on the workflow queue, and a conversation id, which identifies the conversation to continue. It locks that conversation in the database, checks for a running turn, then finds the first queued turn if the lane is clear. It marks that turn as enqueued, builds queue options such as the queue name, workflow name, workflow id, and app version, then asks DBOS to enqueue the turn. If enqueueing fails, it reopens the database, removes the enqueue marker from the still-queued turn, updates its timestamp, and writes a log message so the delay is visible.
+
+**Call relations**: This function is the shared handoff used after a turn-ending event wants to offer the next turn. Inside, it relies on workspace_tx to make database reads and writes safely, uses SQLAlchemy select and update statements to inspect and stamp rows, asks turn_queue_for which queue should receive the work, may call uuid4 to create a fresh workflow id for a retried turn, and finally calls DBOSClient.enqueue_async to hand the turn to the workflow runner. If that handoff fails, it calls the logging helper to record that enqueueing was deferred.
+
+*Call graph*: 7 external calls (enqueue_async, select, update, workspace_tx, log, turn_queue_for, uuid4).
 
 ## 📊 State Registers Touched
 
-- `reg-conversation-records` — The durable conversation state, including conversation identity, title, surface label, sandbox handle, audience, and related metadata.
-- `reg-turn-queue-state` — The durable queue of conversation turns, including admission source, run claim, parked state, resume state, and final status.
-- `reg-runtime-fleet-claims` — The attendance and claim sheet for running service processes, including heartbeats, work ownership, and surface listener claims.
-- `reg-cancellation-cleanup-state` — The shared stop-and-cleanup state that records when active turns, workflows, child work, sandboxes, and streams are being wound down.
-- `reg-schedules-automations` — The durable alarm clock for future work, pauses, monitors, source-change triggers, notification inbox items, and extension jobs.
-- `reg-delegation-state` — The parent-child work state that tracks subagent turns, their contracts, trace links, pending results, and delivery back to the parent.
-- `reg-observability-trace` — The tracing, health, logging, and traceparent state used to connect work across turns, subagents, workers, and cleanup.
-- `reg-database-connection-pools` — Process-global database engines, sessions, transaction handles, and connection pools shared by serving, workers, migrations, and cleanup code.
-- `reg-durable-workflow-checkpoints` — Saved workflow execution/checkpoint state used to resume, repair, cancel, or finalize long-running workflows after pauses, crashes, or worker handoff.
-- `reg-service-worker-lifecycle-state` — Process-local supervisor state for background loops and workers, including async task handles, startup readiness, shutdown signals, and drain status not represented by durable job tables.
+- `reg-persistence-handles` — The shared database and blob-storage connections used to read and save durable system data.
+- `reg-workspace-directory` — The shared record of workspaces, members, seats, admins, invitations, and onboarding status.
+- `reg-member-session-auth` — The signed tokens and browser/session identity state that prove who is making a request.
+- `reg-runtime-authority` — The current workspace, agent, and member identity under which work is allowed to act.
+- `reg-agent-registry` — The saved agents, their owners, visibility, model choices, tool policies, and sandbox settings.
+- `reg-conversation-transcripts` — The durable conversation history, compacted records, audiences, and readable timeline data.
+- `reg-turn-queue-state` — The durable state of conversation turns, including pending, running, paused, cancelled, and finished work.
+- `reg-live-update-streams` — The shared live progress channels that stream text, status, costs, and completion events to clients.
+- `reg-surface-routing-state` — The saved routing state for web, Slack, iMessage, terminal, and other public conversation surfaces.
+- `reg-inbound-delivery-ledger` — The durable deduplication and delivery records for inbound messages, writebacks, and mid-turn replies.
+- `reg-subagent-delivery-state` — The parent-child task links and owed-result records used when agents spawn helper agents.
+- `reg-scheduled-work-store` — The durable records for recurring tasks, delayed resumes, scheduled fires, and background job claims.
+- `reg-runtime-fleet-liveness` — The shared record of running service and worker instances, heartbeats, listener claims, and stuck work.
+- `reg-usage-ledger-balance` — The money and usage ledger that tracks costs, prepaid balances, limits, exports, and billing status.
+- `reg-telemetry-context` — The shared trace, metric, log, health, and redaction context used to observe work across the system.
+- `reg-shared-infra-clients` — Long-lived non-database infrastructure clients and connection pools such as Redis, HTTP, provider, and service clients shared by workers and request handlers.
+- `reg-turn-billing-snapshot` — Per-turn frozen billing identity and BYOK attempt state captured before execution and consumed later for stable accounting.
+- `reg-rate-limit-buckets` — Shared throttling counters, leases, and cooldown state for ingress, provider/model calls, connector actions, and background workers, separate from spend-cap accounting.

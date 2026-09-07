@@ -1,427 +1,533 @@
-# Schema, persistence contracts, and durable storage  `stage-17` (cross-cutting infrastructure)
+# Result publication, teardown, recovery, and cleanup  `stage-17`
 
-This stage is the system’s filing cabinet and rulebook for saved data. It is shared behind-the-scenes support used by the app screens, background workers, workflows, extensions, and storage engines whenever they need to save or read long-lived information.
+This stage is the system’s “put everything away safely” phase. It runs after a turn finishes, is stopped, crashes, or gets stuck. A turn is one unit of work in a conversation. The goal is to publish the final state, cancel what should no longer run, save useful records, and prevent half-finished work from being left behind.
 
-The records file defines the common shapes of important items: agents, conversation turns, settings, final answers, questions, credential requests, and queue choices. In plain terms, it says what fields each item must have so every part of the system describes the same thing in the same way.
+The stop surface is the front door for a user or member asking to stop a running turn. It checks whether stopping is allowed, marks the turn as cancelled, may start the next needed turn, and notifies live listeners that the old work ended. The cancellation helper does the careful inner step: it stops the workflow before recording cancellation in the database.
 
-The transcript file focuses on saved conversations. It gives the system one agreed format for naming, compressing, decoding, and reading conversation history and compacted summaries.
-
-The tables file maps these records into real database tables. It defines columns, links between tables, default values, and safety rules for both SQLite, used locally, and Postgres, used in deployed setups. Together, these files make saved state reliable and understandable across the whole project.
+Workspace change tracking records what files changed, using the sandbox’s file scanner as the trusted source. Delivery cleanup is a safety net for child turns whose results were saved but not handed back to their parent. Runtime instance cleanup keeps running server processes visible and sweeps for stuck processes, workflows, child turns, and turns that look busy but cannot move forward.
 
 ## Files in this stage
 
-### Shared persistence contracts
-Defines the durable record formats and database schema shared by conversations, workers, runtime state, and storage backends.
+### Recovery sweeps
+Background recovery loops keep completed child work, stuck turns, workflows, and crashed serve processes from remaining stranded.
 
-### `core/src/ufo/runtime/turns/transcript.py`
+### `core/src/ufo/runtime/delivery.py`
 
-`io_transport` · `cross-cutting`
+`orchestration` · `background scheduled sweep`
 
-A conversation in this system is not just temporary chat text. It must survive between turns, be inspected later by debugging tools, and be read by evaluation code. This file is the shared contract for that saved data, like a labeled filing system where everyone agrees on the drawer names and document shape.
+When one agent delegates work to a child agent, the child is supposed to report its final result back to the parent. Usually that happens as part of the child’s normal execution path. But some endings happen from the outside, such as another process cancelling the child, or a crash happening at just the wrong time. In those cases, the database may show that the child is finished, but the parent never receives the wake-up it was waiting for.
 
-It defines typed records for a saved conversation, parked turns, and compaction summaries. A “compaction” is when an old, long message history is replaced by a shorter summary plus a kept recent tail, so the model can continue without carrying too much text. The file also records checks about whether important facts survived that shortening.
+`DeliverySweep` is the backstop for that gap. Think of it like a postal worker checking a bin of completed but undelivered letters. It looks in durable database state, not in a running task’s memory, for child turns that are terminal, still marked as pending delivery, and whose parent agent is not archived. It groups them by the parent conversation so that if many child results finish together, the parent can be woken once with the whole set rather than repeatedly.
 
-The actual stored bytes are JSON, compressed with LZ4, a fast compression format. The helper functions turn typed Python objects into compressed bytes, turn compressed bytes back into validated objects, and build the exact blob-store keys where records live. A blob store is a simple storage service for named chunks of bytes.
-
-The important behavior is that decode errors are wrapped as TranscriptDecodeError. That gives callers a clear signal: the saved blob is corrupt, unreadable, or no longer matches the expected shape. Without this file, writers, readers, debuggers, and evaluators could quietly drift into incompatible formats.
+The sweep also has a cooldown. If a conversation was already woken recently by another delivery path, this pass skips it and leaves its pending children for a later tick. That prevents a tight loop where a woken parent immediately spawns more children that wake it again. If the parent app is archived, delivery is skipped without stopping the whole sweep; the pending result can be delivered later if the app is restored.
 
 #### Function details
 
-##### `transcript_key`  (lines 61–62)
+##### `DeliverySweep.run`  (lines 54–72)
 
 ```
-def transcript_key(conversation_id: UUID) -> str
+async def run(self) -> None
 ```
 
-**Purpose**: Builds the storage name for the main saved transcript of one conversation. Callers use it so every part of the system looks in the same place for that conversation’s message history.
+**Purpose**: This is the main body of the delivery sweep. It finds finished child turns that still need to report back, avoids conversations that were just woken, and asks the normal subagent result delivery path to hand each result to its parent.
 
-**Data flow**: It receives a conversation ID. It inserts that ID into a fixed path shaped like a folder location, ending in messages.json.lz4 to show that the content is JSON compressed with LZ4. It returns that path as a string and does not change anything else.
+**Data flow**: It starts with no direct input beyond the sweep object’s `invoker_for` factory and subagent registry. It asks `_outstanding` for pending finished children grouped by parent conversation, checks `_woken_since` to find conversations recently woken, builds a `SubagentResult` for the current workspace, and then tries to deliver each child that is safe to process. The visible result is database and runtime side effects: child results may be marked delivered and parent conversations may be woken. If a parent agent is archived, that child is simply left for a later pass.
 
-**Call relations**: This is the shared naming rule for transcript blobs. Writers and readers can use this key to meet at the same stored file without needing to know each other directly.
+**Call relations**: The scheduled job calls this method when it is time to sweep a workspace. Inside the flow, it relies on `_outstanding` to say what work exists, `_woken_since` to avoid waking the same conversation too often, `ws_current` to know which workspace it is operating in, and `SubagentResult` to reuse the same delivery mechanism used by the normal event path.
 
-
-##### `encode`  (lines 65–67)
-
-```
-def encode(conversation: Conversation) -> bytes
-```
-
-**Purpose**: Turns a Conversation object into compact bytes ready to save. This is used when the system wants to persist a transcript in the agreed storage format.
-
-**Data flow**: It receives a validated Conversation object. It first converts it into plain JSON-friendly data, then serializes that data into a small JSON string, encodes it as bytes, and compresses those bytes with LZ4. The result is a compressed byte string suitable for the blob store.
-
-**Call relations**: This function sits on the write side of the transcript flow. It relies on the Conversation model’s own dump behavior and standard JSON encoding, then produces the exact byte format that decode expects to read later.
-
-*Call graph*: 2 external calls (model_dump, dumps).
+*Call graph*: calls 2 internal fn (_outstanding, _woken_since); 4 external calls (__init__, now, timedelta, ws_current).
 
 
-##### `decode`  (lines 70–74)
+##### `DeliverySweep.candidate_workspaces`  (lines 74–93)
 
 ```
-def decode(body: bytes) -> Conversation
+async def candidate_workspaces(self) -> tuple[UUID, ...]
 ```
 
-**Purpose**: Turns stored transcript bytes back into a validated Conversation object. Callers use it when they need to read a saved conversation safely.
+**Purpose**: This finds which workspaces are worth running the sweep for. It prevents the system from scanning every workspace when only a few have finished child turns waiting to be delivered.
 
-**Data flow**: It receives compressed bytes from storage. It decompresses them, asks the Conversation model to parse and validate the JSON, and returns the resulting Conversation. If the bytes cannot be decompressed or the JSON does not match the expected shape, it raises TranscriptDecodeError instead of leaking lower-level errors.
+**Data flow**: It reads from the owner-level database view across workspaces. It looks for child turns marked as pending delivery, already terminal, and attached to a parent agent that has not been archived. It returns a tuple of workspace IDs where such work exists, with duplicates removed.
 
-**Call relations**: This is the read-side partner to encode. It protects higher-level readers from storage-format details and gives them one clear failure type when a transcript cannot be trusted.
+**Call relations**: A higher-level scheduler can call this before running the sweep so it knows which workspaces need attention. The method opens an owner database transaction and builds a query with SQLAlchemy, then hands the scheduler only the workspace identifiers rather than the full turn data.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `compaction_key`  (lines 160–161)
-
-```
-def compaction_key(conversation_id: UUID, index: int, half: CompactionHalf) -> str
-```
-
-**Purpose**: Builds the storage name for one piece of a compaction record. A compaction has separate stored parts: the window before compaction, the window after compaction, and the summary.
-
-**Data flow**: It receives a conversation ID, a compaction index, and which part is wanted: before, after, or summary. It combines them into a fixed blob-store path and returns that path as a string.
-
-**Call relations**: Both read_compaction_after and read_compaction_record call this function before fetching bytes. It keeps those readers from hard-coding their own path rules, so all compaction lookups stay consistent.
-
-*Call graph*: called by 2 (read_compaction_after, read_compaction_record).
+*Call graph*: 2 external calls (select, owner_tx).
 
 
-##### `decode_compaction`  (lines 164–173)
+##### `DeliverySweep._outstanding`  (lines 95–131)
 
 ```
-def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -> CompactionRecord
+async def _outstanding(self) -> dict[UUID, list[Turn]]
 ```
 
-**Purpose**: Rebuilds a full CompactionRecord from the three stored byte blobs that make it up. It is used when a reader wants the before window, after window, and structured summary together.
+**Purpose**: This gathers the actual child turns in the current workspace that are finished but still not delivered. It organizes them under the parent conversation that should receive the results.
 
-**Data flow**: It receives the compaction index plus compressed bytes for the before window, after window, and summary. It decompresses each piece, validates the message windows and summary against their expected shapes, and returns one CompactionRecord containing all of them. If any piece is unreadable or malformed, it raises TranscriptDecodeError.
+**Data flow**: It reads the workspace database for child turns whose delivery status is pending, whose terminal result exists, and whose parent agent is not archived. It also reads the parent turn’s conversation ID so each child can be grouped under the right conversation. It returns a dictionary where each key is a parent conversation ID and each value is a list of validated `Turn` records, ordered so related fan-out work is processed together and older finished children come first.
 
-**Call relations**: read_compaction_record fetches the three stored blobs and then hands them to this function. decode_compaction is the assembly step that turns separate storage files into one meaningful record.
+**Call relations**: `DeliverySweep.run` calls this at the start of a sweep pass. This helper does the database lookup and record-building work, then gives `run` a clean conversation-to-children map so the main method can focus on delivery decisions.
 
-*Call graph*: called by 1 (read_compaction_record); 2 external calls (__init__, __init__).
-
-
-##### `read_compaction_after`  (lines 176–189)
-
-```
-async def read_compaction_after(blob: BlobStore, conversation_id: UUID, index: int) -> tuple[Message, ...] | None
-```
-
-**Purpose**: Reads only the small “after” window for a particular compaction. This is useful when a caller only needs to check what message window replaced the old history, without loading the larger full record.
-
-**Data flow**: It receives a blob store, a conversation ID, and a compaction index. It builds the key for the after part, fetches those bytes, decompresses and validates them, and returns the messages. If the blob is not found, it returns None. If the blob exists but is unreadable or invalid, it raises TranscriptDecodeError.
-
-**Call relations**: This function calls compaction_key to find the correct blob and BlobStore.get to fetch it. It is a lightweight shortcut for readers that do not need read_compaction_record’s full before/after/summary package.
-
-*Call graph*: calls 2 internal fn (get, compaction_key); 1 external calls (__init__).
+*Call graph*: called by 1 (run); 3 external calls (model_validate, select, workspace_tx).
 
 
-##### `read_compaction_record`  (lines 192–203)
+##### `DeliverySweep._woken_since`  (lines 133–160)
 
 ```
-async def read_compaction_record(blob: BlobStore, conversation_id: UUID, index: int) -> CompactionRecord | None
+async def _woken_since(self, cutoff: datetime, conversations: tuple[UUID, ...]) -> frozenset[UUID]
 ```
 
-**Purpose**: Reads one complete compaction record for a conversation. It gives callers the full picture of what was shortened, what replaced it, and what summary was produced.
+**Purpose**: This checks whether any of the candidate parent conversations were already woken recently by a delivered child result. It is the sweep’s guard against repeatedly waking the same conversation too quickly.
 
-**Data flow**: It receives a blob store, a conversation ID, and a compaction index. It builds and fetches the before, after, and summary blobs. If any of those blobs is missing, it returns None, treating that index as absent. If all are present, it passes the bytes to decode_compaction and returns the decoded CompactionRecord.
+**Data flow**: It receives a cutoff time and a tuple of conversation IDs. It queries the workspace database for delivered child turns connected to those conversations whose update time is newer than the cutoff. It returns a frozen set of conversation IDs that should be skipped for now.
 
-**Call relations**: This is the per-index reader used by read_compaction_records. It delegates path creation to compaction_key, byte fetching to BlobStore.get, and validation/assembly to decode_compaction.
+**Call relations**: `DeliverySweep.run` calls this after finding outstanding work and computing the cooldown cutoff time. The returned set tells `run` which conversation groups to leave untouched until a later sweep, while all other groups can be passed on to `SubagentResult` for delivery.
 
-*Call graph*: calls 3 internal fn (get, compaction_key, decode_compaction); called by 1 (read_compaction_records).
-
-
-##### `read_compaction_records`  (lines 206–216)
-
-```
-async def read_compaction_records(blob: BlobStore, conversation_id: UUID) -> tuple[CompactionRecord, ...]
-```
-
-**Purpose**: Reads all compaction records for a conversation in order. It is used by tools that need the full compaction history, such as debugging or evaluation readers.
-
-**Data flow**: It receives a blob store and a conversation ID. Starting at index 1, it repeatedly asks read_compaction_record for the next record. Each found record is added to a list. The first missing index stops the loop, and the function returns all collected records as an immutable tuple.
-
-**Call relations**: This function is the simple walker over sequential compaction records. It relies on read_compaction_record for each individual fetch and stops naturally when that helper reports that the next numbered record does not exist.
-
-*Call graph*: calls 1 internal fn (read_compaction_record).
+*Call graph*: called by 1 (run); 2 external calls (select, workspace_tx).
 
 
-### `core/src/ufo/schema/records.py`
+### `core/src/ufo/runtime/runtime_instance.py`
 
-`data_model` · `cross-cutting`
+`orchestration` · `background during serve process lifetime`
 
-This file is like the set of official forms used by a busy dispatch center. A “turn” is one unit of work for an agent: someone says something, the system queues it, a worker runs it, and the result is recorded. The file defines the allowed states for that work, such as queued, running, done, failed, or cancelled, and the structured records carried along the way.
+A serve process is one running copy of the system. This file gives each process a “seat” in the database and keeps that seat fresh with a heartbeat, like regularly raising a hand to say “I’m still here.” Other processes use those heartbeats to decide whether work owned by a process is still alive or has been abandoned.
 
-Most records are Pydantic models, meaning they are data shapes that check their own contents when created. That matters because these records cross boundaries: web surfaces, workers, databases, billing, sandbox runtimes, and account-connection flows all read them. If the shape is wrong, the mistake is caught early instead of halfway through a run.
+The file also defines three recurring safety sweeps. ExecutorRecovery looks for DBOS workflows, meaning durable background jobs recorded by DBOS, that are still pending under an executor whose heartbeat is stale or missing. It asks DBOS to recover those workflows so another live process can continue them. CancelReconciler spreads cancellation down a tree of turns: if a parent turn is cancelled, its dependent child turns should be cancelled too. StrandedTurnReconciler fixes turns marked running when their recorded workflow attempt has already ended or disappeared, cancelling them so later conversation flow is not blocked.
 
-The file also gives stable identity rules. Turn IDs, billing ledger IDs, and mid-turn reply IDs are generated from predictable inputs, so retrying the same work produces the same identifier instead of duplicate rows. It chooses whether a turn belongs on the normal queue or the express queue, selects default agent icons, validates time zones and runtime digests, and ensures terminal results match terminal statuses.
-
-Without this file, different parts of the system could disagree about the meaning of a turn, duplicate billing or replies during retries, accept unsafe display text, or run with unclear runtime settings.
+These loops are deliberately periodic rather than instant. That makes them crash-safe and simple: if one tick fails because the database or DBOS is temporarily unavailable, the error is logged and the next tick tries again. The overall design is conservative: it avoids touching work that still belongs to a live process, because recovering or cancelling live work could create duplicate execution or incorrect shutdown.
 
 #### Function details
 
-##### `auto_agent_icon`  (lines 178–197)
+##### `record_fleet_seat`  (lines 42–57)
 
 ```
-def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon
+async def record_fleet_seat(instance_id: UUID) -> None
 ```
 
-**Purpose**: Chooses an icon for a newly created agent. It tries to make icons meaningful from the agent name when possible, and otherwise spreads choices across unused icons so agents in the same workspace are easier to tell apart.
+**Purpose**: Creates this process’s fleet “seat” in the runtime_instance table before DBOS starts running work. This makes the process visible as alive so recovery code does not mistake its new work for abandoned work.
 
-**Data flow**: It receives an agent name and the set of icon names already taken. It looks for known keywords in the name, such as words related to billing, code, or support. If a matching icon is free, it returns that. Otherwise it hashes the name, uses that number to choose from unused icons, and falls back to reusing an icon only after all choices are taken.
+**Data flow**: It receives an instance_id, opens an owner database transaction, inserts a runtime_instance row with no workspace, current heartbeat time, and timestamps, then writes a log message. The visible result is a fresh database row that other fleet processes can read as this process’s liveness signal.
 
-**Call relations**: This helper is used when a new agent needs a visual mark. It relies on SHA-256 hashing from the standard library to make the fallback choice stable: the same name tends to land on the same icon instead of changing randomly.
+**Call relations**: This is the first part of the liveness story. It writes the row that Heartbeat.beat later refreshes, and that ExecutorRecovery._live_executors later reads when deciding which executors are safe to leave alone.
 
-*Call graph*: 1 external calls (sha256).
-
-
-##### `admits_spent_balance`  (lines 222–236)
-
-```
-def admits_spent_balance(intent: ToolIntent) -> bool
-```
-
-**Purpose**: Decides whether a prepared tool action should still be allowed when a workspace has run out of balance. The special allowed action is managing billing, because blocking that would also block the user from fixing the problem.
-
-**Data flow**: It receives a ToolIntent, which is a pre-made tool call. It checks whether the tool is an object action and whether its kind and action fields exactly match the workspace billing-management action. It returns true only for that case and false for all others.
-
-**Call relations**: This function fits into billing or admission gates that normally refuse work for an overdrawn workspace. It gives those gates a narrow exception for the one action that can restore payment, without handing off to any other helper.
+*Call graph*: 3 external calls (insert, owner_tx, log).
 
 
-##### `turn_queue_for`  (lines 250–258)
+##### `Heartbeat.run`  (lines 70–80)
 
 ```
-def turn_queue_for(parent_turn_id: UUID | None, admission_source: 'TurnAdmissionSource') -> str
+async def run(self) -> None
 ```
 
-**Purpose**: Chooses which queue a turn should enter. Normal root turns go to the regular turn queue, while spawned child turns and prepared intents go to an express queue so they do not get stuck behind capacity limits.
+**Purpose**: Runs forever, periodically refreshing this process’s heartbeat. It is meant to keep one failed database update from making a healthy process look dead.
 
-**Data flow**: It receives an optional parent turn ID and an admission source. If there is a parent turn, or if the source says this is a prepared intent, it returns the express queue name. Otherwise it returns the regular turn queue name.
+**Data flow**: It starts with the Heartbeat object’s instance_id. On each loop, it calls Heartbeat.beat to update the database row; if a database error happens, it logs the failure instead of stopping. It then waits for the configured heartbeat interval and repeats.
 
-**Call relations**: This is used during turn admission, when the system first decides how work should be dispatched. It does not call other project functions; it simply applies the queueing rule that keeps parent-child work and short intent actions from deadlocking or waiting unnecessarily.
+**Call relations**: This is the repeating driver for Heartbeat.beat. Other parts of the system rely on its repeated updates indirectly, especially ExecutorRecovery._live_executors, which treats recently updated rows as live executors.
 
-
-##### `turn_id_for`  (lines 267–269)
-
-```
-def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID
-```
-
-**Purpose**: Creates the stable ID for a turn. The same workspace, conversation, and sequence number always produce the same UUID, which helps retries avoid creating duplicate turns.
-
-**Data flow**: It receives a workspace ID, conversation ID, and sequence number. It combines them into a URL-like name and passes that name to UUID version 5 generation, which creates a deterministic UUID. The returned UUID becomes the turn identity.
-
-**Call relations**: This is used wherever a new turn identity must be derived before storing or running work. It hands the actual deterministic UUID creation to the standard library's uuid5 function.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
 
 
-##### `ledger_id_for`  (lines 272–277)
+##### `Heartbeat.beat`  (lines 82–92)
 
 ```
-def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: str='') -> UUID
+async def beat(self) -> None
 ```
 
-**Purpose**: Creates a stable billing ledger ID for one turn, one billing dimension, and one run attempt. This prevents replayed work from writing duplicate billing rows while still allowing a resumed attempt to be billed separately.
+**Purpose**: Writes one heartbeat stamp for this process. A caller uses it to say, in the database, “this runtime instance is alive right now.”
 
-**Data flow**: It receives the workspace ID, turn ID, billing dimension, and an optional attempt ID. It formats those values into a stable name and uses UUID version 5 to turn that name into a UUID. The output is the ID for that billing record.
+**Data flow**: It reads the Heartbeat object’s instance_id, opens an owner database transaction, and updates that runtime_instance row’s heartbeat_at and updated_at fields to the database’s current time. It returns no separate value; the change is the refreshed row.
 
-**Call relations**: This belongs to the billing path around a turn run. It delegates deterministic UUID creation to the standard library, so callers can safely retry the same billing write and land on the same row.
+**Call relations**: Heartbeat.run calls this on every heartbeat tick. Its database update is later interpreted by ExecutorRecovery._live_executors as evidence that the executor should not be recovered by another process.
 
-*Call graph*: 1 external calls (uuid5).
-
-
-##### `mid_turn_reply_id_for`  (lines 280–291)
-
-```
-def mid_turn_reply_id_for(turn_id: UUID, round_index: int, span_index: int, attempt: str='') -> UUID
-```
-
-**Purpose**: Creates a stable ID for a reply that is sent before a turn has fully finished. This lets the system retry delivery without showing the same mid-turn message twice.
-
-**Data flow**: It receives the turn ID, round number, span position, and optional run attempt ID. It combines these into a stable name and generates a deterministic UUID from it. The result identifies exactly one mid-turn reply for that attempt and position.
-
-**Call relations**: This is part of the message-delivery flow for turns that speak while still running. It uses uuid5 so a replay of the same attempt repeats the same ID, while a resumed attempt can produce fresh IDs for fresh words.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
 
 
-##### `RuntimeIdentity._artifact_pair`  (lines 447–450)
+##### `Heartbeat.retire`  (lines 94–100)
 
 ```
-def _artifact_pair(self) -> 'RuntimeIdentity'
+async def retire(self) -> None
 ```
 
-**Purpose**: Checks that runtime revision and image digest are provided together. This prevents a record from naming only half of the deployed runtime artifact.
+**Purpose**: Removes this process’s runtime_instance row during graceful shutdown. This lets peers see immediately that the seat is gone instead of waiting for the heartbeat to become stale.
 
-**Data flow**: It reads the RuntimeIdentity being built. If exactly one of revision or image_digest is missing, it raises an error. If both are present or both are absent, it returns the record unchanged.
+**Data flow**: It reads the Heartbeat object’s instance_id, opens an owner database transaction, and deletes the matching runtime_instance row. It returns nothing; the database no longer shows this process as occupying a live seat.
 
-**Call relations**: Pydantic calls this validator automatically after creating a RuntimeIdentity. It is a guardrail for any code that records which service and sandbox runtime actually ran a turn.
+**Call relations**: core/src/ufo/serve._stop_executor calls this when stopping the executor. It is the clean shutdown counterpart to record_fleet_seat and Heartbeat.beat.
 
-
-##### `TurnRuntimeConfig._pinned_values`  (lines 469–477)
-
-```
-def _pinned_values(self) -> 'TurnRuntimeConfig'
-```
-
-**Purpose**: Checks that per-turn runtime choices are concrete and valid. A turn may pin a real model or environment document, but it may not pin the vague model value “auto” or a malformed environment digest.
-
-**Data flow**: It reads the TurnRuntimeConfig being built. If the model is exactly “auto”, it raises an error. If an environment value is present, it must look like a SHA-256 digest. Valid records are returned unchanged.
-
-**Call relations**: Pydantic calls this validator when a TurnRuntimeConfig is created. It protects later runtime setup code from receiving ambiguous model choices or invalid environment references.
+*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
 
 
-##### `TurnContext._tag_safe_line`  (lines 534–538)
+##### `ExecutorRecovery.run`  (lines 120–126)
 
 ```
-def _tag_safe_line(cls, value: str | None) -> str | None
+async def run(self) -> None
 ```
 
-**Purpose**: Cleans user-surface text so it can be safely inserted into a context block. It removes angle brackets and flattens whitespace so sender names, questions, or source strings cannot fake markup.
+**Purpose**: Runs the executor recovery sweep on a loop. It keeps checking for pending DBOS workflows that belong to processes that are no longer alive.
 
-**Data flow**: It receives one optional text value. If the value is missing, it stays missing. Otherwise the function removes “<” and “>”, splits and rejoins whitespace into one line, and returns the cleaned text, or null if nothing remains.
+**Data flow**: It waits for the configured recovery interval, calls ExecutorRecovery.sweep, logs database or DBOS errors, and then repeats. Its output is not a returned value; its effect is repeated attempts to recover abandoned workflows.
 
-**Call relations**: Pydantic applies this validator to TurnContext sender, question, and source fields. It acts before the engine renders those facts into the prompt context for a turn.
+**Call relations**: This is the periodic driver for ExecutorRecovery.sweep. It keeps recovery work separate from the main request or turn flow, so temporary failures are logged and retried later.
 
-
-##### `TurnContext._known_zone`  (lines 542–549)
-
-```
-def _known_zone(cls, value: str | None) -> str | None
-```
-
-**Purpose**: Checks that a provided time zone name is real. This catches bad surface-provided time zones before a turn is running.
-
-**Data flow**: It receives an optional time zone string. If it is missing, it returns it unchanged. If present, it asks the system time-zone database to load it; success returns the original string, while failure raises a clear validation error.
-
-**Call relations**: Pydantic calls this validator for the TurnContext timezone field. It uses the standard library's ZoneInfo lookup so later prompt-building code can trust that the stored zone name is valid.
-
-*Call graph*: 1 external calls (ZoneInfo).
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
 
 
-##### `Turn.spawned`  (lines 586–589)
+##### `ExecutorRecovery.sweep`  (lines 128–136)
 
 ```
-def spawned(self) -> bool
+async def sweep(self) -> None
 ```
 
-**Purpose**: Tells whether this turn was created as a child of another turn. In plain terms, it answers: did another agent run spawn this work?
+**Purpose**: Finds executors that still have pending workflows but no fresh heartbeat, then asks DBOS to recover their work. This is how surviving serve processes pick up work after another process crashes.
 
-**Data flow**: It reads the Turn's parent_turn_id field. If that field is present, it returns true. If there is no parent turn ID, it returns false.
+**Data flow**: It asks ExecutorRecovery._pending_executors for executor IDs attached to pending workflows and ExecutorRecovery._live_executors for executor IDs with fresh runtime rows. It subtracts live executors from pending executors; for each remaining stranded executor, it runs DBOS recovery in a worker thread and logs how many workflows were recovered.
 
-**Call relations**: This property is read by code that needs to distinguish root turns from spawned child turns. It does not call other helpers; it summarizes the parent-link rule in one place.
+**Call relations**: ExecutorRecovery.run calls this every interval. It depends on the heartbeat data maintained by record_fleet_seat and Heartbeat.beat, and hands actual workflow recovery off to DBOS.
 
-
-##### `Turn.authority`  (lines 592–594)
-
-```
-def authority(self) -> ExecutionAuthority
-```
-
-**Purpose**: Computes whose authority the turn runs under: a member, someone acting on behalf of a member, or workspace-level authority. This matters because tools and actions need to know what permissions apply.
-
-**Data flow**: It reads the turn's speaker_member_id and on_behalf_of_member_id. It passes those IDs to turn_authority, which returns an ExecutionAuthority object. The property returns that authority to the caller.
-
-**Call relations**: Other turn-running or validation code can ask the Turn for its authority instead of rebuilding the rule. This property hands off the permission decision to ufo.runtime.authority.turn_authority.
-
-*Call graph*: 1 external calls (turn_authority).
+*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
 
 
-##### `Turn._nothing_created`  (lines 598–601)
+##### `ExecutorRecovery._pending_executors`  (lines 138–150)
 
 ```
-def _nothing_created(cls, value: object) -> object
+async def _pending_executors(self) -> set[str]
 ```
 
-**Purpose**: Turns a missing created-objects value into an empty tuple. This lets database null mean “nothing was created” instead of forcing every caller to check for null.
+**Purpose**: Collects the executor IDs that currently own pending DBOS workflows. These are the processes that might need recovery if their heartbeat is not fresh.
 
-**Data flow**: It receives the raw created_refs value before normal validation. If the value is null, it returns an empty tuple. Any other value is returned as-is for Pydantic to continue validating.
+**Data flow**: It asks DBOS for up to the configured limit of pending workflows without loading their inputs or outputs. If the result hits the limit, it logs that the scan may be capped. It returns a set of executor_id strings from the workflow status records that have one.
 
-**Call relations**: Pydantic applies this validator when loading or creating a Turn. It protects later code that reads created_refs by ensuring it can treat the field as a collection.
+**Call relations**: ExecutorRecovery.sweep calls this as one half of its comparison. The returned set is later reduced by ExecutorRecovery._live_executors so only abandoned executors are recovered.
 
-
-##### `Turn._aware_utc`  (lines 605–610)
-
-```
-def _aware_utc(cls, value: datetime | None) -> datetime | None
-```
-
-**Purpose**: Ensures turn timestamps are marked as UTC time. This avoids a subtle bug where a database driver returns a timestamp without a timezone marker and Python might treat it as local time.
-
-**Data flow**: It receives an optional datetime value. Missing values stay missing. If the timestamp already has timezone information, it is returned unchanged; if not, UTC timezone information is attached and the adjusted datetime is returned.
-
-**Call relations**: Pydantic applies this validator to created_at, updated_at, and retry_at. It uses datetime.replace from the standard library to add the UTC marker when needed.
-
-*Call graph*: 1 external calls (replace).
+*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
 
 
-##### `Turn._terminal_matches_status`  (lines 613–619)
+##### `ExecutorRecovery._live_executors`  (lines 152–162)
 
 ```
-def _terminal_matches_status(self) -> 'Turn'
+async def _live_executors(self) -> set[str]
 ```
 
-**Purpose**: Checks that a turn's final result agrees with its status. A running or queued turn must not already have a terminal frame, and a done, failed, or cancelled turn must have one.
+**Purpose**: Reads the database to find which executor IDs have heartbeats recent enough to count as alive. This protects live work from being recovered by mistake.
 
-**Data flow**: It reads the completed Turn object. First it forces authority computation, so invalid authority combinations are caught. Then it checks whether the terminal field is present exactly when the status is terminal, and whether terminal.status matches the turn status. It raises an error on mismatch or returns the Turn unchanged.
+**Data flow**: It computes a cutoff time using the current time minus the stale-after window. Then it selects runtime_instance rows whose heartbeat_at is newer than that cutoff and returns their IDs as strings.
 
-**Call relations**: Pydantic calls this validator after building a Turn. It ties together the status field and the terminal result record so downstream workers, surfaces, and storage readers see one consistent story.
+**Call relations**: ExecutorRecovery.sweep calls this after gathering pending executors. Any executor returned here is removed from the recovery target list, because its process is still considered alive.
+
+*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
 
 
-### `core/src/ufo/schema/tables.py`
+##### `CancelReconciler.run`  (lines 186–192)
 
-`data_model` · `database setup and runtime data writes`
+```
+async def run(self) -> None
+```
 
-Think of this file as the blueprint for the system’s filing cabinet. It does not store the data itself. Instead, it tells the database what drawers exist, what labels each drawer has, and which papers are allowed to go where.
+**Purpose**: Runs the cancellation reconciliation sweep forever. It makes cancellation eventually spread from a cancelled turn to dependent turns below it.
 
-The file uses SQLAlchemy, a Python library for describing databases in code. Its central object is `metadata`, which collects every table definition. Other parts of the system can use this metadata to create tables, run migrations, or build database queries without rewriting the schema by hand.
+**Data flow**: It waits for the configured cancellation interval, calls CancelReconciler.sweep, logs database or DBOS errors, and repeats. It does not return a result; its effect is repeated cleanup of descendants that should also be cancelled.
 
-The tables cover the main things the product remembers: workspaces, members, agents, conversations, turns in a conversation, incoming messages, billing ledger entries, spending caps, credentials, external connections, shared artifacts, synced source pages, runtime workers, and access records. The schema also encodes important rules. For example, an agent can only have certain reasoning levels, a turn can only be in known statuses such as queued or done, token counts cannot be negative, and some identities must be unique inside a workspace. These rules protect the data even if a bug elsewhere tries to write something invalid.
+**Call relations**: This is the loop that drives CancelReconciler.sweep. It keeps cascading cancellation outside the real-time turn path, so cancellation work can be retried safely if a tick fails.
 
-A small helper chooses the default audience for a conversation based on the member creating it. Without this file, the rest of the application would not have a single trusted map of what can be stored, how records relate, or what the database must reject.
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
+
+
+##### `CancelReconciler.sweep`  (lines 194–201)
+
+```
+async def sweep(self) -> None
+```
+
+**Purpose**: Finds live turns that sit under a cancelled dependent ancestor and cancels them. This prevents child work from continuing after the work it depends on has been cancelled.
+
+**Data flow**: It builds and runs CancelReconciler._orphans_query inside an owner database transaction. For each returned turn and workspace, it enters that workspace context, calls cancel_one_turn through the DBOS client, and logs when a turn was actually cancelled.
+
+**Call relations**: CancelReconciler.run calls this every interval. It uses CancelReconciler._orphans_query to decide what needs attention, and delegates the actual safe cancellation to cancel_one_turn.
+
+*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
+
+
+##### `CancelReconciler._orphans_query`  (lines 203–243)
+
+```
+def _orphans_query(self) -> sa.Select
+```
+
+**Purpose**: Builds the database query that identifies non-terminal turns with a cancelled dependent ancestor. In plain terms, it finds live child or grandchild turns that should no longer keep running.
+
+**Data flow**: It starts from turns whose status is not terminal, then recursively climbs their parent chain using CancelReconciler._dependent_parent. The climb stops when it finds a cancelled ancestor or can go no higher. It returns a SQL query selecting distinct orphan turn IDs and workspace IDs.
+
+**Call relations**: CancelReconciler.sweep calls this before reading the database. It relies on CancelReconciler._dependent_parent to know which parent links count as dependency links for cancellation.
+
+*Call graph*: calls 1 internal fn (_dependent_parent); called by 1 (sweep); 1 external calls (select).
+
+
+##### `CancelReconciler._dependent_parent`  (lines 245–255)
+
+```
+def _dependent_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement
+```
+
+**Purpose**: Decides whether a turn’s parent should count as a dependency for cancellation. This matters because not every parent-child relationship means the child must die when the parent is cancelled.
+
+**Data flow**: It receives a turn table or table-like object and builds a SQL expression. If the turn has a subagent profile or came from intent admission, the expression returns its parent_turn_id; otherwise it returns null, which stops the ancestor climb.
+
+**Call relations**: CancelReconciler._orphans_query calls this while constructing its recursive parent-walking query. Its decision shapes exactly which descendants CancelReconciler.sweep will later cancel.
+
+*Call graph*: called by 1 (_orphans_query); 3 external calls (case, null, or_).
+
+
+##### `StrandedTurnReconciler.run`  (lines 289–295)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs the stranded-turn cleanup sweep forever. It looks for turns marked running even though their workflow attempt can no longer move them forward.
+
+**Data flow**: It waits for the configured stranded-turn interval, calls StrandedTurnReconciler.sweep, logs database or DBOS errors, and repeats. It returns no value; its work is to keep the turn table from accumulating impossible running states.
+
+**Call relations**: This is the periodic driver for StrandedTurnReconciler.sweep. Like the other loops in this file, it turns a potentially rare failure mode into a repeated, recoverable background check.
+
+*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
+
+
+##### `StrandedTurnReconciler.sweep`  (lines 297–313)
+
+```
+async def sweep(self) -> None
+```
+
+**Purpose**: Cancels running turns whose recorded workflow attempt is no longer pending, enqueued, or delayed in DBOS. This frees conversations from turns that look active but have no live workflow behind them.
+
+**Data flow**: It queries old enough running claimed turns using StrandedTurnReconciler._claimed_query. If the scan reaches the limit, it logs that fact. It then asks StrandedTurnReconciler._advancing_attempts which recorded attempts are still carried by DBOS. Any claimed row whose attempt is not in that live set is cancelled inside its workspace, and successful cancellations are logged.
+
+**Call relations**: StrandedTurnReconciler.run calls this every interval. It uses _claimed_query to find possible problems, _advancing_attempts to avoid touching work still moving through DBOS, and cancel_one_turn to safely terminalize truly stranded turns.
+
+*Call graph*: calls 2 internal fn (_advancing_attempts, _claimed_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
+
+
+##### `StrandedTurnReconciler._claimed_query`  (lines 315–332)
+
+```
+def _claimed_query(self) -> sa.Select
+```
+
+**Purpose**: Builds the database query for running turns that have held the same workflow claim long enough to be suspicious. The grace window prevents newly claimed turns from being mistaken for stranded ones.
+
+**Data flow**: It computes a cutoff time from the current time minus the grace period. It returns a SQL query selecting turn ID, workspace ID, and running_attempt for RUNNING turns with a non-empty running_attempt whose updated_at is older than the cutoff, ordered oldest first and capped at the scan limit.
+
+**Call relations**: StrandedTurnReconciler.sweep calls this before reading candidate turns from the database. The candidates it finds are then checked against DBOS by StrandedTurnReconciler._advancing_attempts.
+
+*Call graph*: called by 1 (sweep); 3 external calls (now, timedelta, select).
+
+
+##### `StrandedTurnReconciler._advancing_attempts`  (lines 334–345)
+
+```
+async def _advancing_attempts(self, attempts: list[str]) -> set[str]
+```
+
+**Purpose**: Checks which workflow attempt IDs are still in a DBOS status that means they can advance. It separates genuinely stranded turns from turns whose workflow is merely waiting its turn.
+
+**Data flow**: It receives a list of workflow attempt IDs. If the list is empty, it returns an empty set to avoid accidentally scanning the whole workflow store. Otherwise it asks DBOS for workflows among those IDs whose status is pending, enqueued, or delayed, and returns the workflow IDs that DBOS still carries.
+
+**Call relations**: StrandedTurnReconciler.sweep calls this after finding claimed running turns. Any attempt ID returned here is treated as still alive, while missing IDs cause the sweep to hand the turn to cancel_one_turn.
+
+*Call graph*: called by 1 (sweep).
+
+
+### Stop and cancellation
+User-initiated stopping validates the request, cancels the active turn safely, and publishes the resulting completion state.
+
+### `core/src/ufo/runtime/surfaces/stop.py`
+
+`orchestration` · `request handling`
+
+This file is the “stop button” workflow for a conversation turn. A turn is one running unit of work inside a conversation. When a member asks to stop it, the system must be careful: it should not cancel the wrong turn, it should not disturb a turn that already finished on its own, and it should wake up any clients that are waiting for live updates.
+
+The main piece is `MemberStop`, which is given three collaborators. A `DBOSClient` is used by the shared cancellation code, a `Hub` is used to publish live events, and `Admission` can create or select the next turn after the stop.
+
+The workflow is deliberately ordered. First it opens a workspace database transaction and checks that the requested turn really belongs to the requested conversation in the requested workspace. This is like checking the label on a package before throwing it away. If the label does not match, it refuses the request.
+
+Then it calls the common turn-cancellation primitive. If that code says the turn was already finished, this file returns a harmless “nothing ended” answer. If cancellation succeeds, it asks admission to redispatch the conversation so the member can move on to the next turn. Only after that does it publish the cancelled terminal event to the hub, so live tails wake up and see the replacement turn already exists.
 
 #### Function details
 
-##### `_conversation_audience`  (lines 12–13)
+##### `MemberStop.stop`  (lines 35–52)
 
 ```
-def _conversation_audience(context: DefaultExecutionContext) -> str
+async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped
 ```
 
-**Purpose**: This function decides the default audience label for a new conversation. In plain terms, it helps answer: should this conversation be shared, or tied to a specific member?
+**Purpose**: Stops one running turn for a member, but only if that turn belongs to the given conversation and workspace. It makes the cancellation durable, starts or finds the follow-up turn, and returns a clear result saying whether anything actually ended.
 
-**Data flow**: It receives a database execution context from SQLAlchemy, which contains the values currently being inserted. It reads the `member_id` from those values, asks `conversation_audience` to turn that member information into the correct audience value, converts the result to text, and returns that text as the value stored in the `audience` column.
+**Data flow**: It receives a workspace ID, conversation ID, and turn ID. It reads the database to confirm that the turn belongs to that conversation inside that workspace. If not, it raises an error instead of touching anything. If the ownership check passes, it asks the shared cancellation code to cancel the turn. If the turn was already finished, it returns `Stopped` with `ended` set to false. If the cancellation happened, it asks admission to redispatch the conversation, publishes a terminal cancellation event to the hub, and returns `Stopped` with `ended` true and the follow-up turn ID.
 
-**Call relations**: This function is not normally called by application code directly. SQLAlchemy calls it when inserting a conversation row that needs a default `audience`. It relies on `DefaultExecutionContext.get_current_parameters` to see the pending row values, then hands the member id to `ufo.runtime.turns.audience.conversation_audience` so the same audience rule is used consistently across the system.
+**Call relations**: This function is the end-to-end stop path. It uses `workspace_tx` and `sqlalchemy.select` to safely check ownership in the database. It then hands the actual cancellation to `cancel_one_turn`, so cancellation rules stay shared with other cancel paths. After admission has prepared the next turn, it wraps the cancellation frame in `Terminal` and publishes it through the hub, then reports the outcome with `Stopped`.
 
-*Call graph*: 2 external calls (get_current_parameters, conversation_audience).
+*Call graph*: 5 external calls (__init__, __init__, select, workspace_tx, cancel_one_turn).
+
+
+### `core/src/ufo/runtime/turns/cancellation.py`
+
+`domain_logic` · `cancel handling`
+
+This file solves a safety problem: cancelling a turn is not just flipping a database flag. Each turn may be running as a durable DBOS workflow, meaning work can survive crashes and resume later. If the database said “cancelled” before the workflow was actually told to stop, the system could believe the turn was dead while the work kept running in the background. This file prevents that.
+
+The main idea is “cancel first, record second.” It looks up the turn row in the database. If the turn is already finished, it leaves it alone. If it is still active, it asks DBOS to cancel the workflow for the current running attempt. Then it locks and rereads the database row, like checking the label on a package before sealing it, to make sure no other worker claimed or changed the turn in the meantime. If the owner changed, it starts over and cancels the new owner instead.
+
+Only after the correct workflow has been cancelled does it write the turn’s terminal result as cancelled. It keeps any objects the turn already created, so callers can still learn what existed before cancellation. Finally, it records a metric and asks the dispatcher to start the next eligible turn in the same conversation.
+
+#### Function details
+
+##### `cancel_one_turn`  (lines 24–102)
+
+```
+async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | None
+```
+
+**Purpose**: Cancels exactly one turn in a durable and race-safe way. It is used when any part of the system needs to stop a turn, while making sure the running workflow is told to stop before the turn is marked cancelled in the database.
+
+**Data flow**: It receives a DBOS client and a turn ID. It reads the turn’s current status and running workflow attempt from the database; if the turn does not exist or is already terminal, it returns nothing. Otherwise it asks DBOS to cancel the workflow, rereads and locks the turn row, and checks that the same attempt still owns it. If ownership changed, it loops and tries again with the new attempt. Once the cancel is safely tied to the current owner, it writes a cancelled terminal frame into the turn row, clears any retry time, updates the timestamp, emits a cancellation metric, dispatches the next turn for the conversation, and returns the cancelled terminal frame.
+
+**Call relations**: This is the shared cancellation primitive used by cancel initiators such as the evaluation driver, the cancel-spawn tool, and the cancellation reconciler. Inside its flow it opens database transactions with workspace_tx, builds SQL queries with SQLAlchemy, asks DBOSClient.cancel_workflow_async to stop the durable workflow, builds a TerminalFrame containing already-created ObjectRef values, reports the result through emit_metric and turn_profile, and then hands control to dispatch_next_turn so the conversation can continue if another turn is ready.
+
+*Call graph*: 9 external calls (__init__, model_validate, cancel_workflow_async, select, update, workspace_tx, emit_metric, turn_profile, dispatch_next_turn).
+
+
+### Workspace change records
+Final workspace snapshots preserve the file-system changes made by a conversation for later display after the turn ends.
+
+### `core/src/ufo/runtime/turns/workspace_changes.py`
+
+`domain_logic` · `turn-end background refresh`
+
+A conversation can change files in ways that are not fully captured by tool messages alone. For example, a shell command might delete a file, rename a folder, or modify many files without naming them one by one. This file solves that gap by asking the workspace itself what changed, much like checking a workbench after someone has finished using the tools.
+
+First, it works out which parts of the workspace are worth checking. File-writing tools point to specific paths, while a shell command can affect anything, so it marks the workspace root as a target. It also keeps watching directories that had changes in the previous scan, so a changed checkout stays visible until it becomes clean again.
+
+The main class, WorkspaceChangeRecorder, runs after a turn has already completed. It asks the sandbox to scan selected directories, validates the answer into strict data shapes, and stores the result in the database. If two turns using the same sandbox finish around the same time, it carefully merges their results instead of blindly overwriting one with the other. If scanning fails, it logs the problem but does not fail the already-finished turn; an old snapshot is better than breaking the conversation.
+
+#### Function details
+
+##### `change_targets`  (lines 37–55)
+
+```
+def change_targets(calls: Iterable[ToolUseBlock]) -> tuple[str, ...]
+```
+
+**Purpose**: This function reads the tool calls from a turn and extracts the workspace paths that may have been changed. It is used to decide where the later change scan should look, instead of scanning an entire possibly huge workspace every time.
+
+**Data flow**: It receives a sequence of tool-use records. For write and edit calls, it takes the requested file path, checks that it really belongs inside the workspace, and stores the workspace-relative path. For bash calls, it stores the workspace root because a shell command may change anything. It ignores invalid paths and unrelated tools, removes duplicates while preserving first-seen order, and returns the resulting paths as a tuple.
+
+**Call relations**: This is the front-door helper for deciding scan targets from tool activity. It relies on workspace_path to reject paths outside the workspace and PurePosixPath to turn accepted paths into clean workspace-relative names.
+
+*Call graph*: 2 external calls (PurePosixPath, workspace_path).
+
+
+##### `WorkspaceChangeRecorder.record`  (lines 101–114)
+
+```
+async def record(self) -> None
+```
+
+**Purpose**: This is the top-level action that refreshes the stored record of workspace changes after a turn. It gathers the previous scan, decides what to check next, asks the sandbox for fresh changes, and saves the merged result.
+
+**Data flow**: It starts with the recorder’s sandbox, conversation, workspace id, and target paths. If the sandbox was never created and there are no targets, it does nothing. Otherwise it reads the last recorded changes, expands them into directories to watch, scans those directories, and stores the new answer. If anything goes wrong, it writes a log entry and leaves the old stored scan untouched.
+
+**Call relations**: This method coordinates the whole file’s workflow. It calls recorded_workspace_changes to get the old snapshot, _directories to choose scan locations, _scan to ask the sandbox what changed, and _store to write the result. It logs failures instead of raising them because the turn has already completed.
+
+*Call graph*: calls 4 internal fn (_directories, _scan, _store, recorded_workspace_changes); 1 external calls (log).
+
+
+##### `WorkspaceChangeRecorder._directories`  (lines 116–129)
+
+```
+def _directories(self, recorded: WorkspaceChanges) -> list[str]
+```
+
+**Purpose**: This function turns file-level targets and previously changed files into a limited list of directories to scan. It keeps watching old changed directories so changes remain visible until the scanner reports they are gone.
+
+**Data flow**: It receives the last recorded WorkspaceChanges object. It combines the recorder’s current target paths with paths from the previous scan, takes each path’s parent directory, sorts the unique directory names, and caps the list if it is too large. If it has to drop extra directories, it logs how many were dropped. It returns the final list of directory strings.
+
+**Call relations**: record calls this just before scanning. The result is handed to _scan as the exact set of places the sandbox should inspect, balancing accuracy with safety so a huge workspace does not produce an unlimited scan request.
+
+*Call graph*: called by 1 (record); 2 external calls (PurePosixPath, log).
+
+
+##### `WorkspaceChangeRecorder._scan`  (lines 131–136)
+
+```
+async def _scan(self, directories: list[str]) -> WorkspaceChanges
+```
+
+**Purpose**: This function asks the sandbox’s file-system helper to report changes under the chosen directories. It also checks that the sandbox’s answer has the expected shape before the rest of the code trusts it.
+
+**Data flow**: It receives a list of workspace-relative directories. It sends those paths to the sandbox command named changes. The raw response is then validated as a WorkspaceChanges object, which contains individual changed paths, patches, and truncation information. If the response is malformed, it raises a clear runtime error.
+
+**Call relations**: record calls this after _directories has chosen where to look. Its validated result is passed to _store, which persists it. This function is the bridge between the recorder’s Python logic and the sandbox’s actual file-system scan.
+
+*Call graph*: called by 1 (record).
+
+
+##### `WorkspaceChangeRecorder._store`  (lines 138–161)
+
+```
+async def _store(self, scanned: WorkspaceChanges, asked: frozenset[str]) -> None
+```
+
+**Purpose**: This function writes the latest scan into the database without accidentally erasing work recorded by another turn at the same time. It treats the database row as the shared copy of the conversation’s current workspace-change snapshot.
+
+**Data flow**: It receives the freshly scanned changes and the set of directories that were actually asked about. Inside a database transaction, it creates the conversation-change row if it does not already exist. Then it locks and reads the current stored scan, merges that stored scan with the fresh scan, and updates the row with the merged JSON data.
+
+**Call relations**: record calls this after a successful scan. It calls _merged to decide what should survive from the old stored data. The database transaction and row lock are important because two recorders can finish at nearly the same time for the same workspace.
+
+*Call graph*: calls 1 internal fn (_merged); called by 1 (record); 5 external calls (model_dump, and_, select, update, workspace_tx).
+
+
+##### `WorkspaceChangeRecorder._merged`  (lines 163–178)
+
+```
+def _merged(self, scanned: WorkspaceChanges, stored: WorkspaceChanges, asked: frozenset[str]) -> WorkspaceChanges
+```
+
+**Purpose**: This function combines a fresh scan with the previously stored scan. Its job is to replace information for directories that were just checked, while preserving older information for directories this scan did not cover.
+
+**Data flow**: It receives the new scanned changes, the old stored changes, and the set of directories scanned this time. It keeps old changes only when their parent directory was not part of this scan and the same path was not already reported freshly. It then puts fresh changes first, appends the kept old changes, caps the total number of changes, and marks the result as truncated if any information may have been left out.
+
+**Call relations**: _store calls this while holding the database row lock. It is the conflict-resolution step that lets concurrent recorders share one stored snapshot without one scan wiping out another scan’s untouched directories.
+
+*Call graph*: called by 1 (_store); 2 external calls (__init__, PurePosixPath).
+
+
+##### `recorded_workspace_changes`  (lines 181–205)
+
+```
+async def recorded_workspace_changes(conversation_id: UUID) -> WorkspaceChanges
+```
+
+**Purpose**: This function reads the last stored workspace-change snapshot for a conversation. If the conversation is a subagent sharing a parent workspace, it resolves to the parent conversation’s stored snapshot instead.
+
+**Data flow**: It receives a conversation id. It opens a database transaction, looks up the conversation that owns the sandbox workspace, then reads that owner’s stored change scan. If there is no conversation row or no stored scan yet, it returns the shared NOTHING_CHANGED value. If a scan exists, it validates and returns it as a WorkspaceChanges object.
+
+**Call relations**: WorkspaceChangeRecorder.record calls this before deciding what directories to scan next. It provides the previous snapshot that keeps already-known changed directories under watch across turns and across subagents sharing the same workspace.
+
+*Call graph*: called by 1 (record); 2 external calls (select, workspace_tx).
 
 ## 📊 State Registers Touched
 
-- `reg-database-schema-version` — The current shape and migration level of the database, so old stored data can be upgraded and all code agrees on table layouts.
-- `reg-extension-store` — The per-workspace saved data that extensions use to remember their own settings and state.
-- `reg-prompt-skill-environment` — The saved instructions, skills, environment documents, and fingerprints that shape what an agent sees for a turn.
-- `reg-agent-records` — The saved assistant profiles, including their model choice, tools policy, setup needs, visibility, reasoning level, and spawn contracts.
-- `reg-workspace-member-seat-state` — The shared record of workspaces, members, admins, invitations, seats, and workspace-level limits.
-- `reg-surface-routing-state` — The saved routing information that maps web, Slack, iMessage, terminal, hosted app, and public-link traffic to the right workspace and conversation.
-- `reg-conversation-records` — The durable conversation state, including conversation identity, title, surface label, sandbox handle, audience, and related metadata.
-- `reg-turn-queue-state` — The durable queue of conversation turns, including admission source, run claim, parked state, resume state, and final status.
-- `reg-transcript-history` — The saved conversation timeline, including messages, compacted summaries, final answers, costs, and readable history.
-- `reg-audience-visibility-state` — The shared privacy labels that decide who may read or join conversation content and workspace objects.
-- `reg-live-updates-delivery` — The live reply and notification delivery state used to stream running turns and safely deliver mid-turn or delayed messages once.
-- `reg-runtime-fleet-claims` — The attendance and claim sheet for running service processes, including heartbeats, work ownership, and surface listener claims.
-- `reg-cancellation-cleanup-state` — The shared stop-and-cleanup state that records when active turns, workflows, child work, sandboxes, and streams are being wound down.
-- `reg-sandbox-handles` — The durable handles and leases that let conversations reconnect to their sandbox, files, ports, hosted previews, and work directories.
-- `reg-source-sync-state` — The saved state for connected information sources, including cursors, pages, deletions, warnings, backoff, and source access grants.
-- `reg-object-artifact-site-store` — The shared store of workspace objects, files, artifacts, previews, reports, websites, todos, and objective records.
-- `reg-object-change-journal` — The durable history of object changes, recording who changed what and what the object looked like before and after.
-- `reg-schedules-automations` — The durable alarm clock for future work, pauses, monitors, source-change triggers, notification inbox items, and extension jobs.
-- `reg-delegation-state` — The parent-child work state that tracks subagent turns, their contracts, trace links, pending results, and delivery back to the parent.
-- `reg-billing-ledger-balance` — The shared money and usage record, including spend caps, model costs, sandbox and egress usage, prepaid balances, and export progress.
-- `reg-observability-trace` — The tracing, health, logging, and traceparent state used to connect work across turns, subagents, workers, and cleanup.
-- `reg-database-connection-pools` — Process-global database engines, sessions, transaction handles, and connection pools shared by serving, workers, migrations, and cleanup code.
-- `reg-blob-storage-state` — The raw byte/blob storage namespaces and content-addressed stored files that back artifacts, previews, environment files, workspace files, and deploy-wide assets.
-- `reg-inbound-message-buffer` — Durable inbound messages from external surfaces waiting to be rendered, admitted, deduplicated, or converted into conversation work.
-- `reg-human-request-state` — Pending and resolved human-interaction requests, including agent questions, secret requests, credential requests, and connection-authorization handoffs.
-- `reg-improvement-proposals` — Durable proposed changes and offline-improvement candidates, including their pending, approved, or rejected review state.
-- `reg-transcript-access-audit` — Audit records of privileged transcript reads, especially admin access to another member’s private conversation history.
+- `reg-conversation-transcripts` — The durable conversation history, compacted records, audiences, and readable timeline data.
+- `reg-turn-queue-state` — The durable state of conversation turns, including pending, running, paused, cancelled, and finished work.
+- `reg-live-update-streams` — The shared live progress channels that stream text, status, costs, and completion events to clients.
+- `reg-inbound-delivery-ledger` — The durable deduplication and delivery records for inbound messages, writebacks, and mid-turn replies.
+- `reg-sandbox-handles` — The remembered sandbox workspaces and conversation sandbox handles used to resume or clean up execution.
+- `reg-browser-sessions` — The active browser automation workbench for a turn, including Chrome sessions, tabs, and downloads.
+- `reg-subagent-delivery-state` — The parent-child task links and owed-result records used when agents spawn helper agents.
+- `reg-object-store-and-journal` — The shared workspace object records and change history for agents, tasks, memories, sites, and related items.
+- `reg-hosted-site-registry` — The saved hosted-site names, owners, visibility, ports, files, previews, and ingress routing state.
+- `reg-scheduled-work-store` — The durable records for recurring tasks, delayed resumes, scheduled fires, and background job claims.
+- `reg-runtime-fleet-liveness` — The shared record of running service and worker instances, heartbeats, listener claims, and stuck work.
+- `reg-telemetry-context` — The shared trace, metric, log, health, and redaction context used to observe work across the system.
+- `reg-workspace-change-log` — Durable per-conversation sandbox file-change snapshots and summaries used after tool execution and shown in workspace-change slots.
+- `reg-active-workflow-handles` — In-process handles for currently executing turns/workflows, including cancellation tokens and cleanup callbacks used to stop, tear down, or recover live work.
+- `reg-workflow-checkpoints` — Durable per-turn workflow checkpoints, serialized runner state, and step/tool-output idempotency records used to resume, cancel, or recover work without rerunning completed actions.
+- `reg-proposal-review-state` — Durable reviewable-change proposals with source/target digests, creator, approval state, and publication lifecycle outside the self-improvement prompt-promotion loop.

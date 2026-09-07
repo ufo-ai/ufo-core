@@ -1,186 +1,89 @@
-# iMessage extension provider and generated protocol plumbing  `stage-19.6`
+# iMessage protocol package markers and Google API support  `stage-19.6`
 
-This stage is behind-the-scenes plumbing for the iMessage extension. It is not the public face of the SDK and it is not the code that chooses how to handle a conversation. Instead, it supplies the contract, message shapes, and network wiring that let the extension talk to the rest of the system in a predictable way.
+This stage is shared behind-the-scenes support for the iMessage protocol code. It does not run the main app or perform message work itself. Instead, it makes sure Python can find and load the generated protocol modules that other parts of the system depend on.
 
-The provider.py file is the hand-written center of this stage. It defines what an iMessage-like provider must be able to do, and the simple records used for incoming messages, attachments, and provider events.
+Most files here are package markers. The __init__.py files in proto, google, google.api, photon, photon.imessage, and photon.imessage.v1 act like labels on folders. They tell Python, “this folder is importable code.” That lets the rest of the project refer to the generated iMessage version 1 protocol files using normal Python imports.
 
-Around it is generated Protocol Buffers code, which provides shared “forms” for data. One group supplies Google API support needed by the generated files. Other groups define iMessage data shapes for messages, media, chats, groups, polls, and service requests. The gRPC files add the call wiring, so clients and servers can send those forms across process or network boundaries. Together, these pieces work like a standardized plug and socket set for the iMessage extension.
-
-## Sub-stages
-
-- [Google API protobuf support for iMessage extension](stage-19.6.1.md) `stage-19.6.1` — 4 files
-- [iMessage protobuf service descriptor modules](stage-19.6.2.md) `stage-19.6.2` — 4 files
-- [iMessage core message and media protobuf types](stage-19.6.3.md) `stage-19.6.3` — 6 files
-- [iMessage chat, group, and poll protobuf types](stage-19.6.4.md) `stage-19.6.4` — 3 files
-- [iMessage generated gRPC service wiring](stage-19.6.5.md) `stage-19.6.5` — 4 files
+The two generated Google API files provide a small but important vocabulary used by those protocol modules. http_pb2.py defines Protocol Buffers message types such as Http, HttpRule, and CustomHttpPattern. Protocol Buffers are a common format for describing structured messages. annotations_pb2.py registers the google.api.http annotation, which describes how a remote procedure call can correspond to an HTTP request. Together, these files provide the scaffolding the generated iMessage protocol code expects.
 
 ## Files in this stage
 
-### iMessage extension provider and generated protocol plumbing
-### `extensions/imessage/ufo_ext_imessage/provider.py`
+### Protocol package roots
+Top-level package markers establish the import path for generated protocol modules and the vendored Google namespace.
 
-`data_model` · `cross-cutting`
+### `extensions/imessage/ufo_ext_imessage/proto/__init__.py`
 
-This file is like the plug shape for the iMessage extension. The rest of the system does not need to know whether messages come from a local database, a remote service, or another bridge. It only needs a provider that follows this contract.
+`other` · `import time`
 
-The small frozen data classes describe the information that moves across that boundary. A MessageAttachment names a file attached to a message. An InboundMessage represents a received message, including who sent it, which conversation it belongs to, its text, any attachments, and whether it was direct. A ProviderEvent wraps message-stream progress: it can carry a new message, a sequence number, or the current head sequence. A sequence number is a marker used to know “how far through the message stream we are,” like a bookmark in a book.
+This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. Here, that means code elsewhere in the project can refer to modules under `extensions.imessage.ufo_ext_imessage.proto` in a clean, predictable way.
 
-MessageProvider is a Protocol, meaning it is an interface: it says what methods a real provider must offer, but it does not implement them here. The surface layer calls these methods to catch up on old messages, subscribe to live ones, send replies or attachments, download files, and classify provider errors. Without this file, different provider implementations could disagree on names, inputs, or expected results, and the iMessage surface would not have a reliable way to communicate with them.
+The `proto` name usually points to protocol definitions or generated code used for structured messages, often created from files such as Protocol Buffers. This file does not define those messages, read data, or run any setup. Its job is more like putting a label on a drawer: the drawer may contain important tools, but the label itself just helps the rest of the system find them.
 
-#### Function details
+Without this file, some Python environments or packaging tools might not recognize the directory as part of the import path, which could make imports fail. Even though it is empty, it supports the organization and reliability of the extension's protocol-related code.
 
-##### `MessageProvider.installation_id`  (lines 37–37)
 
-```
-def installation_id(self) -> str
-```
+### `extensions/imessage/ufo_ext_imessage/proto/google/__init__.py`
 
-**Purpose**: This property gives the unique identifier for the provider installation. The rest of the system can use it to tell one configured message source apart from another.
+`other` · `import time`
 
-**Data flow**: The caller asks the provider for its installation identity → the provider returns a string identifier → no message data is changed.
+This is an empty package marker file. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Here, that package is `extensions/imessage/ufo_ext_imessage/proto/google`, which likely holds generated Protocol Buffer support code under a `google` namespace. Protocol Buffers are a structured data format often used to describe messages shared between systems. Without this file, some Python environments or import styles might not recognize this folder as part of the package tree, and imports that expect `google` to be a package could fail. Think of it like a label on a filing cabinet drawer: the drawer may contain the useful documents elsewhere, but the label lets people find and reference it correctly.
 
-**Call relations**: No direct caller is shown in the provided graph. In the broader contract, this is available whenever code needs to label or distinguish the active provider.
 
+### Google API annotations support
+The Google API package marker and generated protobuf modules provide HTTP annotation types used by generated protocol definitions.
 
-##### `MessageProvider.assign_line`  (lines 39–39)
+### `extensions/imessage/ufo_ext_imessage/proto/google/api/__init__.py`
 
-```
-async def assign_line(self, phone_number: str, idempotency_key: str) -> str
-```
+`other` · `import/package discovery`
 
-**Purpose**: This method asks the provider to assign or connect a phone number line. The idempotency key helps make repeated attempts safe, so the same request can be retried without accidentally creating duplicate work.
+This file is intentionally blank. In Python projects, an `__init__.py` file tells Python that a folder should be treated as a package, meaning its contents can be imported using dotted names like `google.api.something`. Here, it sits inside generated or protocol-related code for the iMessage extension, under a path that mirrors Google's API package layout. Think of it like a label on a drawer: the label does not contain tools itself, but it tells the rest of the system that this drawer belongs in the importable package hierarchy. Without this file, some Python versions or tooling may not recognize this directory as a normal package, which could make imports fail or behave inconsistently. There are no functions, classes, settings, or side effects here.
 
-**Data flow**: A phone number and retry-safe idempotency key go in → the provider performs whatever setup its backend requires → a string result comes back, likely identifying the assigned line or operation.
 
-**Call relations**: No direct caller is shown in the provided graph. It is part of the provider contract for setup or provisioning flows that need to connect a phone number before messaging can work.
+### `extensions/imessage/ufo_ext_imessage/proto/google/api/annotations_pb2.py`
 
+`generated` · `import time`
 
-##### `MessageProvider.catch_up`  (lines 41–41)
+This file is not handwritten project logic. It is produced by the Protocol Buffers compiler, which turns a `.proto` schema file into Python code that other code can import. Protocol Buffers, often called protobuf, are a compact way to describe structured messages and service definitions so different programs can agree on the same data shape.
 
-```
-def catch_up(self, after_sequence: int | None) -> AsyncIterator[ProviderEvent]
-```
+Here, the schema being loaded is `google/api/annotations.proto`. Its main job is to register an extra option named `http` on protobuf service methods. In plain terms, that option lets a service method carry a note such as “this method should be reachable with this HTTP path and verb.” Without this generated file, Python code that imports protobuf API definitions using that annotation would not know what the annotation means, and parsing or loading those definitions could fail.
 
-**Purpose**: This method produces past provider events after a known sequence marker. It is used when the system starts or reconnects and needs to read anything it missed.
+The file checks that the installed protobuf runtime is the expected compatible version, imports the related `http_pb2` message definitions, then adds a serialized description of the schema to protobuf's shared descriptor pool. A descriptor is like a blueprint: it tells protobuf what fields, options, and message types exist. The protobuf builder then turns that blueprint into Python-level objects available to importers.
 
-**Data flow**: The caller gives the last sequence number it has already processed, or nothing if it has no bookmark → the provider streams events after that point → the caller receives ProviderEvent objects one by one through an asynchronous iterator.
+Because it is generated code, it should normally not be edited by hand. If the underlying `.proto` changes, this file should be regenerated instead.
 
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._catch_up calls this when the surface needs to fill the gap between its saved position and the provider’s current messages.
 
-*Call graph*: called by 1 (_catch_up).
+### `extensions/imessage/ufo_ext_imessage/proto/google/api/http_pb2.py`
 
+`generated` · `import time / protobuf schema setup`
 
-##### `MessageProvider.subscribe`  (lines 43–43)
+This file is not handwritten project logic. It was produced by the Protocol Buffers compiler from google/api/http.proto. Protocol Buffers, often called protobuf, are a compact format for describing structured data so different programs can agree on what a message looks like.
 
-```
-def subscribe(self, ready: asyncio.Event) -> AsyncIterator[ProviderEvent]
-```
+In plain terms, this file is like a printed form template. It tells Python what fields exist on Google API HTTP annotation messages: for example, which HTTP method a rule uses, what URL path it matches, what request body field is used, and whether there are extra bindings. Other generated or runtime protobuf code can then create, read, serialize, and deserialize those messages safely.
 
-**Purpose**: This method opens a live stream of new provider events. It lets the system keep listening after the catch-up phase is done.
+At import time, the file first checks that the installed protobuf runtime is compatible with the version used to generate this code. It then registers a serialized description of the google/api/http.proto schema with protobuf’s global descriptor pool. A descriptor is metadata that says, “these are the message names, fields, types, and options.” Finally, protobuf’s internal builder turns that metadata into usable Python message classes in this module.
 
-**Data flow**: The caller gives an asyncio.Event, which is a small signal object used by asynchronous code → the provider starts a live subscription and can mark the signal when it is ready → new ProviderEvent objects come out over time.
+Without this file, any code that imports google.api.http_pb2 or depends on these HTTP annotation message definitions would fail, even if it never directly edits the messages.
 
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._pump_live calls this to receive new messages as they happen.
 
-*Call graph*: called by 1 (_pump_live).
+### Photon iMessage package markers
+Nested package markers expose the Photon iMessage protocol tree down to the versioned v1 module namespace.
 
+### `extensions/imessage/ufo_ext_imessage/proto/photon/__init__.py`
 
-##### `MessageProvider.send_text`  (lines 45–45)
+`other` · `import/package discovery`
 
-```
-async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str
-```
+This is an empty package marker file. In Python, a file named `__init__.py` tells the interpreter that a folder should be treated as an importable package. That matters here because the surrounding `proto/photon` directory likely contains protocol-related code that other parts of the iMessage extension need to import by name. Without this file, some Python versions or tooling might not reliably recognize the folder as part of the package structure. Think of it like a label on a drawer: the drawer may hold the useful documents, but the label helps the rest of the system find it correctly. Since the file is empty, it does not create objects, run setup code, or change program behavior beyond enabling package discovery.
 
-**Purpose**: This method sends a plain text message into a conversation. The idempotency key makes retries safer if the first attempt’s result is unclear.
 
-**Data flow**: A conversation id, message text, and idempotency key go in → the provider sends the text through its underlying messaging service → it returns a string, typically an identifier for the sent message or operation.
+### `extensions/imessage/ufo_ext_imessage/proto/photon/imessage/__init__.py`
 
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._prove calls this when the surface needs to send a text response through the provider.
+`other` · `import time`
 
-*Call graph*: called by 1 (_prove).
+This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. That matters here because the project likely has generated or protocol-related iMessage code under `proto/photon/imessage`, and other parts of the extension need to refer to that code using normal Python import paths. Think of it like a label on a drawer: the drawer may contain many useful documents, but this label is what lets the rest of the system find the drawer by name. Because the file is empty, it does not define settings, create objects, run startup code, or change behavior directly. Its value is structural: without it, imports from this package could fail or behave differently depending on the Python version and packaging setup.
 
 
-##### `MessageProvider.send_attachment`  (lines 47–53)
+### `extensions/imessage/ufo_ext_imessage/proto/photon/imessage/v1/__init__.py`
 
-```
-async def send_attachment(self, conversation_id: str, filename: str, data: bytes, idempotency_key: str) -> str
-```
+`other` · `import/package discovery`
 
-**Purpose**: This method sends a file attachment into a conversation. It is used when the system needs to deliver binary content, not just text.
-
-**Data flow**: A conversation id, filename, raw file bytes, and idempotency key go in → the provider uploads or sends the attachment through its backend → it returns a string identifier for the sent attachment or operation.
-
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._send_contact_card calls this when it needs to send a contact card file through the message provider.
-
-*Call graph*: called by 1 (_send_contact_card).
-
-
-##### `MessageProvider.download_attachment`  (lines 55–55)
-
-```
-def download_attachment(self, attachment_id: str) -> AsyncGenerator[bytes, None]
-```
-
-**Purpose**: This method downloads an attachment by its provider attachment id. It returns the file data in chunks, which avoids needing to hold the whole file in memory at once.
-
-**Data flow**: An attachment id goes in → the provider finds and reads that attachment → chunks of bytes come out through an asynchronous generator until the file is complete.
-
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._downloaded_files calls this when it needs to turn message attachment references into actual downloaded file contents.
-
-*Call graph*: called by 1 (_downloaded_files).
-
-
-##### `MessageProvider.invalidate`  (lines 57–57)
-
-```
-async def invalidate(self) -> None
-```
-
-**Purpose**: This method tells the provider that its current state or connection should be considered no longer valid. A real implementation might use this to clear cached credentials, close sessions, or force a reconnect.
-
-**Data flow**: The caller gives no extra data → the provider invalidates whatever internal state it owns → nothing is returned except completion of the asynchronous operation.
-
-**Call relations**: No direct caller is shown in the provided graph. It exists as part of the contract so higher-level code has a standard way to mark a provider unusable or stale.
-
-
-##### `MessageProvider.invalid_cursor`  (lines 59–59)
-
-```
-def invalid_cursor(self, error: Exception) -> bool
-```
-
-**Purpose**: This method asks whether an error means the saved stream position is no longer usable. A cursor is a bookmark into the provider’s event stream.
-
-**Data flow**: An exception goes in → the provider checks whether that error represents a bad or expired cursor → it returns true or false.
-
-**Call relations**: No direct caller is shown in the provided graph. It is available for recovery code that needs to decide whether to discard its old sequence bookmark and resync.
-
-
-##### `MessageProvider.external_error`  (lines 61–61)
-
-```
-def external_error(self, error: Exception) -> bool
-```
-
-**Purpose**: This method asks whether an exception came from the outside messaging provider rather than from local code. That distinction helps the surface decide how to report or recover from failures.
-
-**Data flow**: An exception goes in → the provider classifies it according to its backend’s error rules → it returns true if the error should be treated as an external provider error, otherwise false.
-
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._consume_connected, extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._downloaded_files, and extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._send_contact_card call this when they catch failures and need to decide how to interpret them.
-
-*Call graph*: called by 3 (_consume_connected, _downloaded_files, _send_contact_card).
-
-
-##### `MessageProvider.error_code`  (lines 63–63)
-
-```
-def error_code(self, error: Exception) -> str
-```
-
-**Purpose**: This method turns a provider-specific exception into a short error code. That gives higher-level code a stable label to log, return, or branch on without understanding every backend’s exception details.
-
-**Data flow**: An exception goes in → the provider extracts or chooses an appropriate code → a string error code comes out.
-
-**Call relations**: extensions/imessage/ufo_ext_imessage/surface.ImessageSurface._send_contact_card calls this after an attachment-sending failure so it can describe the provider error in a consistent way.
-
-*Call graph*: called by 1 (_send_contact_card).
+This file does not contain any code of its own. Its job is structural: it tells Python that the folder `photon/imessage/v1` should be treated as an importable package. In everyday terms, it is like putting a label on a drawer so the rest of the system knows where to find the files inside it. Without this package marker, imports that expect this directory to behave like a Python module namespace could fail or behave differently, depending on the Python version and packaging setup. Because this path sits under `proto`, it likely groups protocol-related code for the iMessage extension, specifically version 1 of the `photon.imessage` interface. The file itself adds no behavior, performs no setup, and defines no functions or classes.

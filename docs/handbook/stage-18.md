@@ -1,3345 +1,2462 @@
-# Model catalog, provider adapters, and billing accounting  `stage-18` (cross-cutting infrastructure)
+# Persistence, database schema, and durable stores  `stage-18` (cross-cutting infrastructure)
 
-This stage is shared behind-the-scenes support for any part of UFO that calls an AI model or charges for that work. It acts like a travel desk: it knows which “vehicles” are available, how to book each one, and how much the trip costs.
+This stage is the system’s long-term memory. It is shared behind-the-scenes support used during startup, normal work, and recovery after changes or crashes. The database holds structured records such as workspaces, conversations, schedules, notifications, and monitors. Blob storage holds large files that do not fit neatly in database rows.
 
-The model interface defines the common shape of requests and streaming replies, including tool calls, images, and reasoning text, so the main turn loop can talk to every provider the same way. The model spec, catalog, Bedrock extension, and OpenRouter extension list available models, their limits, prices, API style, and client setup. The registry is the lookup desk that turns a chosen model name into the right facts, credentials, and caller.
+The core database doorway is core/src/ufo/db.py. It opens safe database sessions, runs migrations that update the schema, and keeps each workspace’s data separated. core/src/ufo/schema/tables.py is the main blueprint for the core tables, while schema/__init__.py simply makes those definitions importable. core/src/ufo/blob.py is the file cabinet for large byte data, using local disk in development or S3 in production. core/src/ufo/harness/durability.py helps old saved workflow records remain readable after code moves.
 
-The Anthropic and OpenAI adapters translate UFO’s standard requests into each provider’s API and translate streamed answers back again, including retry decisions. Grants keep connected provider accounts usable by refreshing expired tokens.
-
-The pricing, accounting, balance, and Metronome files form the money side. They price usage, check prepaid credit and spend limits, record usage, and export billing data to Metronome or Stripe.
+The extension stores add specialized shelves to the same memory system: notifications manage inbox rows, enrichment stores profile and permission data, monitors store repeating watch jobs, pauses store conversations waiting to resume, and schedules store recurring tasks and safely hand due work to background runners.
 
 ## Files in this stage
 
-### Model catalog and registry
-Defines the model inventory from built-in and extension providers, then centralizes model facts and lookup behavior.
+### Core persistence foundations
+Shared storage, database access, workflow durability, and core schema definitions provide the persistence base used across the system.
 
-### `core/src/ufo/harness/models/catalog.py`
+### `core/src/ufo/blob.py`
 
-`config` · `startup and model/pricing lookup`
+`io_transport` · `cross-cutting: used whenever blobs are stored, streamed, listed, or served`
 
-This file is like a menu and price list for the AI models shipped with the core system. Without it, the rest of the program would not know which built-in model IDs are valid, how much their input and output should cost, which environment variable holds the needed API key, or which provider-specific client should be used to contact the model.
+A “blob” here means an opaque bundle of bytes: an uploaded file, generated artifact, static asset, transcript record, or preview image. This file is the storage adapter for those blobs. It hides the difference between a local folder and S3, which is Amazon-style object storage, so the rest of the system can simply say “put these bytes under this key” or “stream this key back.”
 
-The file starts by naming the key slots and environment variables for Anthropic and OpenAI credentials. It also defines shared limits, such as how many tokens fit in a model’s context window. A token is a small chunk of text used by AI model APIs for size and billing.
+The main idea is like a mailroom with two possible buildings. In development, `FilesystemBlobStore` turns each key into a file under a configured root folder. It writes through a temporary file and then swaps it into place, so readers do not see half-written files. In deployment, `S3BlobStore` talks to S3 asynchronously and can upload or download in chunks so large files do not need to fit in memory at once.
 
-The helper functions build `ModelSpec` objects. A `ModelSpec` is the system’s compact fact sheet for one model: provider name, price, knowledge cutoff, context window, reasoning support, API surface, and client factory. The client factory is important because Anthropic and OpenAI need different setup steps, and OpenAI may use a Codex-style client when the credential points to a ChatGPT account.
+On top of those raw backends are safety wrappers. `WorkspaceBlobStore` automatically adds `workspaces/<workspace id>/` to every key, using the currently active workspace. This prevents one workspace from reading or writing another workspace’s blobs by accident. `FleetBlobStore` is the opposite: it is for deploy-wide files only, and only allows known prefixes such as static assets and terminal payloads.
 
-The main function, `core_model_specs`, returns all built-in model specs. At the bottom, the module immediately builds the default catalog, extracts the price table, and creates a pricing digest. That digest gives the system a stable fingerprint of the pricing data, useful for ledgers or checks that need to know exactly which prices were in force.
-
-#### Function details
-
-##### `_anthropic_client`  (lines 32–35)
-
-```
-def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient
-```
-
-**Purpose**: This function creates the Anthropic model client for a specific model and credential. It hides the provider-specific setup so the rest of the system can simply ask the model spec to produce a usable client.
-
-**Data flow**: It receives a model spec and an API key. It turns the key into an Anthropic SDK client, checks whether the key is an OAuth-style credential, then wraps both pieces together with the model spec in an `AnthropicClient`. The result is a ready-to-use client object for that model.
-
-**Call relations**: This function is stored inside Anthropic `ModelSpec` entries by `_anthropic`. Later, when some other part of the system needs to call an Anthropic model, the spec can call this factory to build the actual client.
-
-*Call graph*: 3 external calls (__init__, anthropic_sdk_client, is_oauth_credential).
-
-
-##### `_openai_client`  (lines 38–42)
-
-```
-def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient
-```
-
-**Purpose**: This function creates the OpenAI model client for a specific model and credential. It also detects when the credential should use the Codex-style OpenAI path instead of the normal OpenAI SDK path.
-
-**Data flow**: It receives a model spec and an API key. First it checks whether the key contains or maps to a ChatGPT account ID. If not, it builds a normal OpenAI SDK client and wraps it in an `OpenAIClient`. If an account ID is found, it builds a Codex SDK client for that account and marks the wrapper as Codex-backed. The output is the correct client object for the given key.
-
-**Call relations**: This function is attached to OpenAI `ModelSpec` entries by `_openai`. When the system later wants to run an OpenAI model, the spec uses this function so callers do not need to know which OpenAI client variant is required.
-
-*Call graph*: 4 external calls (__init__, chatgpt_account_id, codex_sdk_client, openai_sdk_client).
-
-
-##### `_anthropic`  (lines 45–65)
-
-```
-def _anthropic(id: str, price: ModelPrice, cutoff: str, key_env: str, *, context_window: int=ANTHROPIC_CONTEXT_WINDOW, reasoning: ReasoningSupport=REASONS_WITH_TOOLS) -> ModelSpec
-```
-
-**Purpose**: This helper builds one complete `ModelSpec` for an Anthropic model. It keeps repeated Anthropic details in one place, so each model row only has to state what is different, such as price, model ID, cutoff date, or context size.
-
-**Data flow**: It receives the model ID, pricing, knowledge cutoff, key environment variable name, and optional context or reasoning settings. It combines those with Anthropic defaults: the Anthropic provider name, Anthropic key slot, chat API surface, and the Anthropic client factory. It returns a finished `ModelSpec` for one Anthropic model.
-
-**Call relations**: `core_model_specs` calls this helper once for each built-in Anthropic model. The helper hands back standardized specs, which are then collected into the core model catalog.
-
-*Call graph*: called by 1 (core_model_specs); 1 external calls (__init__).
-
-
-##### `_openai`  (lines 68–82)
-
-```
-def _openai(id: str, price: ModelPrice, cutoff: str, key_env: str, *, api_surface: ApiSurface='chat') -> ModelSpec
-```
-
-**Purpose**: This helper builds one complete `ModelSpec` for an OpenAI model. It avoids repeating the same OpenAI provider details for every model in the catalog.
-
-**Data flow**: It receives the model ID, pricing, knowledge cutoff, key environment variable name, and optionally which OpenAI API surface to use. It fills in OpenAI defaults: the provider name, context window, reasoning support, key slot, and OpenAI client factory. It returns a finished `ModelSpec` for one OpenAI model.
-
-**Call relations**: `core_model_specs` calls this helper for every built-in OpenAI model. Some calls choose the Responses API surface, which is the route needed for certain models and tool/reasoning combinations.
-
-*Call graph*: called by 1 (core_model_specs); 1 external calls (__init__).
-
-
-##### `core_model_specs`  (lines 85–199)
-
-```
-def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[ModelSpec, ...]
-```
-
-**Purpose**: This function builds the full list of core-shipped model specifications. It is the central source of truth for built-in model IDs, prices, knowledge cutoff dates, context limits, reasoning support, and which API surface each model should use.
-
-**Data flow**: It receives the environment variable names that should be used for Anthropic and OpenAI keys. It creates many `ModelPrice` values, then passes them into `_anthropic` or `_openai` to make `ModelSpec` objects. It returns all of those specs as a tuple, ready to be indexed by model ID or used to build pricing tables.
-
-**Call relations**: At module load time, this function is called to create `CORE_MODEL_SPECS`. The resulting specs feed `CORE_PRICES`, `CORE_PRICING`, and `PRICE_DIGEST`, so the catalog and the billing logic are based on the same model facts.
-
-*Call graph*: calls 2 internal fn (_anthropic, _openai); 1 external calls (__init__).
-
-
-### `extensions/bedrock/ufo_ext_bedrock.py`
-
-`config` · `extension discovery and model setup`
-
-This extension is like a catalog card plus a set of connection instructions for Amazon Bedrock Mantle. UFO needs to know which model names exist, what they cost, how much text they can read at once, what kind of reasoning features they support, and which API style to use when talking to them. Without this file, the rest of the system would not know that these Bedrock models are available or how to connect to them safely.
-
-The file supports two families of models. Anthropic model IDs are connected through Anthropic’s Bedrock Mantle client. OpenAI-style model IDs are connected through UFO’s OpenAI-compatible client, using a Bedrock Mantle web address. The file itself does not rewrite requests or translate messages; it only chooses the correct endpoint and client for each model.
-
-Credentials come from a named secret slot, backed by the environment variable AWS_BEARER_TOKEN_BEDROCK. The AWS region is also required, because Bedrock endpoints are regional. The file looks for AWS_REGION first, then AWS_DEFAULT_REGION, and raises a clear error if neither is set.
-
-At the bottom, `manifest` exposes all of this as a `Manifest`, which is the package of information UFO uses when loading the extension.
+The file also creates presigned URLs for S3. These are temporary URLs that let a sandbox upload or download exactly one object without receiving broad storage credentials.
 
 #### Function details
 
-##### `bedrock_region`  (lines 46–52)
+##### `BlobStore.put`  (lines 54–54)
 
 ```
-def bedrock_region() -> str
+async def put(self, key: str, data: bytes) -> None
 ```
 
-**Purpose**: Finds the AWS region that should be used for Bedrock Mantle requests. This matters because Bedrock service addresses include the region, so the system cannot connect correctly without it.
+**Purpose**: Defines the common promise that any blob store can save a complete byte string under a key. Code can depend on this promise without caring whether the bytes go to disk or S3.
 
-**Data flow**: It reads the process environment, first checking AWS_REGION and then AWS_DEFAULT_REGION. If it finds a value, it returns that region string. If both are missing, it stops with an error explaining which environment variables must be set.
+**Data flow**: A key and a block of bytes go in. The concrete store writes those bytes at that key. Nothing is returned, but the stored object should exist afterward.
 
-**Call relations**: When either kind of client is being created, `_anthropic_client` or `_openai_client` asks this function for the region. The returned region is then built into the Bedrock connection settings.
+**Call relations**: Web asset publishing calls this through the shared interface, so the publishing code can work with any backend that follows the blob-store contract.
 
-*Call graph*: called by 2 (_anthropic_client, _openai_client).
-
-
-##### `_anthropic_client`  (lines 55–67)
-
-```
-def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient
-```
-
-**Purpose**: Builds a UFO Anthropic client for a Bedrock-hosted Anthropic model. Someone uses it indirectly when a model spec says, “this model should be reached through Anthropic’s Bedrock Mantle API.”
-
-**Data flow**: It receives a `ModelSpec`, which describes the model, and an API key. It asks `bedrock_region` for the AWS region, creates an Anthropic Bedrock Mantle async client with that key, region, timeout, and no automatic retries, then wraps it in UFO’s `AnthropicClient` together with the model spec. The result is a ready-to-use client object.
-
-**Call relations**: This function is stored inside Anthropic model specs created by `_anthropic`. Later, when UFO needs to call one of those models, the spec can use this function to build the actual connection. During that build, it hands off region lookup to `bedrock_region` and delegates the provider-specific connection to Anthropic’s Bedrock Mantle client.
-
-*Call graph*: calls 1 internal fn (bedrock_region); 3 external calls (__init__, AsyncAnthropicBedrockMantle, cast).
+*Call graph*: called by 1 (_publish_assets).
 
 
-##### `_openai_client`  (lines 70–77)
+##### `BlobStore.get`  (lines 56–56)
 
 ```
-def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient
+async def get(self, key: str) -> bytes
 ```
 
-**Purpose**: Builds a UFO OpenAI-compatible client for a Bedrock-hosted OpenAI-style model. It chooses the correct Bedrock Mantle base address depending on which OpenAI API surface the model uses.
+**Purpose**: Defines the common promise that any blob store can read a complete object back as bytes. It is the simple whole-file read form.
 
-**Data flow**: It receives a `ModelSpec` and an API key. It reads the AWS region through `bedrock_region`, builds a Bedrock Mantle URL, and chooses between the `/openai/v1` path for the Responses API or `/v1` for the Chat Completions-style API. It then creates an OpenAI SDK client for that URL and wraps it in UFO’s `OpenAIClient`. The output is a ready-to-use client object.
+**Data flow**: A key goes in. The concrete store finds the stored object and returns its bytes, or raises a not-found error if it is missing.
 
-**Call relations**: This function is stored inside OpenAI-style model specs created by `_openai`. When UFO later needs to send a request to one of those models, this function supplies the client. It relies on `bedrock_region` for the regional endpoint and on `openai_sdk_client` to make the lower-level OpenAI-compatible connection.
+**Call relations**: Transcript readers, Slack identity loading, and web asset serving rely on this interface when they need the whole stored object at once.
 
-*Call graph*: calls 1 internal fn (bedrock_region); 2 external calls (__init__, openai_sdk_client).
-
-
-##### `_anthropic`  (lines 80–99)
-
-```
-def _anthropic(id: str, price: ModelPrice, cutoff: str, *, context_window: int=ANTHROPIC_CONTEXT_WINDOW, reasoning: ReasoningSupport=REASONS) -> ModelSpec
-```
-
-**Purpose**: Creates a `ModelSpec` for an Anthropic model available through Bedrock. A model spec is the system’s record of a model’s name, price, limits, reasoning behavior, credential source, and client-building function.
-
-**Data flow**: It takes a model ID, pricing information, a knowledge cutoff date, and optional context-window and reasoning settings. It fills in Bedrock-specific defaults, including the provider name, Anthropic client factory, chat API surface, credential slot, and API-key environment variable. It returns a complete `ModelSpec` ready to be included in the provider’s model list.
-
-**Call relations**: The file uses this helper while building `BEDROCK_MODEL_SPECS`, so each Anthropic entry is created in a consistent way. The client field it places into the spec points to `_anthropic_client`, which is what UFO will call later when it needs a live connection.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: called by 4 (read_compaction_after, read_compaction_record, read_identity, _stored_asset).
 
 
-##### `_openai`  (lines 102–116)
+##### `BlobStore.exists`  (lines 58–58)
 
 ```
-def _openai(id: str, price: ModelPrice, cutoff: str, window: int, api_surface: ApiSurface) -> ModelSpec
+async def exists(self, key: str) -> bool
 ```
 
-**Purpose**: Creates a `ModelSpec` for an OpenAI-compatible model available through Bedrock. It keeps the repeated Bedrock setup in one place so each OpenAI-style model entry only needs to state what is unique about that model.
+**Purpose**: Defines the common promise that any blob store can answer whether a key currently names a stored object. This lets callers avoid unnecessary reads or writes.
 
-**Data flow**: It takes a model ID, pricing information, knowledge cutoff, context-window size, and API style. It combines those with Bedrock defaults, including the provider name, OpenAI client factory, reasoning support, credential slot, and API-key environment variable. It returns a complete `ModelSpec` for the model catalog.
+**Data flow**: A key goes in. The concrete store checks its storage area. A true or false answer comes out.
 
-**Call relations**: The file uses this helper to build the OpenAI-compatible entries in `BEDROCK_MODEL_SPECS`. The spec it creates points to `_openai_client`, so later model calls can be routed to the right Bedrock Mantle OpenAI-compatible endpoint.
+**Call relations**: Slack and web surfaces use this contract to decide whether stored identities or assets are already present before reading or publishing them.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: called by 3 (read_identity, _publish_assets, _stored_asset).
 
 
-##### `manifest`  (lines 204–215)
+##### `BlobStore.delete`  (lines 60–62)
 
 ```
-def manifest() -> Manifest
+async def delete(self, key: str) -> None
 ```
 
-**Purpose**: Packages this extension’s public information into a `Manifest`, which is what UFO reads to discover the provider. It tells UFO the extension name, version, required credential, and available models.
+**Purpose**: Defines the common promise that any blob store can remove an object. Deleting a missing object is intentionally harmless, which makes retries safe.
 
-**Data flow**: It creates a credential description for the Bedrock API key, combines it with the extension name, version, and the full `BEDROCK_MODEL_SPECS` list, and returns a `Manifest` object. It does not make network calls; it only reports what this extension offers and what secret it needs.
+**Data flow**: A key goes in. The concrete store removes the matching object if it exists. Nothing is returned, and no error is expected just because the key was absent.
 
-**Call relations**: The extension loader calls this function when it wants to learn about the Bedrock provider. The returned manifest hands UFO the credential slot created with `CredentialSlot` and the model catalog created earlier with `_anthropic` and `_openai`.
+**Call relations**: This is part of the shared storage interface. Concrete filesystem, S3, workspace, and fleet stores provide the actual deletion behavior.
+
+
+##### `BlobStore.get_stream`  (lines 64–64)
+
+```
+def get_stream(self, key: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Defines the common promise that any blob store can read an object in pieces. This is used for large files so the program does not need to load everything into memory.
+
+**Data flow**: A key goes in. The concrete store opens the stored object and yields byte chunks one at a time. The caller receives a stream of chunks until the object ends.
+
+**Call relations**: This is the streaming read half of the shared interface. Concrete stores implement it using either file reads or S3 response chunks.
+
+
+##### `BlobStore.put_stream`  (lines 66–66)
+
+```
+async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+```
+
+**Purpose**: Defines the common promise that any blob store can write an object from a stream of byte chunks. It is the large-file write form.
+
+**Data flow**: A key and an async stream of chunks go in. The concrete store consumes the chunks and writes them as one stored object. Nothing is returned when the write completes.
+
+**Call relations**: Concrete stores use this interface when callers, such as artifact storage code, produce bytes gradually instead of all at once.
+
+
+##### `BlobStore.list`  (lines 68–72)
+
+```
+async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+```
+
+**Purpose**: Defines the common promise that any blob store can list objects under a required key prefix. It deliberately avoids whole-store scans by requiring callers to name the area they want.
+
+**Data flow**: A prefix goes in. The concrete store returns sorted `BlobEntry` records describing matching keys, sizes, and modification times, capped at a fixed maximum.
+
+**Call relations**: Web asset publishing uses this interface to inspect already stored assets under a known prefix without knowing which backend is underneath.
+
+*Call graph*: called by 1 (_publish_assets).
+
+
+##### `FilesystemBlobStore.put`  (lines 81–86)
+
+```
+async def put(self, key: str, data: bytes) -> None
+```
+
+**Purpose**: Writes a complete blob to the local filesystem. It uses a temporary file first so a crash or interrupted write does not leave a half-finished final file.
+
+**Data flow**: A key and bytes go in. The key is converted to a safe path under the store root, parent folders are created, bytes are written to a uniquely named temporary file, and that file replaces the final path. Nothing is returned.
+
+**Call relations**: This is the filesystem implementation of the shared `put` operation. It depends on `_resolve` to keep the path inside the configured blob root.
+
+*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
+
+
+##### `FilesystemBlobStore.get`  (lines 88–93)
+
+```
+async def get(self, key: str) -> bytes
+```
+
+**Purpose**: Reads a complete blob from the local filesystem. It translates a missing file into the project’s own `BlobNotFound` error.
+
+**Data flow**: A key goes in. The key is resolved to a safe file path, the file is read in a worker thread, and its bytes are returned. If the file is absent, `BlobNotFound` comes out instead of a raw filesystem error.
+
+**Call relations**: This is the filesystem implementation of the shared `get` operation. It uses `_resolve` before touching disk.
+
+*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
+
+
+##### `FilesystemBlobStore.exists`  (lines 95–97)
+
+```
+async def exists(self, key: str) -> bool
+```
+
+**Purpose**: Checks whether a local-file blob exists. It answers only whether the resolved key is a file.
+
+**Data flow**: A key goes in. The key is safely resolved under the blob root, the filesystem is checked, and a boolean answer comes out.
+
+**Call relations**: This is the filesystem implementation of the shared `exists` operation. `_resolve` provides the safety boundary before the disk check happens.
+
+*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
+
+
+##### `FilesystemBlobStore.delete`  (lines 99–101)
+
+```
+async def delete(self, key: str) -> None
+```
+
+**Purpose**: Deletes a local-file blob if it exists. It is safe to call even when the file is already gone.
+
+**Data flow**: A key goes in. The key is safely resolved to a file path, and that file is unlinked with missing files ignored. Nothing is returned.
+
+**Call relations**: This is the filesystem implementation of the shared `delete` operation. It relies on `_resolve` so deletion cannot escape the blob directory.
+
+*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
+
+
+##### `FilesystemBlobStore.get_stream`  (lines 103–116)
+
+```
+async def get_stream(self, key: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Reads a local blob in fixed-size chunks. This is for large files that should not be loaded into memory all at once.
+
+**Data flow**: A key goes in. The matching file is opened, read chunk by chunk, and each chunk is yielded to the caller. The file handle is closed at the end or after an error.
+
+**Call relations**: This is the filesystem implementation of streaming reads. It uses `_resolve` for path safety and raises `BlobNotFound` if the file cannot be opened.
+
+*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
+
+
+##### `FilesystemBlobStore.put_stream`  (lines 118–131)
+
+```
+async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+```
+
+**Purpose**: Writes a local blob from incoming chunks. Like the whole-byte write, it writes to a temporary file first and then atomically swaps it into place.
+
+**Data flow**: A key and a stream of byte chunks go in. The key becomes a safe path, chunks are written to a temporary file, and the temporary file replaces the final file when all chunks arrive. If anything fails, the temporary file is cleaned up.
+
+**Call relations**: This is the filesystem implementation of streaming writes. It calls `_resolve` and uses temporary-file cleanup so callers do not leave corrupt blobs behind.
+
+*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
+
+
+##### `FilesystemBlobStore.list`  (lines 133–136)
+
+```
+async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+```
+
+**Purpose**: Lists local blobs under a required prefix. Requiring a prefix prevents accidental scans of the entire storage tree.
+
+**Data flow**: A non-empty prefix goes in. The actual directory walk is run in a worker thread, and a tuple of matching `BlobEntry` records comes out. An empty prefix raises an error.
+
+**Call relations**: This is the filesystem implementation of the shared `list` operation. It hands the real walking work to `_walk` so disk traversal does not block the async event loop.
+
+*Call graph*: 1 external calls (to_thread).
+
+
+##### `FilesystemBlobStore._walk`  (lines 138–159)
+
+```
+def _walk(self, prefix: str) -> tuple[BlobEntry, ...]
+```
+
+**Purpose**: Performs the actual filesystem search for `list`. It walks the relevant directory, ignores temporary files, and builds the public listing records.
+
+**Data flow**: A prefix goes in. The method finds the contained root, chooses the directory to inspect, walks files below it, keeps only keys that match the prefix, records size and modification time, sorts by key, and returns up to the maximum allowed entries.
+
+**Call relations**: `FilesystemBlobStore.list` calls this inside a worker thread. It uses `_contained_root` and `_resolve` to keep the walk tied to the configured store.
+
+*Call graph*: calls 2 internal fn (_contained_root, _resolve); 4 external calls (__init__, fromtimestamp, walk, Path).
+
+
+##### `FilesystemBlobStore._resolve`  (lines 161–166)
+
+```
+def _resolve(self, key: str) -> Path
+```
+
+**Purpose**: Turns a blob key into a safe filesystem path. Its main job is to stop keys like `../secret` from escaping the blob root.
+
+**Data flow**: A key goes in. The configured root is canonicalized, the key is joined to it and resolved, and the resulting path is returned only if it stays under the root. Unsafe keys raise an error.
+
+**Call relations**: Every filesystem read, write, delete, stream, and walk uses this before touching disk. It depends on `_contained_root` to know the real root path.
+
+*Call graph*: calls 1 internal fn (_contained_root); called by 7 (_walk, delete, exists, get, get_stream, put, put_stream).
+
+
+##### `FilesystemBlobStore._contained_root`  (lines 168–181)
+
+```
+def _contained_root(self) -> Path
+```
+
+**Purpose**: Finds the real filesystem root used by the blob store. It allows the root itself to be a symlink, which is common in deployments, but still checks that the configured location is suitable.
+
+**Data flow**: The configured root path is read from the store. The containment helper validates and canonicalizes it when it exists; if it has not been created yet, the resolved intended path is returned. The caller receives a root path to compare other paths against.
+
+**Call relations**: `_resolve` and `_walk` call this whenever they need the authoritative blob root. It is the safety anchor for all filesystem blob paths.
+
+*Call graph*: called by 2 (_resolve, _walk); 1 external calls (configured_root).
+
+
+##### `_is_missing_key`  (lines 184–185)
+
+```
+def _is_missing_key(error: ClientError) -> bool
+```
+
+**Purpose**: Recognizes S3 errors that mean “this object does not exist.” Different S3-compatible services use slightly different error codes, so this helper centralizes the check.
+
+**Data flow**: An S3 `ClientError` goes in. The function reads the error code from the response and returns true if it matches one of the known missing-object codes.
+
+**Call relations**: S3 `get`, `exists`, and streaming `get_stream` call this when S3 returns an error, so they can turn missing objects into `BlobNotFound` or `False` while letting real failures pass through.
+
+*Call graph*: called by 3 (exists, get, get_stream).
+
+
+##### `S3BlobStore.put`  (lines 207–209)
+
+```
+async def put(self, key: str, data: bytes) -> None
+```
+
+**Purpose**: Writes a complete blob to an S3 bucket in one request. This is the S3 version of the simple whole-byte save operation.
+
+**Data flow**: A key and bytes go in. The method gets or creates the async S3 client, sends a `put_object` request to the configured bucket, and returns nothing after S3 accepts it.
+
+**Call relations**: This implements the shared `put` operation for S3. It relies on `_client` so client creation is reused instead of repeated for every call.
+
+*Call graph*: calls 1 internal fn (_client).
+
+
+##### `S3BlobStore.get`  (lines 211–221)
+
+```
+async def get(self, key: str) -> bytes
+```
+
+**Purpose**: Reads a complete blob from S3. It returns all bytes at once and translates S3’s missing-object response into `BlobNotFound`.
+
+**Data flow**: A key goes in. The method obtains the S3 client, requests the object, reads the response body fully, and returns the bytes. If S3 says the key is missing, `BlobNotFound` is raised.
+
+**Call relations**: This implements the shared `get` operation for S3. It uses `_client` for transport and `_is_missing_key` to classify S3 errors.
+
+*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
+
+
+##### `S3BlobStore.exists`  (lines 223–231)
+
+```
+async def exists(self, key: str) -> bool
+```
+
+**Purpose**: Checks whether an object exists in S3 without downloading it. It uses S3’s metadata check rather than reading the body.
+
+**Data flow**: A key goes in. The method asks S3 for the object header. A successful response becomes `True`; a known missing-key error becomes `False`; other errors are raised.
+
+**Call relations**: This implements the shared `exists` operation for S3. It uses `_client` to talk to S3 and `_is_missing_key` to separate absence from real failures.
+
+*Call graph*: calls 2 internal fn (_client, _is_missing_key).
+
+
+##### `S3BlobStore.delete`  (lines 233–235)
+
+```
+async def delete(self, key: str) -> None
+```
+
+**Purpose**: Deletes an object from S3. S3 deletion is naturally tolerant of missing keys, matching the blob-store contract.
+
+**Data flow**: A key goes in. The method gets the S3 client, sends a delete request for that bucket and key, and returns nothing.
+
+**Call relations**: This implements the shared `delete` operation for S3 and uses `_client` for the reusable S3 connection.
+
+*Call graph*: calls 1 internal fn (_client).
+
+
+##### `S3BlobStore.get_stream`  (lines 237–248)
+
+```
+async def get_stream(self, key: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams an S3 object in chunks. This lets callers serve or process large files without first holding the whole object in memory.
+
+**Data flow**: A key goes in. The method opens the S3 object body and yields chunks of bytes until S3 has no more data. If the object is missing, `BlobNotFound` is raised.
+
+**Call relations**: This implements the shared streaming-read operation for S3. It uses `_client` for the request and `_is_missing_key` to translate missing-object errors.
+
+*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
+
+
+##### `S3BlobStore.put_stream`  (lines 250–294)
+
+```
+async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+```
+
+**Purpose**: Uploads streamed bytes to S3, switching to S3 multipart upload for larger content. Multipart upload means the object is sent as numbered pieces and then finalized as one object.
+
+**Data flow**: A key and a stream of chunks go in. Small total content is buffered and sent with one `put_object` request. Once enough data accumulates, the method starts a multipart upload, sends each part, records S3’s part tags, and completes the upload. If anything fails after multipart starts, it aborts the upload.
+
+**Call relations**: This implements the shared streaming-write operation for S3. It relies on `_client`, and its cleanup path prevents abandoned partial uploads when a caller or network fails.
+
+*Call graph*: calls 1 internal fn (_client).
+
+
+##### `S3BlobStore.presigned_put`  (lines 296–320)
+
+```
+async def presigned_put(self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int) -> str
+```
+
+**Purpose**: Creates a temporary upload URL for exactly one measured object. The URL is signed for a specific key, byte length, checksum, and expiry time.
+
+**Data flow**: A key, expected size, SHA-256 checksum, and lifetime go in. The S3 client signs a PUT URL that S3 will accept only if the request matches those details. The URL string comes out.
+
+**Call relations**: Workspace artifact storage reaches this through `WorkspaceBlobStore.presigned_put` when an untrusted sandbox should upload directly to S3 without receiving full credentials.
+
+*Call graph*: calls 1 internal fn (_client).
+
+
+##### `S3BlobStore.presigned_put_unmeasured`  (lines 322–332)
+
+```
+async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str
+```
+
+**Purpose**: Creates a temporary upload URL for a fixed key when the final byte length is not known yet. It still limits the holder to that one key and expiry time.
+
+**Data flow**: A key and lifetime go in. The S3 client signs a PUT URL without size or checksum restrictions. The URL string comes out.
+
+**Call relations**: Preview rendering reaches this through `WorkspaceBlobStore.presigned_put_unmeasured` when generated output size is only known after rendering.
+
+*Call graph*: calls 1 internal fn (_client).
+
+
+##### `S3BlobStore.presigned_get`  (lines 334–341)
+
+```
+async def presigned_get(self, key: str, ttl_seconds: int) -> str
+```
+
+**Purpose**: Creates a temporary download URL for one S3 object. Anyone holding the URL can read that object until the URL expires.
+
+**Data flow**: A key and lifetime go in. The S3 client signs a GET URL for that bucket and key. The URL string comes out.
+
+**Call relations**: Preview rendering reaches this through `WorkspaceBlobStore.presigned_get` when a renderer or browser needs short-lived access to a stored object.
+
+*Call graph*: calls 1 internal fn (_client).
+
+
+##### `S3BlobStore.put_host`  (lines 343–354)
+
+```
+async def put_host(self) -> str
+```
+
+**Purpose**: Reports the hostname used by presigned S3 upload URLs. The sandbox egress proxy uses this to know which host it should allow.
+
+**Data flow**: The method reads the endpoint URL from the actual S3 client, extracts its hostname, and adjusts it for AWS virtual-hosted bucket addressing when needed. The bare hostname comes out.
+
+**Call relations**: This depends on `_client` so the allowed proxy host is derived from the same client that signs URLs, avoiding mismatches between configuration and generated URLs.
+
+*Call graph*: calls 1 internal fn (_client); 1 external calls (urlsplit).
+
+
+##### `S3BlobStore.list`  (lines 356–373)
+
+```
+async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+```
+
+**Purpose**: Lists S3 objects under a required prefix. It gathers object key, size, and modification time while respecting the project’s maximum listing size.
+
+**Data flow**: A non-empty prefix goes in. The method pages through S3 `list_objects_v2` results, converts each object into a `BlobEntry`, stops once enough entries are collected, and returns the capped tuple.
+
+**Call relations**: This implements the shared `list` operation for S3. It uses `_client` for the paginator and matches the filesystem backend’s prefix-required behavior.
+
+*Call graph*: calls 1 internal fn (_client); 1 external calls (__init__).
+
+
+##### `S3BlobStore.close`  (lines 375–381)
+
+```
+async def close(self) -> None
+```
+
+**Purpose**: Closes the cached S3 client for the currently running async event loop. This releases network resources when that loop is done with the store.
+
+**Data flow**: No explicit input is passed. The method finds the current event loop, removes its cached client and lock from the store, and closes the client if one existed. Nothing is returned.
+
+**Call relations**: This is the cleanup companion to `_client`, which caches one S3 client per event loop.
+
+*Call graph*: 1 external calls (get_running_loop).
+
+
+##### `S3BlobStore._client`  (lines 383–409)
+
+```
+async def _client(self) -> AioBaseClient
+```
+
+**Purpose**: Returns the reusable S3 client for the current async event loop, creating it if needed. Reuse matters because building S3 clients is relatively expensive and each async client belongs to the loop it was created on.
+
+**Data flow**: The current event loop is read. If a client is already cached for that loop, it is returned. Otherwise a lock prevents duplicate creation, a new aiobotocore S3 client is configured with the correct signing and addressing style, cached, and returned.
+
+**Call relations**: Nearly every S3 operation calls this before talking to S3. It is the shared gateway that keeps blob operations efficient and makes presigned URLs use consistent S3 settings.
+
+*Call graph*: called by 11 (delete, exists, get, get_stream, list, presigned_get, presigned_put, presigned_put_unmeasured, put, put_host (+1 more)); 3 external calls (get_session, Lock, get_running_loop).
+
+
+##### `WorkspaceBlobStore.put`  (lines 422–423)
+
+```
+async def put(self, key: str, data: bytes) -> None
+```
+
+**Purpose**: Stores bytes under the currently active workspace. Callers pass a workspace-relative key, and this method prevents them from choosing another workspace’s prefix themselves.
+
+**Data flow**: A relative key and bytes go in. `_full` adds the current workspace prefix, then the backend stores the bytes at that full key. Nothing is returned.
+
+**Call relations**: Environment document and file storage use this when saving workspace-owned data. The method delegates actual storage to either the filesystem or S3 backend.
+
+*Call graph*: calls 1 internal fn (_full); called by 2 (store_environment_document, store_environment_file).
+
+
+##### `WorkspaceBlobStore.get`  (lines 425–426)
+
+```
+async def get(self, key: str) -> bytes
+```
+
+**Purpose**: Reads bytes from the currently active workspace. It hides the full storage prefix from callers.
+
+**Data flow**: A relative key goes in. `_full` expands it to `workspaces/<id>/...`, the backend reads that object, and the bytes are returned.
+
+**Call relations**: Environment loading uses this to retrieve workspace-owned documents and files. The backend supplies the actual disk or S3 read.
+
+*Call graph*: calls 1 internal fn (_full); called by 2 (load_environment_document, load_environment_file).
+
+
+##### `WorkspaceBlobStore.exists`  (lines 428–429)
+
+```
+async def exists(self, key: str) -> bool
+```
+
+**Purpose**: Checks whether a workspace-relative blob exists in the active workspace.
+
+**Data flow**: A relative key goes in. `_full` adds the active workspace prefix, the backend checks that full key, and a boolean answer comes out.
+
+**Call relations**: This is the workspace-scoped version of the shared existence check. It sits between callers and the raw backend to enforce workspace boundaries.
+
+*Call graph*: calls 1 internal fn (_full).
+
+
+##### `WorkspaceBlobStore.delete`  (lines 431–432)
+
+```
+async def delete(self, key: str) -> None
+```
+
+**Purpose**: Deletes a blob from the active workspace. It cannot be used to delete another workspace’s object because the prefix is supplied automatically.
+
+**Data flow**: A relative key goes in. `_full` turns it into the full workspace key, the backend deletes that object if present, and nothing is returned.
+
+**Call relations**: This is the workspace-scoped version of deletion. It delegates to the configured backend after applying the workspace prefix.
+
+*Call graph*: calls 1 internal fn (_full).
+
+
+##### `WorkspaceBlobStore.get_stream`  (lines 434–438)
+
+```
+def get_stream(self, key: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Opens a streamed read for a blob in the active workspace. The workspace prefix is resolved immediately so the stream can keep working after the workspace scope exits.
+
+**Data flow**: A relative key goes in. `_full` captures the full workspace key right away, and the backend returns a stream of byte chunks for that full key.
+
+**Call relations**: Runtime context code uses this to read member blob text. This method wraps the backend stream with workspace safety.
+
+*Call graph*: calls 1 internal fn (_full); called by 1 (_member_blob_text).
+
+
+##### `WorkspaceBlobStore.put_stream`  (lines 440–441)
+
+```
+async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+```
+
+**Purpose**: Writes streamed bytes into the active workspace. It is the workspace-safe path for large artifact uploads.
+
+**Data flow**: A relative key and chunk stream go in. `_full` adds the workspace prefix, and the backend consumes the chunks into the full key. Nothing is returned.
+
+**Call relations**: Artifact storage code calls this when the backend should receive streamed bytes through the application instead of direct S3 upload.
+
+*Call graph*: calls 1 internal fn (_full); called by 1 (store_artifact).
+
+
+##### `WorkspaceBlobStore.list`  (lines 443–448)
+
+```
+async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+```
+
+**Purpose**: Lists blobs under a prefix inside the active workspace, but returns keys relative to that workspace. This keeps callers from seeing or depending on the internal `workspaces/<id>/` prefix.
+
+**Data flow**: A non-empty relative prefix goes in. `_full` builds the workspace root and search prefix, the backend lists full keys, and each result is rewritten so the key no longer includes the workspace root.
+
+**Call relations**: This is the workspace-scoped version of listing. It uses the backend list operation, then adapts the returned `BlobEntry` records for workspace-relative callers.
+
+*Call graph*: calls 1 internal fn (_full); 1 external calls (replace).
+
+
+##### `WorkspaceBlobStore.presigned_put`  (lines 450–461)
+
+```
+async def presigned_put(self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int) -> str
+```
+
+**Purpose**: Creates a measured S3 upload URL for a blob in the active workspace. It is only valid when the underlying backend is S3.
+
+**Data flow**: A relative key, expected size, checksum, and lifetime go in. `_full` adds the workspace prefix, and the S3 backend signs a URL for that full key. If the backend is not S3, an error is raised.
+
+**Call relations**: Artifact storage calls this when a sandbox should upload directly to S3. This wrapper ensures the direct upload still lands inside the current workspace.
+
+*Call graph*: calls 1 internal fn (_full); called by 1 (store_artifact).
+
+
+##### `WorkspaceBlobStore.presigned_put_unmeasured`  (lines 463–469)
+
+```
+async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str
+```
+
+**Purpose**: Creates an unmeasured S3 upload URL for a blob in the active workspace. It is used when the writer controls the content but does not know its final size yet.
+
+**Data flow**: A relative key and lifetime go in. `_full` adds the workspace prefix, and the S3 backend signs a PUT URL for that full key. Non-S3 backends cause an error.
+
+**Call relations**: The document preview renderer calls this for generated covers whose output size is not known before rendering.
+
+*Call graph*: calls 1 internal fn (_full); called by 1 (render_document_cover).
+
+
+##### `WorkspaceBlobStore.presigned_get`  (lines 471–478)
+
+```
+async def presigned_get(self, key: str, ttl_seconds: int) -> str
+```
+
+**Purpose**: Creates a temporary S3 download URL for a blob in the active workspace. It is only available with the S3 backend.
+
+**Data flow**: A relative key and lifetime go in. `_full` adds the workspace prefix, and the S3 backend signs a GET URL for that full key. Non-S3 backends cause an error.
+
+**Call relations**: The document preview renderer calls this when it needs short-lived read access to a workspace blob.
+
+*Call graph*: calls 1 internal fn (_full); called by 1 (render_document_cover).
+
+
+##### `WorkspaceBlobStore._full`  (lines 480–483)
+
+```
+def _full(self, key: str) -> str
+```
+
+**Purpose**: Builds the real storage key for a workspace-relative key. It is the guardrail that keeps callers inside the currently bound workspace.
+
+**Data flow**: A caller-provided key goes in. If it already starts with the reserved workspace prefix, the method rejects it. Otherwise it reads the current workspace id and returns `workspaces/<id>/<key>`.
+
+**Call relations**: Every workspace store operation calls this before touching the backend. It depends on the current workspace context, so unscoped calls fail instead of silently using the wrong workspace.
+
+*Call graph*: called by 10 (delete, exists, get, get_stream, list, presigned_get, presigned_put, presigned_put_unmeasured, put, put_stream); 1 external calls (ws_current).
+
+
+##### `FleetBlobStore.put`  (lines 494–495)
+
+```
+async def put(self, key: str, data: bytes) -> None
+```
+
+**Purpose**: Stores deploy-wide bytes under an approved fleet prefix. This is for data that belongs to the whole installation, not to one workspace.
+
+**Data flow**: A key and bytes go in. `_checked` confirms the key starts with an allowed fleet prefix, then the backend writes the bytes. Nothing is returned.
+
+**Call relations**: This is the fleet-scoped wrapper around the backend `put` operation. It prevents fleet storage from being used as a back door into workspace namespaces.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore.get`  (lines 497–498)
+
+```
+async def get(self, key: str) -> bytes
+```
+
+**Purpose**: Reads a deploy-wide blob from an approved fleet namespace.
+
+**Data flow**: A key goes in. `_checked` verifies the prefix, the backend reads the object, and the bytes are returned.
+
+**Call relations**: This is the fleet-scoped wrapper around backend reads. The prefix check happens before the filesystem or S3 backend is reached.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore.exists`  (lines 500–501)
+
+```
+async def exists(self, key: str) -> bool
+```
+
+**Purpose**: Checks whether an approved deploy-wide blob exists.
+
+**Data flow**: A key goes in. `_checked` confirms it belongs to a fleet namespace, the backend checks the full key, and a boolean comes out.
+
+**Call relations**: This wraps the backend existence check with the fleet namespace rule.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore.delete`  (lines 503–504)
+
+```
+async def delete(self, key: str) -> None
+```
+
+**Purpose**: Deletes a deploy-wide blob, but only from allowed fleet namespaces.
+
+**Data flow**: A key goes in. `_checked` validates the prefix, the backend deletes the object if present, and nothing is returned.
+
+**Call relations**: This wraps backend deletion and applies the same fleet-only boundary used by all fleet operations.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore.get_stream`  (lines 506–507)
+
+```
+def get_stream(self, key: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams a deploy-wide blob from an approved fleet namespace.
+
+**Data flow**: A key goes in. `_checked` validates it, and the backend returns a stream of byte chunks for that key.
+
+**Call relations**: This is the fleet-scoped streaming read wrapper. It delegates chunk delivery to the configured backend.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore.put_stream`  (lines 509–510)
+
+```
+async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+```
+
+**Purpose**: Writes streamed bytes to a deploy-wide blob under an approved fleet prefix.
+
+**Data flow**: A key and chunk stream go in. `_checked` validates the key, and the backend consumes the chunks into that object. Nothing is returned.
+
+**Call relations**: This is the fleet-scoped streaming write wrapper. It keeps streamed fleet data within the allowed namespace before handing it to disk or S3.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore.list`  (lines 512–513)
+
+```
+async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+```
+
+**Purpose**: Lists deploy-wide blobs under an approved fleet prefix.
+
+**Data flow**: A prefix goes in. `_checked` confirms it belongs to one of the allowed fleet namespaces, and the backend returns matching `BlobEntry` records.
+
+**Call relations**: This wraps backend listing with fleet namespace validation, so callers cannot list workspace data through the fleet store.
+
+*Call graph*: calls 1 internal fn (_checked).
+
+
+##### `FleetBlobStore._checked`  (lines 515–518)
+
+```
+def _checked(self, key: str) -> str
+```
+
+**Purpose**: Verifies that a fleet key is in one of the allowed deploy-wide namespaces. It is a simple but important boundary check.
+
+**Data flow**: A key goes in. If it starts with an allowed prefix such as `static/`, `term/`, or `apps/`, the same key is returned. Otherwise an error is raised.
+
+**Call relations**: Every fleet store operation calls this before delegating to the backend. It is the single gate that keeps fleet and workspace storage separate.
+
+*Call graph*: called by 7 (delete, exists, get, get_stream, list, put, put_stream).
+
+
+##### `blob_store_for`  (lines 521–533)
+
+```
+def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore
+```
+
+**Purpose**: Builds the raw blob backend described by configuration. It chooses local filesystem storage or S3 storage and checks that the required settings are present.
+
+**Data flow**: A `BlobConfig` goes in. If the backend is `filesystem`, the configured root becomes a `FilesystemBlobStore`; if it is `s3`, the bucket and optional endpoint or region become an `S3BlobStore`. Missing required fields raise clear errors.
+
+**Call relations**: Startup or setup code uses this factory to create the storage backend that workspace and fleet wrappers can then sit on top of.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### `extensions/openrouter/ufo_ext_openrouter.py`
+### `core/src/ufo/db.py`
 
-`io_transport` · `request handling and tool execution`
+`io_transport` · `startup, request handling, background jobs, migrations, teardown`
 
-OpenRouter is a service that sits in front of many AI model providers. This file is the adapter that makes that router look like a regular UFO model client. Without it, UFO could not use the OpenRouter model list, could not retry around broken upstream providers, and could not offer OpenRouter image or video generation as workspace tools.
+This file protects the project’s main tenancy boundary: many workspaces share one running service, but each database transaction must be tied to the right workspace. For PostgreSQL, it uses row-level security, meaning database rules decide which rows are visible. Before a normal workspace transaction runs, this file sets a short-lived database setting named app.workspace_id, so the database can filter rows for that workspace. The setting is local to the transaction, so it disappears when the transaction ends and cannot leak through a reused pooled connection.
 
-For text models, the file translates UFO's internal request format into OpenAI-style chat-completion requests, because that is the network format OpenRouter speaks. It also maps friendly model names to OpenRouter slugs, attaches session IDs so prompt caching keeps working, sends reasoning settings, streams text and tool-call events back to UFO, and records token usage for billing. A lot of the code exists to make routed providers safer: if one upstream returns nothing, refuses a request that others may accept, stalls mid-stream, or delays usage reporting, the client retries or asks UFO to rerun the round instead of silently losing work.
+The file also builds and remembers SQLAlchemy async engines. An engine is the object that owns a pool of database connections. Because async database connections belong to the event loop that created them, this file keeps a separate engine per event loop and database URL. That avoids using a connection on the wrong loop.
 
-For images and videos, the file defines two tools: generate_image and generate_video. These validate user-facing options, call OpenRouter's dedicated generation APIs, save finished files into the workspace, and meter the cost unless the workspace used its own OpenRouter key. The manifest at the bottom advertises all of this to the host system.
+There are two main transaction doors. workspace_tx is the normal, workspace-scoped door. owner_tx is the special cross-workspace door used by background sweeps to list work that must later be re-opened under the right workspace. The file also includes startup checks, shutdown cleanup, SQLite-specific safety settings, and Alembic migration support so the database schema is at the right version before the app uses it.
 
 #### Function details
 
-##### `openrouter_slug`  (lines 319–329)
+##### `_build_engine`  (lines 108–118)
 
 ```
-def openrouter_slug(model: str) -> str
+def _build_engine(url: str, pool: _Pool) -> AsyncEngine
 ```
 
-**Purpose**: Turns a UFO model name into the provider/model name OpenRouter expects. It adds OpenAI or Anthropic prefixes for common bare model names, while leaving already-prefixed names alone.
-
-**Data flow**: It receives a model string. If the string already contains a slash, it returns it unchanged; if it looks like an OpenAI or Claude model, it adds the matching provider prefix; otherwise it returns the original string.
-
-**Call relations**: The model client calls this whenever it prepares or tracks an OpenRouter request. Message conversion also uses it to detect Google models, which need a special workaround for some tool-result JSON.
-
-*Call graph*: called by 4 (_create_kwargs, _stream, complete, _openrouter_messages).
+*Call graph*: calls 1 internal fn (_pool_kwargs); called by 2 (_engine_for, verify_db_reachable); 1 external calls (create_async_engine).
 
 
-##### `_chunk_provider`  (lines 332–337)
+##### `_pool_kwargs`  (lines 121–141)
 
 ```
-def _chunk_provider(chunk: ChatCompletionChunk) -> str | None
+def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]
 ```
 
-**Purpose**: Extracts the name of the actual upstream provider that OpenRouter used for one streamed response chunk. This matters because a routed model may be served by several companies behind the scenes.
-
-**Data flow**: It receives a streamed chat chunk, looks in the chunk's extra metadata for a provider field, and returns that provider name as text if present. If the chunk does not name a provider, it returns nothing.
-
-**Call relations**: _OpenRouterStream.accept calls this while reading streamed chunks. The saved provider name can later be used by OpenRouterModelClient.complete to avoid a provider that stalled or returned an empty result.
-
-*Call graph*: called by 1 (accept).
+*Call graph*: calls 1 internal fn (_driver_kwargs); called by 1 (_build_engine); 1 external calls (make_url).
 
 
-##### `_refused_upstream`  (lines 340–359)
+##### `_driver_kwargs`  (lines 144–171)
 
 ```
-def _refused_upstream(error: openai.APIStatusError) -> str | None
+def _driver_kwargs(driver: str, pool: _Pool) -> dict[str, Any]
 ```
 
-**Purpose**: Decides whether a 400 error came from one specific upstream provider that can be avoided, rather than from OpenRouter or from an impossible request. A 400 error means the request was rejected as bad in some way.
-
-**Data flow**: It receives an OpenAI API status error. It checks whether the error body includes OpenRouter metadata naming an upstream provider, then filters out messages that suggest every provider would fail, such as context length, authentication, quota, or API key problems. It returns the upstream name only when retrying elsewhere might help.
-
-**Call relations**: Retry logic calls this when OpenRouterModelClient.complete catches a status error, and _OpenRouterRetry.status uses it to decide whether to reroute immediately around a refusing provider.
-
-*Call graph*: called by 2 (complete, status); 1 external calls (dumps).
+*Call graph*: called by 1 (_pool_kwargs).
 
 
-##### `_usage_of`  (lines 362–383)
+##### `_engine_for`  (lines 174–190)
 
 ```
-def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage
+def _engine_for(url: str, pool: _Pool) -> AsyncEngine
 ```
 
-**Purpose**: Converts OpenAI-style token usage into UFO's own Usage object for billing and accounting. It also separates normal input tokens from cached tokens and cache-write tokens.
-
-**Data flow**: It receives usage data from the OpenAI SDK and a flag saying whether cache writes have a price. It reads total prompt, completion, cached, and cache-write token counts, checks that the numbers make sense, and returns a UFO Usage record.
-
-**Call relations**: _OpenRouterStream.accept calls this when a streamed chunk includes usage information. The resulting Usage is later yielded by OpenRouterModelClient.complete as the final accounting for the model call.
-
-*Call graph*: called by 1 (accept); 1 external calls (__init__).
+*Call graph*: calls 1 internal fn (_build_engine); called by 2 (owner_tx, workspace_tx); 1 external calls (get_running_loop).
 
 
-##### `_contains_json_reference`  (lines 398–410)
+##### `init_db`  (lines 193–197)
 
 ```
-def _contains_json_reference(value: object) -> bool
+def init_db(url: str) -> None
 ```
 
-**Purpose**: Checks whether a JSON-like value contains schema reference keys such as $ref or $dynamicRef. This is used because some Google-routed OpenRouter calls reject those references in tool-result messages.
 
-**Data flow**: It receives any Python object. It walks through dictionaries and lists, looking for the special reference keys, and returns true if it finds one or false if it does not.
-
-**Call relations**: _openrouter_messages uses this after parsing tool-result text. If a Google model would see a referenced JSON structure, the message is wrapped as plain text to avoid OpenRouter rejection.
-
-*Call graph*: called by 1 (_openrouter_messages).
-
-
-##### `_openrouter_messages`  (lines 413–450)
+##### `init_owner_db`  (lines 200–214)
 
 ```
-def _openrouter_messages(model: str, system: str, messages: tuple[Message, ...], accepts_image_input: bool) -> list[dict[str, object]]
+def init_owner_db(url: str) -> None
 ```
 
-**Purpose**: Builds the chat messages that will be sent to OpenRouter, including a special compatibility fix for Google models. It also removes image content when the target model cannot accept images.
 
-**Data flow**: It receives the model name, system prompt, UFO messages, and whether image input is allowed. It optionally strips images, converts the conversation into OpenAI-style messages, and for Google models wraps certain tool-result JSON as plain text when it contains schema references.
-
-**Call relations**: OpenRouterModelClient._create_kwargs calls this while building the request body. It relies on openrouter_slug, omit_images, openai_messages, JSON parsing, and _contains_json_reference before handing the finished messages to the OpenAI SDK.
-
-*Call graph*: calls 2 internal fn (_contains_json_reference, openrouter_slug); called by 1 (_create_kwargs); 4 external calls (dumps, loads, omit_images, openai_messages).
-
-
-##### `_OpenRouterRetry.status`  (lines 462–520)
+##### `verify_db_reachable`  (lines 217–237)
 
 ```
-async def status(self, error: openai.APIStatusError, yielded: bool, dead: set[str]) -> '_OpenRouterRetry'
+async def verify_db_reachable() -> None
 ```
 
-**Purpose**: Chooses what to do after OpenRouter returns an HTTP status error. It can reroute around a refusing upstream, wait and retry rate-limit or server errors, or re-raise the error when retrying is unsafe.
-
-**Data flow**: It receives the error, a flag saying whether any visible output was already streamed, and a set of providers to avoid. It may add a provider to that set, log and count a retry, sleep for a backoff delay, and return an updated retry state. If the error should not be retried, it raises it.
-
-**Call relations**: OpenRouterModelClient.complete calls this inside its main retry loop. It uses _refused_upstream to distinguish reroutable upstream refusals from request-level failures.
-
-*Call graph*: calls 1 internal fn (_refused_upstream); 4 external calls (sleep, replace, emit_metric, log).
+*Call graph*: calls 1 internal fn (_build_engine).
 
 
-##### `_OpenRouterRetry.stream_error`  (lines 522–545)
+##### `dispose_db`  (lines 240–263)
 
 ```
-def stream_error(self, error: openai.APIError, yielded: bool) -> '_OpenRouterRetry'
+async def dispose_db() -> None
 ```
 
-**Purpose**: Handles an error injected into the live event stream. It has one narrow retry case for a known Gemini abort; otherwise it treats the stream as interrupted.
-
-**Data flow**: It receives an OpenAI API error and whether output had already appeared. For the known Gemini abort before output, it returns a retry state marked as already retried. For other API stream errors, it raises ModelStreamInterrupted so the engine can discard partial output and rerun the round.
-
-**Call relations**: OpenRouterModelClient.complete calls this after catching OpenAI stream errors. It logs and emits metrics for the special retry case, or hands interruption handling back to UFO's round engine.
-
-*Call graph*: calls 1 internal fn (__init__); 3 external calls (replace, emit_metric, log).
+*Call graph*: calls 1 internal fn (_hand_off); 1 external calls (get_running_loop).
 
 
-##### `_OpenRouterStream.__init__`  (lines 549–556)
+##### `_hand_off`  (lines 266–273)
 
 ```
-def __init__(self, cache_write_30m_priced: bool) -> None
+def _hand_off(loop: asyncio.AbstractEventLoop, engine: AsyncEngine) -> None
 ```
 
-**Purpose**: Creates a small state tracker for one streamed OpenRouter response. It remembers whether anything useful has been yielded, the provider used, tool-call IDs, usage, finish reason, and generation ID.
-
-**Data flow**: It receives a flag saying whether 30-minute cache-write tokens should be counted. It initializes empty fields that will be filled as streamed chunks arrive.
-
-**Call relations**: OpenRouterModelClient.complete creates one of these for each attempted model call. OpenRouterModelClient._stream then feeds chunks into its accept method.
-
-*Call graph*: called by 1 (complete).
+*Call graph*: called by 1 (dispose_db); 1 external calls (call_soon_threadsafe).
 
 
-##### `_OpenRouterStream.accept`  (lines 558–588)
+##### `_dispose_on_this_loop`  (lines 276–300)
 
 ```
-def accept(self, chunk: ChatCompletionChunk) -> tuple[ModelEvent, ...]
+def _dispose_on_this_loop(engine: AsyncEngine) -> None
 ```
 
-**Purpose**: Turns one raw streamed chat chunk into UFO model events, such as text pieces and tool-call pieces. It also captures usage and provider information as it goes.
-
-**Data flow**: It receives a ChatCompletionChunk from the OpenAI SDK. It updates stored generation ID, provider, usage, and finish reason, then emits TextDelta, ToolCallStart, and ToolCallDelta events for any visible content in the chunk.
-
-**Call relations**: OpenRouterModelClient._stream calls this for every chunk from OpenRouter. The events it returns are yielded upward to OpenRouterModelClient.complete and then to the rest of UFO.
-
-*Call graph*: calls 2 internal fn (_chunk_provider, _usage_of); called by 1 (_stream); 3 external calls (__init__, __init__, __init__).
+*Call graph*: 3 external calls (ensure_future, get_running_loop, dispose).
 
 
-##### `OpenRouterModelClient.complete`  (lines 650–708)
+##### `_dispose_on_this_loop.finished`  (lines 295–298)
 
 ```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+def finished(done: asyncio.Task[None]) -> None
 ```
 
-**Purpose**: Runs one full streamed text-model request through OpenRouter and yields UFO model events. It is the main bridge between UFO's model interface and OpenRouter's chat-completions API.
 
-**Data flow**: It receives a ModelRequest. It maps the model to an OpenRouter slug, streams events, retries selected failures, records or looks up usage, avoids bad upstream providers when possible, and finally yields a Usage record or raises a clear interruption/truncation error.
-
-**Call relations**: This is called by UFO wherever a model client is asked to complete a turn. It delegates the actual network call to _stream, uses _finish_usage for accounting, uses _nowhere_left and _stalled_out to guide rerouting, and relies on _OpenRouterRetry for retry decisions.
-
-*Call graph*: calls 8 internal fn (__init__, _finish_usage, _nowhere_left, _stalled_out, _stream, __init__, _refused_upstream, openrouter_slug); 4 external calls (__init__, __init__, __init__, emit_metric).
-
-
-##### `OpenRouterModelClient._stream`  (lines 710–724)
+##### `dispose_loop_engines`  (lines 303–313)
 
 ```
-async def _stream(self, request: ModelRequest, state: _OpenRouterStream, ignore_providers: set[str]) -> AsyncIterator[ModelEvent]
+async def dispose_loop_engines() -> None
 ```
 
-**Purpose**: Performs one actual streaming request to OpenRouter. It marks the stream as started and converts raw chunks into UFO events.
-
-**Data flow**: It receives the request, the stream-state object, and providers to ignore. It builds request arguments, opens a streamed chat completion, yields ModelStreamStart when the first chunk arrives, and then yields events produced from each chunk.
-
-**Call relations**: OpenRouterModelClient.complete calls this inside its retry loop. It uses _create_kwargs to prepare the API call, _excluded to decide provider exclusions, and _OpenRouterStream.accept to translate chunks.
-
-*Call graph*: calls 4 internal fn (_create_kwargs, _excluded, accept, openrouter_slug); called by 1 (complete); 1 external calls (__init__).
+*Call graph*: 1 external calls (get_running_loop).
 
 
-##### `OpenRouterModelClient._excluded`  (lines 726–733)
+##### `_stopping`  (lines 316–323)
 
 ```
-def _excluded(self, slug: str, dead: set[str]) -> frozenset[str]
+def _stopping() -> bool
 ```
 
-**Purpose**: Builds the set of upstream providers that should be avoided for the next OpenRouter call. It keeps exclusions safe for models that have a fixed provider order.
-
-**Data flow**: It receives the OpenRouter slug and the providers already considered dead in this round. For models with a configured provider order, it combines current dead providers with earlier stalled providers but leaves at least one route open. For other models, it returns only the current dead set.
-
-**Call relations**: OpenRouterModelClient._stream calls this before making the network request. The returned set becomes OpenRouter's provider.ignore preference in _create_kwargs.
-
-*Call graph*: called by 1 (_stream).
+*Call graph*: called by 1 (_opened); 1 external calls (current_task).
 
 
-##### `OpenRouterModelClient._nowhere_left`  (lines 735–750)
+##### `_await_opening`  (lines 326–337)
 
 ```
-def _nowhere_left(self, slug: str, model: str, error: openai.APIStatusError, dead: set[str]) -> bool
+async def _await_opening(opening: asyncio.Future[AsyncConnection]) -> tuple[AsyncConnection, asyncio.CancelledError | None]
 ```
 
-**Purpose**: Detects a special case where this client's own provider exclusions made an unpinned OpenRouter model have no route left. In that case, the turn should degrade to an empty result instead of failing hard.
-
-**Data flow**: It receives the slug, public model name, HTTP error, and excluded providers. If there are exclusions, the error is 404, and the model is not one with a fixed provider order, it logs the exhaustion and returns true. Otherwise it returns false.
-
-**Call relations**: OpenRouterModelClient.complete calls this after status errors. If it returns true, complete yields empty usage if needed and ends the request rather than continuing retries or raising the 404.
-
-*Call graph*: called by 1 (complete); 1 external calls (log).
+*Call graph*: called by 1 (_opened); 1 external calls (shield).
 
 
-##### `OpenRouterModelClient._stalled_out`  (lines 752–774)
+##### `_await_close`  (lines 340–348)
 
 ```
-def _stalled_out(self, slug: str, upstream: str | None, kind: str) -> None
+async def _await_close(close: asyncio.Future[bool | None]) -> asyncio.CancelledError | None
 ```
 
-**Purpose**: Remembers an upstream provider that stalled or refused a request, so later calls in the same turn avoid it. This prevents retrying the same broken route under a sticky OpenRouter session.
-
-**Data flow**: It receives the model slug, upstream provider name, and a reason label. If the model uses a configured provider order and the provider is known and not already remembered, it appends the provider to the stalled list and logs it.
-
-**Call relations**: OpenRouterModelClient.complete calls this when streams die or upstream refusals are detected. _excluded later reads the stalled list to carry those avoidances into subsequent attempts.
-
-*Call graph*: called by 1 (complete); 1 external calls (log).
+*Call graph*: called by 1 (_opened); 1 external calls (shield).
 
 
-##### `OpenRouterModelClient._finish_usage`  (lines 776–782)
+##### `_opened`  (lines 352–416)
 
 ```
-async def _finish_usage(self, state: _OpenRouterStream) -> Usage
+async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]
 ```
 
-**Purpose**: Ensures a completed stream has a Usage record. If the stream did not include usage directly, it tries OpenRouter's generation lookup endpoint.
-
-**Data flow**: It receives the stream state. It returns the usage already found in the stream, or asks _generation_usage for usage using the generation ID and finish reason. If no usage can be found, it raises an error.
-
-**Call relations**: OpenRouterModelClient.complete calls this after a stream ends normally. It hands off to _generation_usage only when OpenRouter did not include usage inside the stream.
-
-*Call graph*: calls 1 internal fn (_generation_usage); called by 1 (complete).
+*Call graph*: calls 3 internal fn (_await_close, _await_opening, _stopping); called by 2 (owner_tx, workspace_tx); 7 external calls (Lock, ensure_future, AsyncExitStack, begin, monotonic, emit_histogram, emit_metric).
 
 
-##### `OpenRouterModelClient._generation_usage`  (lines 784–841)
+##### `workspace_tx`  (lines 420–430)
 
 ```
-async def _generation_usage(self, generation_id: str, finish_reason: str) -> Usage | None
+async def workspace_tx() -> AsyncIterator[AsyncConnection]
 ```
 
-**Purpose**: Looks up missing token usage for a completed OpenRouter generation. This covers cases where the stream finished but usage was not included yet.
-
-**Data flow**: It receives a generation ID and expected finish reason. It repeatedly GETs OpenRouter's generation endpoint, tolerating short-lived 404s and transport errors, then validates the returned usage data and converts it to a Usage object. If the lookup never becomes available, it raises ModelStreamInterrupted.
-
-**Call relations**: OpenRouterModelClient._finish_usage calls this as a fallback. It emits retry metrics while waiting for OpenRouter's ledger to catch up.
-
-*Call graph*: calls 1 internal fn (__init__); called by 1 (_finish_usage); 4 external calls (__init__, sleep, AsyncClient, emit_metric).
+*Call graph*: calls 2 internal fn (_engine_for, _opened); 1 external calls (text).
 
 
-##### `OpenRouterModelClient._create_kwargs`  (lines 843–898)
+##### `failed_statement`  (lines 433–453)
 
 ```
-def _create_kwargs(self, request: ModelRequest, ignore_providers: frozenset[str]) -> dict[str, Any]
+def failed_statement(error: BaseException) -> dict[str, str]
 ```
 
-**Purpose**: Builds the exact keyword arguments passed to the OpenAI SDK for an OpenRouter chat-completion request. This is where UFO's request becomes OpenRouter's wire-format request.
 
-**Data flow**: It receives a ModelRequest and a set of providers to ignore. It requires a session ID, creates extra OpenRouter settings for routing and reasoning, converts messages, includes tools and tool-choice settings when present, and returns a dictionary ready for client.chat.completions.create.
-
-**Call relations**: OpenRouterModelClient._stream calls this immediately before sending a request. It uses openrouter_slug and _openrouter_messages to prepare OpenRouter-specific model and message fields.
-
-*Call graph*: calls 2 internal fn (_openrouter_messages, openrouter_slug); called by 1 (_stream).
-
-
-##### `_model_client`  (lines 901–906)
+##### `owner_tx`  (lines 457–470)
 
 ```
-def _model_client(spec: ModelSpec, key: str) -> OpenRouterModelClient
+async def owner_tx() -> AsyncIterator[AsyncConnection]
 ```
 
-**Purpose**: Constructs an OpenRouterModelClient for a specific model spec and API key. This is the factory that the model registry uses when it needs a live client.
-
-**Data flow**: It receives a ModelSpec and key. It creates an OpenAI-compatible async client pointed at OpenRouter's base URL, wraps it in OpenRouterModelClient, and returns that client.
-
-**Call relations**: _openrouter stores this factory inside each ModelSpec. Later, when UFO selects one of those specs, the registry can call this function to obtain the working provider client.
-
-*Call graph*: 2 external calls (__init__, openai_sdk_client).
+*Call graph*: calls 2 internal fn (_engine_for, _opened).
 
 
-##### `_openrouter`  (lines 909–935)
+##### `apply_migrations`  (lines 473–511)
 
 ```
-def _openrouter(id: str, price: ModelPrice, cutoff: str, context_window: int=OPENROUTER_CONTEXT_WINDOW, reasoning: ReasoningSupport=_REASONS, accepts_image_input: bool=True, compaction_keep_messages:
+def apply_migrations(url: str, pack: str | None=None) -> None
 ```
 
-**Purpose**: Creates a ModelSpec entry for one OpenRouter text model. A ModelSpec is the registry record that tells UFO a model's price, limits, key slot, and client factory.
+*Call graph*: calls 1 internal fn (_seal_sqlite_journal); 7 external calls (__init__, upgrade, from_config, Path, migration_locations, catch_warnings, simplefilter).
 
-**Data flow**: It receives model metadata such as ID, price, knowledge cutoff, context window, reasoning support, and compaction settings. It returns a populated ModelSpec using OpenRouter's provider name, API key environment variable, and client factory.
 
-**Call relations**: The file uses this helper to build OPENROUTER_MODEL_SPECS. The manifest then exposes those specs to the host system.
+##### `_seal_sqlite_journal`  (lines 514–530)
+
+```
+def _seal_sqlite_journal(url: str) -> None
+```
+
+*Call graph*: called by 1 (apply_migrations); 2 external calls (make_url, connect).
+
+
+##### `core_migration_head`  (lines 533–541)
+
+```
+def core_migration_head() -> str
+```
+
+*Call graph*: 2 external calls (__init__, from_config).
+
+
+##### `_sqlite_on_connect`  (lines 544–550)
+
+```
+def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
+```
+
+
+##### `_sqlite_begin_immediate`  (lines 553–555)
+
+```
+def _sqlite_begin_immediate(connection: sa.Connection) -> None
+```
+
+*Call graph*: 1 external calls (exec_driver_sql).
+
+
+### `core/src/ufo/harness/durability.py`
+
+`io_transport` · `cross-cutting during DBOS persistence, replay, and crash recovery`
+
+DBOS stores workflow inputs, step results, and errors in a database so work can resume after a crash. The problem is that this stored data may be read by a later version of the code, not the exact version that wrote it. A normal Python pickle is brittle here: it can recreate an object without running its normal validation, so if a Pydantic model gained or lost fields between releases, replay can fail in confusing ways. Pydantic is a data-model library that validates fields and applies defaults.
+
+This file solves that by wrapping pickle with safer rules. When it sees a Pydantic BaseModel, it saves the model's class and its field values, then rebuilds it through Pydantic validation when loading. That means new default fields are filled in, removed fields are ignored, and truly missing required fields fail in a clear place.
+
+It also protects against code moves. Pickled data stores the old module path for each class, like an address on an envelope. If the class moved, the MOVED_MODULES table acts like mail forwarding, sending the loader from the old address to the new one. Without this file, recovered workflows could return raw unreadable strings, fail after deploys, or break when packages are reorganized.
+
+#### Function details
+
+##### `replay_safe_client`  (lines 176–180)
+
+```
+def replay_safe_client(system_database_url: str) -> DBOSClient
+```
+
+**Purpose**: This is the approved way to create a DBOSClient for this project. It makes sure the client knows how to read and write the project's replay-safe saved data instead of using DBOS's default serializer.
+
+**Data flow**: It receives the system database URL. It creates a ReplaySafeSerializer, gives both the URL and serializer to DBOSClient, and returns the ready-to-use client. The database is not changed by this function directly; it prepares the client that will later read and write rows.
+
+**Call relations**: Startup or setup code calls this when it needs a DBOS client. The function hands off construction to ReplaySafeSerializer and DBOSClient so every later DBOS read and write uses the same named format.
+
+*Call graph*: 2 external calls (__init__, DBOSClient).
+
+
+##### `_rebuild`  (lines 183–184)
+
+```
+def _rebuild(model_class: type[BaseModel], fields: dict[str, object]) -> BaseModel
+```
+
+**Purpose**: This rebuilds a saved Pydantic model using the current version of its class. It exists so old stored model data can be validated again and can pick up current defaults.
+
+**Data flow**: It receives a model class and a dictionary of saved field values. It asks that class to validate the fields, which creates a proper model object according to today's class definition. The result is the rebuilt model.
+
+**Call relations**: The custom pickler records this function as the recipe for rebuilding Pydantic models. Later, when deserialization replays that recipe, this function turns the stored class-and-fields pair back into a real model object.
+
+
+##### `_ModelPickler.reducer_override`  (lines 188–191)
+
+```
+def reducer_override(self, obj: object) -> tuple[Callable[..., object], tuple[object, ...]]
+```
+
+**Purpose**: This tells pickle to save Pydantic models in a safer custom shape. Instead of freezing the model's internal state exactly as-is, it records enough information to rebuild the model through validation later.
+
+**Data flow**: It receives each object that pickle is about to save. If the object is a Pydantic BaseModel, it returns a recipe: call _rebuild with the object's class and current field dictionary. If the object is not a Pydantic model, it tells pickle to use its normal behavior.
+
+**Call relations**: ReplaySafeSerializer.serialize uses _ModelPickler to write data. During that write, pickle consults this method whenever it needs to decide how an object should be represented.
+
+
+##### `_CompatUnpickler.find_class`  (lines 195–196)
+
+```
+def find_class(self, module: str, name: str) -> object
+```
+
+**Purpose**: This lets old saved data still find classes after modules have been renamed or moved. It is the compatibility bridge for historic module paths.
+
+**Data flow**: It receives the module name and class or function name recorded in the saved data. It looks up the module name in MOVED_MODULES; if there is a newer location, it substitutes that. It then asks Python's normal unpickler to load the named item from the resolved module.
+
+**Call relations**: ReplaySafeSerializer.deserialize uses _CompatUnpickler when reading saved data. As objects are reconstructed, this method is called whenever pickle needs to locate a class or function by name.
+
+
+##### `ReplaySafeSerializer.name`  (lines 202–203)
+
+```
+def name(self) -> str
+```
+
+**Purpose**: This returns the stable name DBOS uses to label data written with this serializer. That label tells future DBOS clients which decoding rules to use.
+
+**Data flow**: It takes no outside input beyond the serializer instance. It returns the constant serializer name used by this project.
+
+**Call relations**: DBOS calls this as part of its serializer interface. The name ties database rows to ReplaySafeSerializer so later reads know which serializer should decode them.
+
+
+##### `ReplaySafeSerializer.serialize`  (lines 205–208)
+
+```
+def serialize(self, data: object) -> str
+```
+
+**Purpose**: This turns a Python object into a database-friendly text string using the replay-safe pickle rules. It is used when DBOS needs to persist workflow data.
+
+**Data flow**: It receives any Python object. It creates an in-memory byte buffer, uses _ModelPickler to pickle the object into bytes, converts those bytes to base64 text, and returns that text. Base64 is a common way to represent arbitrary bytes using safe printable characters.
+
+**Call relations**: DBOS calls this serializer method when recording data. The method hands the actual object traversal to _ModelPickler, which applies the special Pydantic model rule before the bytes are encoded for storage.
+
+*Call graph*: 3 external calls (__init__, b64encode, BytesIO).
+
+
+##### `ReplaySafeSerializer.deserialize`  (lines 210–211)
+
+```
+def deserialize(self, serialized_data: str) -> object
+```
+
+**Purpose**: This turns stored text back into a Python object using compatibility rules for moved modules and safely rebuilt models. It is used when DBOS replays or recovers saved workflow data.
+
+**Data flow**: It receives the base64 text stored in the database. It decodes the text back into bytes, wraps those bytes in an in-memory stream, and uses _CompatUnpickler to reconstruct the original object graph. The returned value is the usable Python object.
+
+**Call relations**: DBOS calls this serializer method when loading recorded data. The method delegates object reconstruction to _CompatUnpickler, which can redirect old module names while pickle rebuilds the saved objects.
+
+*Call graph*: 3 external calls (__init__, b64decode, BytesIO).
+
+
+### `core/src/ufo/schema/__init__.py`
+
+`other` · `cross-cutting`
+
+This is an empty Python package marker file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to modules under `core/src/ufo/schema` using normal Python import paths.
+
+There is no runtime logic in this file: no functions, classes, constants, or setup steps. Its value is structural rather than behavioral. A useful analogy is a label on a drawer: the label does not contain the tools, but it tells the rest of the system that this drawer exists and can be opened in an organized way.
+
+Without this file, depending on the Python version and packaging setup, imports involving `ufo.schema` could become less explicit or fail in some environments. Keeping it present makes the package layout clear and stable.
+
+
+### `core/src/ufo/schema/tables.py`
+
+`data_model` · `database setup, migrations, and runtime database access`
+
+Think of this file as the blueprint for the project’s main filing cabinet. It does not store data itself. Instead, it tells SQLAlchemy, the Python database toolkit, exactly what drawers exist, what labels are allowed, and which records must point to other records.
+
+The file creates one shared `metadata` object, then fills it with table definitions. These tables cover the system’s main concepts: workspaces, members, agents, conversations, turns in a conversation, incoming messages, billing ledger entries, credentials, external connections, source documents, shared files, runtime workers, and access records. The same definitions can be used against SQLite, a lightweight local database, and Postgres, a production database server, so developers and deployed systems follow the same rules.
+
+A lot of the value here is in the guardrails. Foreign keys keep related records connected, like making sure a conversation belongs to a real workspace. Unique constraints stop duplicates, such as two members with the same email in one workspace. Check constraints prevent impossible states, such as a turn being marked finished while still missing its final result. Indexes are added where the system is likely to search often, so common lookups stay fast.
+
+Without this file, different parts of the system could disagree about what the database should look like, causing broken inserts, inconsistent data, or slow queries.
+
+#### Function details
+
+##### `_conversation_audience`  (lines 12–13)
+
+```
+def _conversation_audience(context: DefaultExecutionContext) -> str
+```
+
+**Purpose**: This function chooses the default audience value for a new conversation when one is not provided directly. In plain terms, it decides whether a conversation should be treated as shared or tied to a specific member, based on the row being inserted.
+
+**Data flow**: It receives a SQLAlchemy execution context, which is an object describing the current database insert or update. It reads the current row’s parameters, pulls out `member_id`, passes that value to `conversation_audience`, and turns the result into text. That text becomes the stored default value for the conversation’s `audience` column.
+
+**Call relations**: This function is attached to the `conversation` table as a Python-side default for the `audience` column. When SQLAlchemy prepares a new conversation row and no audience was supplied, it calls this helper. The helper asks the shared audience helper `conversation_audience` to apply the project’s audience rules, then hands SQLAlchemy the final string to write into the database.
+
+*Call graph*: 2 external calls (get_current_parameters, conversation_audience).
+
+
+### Member-facing extension stores
+Extension-specific database layers persist notification inbox state and member enrichment records.
+
+### `extensions/app_notification/ufo_ext_app_notification/store.py`
+
+`domain_logic` · `cross-cutting: posting notifications, background drain ticks, delivery, and cleanup`
+
+The notification app needs a safe shared inbox so agents can be told about important changes without being spammed by hundreds of separate messages. This file provides that inbox. A notification is stored as one database row for one subject, one receiving agent, and one member. If the same subject is raised again while still open, the file updates the existing row, replaces the latest message body, and increases an occurrence count instead of adding another row. This is like keeping one sticky note per topic and tallying how many times it came up.
+
+The file also protects background drain jobs from stepping on each other. A drain job looks for “lanes,” meaning one inbox for one agent-member pair, then claims a limited batch of open rows with a temporary lease. If another drain tick overlaps, the lease stops both jobs from sending the same notification. If the job fails, the lease expires and the rows can be retried.
+
+The store also records when a notification was triaged, meaning read into a drain turn, and when it was delivered to a surface such as a conversation or UI. Every query filters by workspace because the database connection is not automatically scoped to one workspace. Without this file, the notification app would not have a reliable memory of what still needs attention, what was already read, or what has already been delivered.
+
+#### Function details
+
+##### `Notification.name`  (lines 103–104)
+
+```
+def name(self) -> str
+```
+
+**Purpose**: Gives a notification a stable object-style name based on its unique id. This lets other parts of the app refer to a notification by a safe text name instead of passing around a raw database id.
+
+**Data flow**: It reads the notification’s UUID id → converts it to its compact hexadecimal text form → returns that text as the notification name. It does not change anything.
+
+**Call relations**: This is used wherever a Notification object needs to be matched against names supplied by a caller, especially when deciding which named notifications are deliverable.
+
+
+##### `Notification.lane`  (lines 107–108)
+
+```
+def lane(self) -> Lane
+```
+
+**Purpose**: Builds the lane that this notification belongs to. A lane is the inbox for one receiving agent and one member.
+
+**Data flow**: It reads the notification’s receiving agent id and member id → packages them into a Lane value → returns that Lane. The notification itself is unchanged.
+
+**Call relations**: This property helps code move from an individual notification to the inbox bucket it belongs to. It creates a Lane object so drain logic can group work by agent-member pair.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `GenerateImageInput._within_model_limits`  (lines 1046–1070)
+##### `_aware`  (lines 121–122)
 
 ```
-def _within_model_limits(self) -> 'GenerateImageInput'
+def _aware(value: datetime) -> datetime
 ```
 
-**Purpose**: Validates image-generation arguments against what the selected image model can actually do. This catches unsupported combinations before sending a doomed request to OpenRouter.
+**Purpose**: Makes sure a date and time value has timezone information. This prevents confusing comparisons between times that know their timezone and times that do not.
 
-**Data flow**: It reads the chosen model, image count, aspect ratio, and resolution from the input object. It raises a validation error for too many images or unsupported settings, and fills in a default resolution for models that use resolution tiers.
+**Data flow**: It receives a datetime value → checks whether it already has a timezone → returns it unchanged if it does, or returns a copy marked as UTC if it does not.
 
-**Call relations**: Pydantic calls this automatically after building GenerateImageInput. OpenRouterImages.generate then receives only arguments that passed these model-specific checks.
+**Call relations**: _row calls this while turning database rows into Notification objects, so timestamps read from different database engines are normalized before the rest of the app uses them.
 
+*Call graph*: called by 1 (_row); 1 external calls (replace).
 
-##### `_reported_cost_micro_usd`  (lines 1078–1090)
 
-```
-def _reported_cost_micro_usd(usage: object) -> int | None
-```
-
-**Purpose**: Finds the cost OpenRouter reported for an image or video generation and converts it to micro-dollars. A micro-dollar here means one millionth of a US dollar, which is convenient for exact billing math.
-
-**Data flow**: It receives a usage-like object. It checks usage.cost first, then cost_details.upstream_inference_cost for bring-your-own-key style billing, ignores zero or invalid values, and returns a rounded micro-USD amount or nothing.
-
-**Call relations**: OpenRouterImages._charge uses this for image costs, and OpenRouterVideos._job uses it when reading completed video jobs. If it returns nothing, each tool falls back to its configured list price.
-
-*Call graph*: called by 2 (_charge, _job).
-
-
-##### `OpenRouterImages.generate`  (lines 1123–1160)
-
-```
-async def generate(self, ctx: ToolContext, args: GenerateImageInput) -> ToolResult
-```
-
-**Purpose**: Runs one complete image-generation tool call. It sends the prompt to OpenRouter, saves returned images in the workspace, meters cost when appropriate, and returns file paths plus image content to the model.
-
-**Data flow**: It receives a ToolContext and validated GenerateImageInput. It obtains the OpenRouter key, posts the request, converts errors into tool errors, decodes images, writes files, calculates cost, optionally records image billing, and returns a ToolResult containing JSON metadata and image attachments.
-
-**Call relations**: _generate_image calls this as the registered tool handler. Inside, it uses _refusal, _images, _save, and _charge to break the job into readable steps.
-
-*Call graph*: calls 5 internal fn (meter_images, _charge, _images, _refusal, _save); 6 external calls (__init__, __init__, __init__, model_dump, AsyncClient, dumps).
-
-
-##### `OpenRouterImages._refusal`  (lines 1162–1177)
-
-```
-def _refusal(self, args: GenerateImageInput, response: httpx.Response) -> str
-```
-
-**Purpose**: Turns a failed image API response into a short message the model can read and react to. This might describe a rejected prompt, bad parameter, missing balance, or other provider refusal.
-
-**Data flow**: It receives the original image arguments and HTTP response. It tries to read a JSON error message, falls back to raw response text, trims it to a safe length, and returns one readable sentence.
-
-**Call relations**: OpenRouterImages.generate calls this when OpenRouter returns an error status. The returned text becomes the content of an error ToolResult.
-
-*Call graph*: called by 1 (generate); 1 external calls (json).
-
-
-##### `OpenRouterImages._images`  (lines 1179–1209)
-
-```
-def _images(self, args: GenerateImageInput, body: object) -> tuple[GeneratedImage, ...]
-```
-
-**Purpose**: Extracts usable images from OpenRouter's response. It refuses to save missing or oversized image data.
-
-**Data flow**: It receives the original image arguments and response body. It looks for base64-encoded image entries, decodes each into bytes, applies the maximum byte limit, assigns a media type when missing, and returns GeneratedImage records. If none are usable, it raises OpenRouterImageError.
-
-**Call relations**: OpenRouterImages.generate calls this after a successful HTTP response. The returned GeneratedImage objects are then saved by _save and included in the final ToolResult.
-
-*Call graph*: called by 1 (generate); 3 external calls (__init__, __init__, b64decode).
-
-
-##### `OpenRouterImages._save`  (lines 1211–1218)
-
-```
-async def _save(self, ctx: ToolContext, args: GenerateImageInput, index: int, image: GeneratedImage) -> str
-```
-
-**Purpose**: Writes one generated image file into the workspace. It chooses a file extension based on the image's media type.
-
-**Data flow**: It receives the tool context, input arguments, image index, and image data. It builds a path under generated-images, writes the raw bytes through the sandbox, and returns the saved path.
-
-**Call relations**: OpenRouterImages.generate calls this once for each decoded image. The collected paths are included in the tool's JSON result so the agent can refer to or share the files.
-
-*Call graph*: called by 1 (generate).
-
-
-##### `OpenRouterImages._charge`  (lines 1220–1227)
-
-```
-def _charge(self, body: object, args: GenerateImageInput, images: int) -> int
-```
-
-**Purpose**: Calculates what an image generation should cost for metering. It uses OpenRouter's reported charge when available and otherwise uses the model's configured list price per image.
-
-**Data flow**: It receives the response body, original arguments, and number of images. It reads usage cost through _reported_cost_micro_usd; if no positive reported cost exists, it multiplies the model's fallback price by the image count.
-
-**Call relations**: OpenRouterImages.generate calls this after saving images. The result is written into the tool output and passed to ToolContext.meter_images when the platform key paid for the generation.
-
-*Call graph*: calls 1 internal fn (_reported_cost_micro_usd); called by 1 (generate).
-
-
-##### `_generate_image`  (lines 1230–1235)
-
-```
-async def _generate_image(ctx: ToolContext, args: GenerateImageInput) -> ToolResult
-```
-
-**Purpose**: Acts as the registered handler for the generate_image tool. It connects the generic tool system to the OpenRouterImages helper.
-
-**Data flow**: It receives a ToolContext and validated image arguments. It checks that extension context is available, creates an OpenRouterImages runner with credentials and optional test transport, and returns the runner's ToolResult.
-
-**Call relations**: GENERATE_IMAGE_TOOL points at this function. When an agent calls generate_image, the tool runtime invokes this handler.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `GenerateVideoInput._within_model_limits`  (lines 1291–1315)
-
-```
-def _within_model_limits(self) -> 'GenerateVideoInput'
-```
-
-**Purpose**: Validates video-generation arguments against the selected video model's real limits. It also chooses the default resolution that will be used for billing.
-
-**Data flow**: It reads the chosen model, duration, aspect ratio, and resolution from the input object. It rejects unsupported duration, aspect-ratio, or resolution choices, and fills in the model's default resolution when the caller omitted one.
-
-**Call relations**: Pydantic runs this automatically after creating GenerateVideoInput. OpenRouterVideos.generate then works with arguments that match the allowlisted model's capabilities.
-
-
-##### `OpenRouterVideos.generate`  (lines 1357–1398)
-
-```
-async def generate(self, ctx: ToolContext, args: GenerateVideoInput) -> ToolResult
-```
-
-**Purpose**: Runs one complete video-generation tool call. It starts the OpenRouter video job, waits for it to finish, downloads the MP4, saves it, meters cost when appropriate, and returns the saved path.
-
-**Data flow**: It receives a ToolContext and validated GenerateVideoInput. It gets credentials, posts the video request, handles immediate refusal, polls the job until it settles, returns an error if generation failed, downloads the completed content, writes it to the workspace, calculates cost, optionally records video billing, and returns a ToolResult with metadata.
-
-**Call relations**: _generate_video calls this as the registered tool handler. It coordinates _refusal, _job, _settled, _failure, _download, _save, and _charge.
-
-*Call graph*: calls 8 internal fn (meter_videos, _charge, _download, _failure, _job, _refusal, _save, _settled); 5 external calls (__init__, __init__, model_dump, AsyncClient, dumps).
-
-
-##### `OpenRouterVideos._refusal`  (lines 1400–1415)
-
-```
-def _refusal(self, args: GenerateVideoInput, response: httpx.Response) -> str
-```
-
-**Purpose**: Turns an immediate failed video API response into readable tool error text. This gives the model enough information to change the prompt or settings.
-
-**Data flow**: It receives the video arguments and HTTP response. It tries to read a JSON error message, falls back to response text, trims the detail to a safe length, and returns a short failure message.
-
-**Call relations**: OpenRouterVideos.generate calls this when the initial POST request returns an error status. The message becomes the text of an error ToolResult.
-
-*Call graph*: called by 1 (generate); 1 external calls (json).
-
-
-##### `OpenRouterVideos._job`  (lines 1417–1432)
-
-```
-def _job(self, body: object) -> VideoJob
-```
-
-**Purpose**: Parses OpenRouter's video job description into a small VideoJob record. A video job is the ticket used to poll and later download the generated file.
-
-**Data flow**: It receives a response body. It reads the job ID, status, optional error message, and optional reported cost; if the ID or status is missing, it raises OpenRouterVideoError. Otherwise it returns a VideoJob.
-
-**Call relations**: OpenRouterVideos.generate calls this after the initial POST, and OpenRouterVideos._settled calls it after each poll response. It uses _reported_cost_micro_usd to capture billing data when OpenRouter provides it.
-
-*Call graph*: calls 1 internal fn (_reported_cost_micro_usd); called by 2 (_settled, generate); 2 external calls (__init__, __init__).
-
-
-##### `OpenRouterVideos._settled`  (lines 1434–1455)
-
-```
-async def _settled(self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob) -> VideoJob
-```
-
-**Purpose**: Polls an OpenRouter video job until it is no longer pending or in progress. It places a time limit on the wait so a stuck outside job does not hold the turn forever.
-
-**Data flow**: It receives the input arguments, an HTTP client, and the current VideoJob. While the job is pending or in progress, it sleeps, polls OpenRouter, parses the new job state, and stops when the status changes. If the deadline passes or polling fails, it raises OpenRouterVideoError.
-
-**Call relations**: OpenRouterVideos.generate calls this after creating the job. It repeatedly hands poll bodies to _job and returns the final job state to generate.
-
-*Call graph*: calls 1 internal fn (_job); called by 1 (generate); 4 external calls (__init__, sleep, get, monotonic).
-
-
-##### `OpenRouterVideos._failure`  (lines 1457–1461)
-
-```
-def _failure(self, args: GenerateVideoInput, job: VideoJob) -> str
-```
-
-**Purpose**: Builds a readable explanation for a video job that ended without producing a completed video. It prefers the provider's own error message when available.
-
-**Data flow**: It receives the original video arguments and final VideoJob. It chooses the job's error text or a generic status message, trims it, and returns a short sentence.
-
-**Call relations**: OpenRouterVideos.generate calls this when a settled job is not completed. The returned text becomes the content of an error ToolResult.
-
-*Call graph*: called by 1 (generate).
-
-
-##### `OpenRouterVideos._download`  (lines 1463–1482)
-
-```
-async def _download(self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob) -> bytes
-```
-
-**Purpose**: Downloads the finished MP4 for a completed video job and checks that it is usable. It prevents empty or oversized video files from being saved.
-
-**Data flow**: It receives the input arguments, HTTP client, and completed VideoJob. It GETs the job content, raises an error for failed downloads, empty content, or content over the byte limit, and returns the raw video bytes.
-
-**Call relations**: OpenRouterVideos.generate calls this only after _settled reports a completed job. The bytes it returns are then passed to _save.
-
-*Call graph*: called by 1 (generate); 2 external calls (__init__, get).
-
-
-##### `OpenRouterVideos._save`  (lines 1484–1488)
-
-```
-async def _save(self, ctx: ToolContext, args: GenerateVideoInput, video: bytes) -> str
-```
-
-**Purpose**: Writes the finished video into the workspace as an MP4 file.
-
-**Data flow**: It receives the tool context, input arguments, and raw video bytes. It builds a path under generated-videos using the requested file name, writes the bytes through the sandbox, and returns the path.
-
-**Call relations**: OpenRouterVideos.generate calls this after downloading the completed video. The returned path is included in the final tool result.
-
-*Call graph*: called by 1 (generate).
-
-
-##### `OpenRouterVideos._charge`  (lines 1490–1498)
-
-```
-def _charge(self, args: GenerateVideoInput, job: VideoJob) -> int
-```
-
-**Purpose**: Calculates the cost to meter for a video generation. It uses OpenRouter's reported cost when available and otherwise falls back to the configured per-second model rate for the chosen resolution.
-
-**Data flow**: It receives the video arguments and final VideoJob. If the job already contains a reported micro-USD cost, it returns that; otherwise it multiplies the model's per-second price for the actual resolution by the requested duration.
-
-**Call relations**: OpenRouterVideos.generate calls this after saving the video. The result is written into the tool output and passed to ToolContext.meter_videos when the platform key paid for the generation.
-
-*Call graph*: called by 1 (generate).
-
-
-##### `_generate_video`  (lines 1501–1506)
-
-```
-async def _generate_video(ctx: ToolContext, args: GenerateVideoInput) -> ToolResult
-```
-
-**Purpose**: Acts as the registered handler for the generate_video tool. It connects the tool runtime to the OpenRouterVideos runner.
-
-**Data flow**: It receives a ToolContext and validated video arguments. It checks that extension context exists, creates an OpenRouterVideos helper with credentials and optional test transport, and returns the helper's ToolResult.
-
-**Call relations**: GENERATE_VIDEO_TOOL points at this function. When an agent calls generate_video, the tool runtime invokes this handler.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `manifest`  (lines 1519–1535)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Describes this extension to the UFO host system. It advertises the OpenRouter models, the image and video tools, and the credential slot needed for the API key.
-
-**Data flow**: It takes no input. It returns a Manifest containing the extension name and version, all registered model specs, both tool definitions, and the OpenRouter API-key credential description.
-
-**Call relations**: The extension loader calls this to discover what the file provides. The returned manifest is how the rest of UFO learns that OpenRouter models and generation tools are available.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-### `core/src/ufo/harness/models/spec.py`
-
-`data_model` · `model registry setup and per-request model calling`
-
-This file is the project’s model fact sheet. Each supported model gets a `ModelSpec`, which is a frozen data record: once created, its values cannot be changed by accident. That matters because many parts of the system need to agree on the same facts: which provider serves the model, how much it costs, whether it can use images, how large a conversation it can read, whether it supports “reasoning” mode, and where to find its API key.
-
-Without this file, those facts would likely be scattered across prompt building, billing, client setup, error handling, and transcript cleanup. That would make mistakes easy: one place might think a model supports tools with reasoning while another place sends an invalid request.
-
-The file also contains small guardrails. Dates must look like `YYYY-MM`; transcript compaction thresholds must make sense; reasoning options cannot contradict each other. Think of it like a checklist at a rental counter: before handing over a car, the system confirms the fuel type, license rules, and limits are all valid.
-
-Two helper records sit beside `ModelSpec`. `ReasoningSupport` describes whether a model can do extra reasoning work and when that can be turned off. `RepeatedToolCompaction` describes when repeated tool-heavy conversations should be shortened to stay within the model’s memory limit.
-
-#### Function details
-
-##### `ReasoningSupport.internal_effort`  (lines 38–41)
-
-```
-def internal_effort(self) -> ReasoningEffort
-```
-
-**Purpose**: This chooses the system’s safest internal reasoning setting for a model. It answers: should the system treat reasoning as off, or must it use the model’s minimum allowed reasoning level?
-
-**Data flow**: It reads the `ReasoningSupport` record: whether reasoning is supported, whether it can be disabled, and the minimum allowed effort. If the model does not support reasoning, or if reasoning can be turned off, it returns `"off"`. If reasoning is mandatory, it returns the model’s minimum reasoning effort.
-
-**Call relations**: This is a small decision helper for code that needs a default internal reasoning value from a model’s capabilities. It does not call out to other code; it simply interprets the fields stored on the same `ReasoningSupport` record.
-
-
-##### `RepeatedToolCompaction.__post_init__`  (lines 51–55)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This checks that the repeated-tool transcript compaction rule is usable. It prevents settings that would trigger too early, never trigger sensibly, or represent an impossible percentage.
-
-**Data flow**: It receives a newly created `RepeatedToolCompaction` object with `consecutive_turns` and `trigger_percent`. It verifies that repeated tool use means at least two consecutive turns, and that the trigger percentage is from 1 through 99. If the values are valid, creation continues unchanged; if not, it raises a `ValueError` with a clear message.
-
-**Call relations**: This runs automatically when a `RepeatedToolCompaction` record is created. It does not hand work to another project function; its role is to stop bad configuration before any conversation-shortening logic relies on it.
-
-
-##### `ModelSpec.__post_init__`  (lines 85–106)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This validates a model’s fact sheet as soon as it is created. It catches contradictory or unsafe model settings early, before a request reaches a provider and fails in a harder-to-understand way.
-
-**Data flow**: It reads the new `ModelSpec` fields: the knowledge cutoff date, reasoning settings, compaction limits, and context window. It checks that the date is in `YYYY-MM` form, that reasoning-related flags do not contradict each other, and that compaction thresholds are positive and smaller than the model’s context window. Valid specs pass through unchanged; invalid specs raise `ValueError` with model-specific messages.
-
-**Call relations**: This runs automatically during `ModelSpec` creation, usually as model entries are registered. It sits at the boundary between configuration and runtime use: later code can trust the spec because this method has already rejected impossible combinations.
-
-
-##### `ModelSpec.key_rejected`  (lines 108–119)
-
-```
-def key_rejected(self) -> CredentialValueInvalid
-```
-
-**Purpose**: This turns a provider’s “bad key” response into the project’s own clear credential error. It tells the user that the API key for this model was rejected and points them toward the possible places that key came from.
-
-**Data flow**: It reads the model id, provider name, environment-variable key name, and workspace key slot from the `ModelSpec`. It builds a human-readable message explaining that the provider rejected the key, then creates and returns a `CredentialValueInvalid` error object containing that message.
-
-**Call relations**: This is used when a provider reports an authentication failure, such as an HTTP 401 status. Its only handoff is to `CredentialValueInvalid`, which wraps the message in the project’s standard credential-error type so callers do not have to understand each provider’s own error class.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ModelSpec.rate_limited`  (lines 121–129)
-
-```
-def rate_limited(self) -> ModelAccountRateLimited
-```
-
-**Purpose**: This turns a provider’s “too many requests” or “no capacity” response into the project’s own account-capacity error. It gives callers one consistent error type for rate limits across different model providers.
-
-**Data flow**: It reads the model id and provider name from the `ModelSpec`. It writes a message saying that the account serving this model has no capacity right now, then creates and returns a `ModelAccountRateLimited` error object.
-
-**Call relations**: This is used after the model client has exhausted its own retries and the provider is still rate limiting, commonly associated with an HTTP 429 response. It hands the final message to `ModelAccountRateLimited`, making rate-limit failures look the same to the rest of the system no matter which provider produced them.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ModelSpec.wire_reasoning`  (lines 131–145)
-
-```
-def wire_reasoning(self, requested: ReasoningEffort, tools: tuple[ToolSchema, ...]) -> ReasoningEffort | None
-```
-
-**Purpose**: This decides what reasoning setting, if any, should actually be sent to the model provider for one request. It protects the system from sending reasoning options to models or request shapes that do not support them.
-
-**Data flow**: It receives the user- or system-requested reasoning effort and the tools included in the request. It reads the model’s reasoning capabilities from the `ModelSpec`. If the model does not support reasoning, it returns `None`, meaning no reasoning parameter should be sent. If tools are present but this model cannot combine tools with reasoning, it also returns `None`. If reasoning was requested as `"off"` but the model has reasoning on by default and cannot disable it, it returns the model’s minimum effort instead. Otherwise, it returns the requested effort unchanged.
-
-**Call relations**: This sits just before a request is converted into the provider’s wire format, meaning the exact data sent over the API. It does not call other functions; it acts as the model-specific rulekeeper so client code can ask one question: “what reasoning value is safe to send for this request?”
-
-
-### `core/src/ufo/harness/models/registry.py`
-
-`domain_logic` · `startup and model request handling`
-
-This file solves a practical problem: many parts of the system need to know what a model is, who provides it, how much it costs, and which key should pay for it. Without one shared registry, a bad model name or missing key could show up much later as a confusing provider error, a broken bill, or a failed turn.
-
-The registry works like a front desk for models. At startup, `model_registry` collects the built-in model definitions and any model definitions supplied by extensions. It refuses duplicate model IDs, so one model cannot quietly replace another. It also checks that configured default models really exist.
-
-During a run, `ModelRegistry` answers questions such as “what provider serves this model?”, “which bring-your-own-key slot pays for it?”, and “what client should I call?” A client is the object that sends requests to the model provider. The registry builds clients only when needed, so changed or refreshed credentials can be picked up without restarting.
-
-There is special care for member-owned accounts. If a provider rejects a token before any response has streamed back, `_RebuiltOnRejection` rebuilds the client once, giving refreshed credentials a chance. If a member has multiple connected accounts, `MemberAccounts` and `ServingModel` can move a turn to the next account, but only if billing still matches the account that the turn was supposed to use.
-
-#### Function details
-
-##### `_RebuiltOnRejection.complete`  (lines 57–72)
-
-```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: This runs a model request through a client that can be rebuilt once if the provider says the credential is invalid before any output has been delivered. It exists to survive short-lived access tokens expiring during a long turn, without replaying a stream the user has already started seeing.
-
-**Data flow**: It receives a model request and starts yielding events from the already-built client. If events have already been yielded and the credential fails, it lets the error pass through because replaying would duplicate output. If no event has been delivered yet, it asks the registry for a fresh client for the same model, checks that the funding source and payer did not change, and then yields events from the rebuilt client. If the payer changed, it raises a funding-change error instead of silently charging someone else.
-
-**Call relations**: This wrapper is created by `ModelRegistry.client_for` for member-routed calls. When normal model streaming hits an invalid credential early, this method does the one allowed rebuild; if the rebuild would change who pays, it hands off to `ModelFundingChanged` so the caller sees a clear failure.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `MemberAccounts.next`  (lines 95–105)
-
-```
-async def next(self) -> tuple[ModelSpec, ModelClient]
-```
-
-**Purpose**: This chooses the next connected member account to try when the current account cannot continue. It keeps failover safe by making sure the new model call is still paid by the member account that the turn is allowed to use.
-
-**Data flow**: It reads the remaining alternate model IDs. If none are left, it raises the stored “all accounts exhausted” error. Otherwise it removes the first alternate from the list, looks up that model’s specification, builds a client for it, and compares the resolved funding and payer with the current workspace member payer. If they match, it returns the model specification and client. If not, it raises a funding-change error.
-
-**Call relations**: This is used by `ServingModel.move` when a turn needs to switch from one member account to another. It consults the current workspace through `ws_current` so the move cannot accidentally fall back to a workspace or platform key.
-
-*Call graph*: 2 external calls (__init__, ws_current).
-
-
-##### `ServingModel.move`  (lines 130–137)
-
-```
-async def move(self) -> bool
-```
-
-**Purpose**: This moves an active turn to the member’s next available account, if such account failover is allowed. It keeps the current model ID, model facts, and client together so later rounds all refer to the new model consistently.
-
-**Data flow**: It starts with the serving model currently used by a turn. If there is no `MemberAccounts` object attached, it returns `false`, meaning this turn cannot move. If accounts are available, it asks for the next model specification and client, replaces its own stored specification, client, and model ID, and returns `true`.
-
-**Call relations**: This method is the small switch lever used by turn-running code when a provider rejects a member account before producing output. It relies on `MemberAccounts.next` to choose and validate the next account before changing the live `ServingModel`.
-
-
-##### `ModelRegistry.resolve`  (lines 151–154)
-
-```
-def resolve(self, model: str) -> str
-```
-
-**Purpose**: This converts the special model name `auto` into the concrete default model configured for this deployment. If the caller already gave a real model ID, it leaves it unchanged.
-
-**Data flow**: It receives a model name. If that name is the automatic-model sentinel, it returns the registry’s configured default model ID. Otherwise it returns the original name.
-
-**Call relations**: This is called by `ModelRegistry.key_slot_for` and `ModelRegistry.model_key_env` before they answer questions about keys. That way a stored setting of `auto` is treated as the real model that will actually run.
-
-*Call graph*: called by 2 (key_slot_for, model_key_env).
-
-
-##### `ModelRegistry.spec`  (lines 156–162)
-
-```
-def spec(self, model: str) -> ModelSpec
-```
-
-**Purpose**: This looks up the registered facts for a model ID. It gives the rest of the system one reliable place to fail if a model name is unknown.
-
-**Data flow**: It receives a model ID and reads the registry’s model table. If the ID exists, it returns the corresponding `ModelSpec`, which describes things like provider, client builder, price, and key slot. If the ID is missing, it raises a clear error naming the unknown model.
-
-**Call relations**: This lookup is used by `ModelRegistry.client_for`, `ModelRegistry.provider_for`, and `ModelRegistry.model_key_env`. Those callers all depend on it so mistakes in model names are caught at the registry boundary instead of later in unrelated code.
-
-*Call graph*: called by 3 (client_for, model_key_env, provider_for).
-
-
-##### `ModelRegistry.client_for`  (lines 164–199)
-
-```
-async def client_for(self, model: str) -> ResolvedModelClient
-```
-
-**Purpose**: This builds the actual client object used to call a model, with the right credential and payer attached. It also validates that the credential can safely be sent to the provider.
-
-**Data flow**: It receives a model ID, looks up its specification, and checks whether that model needs a key. If no key is needed, it returns a platform-funded client. If a key is needed, it asks the current workspace for the right credential, reports a clear error if none is set, rejects non-ASCII key values because the provider connection cannot carry them, and builds the provider client. For member-routed calls, it wraps the client in `_RebuiltOnRejection` so one early credential rejection can trigger a safe rebuild. It returns the client together with the funding type and exact payer.
-
-**Call relations**: This is the registry’s main handoff from model name to callable provider client. It calls `ModelRegistry.spec` for model facts, uses `ws_current` to find credentials in the active workspace, creates `ResolvedModelClient` as the result, and may create `_RebuiltOnRejection` for safer member-account calls.
-
-*Call graph*: calls 1 internal fn (spec); 4 external calls (__init__, __init__, __init__, ws_current).
-
-
-##### `ModelRegistry.provider_for`  (lines 201–205)
-
-```
-def provider_for(self, model: str) -> str
-```
-
-**Purpose**: This answers which provider, such as Anthropic or OpenAI, serves a given model. It is useful when calls or costs need to be grouped by backend provider.
-
-**Data flow**: It receives a model ID, looks up the model specification, and returns the provider name stored there. If the model ID is unknown, the lookup raises the same clear registry error used elsewhere.
-
-**Call relations**: It depends on `ModelRegistry.spec` so provider reporting uses the same model facts as client creation and key checks. Other parts of the system can call this when they need provider-level labels without building a full client.
-
-*Call graph*: calls 1 internal fn (spec).
-
-
-##### `ModelRegistry.key_slot_for`  (lines 207–218)
-
-```
-def key_slot_for(self, model: str) -> str | None
-```
-
-**Purpose**: This tells which bring-your-own-key slot would pay for a model, if any. It is deliberately forgiving for old or missing model IDs so billing exports can label them as platform-served instead of crashing.
-
-**Data flow**: It receives a model name, first resolving `auto` to the configured real model. It then checks the registry table directly. If there is no matching model or the model has no key slot, it returns `null`. Otherwise it returns the key slot name.
-
-**Call relations**: It calls `ModelRegistry.resolve` so automatic model settings are interpreted as the model that would actually run. Unlike stricter paths such as `spec`, this method is shaped for reporting and historical records, where an unknown old model should not stop the whole export.
-
-*Call graph*: calls 1 internal fn (resolve).
-
-
-##### `ModelRegistry.model_key_env`  (lines 220–230)
-
-```
-def model_key_env(self, model: str, config: Config) -> str | None
-```
-
-**Purpose**: This tells onboarding which environment variable should be set before a model’s first use. It only answers for the core providers whose key names the system knows how to check ahead of time.
-
-**Data flow**: It receives a model name and the configuration object. It resolves `auto`, looks up the model specification, reads the provider, and then returns the configured Anthropic or OpenAI API-key environment variable name. For other providers, usually contributed by extensions, it returns `null` because their key lookup happens later.
-
-**Call relations**: It calls `ModelRegistry.resolve` and then `ModelRegistry.spec` so onboarding checks the actual configured model, not just the placeholder `auto`. It is used before a turn to give users early feedback about missing core provider keys.
-
-*Call graph*: calls 2 internal fn (resolve, spec).
-
-
-##### `model_registry`  (lines 233–266)
-
-```
-def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry
-```
-
-**Purpose**: This builds the complete `ModelRegistry` used by the running system. It combines built-in models with extension-provided models, checks that important configured models exist, and prepares the shared price table.
-
-**Data flow**: It receives the system configuration and a set of extension manifests. It asks for the built-in model specifications, adds every manifest-contributed model, and stores them by model ID. If two models claim the same ID, it raises an error. It then checks that the configured automatic model, ambient reply model, and background job model are all registered. Finally it builds pricing from the registered model prices and returns a new `ModelRegistry`.
-
-**Call relations**: This is the startup builder for the registry. It calls `core_model_specs` to get built-in models, `pricing_from` to make the merged pricing table, and constructs `ModelRegistry` as the object other runtime code will query during model calls.
-
-*Call graph*: 3 external calls (__init__, core_model_specs, pricing_from).
-
-
-### Provider adapters and credentials
-Implements Anthropic and OpenAI-compatible streaming adapters and manages connected provider grants.
-
-### `core/src/ufo/harness/models/anthropic.py`
-
-`io_transport` · `request handling`
-
-The rest of the system wants to talk to language models in one common format, no matter which company provides the model. Anthropic's API has its own request shape, authentication rules, streaming event types, tool-call format, image format, and error behavior. This file translates between those worlds.
-
-On the way out, it builds Anthropic-compatible request data from a `ModelRequest`: system text, chat messages, tools, images, cache hints, and optional reasoning settings. It also chooses the right authentication style: normal API keys use one header, while Anthropic OAuth tokens use bearer-token authentication and a special beta header.
-
-On the way back, `_AnthropicStream` reads Anthropic's stream like a live transcript. Text chunks become UFO text events, tool-call starts and JSON fragments become UFO tool-call events, and hidden reasoning blocks are saved until the end so they can be replayed correctly later. Token usage is collected along the way.
-
-The file is also careful about failure. Before any visible output has been yielded, temporary network or provider errors can be retried with increasing waits. After visible output has begun, the partial answer is no longer safe to silently retry, so the stream is marked interrupted and the higher-level round logic can restart cleanly.
-
-#### Function details
-
-##### `anthropic_sdk_client`  (lines 57–73)
-
-```
-def anthropic_sdk_client(credential: str) -> anthropic.AsyncAnthropic
-```
-
-**Purpose**: Creates the Anthropic software client used to make API calls. It deliberately turns off the SDK's built-in retries because this file applies its own retry rules, which are aware of streaming and UFO's round logic.
-
-**Data flow**: It takes one credential string. It checks whether the credential looks like an Anthropic OAuth token; if so, it creates a client that authenticates with a bearer token and beta headers. Otherwise, it creates a client that authenticates with an API key. The result is an `AsyncAnthropic` client ready for requests.
-
-**Call relations**: This is the setup doorway for Anthropic access. It calls `is_oauth_credential` to decide which authentication path to use, then hands the chosen settings to Anthropic's SDK client constructor.
-
-*Call graph*: calls 1 internal fn (is_oauth_credential); 1 external calls (AsyncAnthropic).
-
-
-##### `is_oauth_credential`  (lines 76–78)
-
-```
-def is_oauth_credential(credential: str) -> bool
-```
-
-**Purpose**: Tells whether a credential is an Anthropic OAuth access token rather than a normal API key. This matters because the two are sent to Anthropic differently.
-
-**Data flow**: It receives a credential string and checks its prefix. If the string starts with Anthropic's OAuth token prefix, it returns true; otherwise it returns false. It does not change anything else.
-
-**Call relations**: `anthropic_sdk_client` calls this before building the Anthropic SDK client, so the client is configured with the correct kind of authentication.
-
-*Call graph*: called by 1 (anthropic_sdk_client).
-
-
-##### `_anthropic_image`  (lines 81–85)
-
-```
-def _anthropic_image(source: ImageSource) -> dict[str, object]
-```
-
-**Purpose**: Converts UFO's internal image representation into the image block shape Anthropic expects. It is a small translator for base64-encoded image data.
-
-**Data flow**: It receives an `ImageSource`, which includes a media type such as PNG or JPEG and the base64 image data. It wraps those fields in Anthropic's nested dictionary format and returns that dictionary.
-
-**Call relations**: This helper is used when outgoing messages or tool results include images. `anthropic_content` uses it for normal image blocks, and `_anthropic_tool_result_part` uses it for image pieces inside tool results.
-
-*Call graph*: called by 2 (_anthropic_tool_result_part, anthropic_content).
-
-
-##### `_anthropic_tool_result_part`  (lines 88–93)
-
-```
-def _anthropic_tool_result_part(part: ToolResultContent) -> dict[str, object]
-```
-
-**Purpose**: Converts one piece of tool output into Anthropic's content format. Tool output can be text or an image, and Anthropic needs each piece described in its own wire format.
-
-**Data flow**: It receives a tool-result content block. If the block is text, it returns a text dictionary. If the block is an image, it passes the image source to `_anthropic_image` and returns the converted image dictionary.
-
-**Call relations**: `anthropic_content` calls this while building a tool result message that may contain multiple text and image parts.
-
-*Call graph*: calls 1 internal fn (_anthropic_image); called by 1 (anthropic_content).
-
-
-##### `anthropic_content`  (lines 96–130)
-
-```
-def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, object]]
-```
-
-**Purpose**: Turns UFO's message content into the exact content shape Anthropic's API accepts. This lets the rest of the system keep using one common message model while this file handles Anthropic-specific formatting.
-
-**Data flow**: It receives either plain text or a tuple of content blocks. Plain text passes through unchanged. Structured blocks are inspected one by one and converted into Anthropic dictionaries for text, images, tool calls, tool results, and Anthropic reasoning. OpenAI-style reasoning items are skipped because Anthropic cannot use them.
-
-**Call relations**: `AnthropicClient._request_kwargs` calls this for every outgoing chat message. During conversion it delegates image formatting to `_anthropic_image` and tool-result piece formatting to `_anthropic_tool_result_part`.
-
-*Call graph*: calls 2 internal fn (_anthropic_image, _anthropic_tool_result_part); called by 1 (_request_kwargs).
-
-
-##### `_AnthropicRetry.transport`  (lines 141–176)
-
-```
-async def transport(self, error: Exception, yielded: bool) -> _AnthropicRetry
-```
-
-**Purpose**: Decides what to do after a network-style streaming failure, such as a timeout or dropped connection. It protects users from brief provider glitches, while avoiding unsafe retries after visible output has already been shown.
-
-**Data flow**: It receives the original error and a flag saying whether any text or tool-call output has already been yielded. If output was already yielded, it logs the failure and raises a stream-interrupted error. If no output was yielded and the retry budget remains, it logs and counts the retry, waits for the current delay, and returns a new retry state with a larger delay. If the retry budget is exhausted, it re-raises the original error.
-
-**Call relations**: `AnthropicClient.complete` calls this when Anthropic's stream fails with transport errors. This method uses logging and metrics for observability, sleeps before retrying, and returns updated retry instructions to the main completion loop.
-
-*Call graph*: calls 1 internal fn (__init__); 4 external calls (sleep, replace, emit_metric, log).
-
-
-##### `_AnthropicRetry.status`  (lines 178–238)
-
-```
-async def status(self, error: anthropic.APIStatusError, yielded: bool) -> _AnthropicRetry
-```
-
-**Purpose**: Decides what to do after Anthropic reports an API status error. It separates permanent problems, like a rejected key or bad request, from temporary problems that can be retried.
-
-**Data flow**: It receives Anthropic's status error and whether visible output has already been yielded. A rejected key becomes UFO's credential error. Non-retryable client errors are raised immediately. Rate limits and temporary provider errors may be retried before output is visible, using `retry-after` if Anthropic supplied it. Long rate-limit waits can be handed back as `ModelRetryAfter` instead of sleeping inside this call.
-
-**Call relations**: `AnthropicClient.complete` calls this when the stream raises an Anthropic status error. The method logs outcomes, emits retry metrics, may wait, and then either returns updated retry state or raises the right higher-level error for the round controller.
-
-*Call graph*: calls 2 internal fn (__init__, __init__); 4 external calls (sleep, replace, emit_metric, log).
-
-
-##### `_AnthropicStream.__init__`  (lines 242–253)
-
-```
-def __init__(self) -> None
-```
-
-**Purpose**: Creates a fresh state tracker for one Anthropic streaming response. It starts with no emitted output, no known tool calls, no collected reasoning, and zero token usage.
-
-**Data flow**: It takes no outside data besides the new object being created. It initializes dictionaries and counters that will be filled as stream events arrive. The result is an empty stream state ready for `accept` to update.
-
-**Call relations**: `AnthropicClient.complete` creates a new `_AnthropicStream` for each request attempt, including retries. That keeps partial state from one attempt from leaking into the next.
-
-*Call graph*: called by 1 (complete).
-
-
-##### `_AnthropicStream.accept`  (lines 255–299)
-
-```
-def accept(self, event: object) -> tuple[ModelEvent, ...]
-```
-
-**Purpose**: Reads one raw Anthropic stream event and turns it into zero or more UFO model events. It is the main event translator for live responses.
-
-**Data flow**: It receives one Anthropic event. Message-start events update token input usage. Text deltas become UFO text deltas. Tool-use starts and JSON fragments become UFO tool-call events. Thinking and redacted-thinking events are stored for later rather than streamed live. Message-delta events record output token counts and the stop reason. It returns the UFO events that should be yielded immediately, if any, and records whether visible output has begun.
-
-**Call relations**: `AnthropicClient.complete` feeds every raw stream event into this method. Inside, it calls `_record_input_usage` when usage first appears and `_close_thinking` when a reasoning block finishes, then hands immediate text or tool events back to the completion loop.
-
-*Call graph*: calls 2 internal fn (_close_thinking, _record_input_usage); 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `_AnthropicStream._record_input_usage`  (lines 301–309)
-
-```
-def _record_input_usage(self, usage: Any) -> None
-```
-
-**Purpose**: Stores the input-token accounting reported by Anthropic. This includes normal input tokens and cache-related token counts.
-
-**Data flow**: It receives Anthropic's usage object. It copies input tokens, cache-read tokens, and cache-write tokens into the stream state, handling both older and newer Anthropic cache-reporting shapes. It returns nothing; the stream state's counters are updated.
-
-**Call relations**: `_AnthropicStream.accept` calls this when the stream starts and Anthropic sends message-level usage. Later, `has_usage` and `usage` use these stored values to decide what accounting event to emit.
-
-*Call graph*: called by 1 (accept).
-
-
-##### `_AnthropicStream._close_thinking`  (lines 311–320)
-
-```
-def _close_thinking(self, index: int) -> None
-```
-
-**Purpose**: Finishes one Anthropic thinking block and saves it as a complete UFO reasoning block. A thinking block must include a signature, because Anthropic requires the signed reasoning to be echoed back exactly in later tool-result turns.
-
-**Data flow**: It receives the index of the thinking block that just ended. It gathers all text fragments saved for that index, retrieves and removes the matching signature, and appends a complete `ThinkingBlock` to the stream's reasoning list. If the signature is missing or empty, it raises an error because the reasoning would be unusable.
-
-**Call relations**: `_AnthropicStream.accept` calls this when Anthropic says a thinking content block has stopped. The completed reasoning is not yielded immediately; `AnthropicClient.complete` yields it near the end, just before usage.
-
-*Call graph*: called by 1 (accept); 1 external calls (__init__).
-
-
-##### `_AnthropicStream.has_usage`  (lines 322–328)
-
-```
-def has_usage(self) -> bool
-```
-
-**Purpose**: Checks whether this stream has any token-usage information worth reporting. This is useful when a stream fails before it completes but still reported some accounting data.
-
-**Data flow**: It reads the stream state's input and cache token counters. If any of them are nonzero, it returns true; otherwise it returns false. It does not change the stream state.
-
-**Call relations**: `AnthropicClient.complete` uses this check in failure paths and unusual stream endings so it can still yield usage data when Anthropic provided it.
-
-
-##### `_AnthropicStream.usage`  (lines 330–337)
-
-```
-def usage(self) -> Usage
-```
-
-**Purpose**: Builds UFO's standard usage record from the token counts collected during the Anthropic stream. This gives the rest of the system one consistent accounting format.
-
-**Data flow**: It reads input tokens, output tokens, cache-read tokens, and cache-write tokens from the stream state. If output tokens were never set, it reports zero output tokens. It returns a `Usage` object and does not change the stream state.
-
-**Call relations**: `AnthropicClient.complete` yields this result at the end of a successful stream and also before raising certain errors, so callers can still record token costs.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `AnthropicClient._request_kwargs`  (lines 346–392)
-
-```
-def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]
-```
-
-**Purpose**: Builds the dictionary of arguments passed to Anthropic's `messages.create` call. It is where UFO's model request is translated into Anthropic's request language.
-
-**Data flow**: It receives a `ModelRequest`. It creates system-message blocks, converts chat messages after trimming images where needed, sets the model name, token limit, streaming flag, cache settings, reasoning settings, and tool definitions. If OAuth is being used, it adds Anthropic's Claude Code system prefix. The output is a dictionary ready to send to the Anthropic SDK.
-
-**Call relations**: `AnthropicClient.complete` calls this right before starting a provider request. It relies on `anthropic_content` for message conversion and `trim_images` to keep image-bearing history within the supported shape.
-
-*Call graph*: calls 1 internal fn (anthropic_content); called by 1 (complete); 1 external calls (trim_images).
-
-
-##### `AnthropicClient.complete`  (lines 394–489)
-
-```
-async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: Runs one streaming completion request against Anthropic and yields UFO-standard model events. It is the main public behavior of this client: send the request, stream back text and tool calls, report reasoning and usage, and apply safe retry rules.
-
-**Data flow**: It receives a `ModelRequest`. It creates retry state, builds Anthropic request arguments, opens a streaming response, and feeds each raw event through `_AnthropicStream.accept`. It yields a stream-start event, then text and tool-call events as they arrive. At the end it checks Anthropic's stop reason, raises clear UFO errors for truncation or refusal, retries empty answers a limited number of times, yields saved reasoning blocks, then yields final usage and returns. On retryable provider failures before visible output, it waits and tries again; after visible output, it raises an interrupted-stream error through the retry helper.
-
-**Call relations**: This method is the coordinator for the whole file. It calls `_request_kwargs` to prepare the outgoing call, creates `_AnthropicStream` to translate incoming events, uses `_AnthropicRetry` for error decisions, emits metrics for empty-response retries, and yields the standardized events consumed by the rest of the harness.
-
-*Call graph*: calls 2 internal fn (_request_kwargs, __init__); 5 external calls (__init__, __init__, __init__, __init__, emit_metric).
-
-
-### `core/src/ufo/harness/models/openai.py`
-
-`io_transport` · `request handling`
-
-This file lets the rest of the system talk to OpenAI and OpenAI-compatible providers without caring about their exact wire format. A "wire format" is the shape of the HTTP request and streaming response a provider expects. Some models use OpenAI's older Chat Completions API, while others must use the newer Responses API, especially when reasoning data or certain tool settings are involved. This file chooses the right surface from the model specification, or forces the Responses path when the credential is a ChatGPT account token for the Codex backend.
-
-The file does three main jobs. First, it builds SDK clients with the right host, headers, timeout, and retry settings. Second, it translates UFO's neutral message blocks, tools, images, tool results, reasoning items, and token limits into the exact request shape OpenAI expects. Third, it reads streaming events back from the provider and emits simple UFO events such as text chunks, tool-call starts, tool-call argument chunks, reasoning blocks, and final token usage.
-
-It also protects the wider system from common provider failures. Before any visible output is produced, temporary network errors, rate limits, server errors, and empty responses can be retried. After output has started, a broken stream is treated as an interrupted round so the engine can discard the partial answer and try again safely. Without this file, the rest of the harness would need to know many provider-specific details and would be much more fragile.
-
-#### Function details
-
-##### `_cache_write_tokens`  (lines 112–120)
-
-```
-def _cache_write_tokens(details: PromptTokensDetails | InputTokensDetails | None) -> int
-```
-
-**Purpose**: Reads the provider's optional count of tokens written into a prompt cache. This matters for usage and billing, because cached tokens can be priced differently from normal input tokens.
-
-**Data flow**: It receives token-detail data from an OpenAI usage object. It looks for a provider-specific extra field named cache_write_tokens, treats a missing value as zero, checks that any present value is a real integer, and returns that integer.
-
-**Call relations**: Usage conversion helpers call this when they translate OpenAI usage into UFO's Usage record. It is shared by both the Chat Completions path and the Responses path so cache accounting stays consistent.
-
-*Call graph*: called by 2 (_chat_usage, _responses_usage).
-
-
-##### `_responses_usage`  (lines 123–137)
-
-```
-def _responses_usage(raw: ResponseUsage, cache_write_30m_priced: bool) -> Usage
-```
-
-**Purpose**: Turns usage data from the Responses API into UFO's standard Usage format. It separates normal input tokens, cached input tokens, cache-write tokens, and output tokens.
-
-**Data flow**: It receives a raw Responses usage object and a flag saying whether cache writes should be counted as separately priced. It reads cached and cache-write token counts, checks that they do not exceed total input tokens, then returns a Usage object with the counts split into UFO's categories.
-
-**Call relations**: _ResponsesStream.accept calls this when a completed or failed Responses stream reports usage. _ResponsesStream._record_incomplete also calls it when an incomplete response still includes usage.
-
-*Call graph*: calls 1 internal fn (_cache_write_tokens); called by 2 (_record_incomplete, accept); 1 external calls (__init__).
-
-
-##### `_chat_usage`  (lines 140–154)
-
-```
-def _chat_usage(raw: openai.types.CompletionUsage, cache_write_30m_priced: bool) -> Usage
-```
-
-**Purpose**: Turns usage data from the Chat Completions API into UFO's standard Usage format. It performs the same accounting as the Responses path, but reads the older Chat usage fields.
-
-**Data flow**: It receives a raw Chat Completions usage object and a cache-pricing flag. It extracts cached and cache-write prompt tokens, validates that the counts make sense, subtracts them from normal input tokens, and returns a Usage object.
-
-**Call relations**: _ChatStream.accept calls this when a streamed chat chunk includes final usage information.
-
-*Call graph*: calls 1 internal fn (_cache_write_tokens); called by 1 (accept); 1 external calls (__init__).
-
-
-##### `openai_sdk_client`  (lines 157–170)
-
-```
-def openai_sdk_client(api_key: str, base_url: str | None=None, default_headers: dict[str, str] | None=None) -> openai.AsyncOpenAI
-```
-
-**Purpose**: Creates an asynchronous OpenAI SDK client with UFO's chosen timeout and with SDK-level retries turned off. UFO does its own retrying so it can make careful decisions around streamed partial output.
-
-**Data flow**: It receives an API key, and optionally a base URL and default headers. It passes them into the OpenAI SDK along with a fixed timeout and max_retries set to zero, then returns the ready client.
-
-**Call relations**: codex_sdk_client uses this to build the special ChatGPT Codex client. Other provider integrations can also use it when they speak OpenAI-compatible HTTP but live at a different base URL.
-
-*Call graph*: called by 1 (codex_sdk_client); 1 external calls (AsyncOpenAI).
-
-
-##### `chatgpt_account_id`  (lines 173–186)
-
-```
-def chatgpt_account_id(credential: str) -> str | None
-```
-
-**Purpose**: Detects whether a credential is a ChatGPT account token and, if so, extracts the ChatGPT account id from it. This decides whether UFO should use the ChatGPT Codex backend instead of api.openai.com.
-
-**Data flow**: It receives a credential string. If the string does not look like a JWT, meaning a dot-separated signed token, it returns None. If it does look like one, it decodes the payload, reads the expected auth claims, and returns the account id only if it is a non-empty string.
-
-**Call relations**: This function is a credential classifier. Code that builds clients can use its result to choose codex_sdk_client for ChatGPT account credentials, or the normal OpenAI client path for platform API keys.
-
-*Call graph*: 2 external calls (urlsafe_b64decode, loads).
-
-
-##### `codex_sdk_client`  (lines 189–205)
-
-```
-def codex_sdk_client(credential: str, account: str) -> openai.AsyncOpenAI
-```
-
-**Purpose**: Builds an OpenAI SDK client aimed at the ChatGPT Codex backend. This backend needs extra headers that identify the account, app origin, beta Responses support, and streaming response type.
-
-**Data flow**: It receives the credential and the ChatGPT account id. It creates the required header set and passes the credential, Codex base URL, and headers to openai_sdk_client, returning the configured SDK client.
-
-**Call relations**: It delegates the actual SDK construction to openai_sdk_client. It exists because ChatGPT account tokens are served by a different backend than ordinary OpenAI API keys.
-
-*Call graph*: calls 1 internal fn (openai_sdk_client).
-
-
-##### `_status_retry_wait`  (lines 208–214)
-
-```
-def _status_retry_wait(error: openai.APIStatusError, delay: float) -> float
-```
-
-**Purpose**: Chooses how long to wait before retrying an HTTP status error. It respects the provider's retry-after header when present, but never waits less than the current backoff delay.
-
-**Data flow**: It receives an OpenAI status error and the current retry delay. It tries to parse the retry-after response header as a number of seconds, falls back to the current delay if parsing fails, and returns the larger wait time.
-
-**Call relations**: _OpenAIRetry.status calls this when a rate limit or server error is retryable. This keeps retry timing aligned with provider guidance when the provider gives one.
-
-*Call graph*: called by 1 (status).
-
-
-##### `_openai_image`  (lines 217–221)
-
-```
-def _openai_image(source: ImageSource) -> dict[str, object]
-```
-
-**Purpose**: Converts UFO's image data into the image-url shape OpenAI accepts. The image is embedded as a data URL, which is like putting the image bytes directly inside the message.
-
-**Data flow**: It receives an ImageSource containing a media type and base64 image data. It returns a small dictionary with OpenAI's image_url fields filled in.
-
-**Call relations**: openai_messages uses this for image content in chat messages. _openai_tool_result uses it when a tool result contains images that must be moved into a user message.
-
-*Call graph*: called by 2 (_openai_tool_result, openai_messages).
-
-
-##### `_openai_tool_result`  (lines 224–240)
-
-```
-def _openai_tool_result(result: str | tuple[ToolResultContent, ...]) -> tuple[str, list[dict[str, object]]]
-```
-
-**Purpose**: Splits a UFO tool result into text and images for the Chat Completions API. This is needed because OpenAI tool messages can carry text, but images have to be sent separately as user message content.
-
-**Data flow**: It receives either a plain string result or a tuple of text and image blocks. It gathers all text into one string, converts images with _openai_image, and returns both the text and the list of image parts.
-
-**Call relations**: openai_messages calls this while translating prior tool results into chat messages. It gives openai_messages the pieces needed to create both the tool message and any follow-up image message.
-
-*Call graph*: calls 1 internal fn (_openai_image); called by 1 (openai_messages).
-
-
-##### `openai_messages`  (lines 243–302)
-
-```
-def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str, object]]
-```
-
-**Purpose**: Translates UFO's conversation history into the message list expected by OpenAI's Chat Completions API. It keeps text, images, tool calls, and tool results, but drops reasoning blocks because this API has nowhere to put them.
-
-**Data flow**: It receives the system prompt and the stored UFO messages. It trims images as needed, walks each message block, converts images and tool calls to OpenAI shapes, turns tool results into tool messages, lifts tool-result images into user messages, and returns a list of OpenAI-style message dictionaries.
-
-**Call relations**: OpenAIClient._chat_kwargs calls this when building a Chat Completions request. It is the main adapter from UFO's internal message model to the chat API's request body.
-
-*Call graph*: calls 2 internal fn (_openai_image, _openai_tool_result); called by 1 (_chat_kwargs); 2 external calls (dumps, trim_images).
-
-
-##### `responses_input`  (lines 305–406)
-
-```
-def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemParam]
-```
-
-**Purpose**: Translates UFO's conversation history into the input-item format expected by OpenAI's Responses API. Unlike the chat path, it can preserve OpenAI reasoning items so the model can continue a tool round with its prior hidden reasoning context.
-
-**Data flow**: It receives UFO messages. It trims images, then turns plain messages, text blocks, image blocks, tool calls, tool outputs, and reasoning items into the corresponding Responses API input items. It drops reasoning formats from other providers that this API cannot replay.
-
-**Call relations**: responses_request calls this to fill the input field of a Responses request. It is the Responses API equivalent of openai_messages, but with extra support for reasoning and function-call output items.
-
-*Call graph*: called by 1 (responses_request); 13 external calls (dumps, ResponseReasoningItemParam, EasyInputMessageParam, ResponseFunctionToolCallParam, ResponseInputImageContentParam, ResponseInputImageParam, FunctionCallOutput, ResponseInputTextContentParam, ResponseInputTextParam, ResponseOutputTextParam (+3 more)).
-
-
-##### `responses_request`  (lines 409–448)
-
-```
-def responses_request(request: ModelRequest, effort: OpenAIEffort, codex: bool=False) -> dict[str, Any]
-```
-
-**Purpose**: Builds the full request body for OpenAI's Responses API. It includes the model, instructions, input history, streaming choice, reasoning settings, tools, and tool-choice rules.
-
-**Data flow**: It receives a UFO ModelRequest, a resolved reasoning effort, and a flag saying whether the target is the Codex backend. It converts messages through responses_input, adds max output tokens except for Codex, asks for encrypted reasoning content, disables provider-side storage, adds tools if present, and returns the request dictionary.
-
-**Call relations**: OpenAIClient._complete_responses calls this just before sending the provider request. It is the final packing step for the Responses streaming path.
-
-*Call graph*: calls 1 internal fn (responses_input); called by 1 (_complete_responses); 1 external calls (FunctionToolParam).
-
-
-##### `_OpenAIRetry.transport`  (lines 458–493)
-
-```
-async def transport(self, error: Exception, yielded: bool) -> _OpenAIRetry
-```
-
-**Purpose**: Decides what to do after a network or transport failure, such as a timeout or dropped connection. It retries only when it is still safe to do so.
-
-**Data flow**: It receives the exception and a flag saying whether any visible model output has already been yielded. If output has already appeared, it raises a stream-interrupted error. If not and retry attempts remain, it logs and counts the retry, sleeps, and returns a new retry state with a larger delay. If attempts are exhausted, it re-raises the original error.
-
-**Call relations**: Both streaming completion methods use this in their transport-error catch blocks. It hands back updated retry state so the outer loop can try the same model request again.
-
-*Call graph*: calls 1 internal fn (__init__); 4 external calls (sleep, replace, emit_metric, log).
-
-
-##### `_OpenAIRetry.status`  (lines 495–543)
-
-```
-async def status(self, error: openai.APIStatusError, yielded: bool) -> _OpenAIRetry
-```
-
-**Purpose**: Decides what to do after the provider returns an HTTP error status. It treats rejected keys, rate limits, server failures, and mid-stream failures differently so callers get useful errors.
-
-**Data flow**: It receives an OpenAI status error and a flag saying whether output was already yielded. A rejected key becomes the model spec's credential error. Retryable rate limits or server errors are retried before output starts. Mid-stream retryable errors become stream interruptions. Exhausted rate limits become the spec's rate-limit error, and other non-retryable errors are raised.
-
-**Call relations**: Both streaming paths call this after status errors. It uses _status_retry_wait to decide sleep time and returns updated retry state when another attempt should be made.
-
-*Call graph*: calls 2 internal fn (_status_retry_wait, __init__); 4 external calls (sleep, replace, emit_metric, log).
-
-
-##### `_ChatStream.__init__`  (lines 547–552)
-
-```
-def __init__(self, cache_write_30m_priced: bool) -> None
-```
-
-**Purpose**: Creates the state tracker for one Chat Completions stream. It remembers whether anything useful was emitted, maps tool-call indexes to ids, and stores final usage and finish reason.
-
-**Data flow**: It receives a flag saying whether cache-write tokens should be priced separately. It initializes empty tracking fields for yielded output, tool calls, usage, and finish reason.
-
-**Call relations**: OpenAIClient._complete_chat creates one _ChatStream for each provider attempt. The completion loop then feeds every incoming chat chunk into that state object.
-
-*Call graph*: called by 1 (_complete_chat).
-
-
-##### `_ChatStream.accept`  (lines 554–582)
-
-```
-def accept(self, chunk: ChatCompletionChunk) -> tuple[ModelEvent, ...]
-```
-
-**Purpose**: Consumes one streamed Chat Completions chunk and turns it into UFO model events. These events are the live pieces the rest of the harness understands.
-
-**Data flow**: It receives one OpenAI chat chunk. It records usage if present, records the finish reason if present, converts text deltas into TextDelta events, starts tool calls when first seen, converts tool argument fragments into ToolCallDelta events, updates its yielded flag, and returns the events from that chunk.
-
-**Call relations**: OpenAIClient._complete_chat calls this inside the stream loop. It uses _chat_usage for final token accounting and creates the event objects that are yielded to the caller.
-
-*Call graph*: calls 1 internal fn (_chat_usage); 3 external calls (__init__, __init__, __init__).
-
-
-##### `_ChatStream.finish`  (lines 584–599)
-
-```
-def finish(self) -> tuple[Usage, Exception | None]
-```
-
-**Purpose**: Finishes a Chat Completions stream by returning its final usage and any terminal error. It detects when OpenAI stopped only because the token budget was reached.
-
-**Data flow**: It reads the stored finish reason and usage. If finish_reason is length, it prepares a ModelResponseTruncated error. If usage is missing, it raises either that truncation error or a missing-usage error. Otherwise it returns the usage plus the optional truncation error.
-
-**Call relations**: OpenAIClient._complete_chat calls this after the async stream ends. The caller then yields usage and either returns normally or raises the terminal error.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_ResponsesStream.__init__`  (lines 603–610)
-
-```
-def __init__(self, cache_write_30m_priced: bool) -> None
-```
-
-**Purpose**: Creates the state tracker for one Responses API stream. It remembers emitted output, tool-call ids, reasoning items, final usage, and any terminal error.
-
-**Data flow**: It receives a cache-pricing flag. It initializes empty collections for tool-call tracking and reasoning, clears usage and terminal error, and marks that no visible output has been yielded yet.
-
-**Call relations**: OpenAIClient._complete_responses creates one _ResponsesStream for each provider attempt. The streaming loop then feeds all Responses events into it.
-
-*Call graph*: called by 1 (_complete_responses).
-
-
-##### `_ResponsesStream.accept`  (lines 612–651)
-
-```
-def accept(self, event: ResponseStreamEvent) -> tuple[ModelEvent, ...]
-```
-
-**Purpose**: Consumes one Responses API stream event and converts it into UFO events or stored final state. It understands text, tool calls, reasoning completion, refusal, completion, failure, and incomplete-response events.
-
-**Data flow**: It receives a Responses stream event. Depending on the event type, it may emit a TextDelta, ToolCallStart, or ToolCallDelta; store reasoning; convert usage; or record a terminal refusal, truncation, or failure error. It updates whether visible output has been yielded and returns any emitted events.
-
-**Call relations**: OpenAIClient._complete_responses calls this for each event from the provider. It delegates detailed reasoning storage to _record_reasoning and incomplete-response handling to _record_incomplete.
-
-*Call graph*: calls 3 internal fn (_record_incomplete, _record_reasoning, _responses_usage); 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `_ResponsesStream._record_reasoning`  (lines 653–662)
-
-```
-def _record_reasoning(self, item: ResponseReasoningItem) -> None
-```
-
-**Purpose**: Stores a completed OpenAI reasoning item so it can be replayed in a future request. This is important when the model makes tool calls and later needs its encrypted reasoning context back.
-
-**Data flow**: It receives a completed reasoning item from the Responses stream. It checks that encrypted content is present, copies the id, encrypted content, and summary text into a UFO ReasoningItemBlock, and appends it to the stream state's reasoning list.
-
-**Call relations**: _ResponsesStream.accept calls this when it sees a reasoning item done event. OpenAIClient._complete_responses later yields the collected reasoning blocks just before final usage.
-
-*Call graph*: called by 1 (accept); 1 external calls (__init__).
-
-
-##### `_ResponsesStream._record_incomplete`  (lines 664–675)
-
-```
-def _record_incomplete(self, response: Any) -> None
-```
-
-**Purpose**: Records why a Responses API stream ended incompletely. It turns provider reasons into UFO errors such as truncation or refusal when possible.
-
-**Data flow**: It receives an incomplete response object. If usage is present, it converts and stores it. It then reads the incomplete reason: max_output_tokens becomes ModelResponseTruncated, content_filter becomes ModelRefusal, and anything else becomes a general runtime error.
-
-**Call relations**: _ResponsesStream.accept calls this when the provider sends an incomplete-response event. Its stored terminal error is later returned or raised by _ResponsesStream.finish.
-
-*Call graph*: calls 1 internal fn (_responses_usage); called by 1 (accept); 2 external calls (__init__, __init__).
-
-
-##### `_ResponsesStream.finish`  (lines 677–685)
-
-```
-def finish(self) -> tuple[Usage, Exception | None]
-```
-
-**Purpose**: Finishes a Responses API stream by returning final usage and any terminal error. It preserves special error types like refusal and truncation so the engine can recover or report them correctly.
-
-**Data flow**: It reads the stored usage and terminal error. If usage is missing, it raises the terminal error if one exists, or a missing-usage error otherwise. If usage exists, it returns usage together with the optional terminal error.
-
-**Call relations**: OpenAIClient._complete_responses calls this after the provider stream ends. The caller uses its result to decide whether to yield usage, yield reasoning, return, or raise an error.
-
-
-##### `OpenAIClient.complete`  (lines 700–703)
-
-```
-def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: Chooses which OpenAI-style API surface to use for a model request. It hides the difference between Chat Completions and Responses from the rest of the harness.
-
-**Data flow**: It receives a ModelRequest. If this client is for Codex or the model spec says to use Responses, it returns the Responses streaming iterator; otherwise it returns the Chat Completions streaming iterator.
-
-**Call relations**: This is the public entry on OpenAIClient. Callers ask it for streamed model events, and it delegates to _complete_chat or _complete_responses based on client and model configuration.
-
-*Call graph*: calls 2 internal fn (_complete_chat, _complete_responses).
-
-
-##### `OpenAIClient._reasoning_effort`  (lines 705–724)
-
-```
-def _reasoning_effort(self, request: ModelRequest) -> OpenAIEffort
-```
-
-**Purpose**: Figures out what reasoning setting, if any, should be sent to OpenAI for this request. Reasoning means the model may spend hidden work tokens before answering; this setting controls that behavior where the provider supports it.
-
-**Data flow**: It receives a ModelRequest and reads the model spec's reasoning rules. It asks the spec for the wire-level reasoning value, converts UFO's off setting into OpenAI's none value, omits auto or unsupported values, and raises if the caller asked to turn reasoning off in a tool request where the provider gives no legal way to say that.
-
-**Call relations**: _chat_kwargs uses this while building Chat Completions parameters. _complete_responses uses it before building a Responses request.
-
-*Call graph*: called by 2 (_chat_kwargs, _complete_responses).
-
-
-##### `OpenAIClient._chat_kwargs`  (lines 726–755)
-
-```
-def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]
-```
-
-**Purpose**: Builds the keyword arguments passed to the OpenAI Chat Completions create call. It packages the model, messages, token budget, streaming options, reasoning effort, tools, and tool-choice rule.
-
-**Data flow**: It receives a ModelRequest. It converts messages with openai_messages, adds max completion tokens and usage-in-stream options, asks _reasoning_effort for any reasoning parameter, converts tools into OpenAI function definitions, and returns the finished argument dictionary.
-
-**Call relations**: OpenAIClient._complete_chat calls this immediately before starting a chat stream. It is the final request-building step for the Chat Completions path.
-
-*Call graph*: calls 2 internal fn (_reasoning_effort, openai_messages); called by 1 (_complete_chat).
-
-
-##### `OpenAIClient._complete_chat`  (lines 757–831)
-
-```
-async def _complete_chat(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: Runs a full streaming Chat Completions request and yields UFO model events as they arrive. It also retries safe provider failures and emits final usage as the last successful event.
-
-**Data flow**: It receives a ModelRequest. It builds chat arguments, opens an OpenAI stream, yields a ModelStreamStart when the stream begins, feeds chunks into _ChatStream, yields text and tool-call events, handles retryable errors before visible output, treats mid-stream failures as interruptions, checks final stream state, retries empty completions a few times, and finally yields usage or raises the terminal error.
-
-**Call relations**: OpenAIClient.complete calls this for models using Chat Completions. It relies on _chat_kwargs for request construction, _ChatStream for chunk translation, and _OpenAIRetry for retry decisions.
-
-*Call graph*: calls 3 internal fn (_chat_kwargs, __init__, __init__); called by 1 (complete); 3 external calls (__init__, __init__, emit_metric).
-
-
-##### `OpenAIClient._complete_responses`  (lines 833–900)
-
-```
-async def _complete_responses(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: Runs a full streaming Responses API request and yields UFO model events as they arrive. It is the Responses counterpart to the chat path, with extra support for preserving reasoning items.
-
-**Data flow**: It receives a ModelRequest. It resolves reasoning effort, builds a Responses request, opens the provider stream, yields ModelStreamStart, feeds events into _ResponsesStream, yields live text and tool-call events, retries safe failures, treats mid-stream provider errors as interruptions, retries empty completions, then yields collected reasoning blocks followed by final usage.
-
-**Call relations**: OpenAIClient.complete calls this for Codex clients or models whose spec selects the Responses API. It uses responses_request for request construction, _ResponsesStream for event translation, and _OpenAIRetry for retry behavior.
-
-*Call graph*: calls 4 internal fn (_reasoning_effort, __init__, responses_request, __init__); called by 1 (complete); 3 external calls (__init__, __init__, emit_metric).
-
-
-### `core/src/ufo/harness/models/grant.py`
-
-`domain_logic` · `credential use and refresh during provider calls`
-
-This file exists because a connected provider account is not the same as a permanent API key. An access token expires. The refresh token is the “ticket” used to buy the next access token. If the system stored only the access token, it might still look connected after it had stopped working.
-
-The main object is `Grant`, a small data record containing the current access token, the refresh token, and the expiry time. It also records whether another task has temporarily claimed the right to refresh it, because refresh tokens may be single-use. This is like putting a “someone is at the counter renewing this pass” note on a shared membership card, so two people do not try to renew it at once.
-
-The file also defines which OAuth client ID and token endpoint to use for OpenAI and Anthropic. OAuth is the common web sign-in system where one service grants another limited access. The client ID can come from the environment, so different deployments can identify themselves differently.
-
-When a token response comes back from a provider, `granted` checks that it contains all required pieces before accepting it. When a stored value is read, `read_grant` decides whether it is really a grant JSON object or just a plain API key. When a grant needs renewal, `refreshed` calls the provider’s token endpoint and returns a completely new `Grant`, because providers can rotate both access and refresh tokens.
-
-#### Function details
-
-##### `openai_client_id`  (lines 36–39)
-
-```
-def openai_client_id() -> str
-```
-
-**Purpose**: Returns the client ID this deployment should present to OpenAI when refreshing or redeeming an OAuth grant. It uses a deployment-specific environment value if one is set, otherwise it falls back to the public OpenAI Codex client ID.
-
-**Data flow**: It reads the `UFO_OPENAI_OAUTH_CLIENT_ID` environment variable. If that value exists, it returns it; if not, it returns the built-in public OpenAI client ID. It does not change anything.
-
-**Call relations**: The OpenAI entry in `GRANT_CLIENTS` stores this function instead of a fixed string. Later, when `refreshed` needs to renew an OpenAI grant, it calls through that stored function so the refresh uses the same kind of client identity that the sign-in flow used.
-
-
-##### `anthropic_client_id`  (lines 42–45)
-
-```
-def anthropic_client_id() -> str
-```
-
-**Purpose**: Returns the client ID this deployment should present to Anthropic when refreshing or redeeming an OAuth grant. It uses a deployment-specific environment value if one is set, otherwise it falls back to the public Claude client ID.
-
-**Data flow**: It reads the `UFO_ANTHROPIC_OAUTH_CLIENT_ID` environment variable. If that value exists, it returns it; otherwise it returns the built-in Anthropic public client ID. It only reports the chosen value and does not modify state.
-
-**Call relations**: The Anthropic entry in `GRANT_CLIENTS` points to this function. When `refreshed` renews an Anthropic grant, it asks this function for the client ID to send to Anthropic’s token endpoint.
-
-
-##### `GrantRefusedRefresh.__init__`  (lines 71–73)
-
-```
-def __init__(self, slot: str) -> None
-```
-
-**Purpose**: Builds a clear error for the case where a provider will not exchange a refresh token for a new grant. This tells the rest of the system that the user’s connected account can no longer be repaired automatically and must be connected again.
-
-**Data flow**: It receives the slot name, such as the OpenAI or Anthropic credential slot. It creates an exception message naming that slot and stores the slot on the exception object, so later code can know which connected account failed.
-
-**Call relations**: `refreshed` raises this error whenever the provider cannot be reached, rejects the refresh, or returns an unusable answer. `WorkspaceScope._refreshed_credential` can also raise it when refreshing a workspace credential fails, so callers get one consistent signal for “this grant cannot be refreshed.”
-
-*Call graph*: called by 2 (refreshed, _refreshed_credential).
-
-
-##### `Grant.spent`  (lines 88–89)
-
-```
-def spent(self) -> bool
-```
-
-**Purpose**: Says whether this grant should be treated as used up. It does not wait until the exact expiry second; it marks the grant spent several minutes early so a long-running provider call does not die halfway through.
-
-**Data flow**: It reads the grant’s `expires_at` time and the current clock time. It subtracts the safety margin from the expiry time, compares that with now, and returns `true` if the grant is close enough to expiry that it should be refreshed.
-
-**Call relations**: This property is meant for code deciding whether it can safely use a grant or should refresh it first. Internally it depends only on the current time, so it can be checked whenever a credential is about to be spent.
-
-*Call graph*: 1 external calls (time).
-
-
-##### `Grant.claimed`  (lines 92–93)
-
-```
-def claimed(self) -> bool
-```
-
-**Purpose**: Says whether another caller currently has the right to refresh this grant. This helps prevent two tasks from spending the same one-time refresh token at the same time.
-
-**Data flow**: It reads `refreshing_until` from the grant and compares it with the current clock time. If the current time is still before that lease deadline, it returns `true`; otherwise it returns `false`.
-
-**Call relations**: This property is used by refresh coordination code to decide whether to wait, retry, or take over after an old refresh claim has expired. It is the simple clock check behind the “someone else is renewing this” marker.
-
-*Call graph*: 1 external calls (time).
-
-
-##### `Grant.stored`  (lines 95–96)
-
-```
-def stored(self) -> str
-```
-
-**Purpose**: Turns a `Grant` object into the string form that can be saved in a credential slot. This keeps the access token, refresh token, expiry time, and refresh claim together instead of storing only one piece.
-
-**Data flow**: It takes the fields already present on the `Grant` object and serializes them as JSON text. The returned string can be written to storage; the object itself is not changed.
-
-**Call relations**: Other parts of the system can call this before saving a connected account grant. Its counterpart in this file is `read_grant`, which tries to turn a stored JSON string back into a `Grant`.
-
-
-##### `granted`  (lines 99–112)
-
-```
-def granted(payload: dict[str, object]) -> Grant | None
-```
-
-**Purpose**: Checks a provider token response and turns it into a valid `Grant` only if all required pieces are present. It refuses incomplete responses because an access token without a refresh token would work briefly and then leave the account stuck.
-
-**Data flow**: It receives a dictionary decoded from a provider response. It looks for a non-empty `access_token`, a non-empty `refresh_token`, and a numeric `expires_in` value. If anything is missing or the wrong type, it returns `None`; otherwise it creates a `Grant` whose expiry time is the current time plus the provider’s lifetime value.
-
-**Call relations**: `refreshed` calls this after receiving JSON from a provider’s token endpoint. `granted` is the gatekeeper that decides whether the provider’s answer is complete enough to store and use.
-
-*Call graph*: called by 1 (refreshed); 2 external calls (__init__, time).
-
-
-##### `read_grant`  (lines 115–127)
-
-```
-def read_grant(stored: str) -> Grant | None
-```
-
-**Purpose**: Tries to read a stored credential string as a `Grant`. If the string is not grant-shaped JSON, it returns `None`, which lets the system treat it as a plain API key instead.
-
-**Data flow**: It receives a stored string. First it tries to parse it as JSON. If parsing fails, or the parsed value is not an object, or the object cannot be validated as a `Grant`, it returns `None`. If validation succeeds, it returns the `Grant` object.
-
-**Call relations**: This function sits at the boundary between saved credential text and usable grant data. It pairs with `Grant.stored`: one writes the JSON form, the other safely recognizes and rebuilds it later.
-
-*Call graph*: 1 external calls (loads).
-
-
-##### `refreshed`  (lines 130–155)
-
-```
-async def refreshed(grant: Grant, slot: str) -> Grant
-```
-
-**Purpose**: Uses a grant’s refresh token to ask OpenAI or Anthropic for a new grant. This is what keeps a connected account working after the short-lived access token expires.
-
-**Data flow**: It receives the old `Grant` and the credential slot name. From the slot it finds the right token endpoint and client-ID function. It sends an HTTP POST request containing the refresh token, the refresh-token grant type, and the client ID. If the provider cannot be reached, rejects the request, returns unreadable JSON, or omits required fields, it raises `GrantRefusedRefresh`. If everything is valid, it returns a new `Grant` containing the newly issued access and refresh tokens.
-
-**Call relations**: This is the file’s main renewal path. It calls the slot-specific client-ID function through `GRANT_CLIENTS`, uses `httpx.AsyncClient` to contact the provider over HTTP, hands the provider’s JSON answer to `granted`, and raises `GrantRefusedRefresh` whenever the refresh cannot produce a usable replacement.
-
-*Call graph*: calls 2 internal fn (__init__, granted); 1 external calls (AsyncClient).
-
-
-### `core/src/ufo/harness/models/interface.py`
-
-`data_model` · `request preparation and model streaming`
-
-This file is the contract between the UFO harness and any large language model service it talks to. Without it, each provider client would invent its own request and response shapes, and the rest of the system would have to know provider-specific details. Instead, this file gives everyone one shared set of message types.
-
-Most of the file is made of small data shapes. A user or assistant message can contain plain text, images, tool calls, tool results, or model reasoning blocks. The reasoning blocks are kept carefully because some providers require the exact same hidden reasoning data to be sent back on the next turn. Tool results can also carry images, such as screenshots, not just text.
-
-`ModelRequest` is the main package sent to a model client: it includes the model name, system prompt, conversation messages, token budget, tools, optional forced tool choice, reasoning setting, and cache/session hints. `ModelClient` is a protocol, meaning any provider-specific client counts as a model client if it offers the expected `complete` method.
-
-The file also protects provider limits around images. `trim_images` keeps the newest images while replacing older or oversized ones with a clear text note. `omit_images` replaces all images when the chosen model only accepts text. This is like packing photos into an email with strict limits: keep the most recent useful ones, and leave a note where the others were removed.
-
-#### Function details
-
-##### `ModelRequest._forced_choice_names_an_offered_tool`  (lines 160–165)
-
-```
-def _forced_choice_names_an_offered_tool(self) -> 'ModelRequest'
-```
-
-**Purpose**: This validation step makes sure a request cannot force the model to use a tool that was not actually offered. It prevents a confusing or impossible model request before it reaches a provider.
-
-**Data flow**: It reads the `tool_choice` field and the list of offered `tools` inside the `ModelRequest`. If no tool is forced, it leaves the request unchanged. If a tool is forced, it checks that one offered tool has the same name; otherwise it raises an error instead of producing an invalid request.
-
-**Call relations**: This runs automatically when a `ModelRequest` is created or validated by Pydantic, the library used here to check structured data. It does not call other project functions; it acts as a gatekeeper before any `ModelClient.complete` implementation receives the request.
-
-
-##### `ModelClient.complete`  (lines 219–219)
-
-```
-def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
-```
-
-**Purpose**: This is the shared promise every model client must keep: given a `ModelRequest`, stream back model events. Provider-specific clients implement this so the rest of the system can ask for completions without caring whether the backend is Anthropic, OpenAI, or another service.
-
-**Data flow**: A complete `ModelRequest` goes in. The implementation sends that request to its provider and yields a stream of events such as text pieces, tool-call starts, tool-call JSON fragments, reasoning blocks, usage information, or stream-start markers. The protocol itself only defines the shape; it does not do the network work.
-
-**Call relations**: Other parts of the harness call `complete` when they need a model answer. This file defines the interface, while concrete provider clients elsewhere supply the real behavior behind it.
-
-
-##### `trim_images`  (lines 227–258)
-
-```
-def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]
-```
-
-**Purpose**: This prepares messages for image-capable model providers by enforcing shared image limits. It keeps the newest images that fit the per-message, per-request, and byte-size budgets, and replaces removed images with a short note.
-
-**Data flow**: It receives a tuple of conversation `Message` objects. First it asks `_image_positions` where all inline images are. It chooses which image positions survive based on provider count limits, then uses `_image_data_len` to apply the total image-data budget from newest to oldest. Finally it calls `_trim_message` for each message that may need replacements, returning a new tuple of messages where dropped images are replaced by text markers. If nothing needs changing, it returns the original messages.
-
-**Call relations**: This function is used before a provider client translates the shared message format into that provider's own request format. It coordinates the helper functions: `_image_positions` finds images, `_image_data_len` measures them, and `_trim_message` rewrites the affected messages.
-
-*Call graph*: calls 3 internal fn (_image_data_len, _image_positions, _trim_message).
-
-
-##### `omit_images`  (lines 261–269)
-
-```
-def omit_images(messages: tuple[Message, ...]) -> tuple[Message, ...]
-```
-
-**Purpose**: This prepares messages for a text-only model by replacing every image with an explicit text note. That way the model receives a valid text request and can still see that an image was present but unavailable.
-
-**Data flow**: It receives a tuple of `Message` objects. It uses `_image_positions` to find every top-level or tool-result image. If there are no images, it returns the original messages. Otherwise it calls `_trim_message` for each message, replacing all found images with the text marker for unsupported images, and returns the rewritten tuple.
-
-**Call relations**: Provider selection or request preparation can call this when the chosen model cannot accept image input. It shares the same image-finding and message-rewriting helpers as `trim_images`, but it drops all images instead of keeping some.
-
-*Call graph*: calls 2 internal fn (_image_positions, _trim_message).
-
-
-##### `_image_data_len`  (lines 272–283)
-
-```
-def _image_data_len(messages: tuple[Message, ...], position: tuple[int, int, int | None]) -> int
-```
-
-**Purpose**: This helper tells `trim_images` how large one image's base64 data is. The size is used to stay under the provider's total image-data limit.
-
-**Data flow**: It receives the full message tuple and one image position, which identifies a message, a content block, and possibly a nested item inside a tool result. It looks up that exact image and returns the length of its encoded image data. If the position does not point to an image, it raises an internal error because the caller gave it an impossible address.
-
-**Call relations**: `trim_images` calls this while deciding which kept images still fit inside the request-wide byte budget. It relies on positions produced by `_image_positions`, so in normal use those positions should always point to real images.
-
-*Call graph*: called by 1 (trim_images).
-
-
-##### `_image_positions`  (lines 286–306)
-
-```
-def _image_positions(messages: tuple[Message, ...]) -> list[tuple[int, int, int | None]]
-```
-
-**Purpose**: This helper scans a conversation and records where every image lives. It understands both images placed directly in messages and images nested inside tool results.
-
-**Data flow**: It receives a tuple of `Message` objects. For each message with structured content, it walks through the content blocks. When it finds a direct `ImageBlock`, it records its message and block location; when it finds a `ToolResultBlock` with multiple parts, it records the location of each image inside that result. It returns the list of positions from oldest message to newest.
-
-**Call relations**: `trim_images` calls this to decide which images to keep or drop, and `omit_images` calls it to find all images that must be replaced. The returned positions are then passed to `_image_data_len` and `_trim_message`.
-
-*Call graph*: called by 2 (omit_images, trim_images).
-
-
-##### `_trim_message`  (lines 309–336)
-
-```
-def _trim_message(message_index: int, message: Message, drop: set[tuple[int, int, int | None]], replacement: str) -> Message
-```
-
-**Purpose**: This helper rewrites one message by replacing selected images with a plain text placeholder. It leaves all other content untouched.
-
-**Data flow**: It receives a message index, one `Message`, a set of image positions to drop, and the replacement text to insert. If the message is plain text, it returns it unchanged. If the message has structured blocks, it walks through them: a dropped top-level image becomes a new `TextBlock`, and a dropped image inside a tool result becomes a `TextBlock` inside a copied tool-result block. It returns a copied `Message` with the updated content.
-
-**Call relations**: `trim_images` and `omit_images` call this after they decide which image positions should disappear. It uses `TextBlock` to create the visible placeholder and `Message.model_copy` to preserve the original message while changing only its content.
-
-*Call graph*: called by 2 (omit_images, trim_images); 2 external calls (__init__, model_copy).
-
-
-### Usage pricing and ledgers
-Turns model and runtime usage into billable cost while enforcing prepaid balance and spend constraints.
-
-### `core/src/ufo/runtime/billing/accounting.py`
-
-`domain_logic` · `cross-cutting: turn admission, per-round billing, background billing, reporting, and usage export`
-
-This file answers a simple but important question: when UFO does work for a workspace, who pays, how much, and is the workspace still allowed to keep going? It writes usage into a ledger, which is like a bank statement for compute: token counts, media generations, network egress counts, prices, models, and timestamps all become durable rows in the database.
-
-The file is careful about retries. A turn may be replayed after a crash, so token usage for a single run attempt is treated as cumulative: if the same attempt reports the same usage again, nothing is charged twice; if it reports more usage, only the extra cost is debited. Separate attempts add together.
-
-It also distinguishes platform-paid work from bring-your-own-key work. If a workspace used its own provider key, the ledger can still record the value of the work, but the prepaid balance is not debited for that model call.
-
-On top of recording, this file enforces gates. `SpendEvaluator` checks rolling spend caps for a workspace, member, or agent. `BalanceGate` checks whether prepaid balance is high enough to start or continue work. Finally, `SpendRollup` reads the ledger back into human reports, and the export functions freeze usage deltas for external billing consumers.
-
-#### Function details
-
-##### `OffTurnSpendRefused.__init__`  (lines 64–67)
-
-```
-def __init__(self, outcome: SpendOutcome, message: str, model: str) -> None
-```
-
-**Purpose**: Creates an error used when a model call made outside a normal turn is blocked by billing rules. It stores both the decision, such as park or reject, and the model that was refused.
-
-**Data flow**: It receives a spend outcome, a message for the caller, and a model name. It saves the outcome and model on the error object, then passes the message to the normal exception machinery so it can be shown or logged.
-
-**Call relations**: The off-turn model access path raises this when billing gates refuse a model call. The stored model matters because one model may be blocked while another is allowed if the workspace owns a key for only some providers.
-
-*Call graph*: called by 1 (turn).
-
-
-##### `applicable_caps_absent`  (lines 70–76)
-
-```
-def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> bool
-```
-
-**Purpose**: Quickly answers whether the system recently learned that no spend cap applies to a specific workspace/member/agent combination. This avoids unnecessary database reads in the common case where no caps are configured.
-
-**Data flow**: It takes the workspace, optional member, and agent identifiers. It looks in a short-lived in-memory cache and returns true only if the matching entry exists and has not expired.
-
-**Call relations**: This is a fast path that callers can use before doing cap enforcement. The matching cache entries are written by `SpendEvaluator.decide` through `_note_absent_caps` when a full database check finds no relevant caps.
-
-*Call graph*: 1 external calls (monotonic).
-
-
-##### `_note_absent_caps`  (lines 79–88)
-
-```
-def _note_absent_caps(key: tuple[UUID, UUID | None, UUID | None]) -> None
-```
-
-**Purpose**: Remembers for a few seconds that a particular workspace/member/agent combination has no spend caps. This keeps cap checking cheap without making the cache a source of permanent truth.
-
-**Data flow**: It receives a cache key made from workspace, member, and agent identifiers. It removes expired entries if the cache is full, then stores a new expiry time for that key.
-
-**Call relations**: `SpendEvaluator.decide` calls this after it has checked the database and found no applicable caps. Later, `applicable_caps_absent` can use the note to skip another database round trip.
-
-*Call graph*: called by 1 (decide); 1 external calls (monotonic).
-
-
-##### `_total_tokens`  (lines 91–99)
-
-```
-def _total_tokens(usage: Usage) -> int
-```
-
-**Purpose**: Adds up all token categories in a usage record into one total. Billing needs this single total for ledger amounts and reports.
-
-**Data flow**: It receives a `Usage` object containing input, output, cache-read, and cache-write token counts. It sums those fields and returns the combined token count.
-
-**Call relations**: Token billing writers call this before deciding whether there is anything to record. It feeds `record_turn_usage`, `record_workspace_usage`, and `record_sandbox_tokens`.
-
-*Call graph*: called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
-
-
-##### `_prompt_tokens`  (lines 102–111)
-
-```
-def _prompt_tokens(usage: Usage) -> int
-```
-
-**Purpose**: Counts the tokens that made up the prompt the model read, including cached prompt tokens. This is used to calculate what share of a prompt came from cache.
-
-**Data flow**: It receives a `Usage` object and adds input tokens plus cache-read and cache-write tokens, but not output tokens. It returns that prompt-side total.
-
-**Call relations**: The token ledger writers store this value beside the total token count. Later reporting, especially `read_turn_cost`, can compute cache percentage from the same ledger data that holds the cost.
-
-*Call graph*: called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
-
-
-##### `workspace_owns_the_key`  (lines 114–137)
-
-```
-async def workspace_owns_the_key(connection: AsyncConnection, workspace_id: UUID, key_slot: str | None) -> bool
-```
-
-**Purpose**: Checks whether a workspace has stored its own provider credential for a given key slot. This prevents the platform from charging prepaid balance when the workspace is already paying the provider directly.
-
-**Data flow**: It receives a database connection, workspace id, and key slot name. If the slot is missing it returns false; otherwise it asks the credential table whether that workspace has a matching credential row.
-
-**Call relations**: `BalanceGate._workspace_serves_itself` uses this as the final check for the own-key exemption. It deliberately checks workspace-owned credentials, not member credentials.
-
-*Call graph*: called by 1 (_workspace_serves_itself); 3 external calls (exists, scalar, select).
-
-
-##### `record_turn_usage`  (lines 140–275)
-
-```
-async def record_turn_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, usage: Usage, attempt: str='', pricing: Pricing=CORE_PRICING, byok: bool=False) -> None
-```
-
-**Purpose**: Records and charges token usage for one turn run attempt. It is built to survive workflow replay without double-charging the same attempt.
-
-**Data flow**: It receives the workspace, turn, model, usage counters, attempt id, pricing table, and whether the call used the workspace's own key. It totals and prices the usage, compares it with any existing ledger row for the same attempt, debits only the new charge when appropriate, and inserts or updates the ledger row.
-
-**Call relations**: Turn execution code calls this as model usage becomes known. It uses `_total_tokens` and `_prompt_tokens` for counts, pricing to compute cost, and balance debit to take money only after replay safety checks pass.
-
-*Call graph*: calls 3 internal fn (micro_usd, _prompt_tokens, _total_tokens); 7 external calls (__init__, execute, insert, select, update, debit, ledger_id_for).
-
-
-##### `read_turn_cost`  (lines 289–319)
-
-```
-async def read_turn_cost(connection: AsyncConnection, turn_id: UUID, dimension: str) -> TurnCost | None
-```
-
-**Purpose**: Reads what a turn spent for a chosen ledger dimension, such as host-side model tokens or sandbox model tokens. It returns a compact cost summary for display or terminal reporting.
-
-**Data flow**: It receives a connection, turn id, and dimension name. It sums matching ledger rows across all attempts, calculates cache percentage from prompt and cache-read tokens, and returns a `TurnCost` object or nothing if the turn has no such spend.
-
-**Call relations**: This is a reader over rows written by functions such as `record_turn_usage` and `record_sandbox_tokens`. It lets later turn-summary code avoid reconstructing cost from in-memory state.
-
-*Call graph*: 3 external calls (__init__, execute, select).
-
-
-##### `record_workspace_usage`  (lines 322–371)
-
-```
-async def record_workspace_usage(connection: AsyncConnection, workspace_id: UUID, model: str, usage: Usage, pricing: Pricing=CORE_PRICING, byok: bool=False) -> None
-```
-
-**Purpose**: Records token usage for a workspace-level background job that is not attached to a turn. This lets scheduled or off-turn work count toward workspace spend without pretending it belongs to a member or agent.
-
-**Data flow**: It receives workspace id, model, usage, pricing, and whether the workspace used its own key. It totals and prices the usage, debits the workspace unless own-key billing applies, and inserts a fresh ledger row with no turn id.
-
-**Call relations**: Background job code uses this instead of `record_turn_usage`. It shares token counting and pricing behavior with turn billing, but intentionally leaves member and agent attribution empty.
-
-*Call graph*: calls 3 internal fn (micro_usd, _prompt_tokens, _total_tokens); 4 external calls (execute, insert, debit, uuid4).
-
-
-##### `record_egress_request`  (lines 374–403)
-
-```
-async def record_egress_request(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int=1) -> None
-```
-
-**Purpose**: Counts sandbox network egress requests for a turn. These requests are metered as counts, not charged as money.
-
-**Data flow**: It receives workspace id, turn id, and a request count. It builds the stable ledger id for that turn's egress row, then inserts the row or atomically adds to the existing count.
-
-**Call relations**: The sandbox egress proxy uses this when turn-attached sandbox traffic is flushed. It writes a separate `egress` dimension so it does not mix with token billing.
-
-*Call graph*: 2 external calls (execute, ledger_id_for).
-
-
-##### `record_probe_egress_request`  (lines 406–432)
-
-```
-async def record_probe_egress_request(connection: AsyncConnection, workspace_id: UUID, amount: int=1) -> None
-```
-
-**Purpose**: Counts sandbox network egress requests made by off-turn probes. Like turn egress, it records activity but does not charge money.
-
-**Data flow**: It receives workspace id and a request count. It inserts a new ledger row with no turn id, priced at zero, so the count belongs only to the workspace.
-
-**Call relations**: Probe or proxy code uses this for sandbox activity not tied to a turn. Because the row has no turn id, workspace reports can include it while member and agent reports naturally leave it out.
-
-*Call graph*: 3 external calls (execute, insert, uuid4).
-
-
-##### `record_sandbox_tokens`  (lines 435–511)
-
-```
-async def record_sandbox_tokens(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, usage: Usage, pricing: Pricing=CORE_PRICING) -> None
-```
-
-**Purpose**: Records and charges model calls made from inside a sandbox through the egress proxy. These are separate from the host turn loop's own model calls.
-
-**Data flow**: It receives workspace, turn, model, usage, and pricing. It totals and prices the tokens, debits the workspace, and inserts or atomically adds the usage and cost to the turn's `sandbox_tokens` ledger row.
-
-**Call relations**: The sandbox proxy calls this when in-sandbox model usage is known. It uses the same token helpers and pricing style as host-side token billing, but accumulates under a different ledger dimension.
-
-*Call graph*: calls 3 internal fn (micro_usd, _prompt_tokens, _total_tokens); 3 external calls (execute, debit, ledger_id_for).
-
-
-##### `record_image_usage`  (lines 514–533)
-
-```
-async def record_image_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, images: int, micro_usd: int) -> None
-```
-
-**Purpose**: Records and charges generated images for a turn. The caller supplies the price because image providers may bill in units other than text tokens.
-
-**Data flow**: It receives workspace, turn, model, image count, and cost. It passes those values to the shared media writer with the image dimension.
-
-**Call relations**: Provider extensions or image generation code call this after an image generation completes. It delegates the actual ledger update and debit to `_record_media_usage`.
-
-*Call graph*: calls 1 internal fn (_record_media_usage).
-
-
-##### `record_video_usage`  (lines 536–550)
-
-```
-async def record_video_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, videos: int, micro_usd: int) -> None
-```
-
-**Purpose**: Records and charges generated videos for a turn. It mirrors image billing, but under the video dimension.
-
-**Data flow**: It receives workspace, turn, model, video count, and cost. It forwards those values to the shared media writer with the video dimension.
-
-**Call relations**: Video generation code calls this after the provider reports the charge. `_record_media_usage` does the shared database and balance work.
-
-*Call graph*: calls 1 internal fn (_record_media_usage).
-
-
-##### `_record_media_usage`  (lines 553–594)
-
-```
-async def _record_media_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, dimension: str, model: str, amount: int, micro_usd: int) -> None
-```
-
-**Purpose**: Shared helper that writes image or video usage into the ledger and debits the workspace. It keeps media billing consistent across different media types.
-
-**Data flow**: It receives the media dimension, amount, price, workspace, turn, and model. It debits the workspace for the new price, then inserts a per-turn ledger row or atomically adds the new amount and cost to the existing one.
-
-**Call relations**: `record_image_usage` and `record_video_usage` both call this. It is the common path for media charges, while egress remains the special dimension that records counts without debiting money.
-
-*Call graph*: called by 2 (record_image_usage, record_video_usage); 3 external calls (execute, debit, ledger_id_for).
-
-
-##### `mint_usage_exports`  (lines 619–742)
+##### `_row`  (lines 125–144)
 
 ```
-async def mint_usage_exports(connection: AsyncConnection, workspace_id: UUID, consumer: str, floor: datetime, key_slot_for: Callable[[str], str | None]) -> None
+def _row(row: sa.RowMapping) -> Notification
 ```
 
-**Purpose**: Freezes newly settled ledger growth into export-intent rows for an external billing consumer. This makes retries safe because the exported delta is saved before delivery.
+**Purpose**: Turns one raw database result row into a Notification object that application code can use comfortably. It is the translation step between SQL results and the app’s plain Python data model.
 
-**Data flow**: It receives a workspace, consumer name, backfill floor time, and a function that maps models to credential slots. It finds ledger rows that have grown beyond what was previously exported, decides whether each token charge was bring-your-own-key, and inserts one immutable export row per new delta.
+**Data flow**: It receives a database row mapping with column names and values → pulls out each notification field → normalizes timestamp fields with _aware → returns a populated Notification object.
 
-**Call relations**: A usage export job calls this before reading pending exports. It depends on ledger rows written by the billing recorders and creates stable work for `read_pending_usage_exports` to deliver.
+**Call relations**: NotificationStore.rows and NotificationStore.claim call this after fetching rows from the database. It hands them clean Notification objects instead of database-specific row objects.
 
-*Call graph*: 5 external calls (now, timedelta, execute, or_, select).
+*Call graph*: calls 1 internal fn (_aware); called by 2 (claim, rows); 1 external calls (__init__).
 
 
-##### `read_pending_usage_exports`  (lines 745–790)
+##### `_claim_available`  (lines 147–148)
 
 ```
-async def read_pending_usage_exports(connection: AsyncConnection, workspace_id: UUID, consumer: str, limit: int) -> tuple[UsageExport, ...]
+def _claim_available(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Reads frozen usage-export records that have not yet been acknowledged by an external consumer. It returns exactly what should be sent next.
+**Purpose**: Builds the rule for whether a notification can currently be claimed by a drain job. A row is available if it has no lease or its lease has expired.
 
-**Data flow**: It receives workspace id, consumer name, and a limit. It selects unacknowledged export rows, joins their descriptive ledger fields, converts them into `UsageExport` objects, and returns them in mint order.
+**Data flow**: It receives the current time → creates a database condition checking for a missing claim expiry or an expiry earlier than now → returns that condition for use in SQL queries.
 
-**Call relations**: The export delivery loop calls this after `mint_usage_exports`. If delivery fails before acknowledgement, the same frozen rows are read again for safe retry.
+**Call relations**: The workspace candidate query, lane finder, and claim operation all use this same rule. That keeps the definition of “free to claim” consistent across the drain flow.
 
-*Call graph*: 3 external calls (__init__, execute, select).
+*Call graph*: called by 3 (claim, lanes_with_untriaged, due); 1 external calls (or_).
 
 
-##### `ack_usage_exports`  (lines 793–817)
+##### `inbox_agent_id`  (lines 151–164)
 
 ```
-async def ack_usage_exports(connection: AsyncConnection, workspace_id: UUID, consumer: str, exports: tuple[UsageExport, ...]) -> None
+async def inbox_agent_id(ctx: ExtensionContext) -> UUID | None
 ```
 
-**Purpose**: Marks exported usage deltas as acknowledged after an outside billing system has accepted them. This removes them from future pending reads.
+**Purpose**: Finds the live agent that belongs to the notification app in the current workspace. This matters because the app should only write to and wake the agent it provisioned, not another agent that happens to have a similar name.
 
-**Data flow**: It receives the workspace, consumer, and the exact `UsageExport` objects that were delivered. It updates matching export rows by ledger id and starting amount, setting their acknowledged time.
+**Data flow**: It asks the extension context for all workspace agents → scans for the first non-archived agent provisioned by the notification extension → returns that agent’s id, or None if no suitable agent exists.
 
-**Call relations**: The export delivery loop calls this only after successful external delivery. It completes the flow started by `mint_usage_exports` and read by `read_pending_usage_exports`.
+**Call relations**: Other notification code can call this before addressing inbox work. It relies on ExtensionContext.workspace_agents to read the workspace’s agent list.
 
-*Call graph*: 3 external calls (execute, or_, update).
+*Call graph*: calls 1 internal fn (workspace_agents).
 
 
-##### `metered_workspaces`  (lines 820–823)
+##### `untriaged_workspaces`  (lines 167–183)
 
 ```
-def metered_workspaces() -> WorkspaceCandidates
+def untriaged_workspaces() -> WorkspaceCandidates
 ```
 
-**Purpose**: Finds workspaces that have ever had ledger activity and are therefore candidates for usage export. It is intentionally broad and cheap.
+**Purpose**: Creates the background-job candidate source for workspaces that have notification drain work waiting. It tells the job system, “these workspaces may need a drain tick.”
 
-**Data flow**: It builds a candidate source from distinct workspace ids in the ledger table. The result is a `WorkspaceCandidates` object that a job runner can iterate or schedule from.
+**Data flow**: It defines a database query-producing helper for due workspaces → passes that helper to the job candidate machinery → returns a WorkspaceCandidates object the scheduler can use.
 
-**Call relations**: Usage-export orchestration uses this to decide which workspaces to check. Per-workspace reads can still be no-ops if everything is already exported.
+**Call relations**: The scheduler uses this as the seam between notification storage and background jobs. Inside it, the nested due query checks for open, claimable rows whose target inbox agent is live.
 
 *Call graph*: 1 external calls (owner_candidates).
 
 
-##### `SpendEvaluator.decide`  (lines 860–875)
+##### `untriaged_workspaces.due`  (lines 171–181)
 
 ```
-async def decide(self, connection: AsyncConnection, pending_micro_usd: int) -> SpendDecision
+def due() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Decides whether proposed work is allowed under configured spend caps. The answer can be allow, park for later, or reject outright.
+**Purpose**: Builds the actual database query for workspaces that currently have open notification rows ready to be drained. It only includes rows whose lease is free and whose receiving agent is live.
 
-**Data flow**: It receives a database connection and the cost expected for pending work. It loads applicable caps, caches the no-cap case, sums recent usage for each cap, compares usage plus pending cost to each limit, and returns a `SpendDecision` with a user-facing message if blocked.
+**Data flow**: It gets the current UTC time → builds a SELECT query over notification workspace ids → filters to open rows, available claims, and live target agents → returns the SQL query for the job system to run.
 
-**Call relations**: Admission and continuation code use this when they need cap enforcement. It coordinates `_applicable_caps`, `_used_micro_usd`, `_message`, and `_note_absent_caps`.
+**Call relations**: This helper is handed to owner_candidates by untriaged_workspaces. It uses _claim_available for lease logic and agent_is_live so the scheduler does not wake workspaces for dead inbox agents.
 
-*Call graph*: calls 4 internal fn (_applicable_caps, _message, _used_micro_usd, _note_absent_caps); 1 external calls (__init__).
-
-
-##### `SpendEvaluator._applicable_caps`  (lines 877–905)
-
-```
-async def _applicable_caps(self, connection: AsyncConnection) -> tuple[SpendCap, ...]
-```
-
-**Purpose**: Loads the spend caps that apply to this workspace, and optionally to its member and agent. It turns database rows into small `SpendCap` objects.
-
-**Data flow**: It reads cap rows whose scope matches the workspace as a whole, the current member, or the current agent. It returns all matching caps as an immutable tuple.
-
-**Call relations**: `SpendEvaluator.decide` calls this first. If it returns no caps, the decision can allow work and remember the no-cap result briefly.
-
-*Call graph*: called by 1 (decide); 4 external calls (__init__, execute, or_, select).
+*Call graph*: calls 1 internal fn (_claim_available); 3 external calls (now, select, agent_is_live).
 
 
-##### `SpendEvaluator._used_micro_usd`  (lines 907–933)
+##### `NotificationStore.post`  (lines 192–299)
 
 ```
-async def _used_micro_usd(self, connection: AsyncConnection, cap: SpendCap) -> int
+async def post(self, *, to_agent_id: UUID, member_id: UUID, subject: str, body: str, agent_id: UUID, agent_name: str, turn_id: UUID, conversation_id: UUID) -> Posted | Refused
 ```
 
-**Purpose**: Calculates how much money has already been priced inside one cap's rolling time window. This is what gets compared to the cap limit.
+**Purpose**: Adds or updates a notification for one subject in one lane. It folds repeated posts about the same open subject into one row, so the inbox stays compact instead of growing without limit.
 
-**Data flow**: It receives a `SpendCap`, computes the cutoff time from its window length, and sums ledger `priced_micro_usd` rows that belong to the cap's scope. It returns the summed micro-dollar amount.
+**Data flow**: It receives the destination agent, member, subject, body, producing agent, turn, and conversation → checks how many notification subjects this producer turn has already opened → refuses a new subject if the per-turn limit is reached and there is no existing open row → otherwise inserts a new row or updates the existing subject row → returns Posted with the new occurrence count, or Refused with a reason.
 
-**Call relations**: `SpendEvaluator.decide` calls this once for each applicable cap. The result is combined with pending spend to decide whether the cap is breached.
+**Call relations**: This is the main write path for raising notifications. It uses database upsert behavior, meaning “insert if new, update if already present,” and returns a small result object so callers know whether their notification was accepted.
 
-*Call graph*: called by 1 (decide); 4 external calls (now, timedelta, execute, select).
-
-
-##### `SpendEvaluator._message`  (lines 935–946)
-
-```
-def _message(self, outcome: SpendOutcome, breaches: list[SpendCap]) -> str
-```
-
-**Purpose**: Builds the plain message shown when a spend cap blocks work. It names the tightest breached cap and whether the work was parked or declined.
-
-**Data flow**: It receives the final outcome and the list of breached caps. It picks the cap with the smallest limit, converts micro-dollars to dollars, and returns a readable sentence.
-
-**Call relations**: `SpendEvaluator.decide` calls this only after it has found at least one breach. The returned text travels inside the `SpendDecision`.
-
-*Call graph*: called by 1 (decide).
+*Call graph*: 6 external calls (__init__, __init__, case, null, select, uuid4).
 
 
-##### `_token_sum`  (lines 1052–1060)
+##### `NotificationStore.rows`  (lines 301–314)
 
 ```
-def _token_sum() -> sa.ColumnElement[int]
+async def rows(self) -> tuple[Notification, ...]
 ```
 
-**Purpose**: Builds a reusable database expression for summing token amounts only from token-related ledger dimensions. Non-token dimensions, such as images or egress, count as zero.
+**Purpose**: Reads all notification rows for the current workspace, newest first. This is the broad listing method used when code needs a workspace-level view of the notification table.
 
-**Data flow**: It takes no runtime input. It returns a SQL expression that adds ledger amounts when the dimension is `tokens` or `sandbox_tokens` and otherwise adds zero.
+**Data flow**: It opens a transaction → selects all notification columns for the store’s workspace → orders by most recently raised notification → converts each database row through _row → returns a tuple of Notification objects.
 
-**Call relations**: Report builders use this inside larger database queries. It is shared by `_usage_details`, `SpendRollup.read`, and `SpendRollup._by_origin`.
+**Call relations**: NotificationStore.deliverable calls this and then filters the returned objects by name, member, and delivery state. Other callers can use it as the general read-all view.
 
-*Call graph*: called by 3 (_by_origin, read, _usage_details); 1 external calls (case).
-
-
-##### `_token_cost_sum`  (lines 1063–1075)
-
-```
-def _token_cost_sum() -> sa.ColumnElement[int]
-```
-
-**Purpose**: Builds a reusable database expression for summing money spent only on token-related dimensions. This separates token cost from total cost.
-
-**Data flow**: It takes no runtime input. It returns a SQL expression that adds `priced_micro_usd` for `tokens` and `sandbox_tokens`, while treating other dimensions as zero.
-
-**Call relations**: Usage report queries call this beside `_token_sum`. It supports token-specific totals in workspace, member, and origin reports.
-
-*Call graph*: called by 3 (_by_origin, read, _usage_details); 1 external calls (case).
+*Call graph*: calls 1 internal fn (_row); called by 1 (deliverable); 1 external calls (select).
 
 
-##### `_usage_details`  (lines 1078–1202)
+##### `NotificationStore.dismiss`  (lines 316–324)
 
 ```
-async def _usage_details(connection: AsyncConnection, source: sa.FromClause, scope: sa.ColumnElement[bool], cutoff: datetime | None, now: datetime) -> UsageDetails
+async def dismiss(self, row_id: UUID) -> bool
 ```
 
-**Purpose**: Builds the detailed usage section shared by workspace and member reports. It includes selected-range totals, all-time totals, daily history, model breakdowns, execution breakdowns, and comparison tokens for the previous period.
+**Purpose**: Deletes one notification row from the current workspace. This is used when a notification should be removed entirely rather than triaged or delivered.
 
-**Data flow**: It receives a database connection, a table/join source, a scope filter, an optional cutoff, and the current time. It runs several aggregate queries, fills missing daily rows with zeros, normalizes the first-use timestamp, and returns a `UsageDetails` object.
+**Data flow**: It receives a notification id → deletes the matching row only within the current workspace → returns true if exactly one row was deleted, otherwise false.
 
-**Call relations**: `SpendRollup.read` and `SpendRollup.read_member` both call this so their reports tell the same story. It relies on `_token_sum` and `_token_cost_sum` to keep token totals consistent.
+**Call relations**: This is a direct cleanup action. It does not call the higher-level row conversion helpers because it only needs to remove a row and report whether anything changed.
 
-*Call graph*: calls 2 internal fn (_token_cost_sum, _token_sum); called by 2 (read, read_member); 9 external calls (__init__, __init__, __init__, __init__, fromisoformat, date, timedelta, execute, select).
-
-
-##### `SpendRollup.read`  (lines 1213–1317)
-
-```
-async def read(self, connection: AsyncConnection, window_seconds: int | None) -> SpendReport
-```
-
-**Purpose**: Reads a full workspace spend report for a selected time window or for all time. It turns raw ledger rows into totals by dimension, member, agent, origin, pricing table, and usage detail.
-
-**Data flow**: It receives a connection and optional window length. It computes the time cutoff, runs grouped ledger queries for the workspace, asks `_by_origin` for origin totals, asks `_usage_details` for usage charts, and returns a `SpendReport`.
-
-**Call relations**: Billing dashboards or APIs use this when showing workspace-level spend. It is the main reporting entry point for ledger data.
-
-*Call graph*: calls 4 internal fn (_by_origin, _token_cost_sum, _token_sum, _usage_details); 8 external calls (__init__, __init__, __init__, __init__, now, timedelta, execute, select).
+*Call graph*: 1 external calls (delete).
 
 
-##### `SpendRollup._by_origin`  (lines 1319–1384)
+##### `NotificationStore.lanes_with_untriaged`  (lines 326–361)
 
 ```
-async def _by_origin(self, connection: AsyncConnection, window: sa.ColumnElement[bool]) -> tuple[OriginTotal, ...]
+async def lanes_with_untriaged(self, cooldown_seconds: int) -> tuple[Lane, ...]
 ```
 
-**Purpose**: Groups token spend by the conversation origin a member actually started, even when subagents created child turns. This makes fan-out work appear under the surface that caused it.
+**Purpose**: Finds inbox lanes that have open notifications ready for a drain job, while respecting a cooldown period. The cooldown prevents the same member-agent inbox from being woken again immediately after it was just read.
 
-**Data flow**: It receives a connection and window filter. It builds a recursive database query that walks parent turns up to their root conversation, then sums token counts and token costs by that conversation's readable surface label.
+**Data flow**: It receives a cooldown length in seconds → reads distinct lanes with open, claimable rows → reads lanes triaged recently within the cooldown window → removes the cooling lanes from the open-lane list → returns Lane objects for the lanes that are ready now.
 
-**Call relations**: `SpendRollup.read` calls this as one section of the workspace report. It uses `_token_sum` and `_token_cost_sum` so origin totals match other token reports.
+**Call relations**: The drain uses this before claiming work. It shares lease availability logic with the claim path through _claim_available, so lanes are only offered when their rows are actually claimable.
 
-*Call graph*: calls 2 internal fn (_token_cost_sum, _token_sum); called by 1 (read); 4 external calls (__init__, desc, execute, select).
-
-
-##### `SpendRollup.read_member`  (lines 1386–1444)
-
-```
-async def read_member(self, connection: AsyncConnection, member_id: UUID, window_seconds: int | None) -> MemberSpendReport
-```
-
-**Purpose**: Reads a spend report for one member only. It includes that member's selected usage, all-time usage, dimensions, and member-specific spend caps.
-
-**Data flow**: It receives a connection, member id, and optional window length. It joins ledger rows through turns and conversations to that member, aggregates spend by dimension, loads that member's caps, builds shared usage details, and returns a `MemberSpendReport`.
-
-**Call relations**: Member-facing billing views or admin tools use this for a single person's usage. It reuses `_usage_details` so member reports match workspace report calculations.
-
-*Call graph*: calls 1 internal fn (_usage_details); 7 external calls (__init__, __init__, __init__, now, timedelta, execute, select).
+*Call graph*: calls 1 internal fn (_claim_available); 4 external calls (__init__, now, timedelta, select).
 
 
-##### `BalanceGate.admits`  (lines 1476–1514)
+##### `NotificationStore.claim`  (lines 363–401)
 
 ```
-async def admits(self, connection: AsyncConnection, agent_id: UUID | None=None, key_slot_for: Callable[[str], str | None] | None=None, turn_id: UUID | None=None, model: str | None=None) -> SpendDecisi
+async def claim(self, lane: Lane, limit: int, lease_seconds: int) -> tuple[Notification, ...]
 ```
 
-**Purpose**: Decides whether a turn may start, resume, or be folded into a live run based on prepaid balance. Starting requires reserve headroom unless the workspace is using its own provider key and is still above zero.
+**Purpose**: Temporarily reserves a limited number of open notifications from one lane for a drain job. The lease is what prevents two overlapping drain jobs from reading and sending the same rows.
 
-**Data flow**: It receives a connection and optional agent, key-slot resolver, turn id, and model. It reads the workspace balance headroom, checks reserve and grace rules, checks whether the turn already debited money, optionally checks whether the workspace serves the model with its own key, and returns a `SpendDecision`.
+**Data flow**: It receives a Lane, a maximum number of rows, and a lease duration → selects the oldest open, claimable rows in that lane → updates them with a claim expiry timestamp → converts the returned rows into Notification objects → returns them sorted oldest first.
 
-**Call relations**: Turn admission and resume paths call this before allowing work to begin. It delegates own-key checks to `_workspace_serves_itself` and prior-charge checks to `_turn_has_debited`.
+**Call relations**: This is the handoff from “there is work” to “this drain turn owns these rows for now.” It uses _claim_available to avoid already leased rows and _row to return application-friendly Notification objects.
 
-*Call graph*: calls 2 internal fn (_turn_has_debited, _workspace_serves_itself); 4 external calls (__init__, _forget_absent_balance, balance_refusal_message, read_headroom).
-
-
-##### `BalanceGate._workspace_serves_itself`  (lines 1516–1538)
-
-```
-async def _workspace_serves_itself(self, connection: AsyncConnection, agent_id: UUID | None, key_slot_for: Callable[[str], str | None] | None, model: str | None=None) -> bool
-```
-
-**Purpose**: Determines whether the workspace's own credential will serve the model being run. This supports the balance-gate exemption for bring-your-own-key model calls.
-
-**Data flow**: It receives an optional agent id, optional model, and a function that maps model names to credential slots. If the model is not provided, it reads the agent's model from the database; then it checks whether the workspace owns the needed key slot.
-
-**Call relations**: `BalanceGate.admits` calls this only when balance is below the normal starting reserve but still positive. It finishes by calling `workspace_owns_the_key`.
-
-*Call graph*: calls 1 internal fn (workspace_owns_the_key); called by 1 (admits); 2 external calls (execute, select).
+*Call graph*: calls 2 internal fn (_claim_available, _row); 5 external calls (now, timedelta, and_, select, update).
 
 
-##### `BalanceGate.sustains`  (lines 1540–1561)
+##### `NotificationStore.mark_triaged`  (lines 403–430)
 
 ```
-async def sustains(self, connection: AsyncConnection, pending_micro_usd: int, turn_id: UUID | None=None) -> SpendDecision
+async def mark_triaged(self, batch: tuple[Notification, ...], turn_id: UUID) -> None
 ```
 
-**Purpose**: Decides whether a running turn may continue into another round. Unlike admission, continuation stops at zero balance, not at the reserve line.
+**Purpose**: Closes the exact notification rows that a drain turn successfully read. It only closes a row if its occurrence count is still the same as when it was claimed, so new folded-in activity is not accidentally hidden.
 
-**Data flow**: It receives a connection, the pending cost not yet billed, and an optional turn id. It reads balance headroom, subtracts pending spend, applies grace, and either allows the turn or rejects it if the turn would actually debit money while over the limit.
+**Data flow**: It receives the batch of Notifications that were read and the drain turn id → updates rows in the current workspace whose ids and occurrence counts still match → stamps them with the triage turn and time, clears the lease, and updates their timestamp → returns nothing.
 
-**Call relations**: The turn loop calls this between rounds or before more spend is taken. It uses `_turn_has_debited` to avoid parking work that costs the balance nothing and therefore could never resume by itself.
+**Call relations**: InboxDrain._wake calls this after waking or preparing the inbox turn. The occurrence-count check is important: if another post arrived after the claim, the row stays open under its lease and can be retried after the lease expires.
 
-*Call graph*: calls 1 internal fn (_turn_has_debited); 4 external calls (__init__, _forget_absent_balance, balance_refusal_message, read_headroom).
-
-
-##### `BalanceGate._turn_has_debited`  (lines 1563–1586)
-
-```
-async def _turn_has_debited(self, connection: AsyncConnection, turn_id: UUID | None) -> bool
-```
-
-**Purpose**: Checks whether a turn has already taken real money from the workspace balance. This is different from asking whether the work had a listed price, because own-key token work can be priced but not debited.
-
-**Data flow**: It receives a connection and optional turn id. If there is no turn id it returns false; otherwise it looks for any ledger row for that turn with a positive debited amount and returns whether one exists.
-
-**Call relations**: `BalanceGate.admits` and `BalanceGate.sustains` use this to avoid bad loops around balance limits. It grounds the decision in what the ledger actually charged.
-
-*Call graph*: called by 2 (admits, sustains); 2 external calls (execute, select).
+*Call graph*: called by 1 (_wake); 3 external calls (and_, or_, update).
 
 
-### `core/src/ufo/harness/models/pricing.py`
-
-`domain_logic` · `billing/accounting`
-
-This file is the project’s price list and calculator for language model usage. Models charge different rates for different kinds of tokens, such as input tokens, output tokens, and cached tokens. The ModelPrice data class stores those rates in micro-USD per million tokens. A micro-USD is one millionth of a US dollar, which lets the code use whole numbers instead of floating-point money values.
-
-The main job is simple: take a model name, take a Usage record that says how many tokens were used in each category, look up that model’s rates, multiply the counts by the matching rates, and return the total cost in micro-USD. If the model is not in the price table, the code logs a warning and returns zero. That is important for old or historical records: billing can continue without crashing, but the missing price is still visible in logs.
-
-The file also builds a digest, which is a cryptographic fingerprint, of the price table. Like a tamper-evident label on a receipt, this digest makes it possible to tell exactly which set of prices produced a billed amount. The Pricing class bundles the price table with that digest and exposes a small method for calculating costs.
-
-#### Function details
-
-##### `price_digest`  (lines 27–44)
+##### `NotificationStore.is_delivery_turn`  (lines 432–445)
 
 ```
-def price_digest(prices: Mapping[str, ModelPrice]) -> str
+async def is_delivery_turn(self, turn_id: UUID) -> bool
 ```
 
-**Purpose**: Creates a stable version stamp for a table of model prices. This helps later readers know exactly which prices were used when a usage record was billed.
+**Purpose**: Checks whether a given turn was created as part of delivering a notification. This acts as a loop guard so notification delivery does not recursively trigger more notification delivery.
 
-**Data flow**: It receives a mapping from model names to ModelPrice values. It turns that table into sorted, compact JSON so the same prices always produce the same text, then runs SHA-256, a standard fingerprinting algorithm, over that text. It returns a string starting with "sha256:" followed by the fingerprint.
+**Data flow**: It receives a turn id → searches the current workspace for any notification whose delivered_turn_id matches it → returns true if one exists, otherwise false.
 
-**Call relations**: When a new Pricing object is built, pricing_from calls this function to stamp the price table. Internally it relies on json.dumps to make the deterministic text form and hashlib.sha256 to make the fingerprint.
-
-*Call graph*: called by 1 (pricing_from); 2 external calls (sha256, dumps).
-
-
-##### `usage_priced_micro_usd`  (lines 47–61)
-
-```
-def usage_priced_micro_usd(model: str, usage: Usage, prices: Mapping[str, ModelPrice]) -> int
-```
-
-**Purpose**: Calculates the cost of one usage record for one model. It is the core calculator that turns token counts into a money amount measured in micro-USD.
-
-**Data flow**: It receives a model name, a Usage object containing token counts, and a price table. It looks up the model’s rates, multiplies each token category by its matching rate, adds the results, and divides by one million because the rates are per million tokens. If the model is missing from the table, it logs that fact and returns 0 instead of stopping the program.
-
-**Call relations**: Pricing.micro_usd calls this helper whenever billing code asks for a cost. If the model is unknown, this function hands the problem to the observability logger so operators can notice the missing price.
-
-*Call graph*: called by 1 (micro_usd); 1 external calls (log).
-
-
-##### `Pricing.micro_usd`  (lines 71–72)
-
-```
-def micro_usd(self, model: str, usage: Usage) -> int
-```
-
-**Purpose**: Provides the simple public way to ask a Pricing object, “What did this model usage cost?” It keeps callers from needing to know the details of the price table lookup and token math.
-
-**Data flow**: It receives a model name and a Usage record. It uses the Pricing object’s stored price table and passes everything to usage_priced_micro_usd. The result is returned as an integer number of micro-USD.
-
-**Call relations**: Billing code calls this method when recording sandbox, turn, or workspace usage. This method is a small wrapper that keeps those accounting paths focused on recording charges while usage_priced_micro_usd does the actual calculation.
-
-*Call graph*: calls 1 internal fn (usage_priced_micro_usd); called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
-
-
-##### `pricing_from`  (lines 75–78)
-
-```
-def pricing_from(prices: Mapping[str, ModelPrice]) -> Pricing
-```
-
-**Purpose**: Builds a complete Pricing object from a raw model price table. It makes a copy of the table and attaches the digest that identifies that exact set of rates.
-
-**Data flow**: It receives a mapping of model names to ModelPrice values. It copies that mapping into a normal dictionary, calculates the price digest for the copied table, and returns a new Pricing object containing both the table and the digest.
-
-**Call relations**: This is the setup step for pricing data. It calls price_digest so every Pricing object carries its own version stamp, then constructs the Pricing instance that later billing code can use.
-
-*Call graph*: calls 1 internal fn (price_digest); 1 external calls (__init__).
-
-
-### `core/src/ufo/runtime/billing/balance.py`
-
-`domain_logic` · `request handling and billing background jobs`
-
-This file solves a practical billing problem: the system needs to check credit before model work starts, and that check happens often. Instead of recalculating a lifetime total from every purchase each time, it keeps a current balance row in the database, like a running bank balance. The individual purchases are still stored separately so the balance can be audited later.
-
-The file separates several jobs. It can quickly read only the numbers needed to decide whether a workspace has enough “headroom” to start more work. It can read the fuller balance picture for an admin screen, including lifetime credit granted and money charged. It can add credit exactly once per payment reference, so a repeated payment notification does not double-credit the workspace. It can subtract usage from the balance in the same transaction as the usage record, so the money trail stays consistent.
-
-It also supports automatic top-ups. A workspace may say, “when my balance drops below this threshold, charge this amount.” The file can find workspaces that crossed that line, store those settings, and mark that a workspace has successfully paid before. That successful payment earns a small grace allowance, so a workspace is not stopped during the short delay between running low and the refill completing.
-
-A small in-memory cache remembers workspaces that recently had no balance row. This saves repeated database reads for self-hosted or unpaid setups, but it is only an optimization; adding credit clears the cache entry.
-
-#### Function details
-
-##### `balance_absent`  (lines 40–46)
-
-```
-def balance_absent(workspace_id: UUID) -> bool
-```
-
-**Purpose**: This is a quick check that answers whether a workspace was recently found to have no balance row. It is used as a shortcut so the system can avoid repeated database reads for workspaces that are known, for a few seconds, to have no billing balance.
-
-**Data flow**: It receives a workspace ID. It looks in a small in-memory map for an expiry time, compares that time with the current monotonic clock, and returns true only if the “no balance” note is still fresh. It does not change the database or the balance.
-
-**Call relations**: This function stands at the front of the fast path. Other code can ask it before doing a heavier balance read. The notes it checks are created by _note_absent_balance when read_balance or read_headroom fail to find a database row, and they are cleared by _forget_absent_balance after credit creates or updates a balance.
-
-*Call graph*: 1 external calls (monotonic).
-
-
-##### `_note_absent_balance`  (lines 49–56)
-
-```
-def _note_absent_balance(workspace_id: UUID) -> None
-```
-
-**Purpose**: This records, briefly, that a workspace has no balance row. It exists to make repeated checks cheaper without treating the cache as the source of truth.
-
-**Data flow**: It receives a workspace ID, reads the current monotonic time, and stores an expiry time a few seconds in the future. If the cache has reached its maximum size, it first removes entries whose expiry time has already passed. The result is an updated in-memory cache entry, not a database change.
-
-**Call relations**: read_balance and read_headroom call this when the database says the workspace has no balance row. Later, balance_absent can use the note to skip work for a short time. If credit later adds money to the workspace, _forget_absent_balance removes the note so the shortcut cannot hide a real balance.
-
-*Call graph*: called by 2 (read_balance, read_headroom); 1 external calls (monotonic).
-
-
-##### `_forget_absent_balance`  (lines 59–62)
-
-```
-def _forget_absent_balance(workspace_id: UUID) -> None
-```
-
-**Purpose**: This removes the short-lived “no balance” note for a workspace. It is needed when a workspace has just been credited, because the old shortcut would now be wrong.
-
-**Data flow**: It receives a workspace ID and deletes that ID from the in-memory absence cache if it is present. Nothing is returned, and no database row is changed.
-
-**Call relations**: credit calls this after successfully adding money to a workspace balance. That keeps the fast-path cache in step with the real database state, so future balance checks do not incorrectly assume the workspace still lacks a balance.
-
-*Call graph*: called by 1 (credit).
-
-
-##### `billing_screen_url`  (lines 79–88)
-
-```
-def billing_screen_url(public_base_url: str | None, home_surface: str | None) -> str | None
-```
-
-**Purpose**: This builds the link to the workspace billing screen, if this deployment has a public web address and a browser surface to show it on. If there is nowhere useful to send a user, it returns no link.
-
-**Data flow**: It takes a public base URL and the name of the home surface. If either is missing, it returns None. Otherwise it trims any trailing slash from the base URL, appends the surface path and billing fragment, and returns the completed URL string.
-
-**Call relations**: This is used when preparing messages or configuration for billing gates. Its result can be handed to balance_refusal_message so a user who is blocked for lack of credit can be told exactly where an admin can fix it.
-
-
-##### `balance_refusal_message`  (lines 91–100)
-
-```
-def balance_refusal_message(billing_url: str | None) -> str
-```
-
-**Purpose**: This writes the human-facing message shown when a workspace is out of credit. It explains the problem and, when possible, includes the billing page link.
-
-**Data flow**: It takes an optional billing URL. If the URL is missing, it returns a plain sentence saying the workspace is out of credit and an admin can set up refills. If the URL exists, it returns the same warning with the link included.
-
-**Call relations**: This function sits near the point where billing decisions become user-facing text. It commonly follows billing_screen_url: first build the link if there is one, then use this function to produce the refusal message.
-
-
-##### `read_auto_topup`  (lines 112–134)
-
-```
-async def read_auto_topup(connection: AsyncConnection, workspace_id: UUID) -> AutoTopup | None
-```
-
-**Purpose**: This checks whether a workspace both has automatic top-up configured and has fallen low enough to need one now. It answers the refill job’s question: “Should we try to charge this workspace on this tick?”
-
-**Data flow**: It receives a database connection and workspace ID. It reads the workspace’s balance, top-up amount, and top-up threshold from the balance table. If there is no row, no top-up amount, or the balance is still above the threshold, it returns None. Otherwise it returns an AutoTopup object containing the amount to charge and the threshold that triggered it.
-
-**Call relations**: A billing extension or refill worker can call this before attempting payment. The function keeps the “is this workspace short?” decision in core billing logic, while the payment extension can focus on how to charge the card.
-
-*Call graph*: 3 external calls (__init__, execute, select).
-
-
-##### `topping_up_workspaces`  (lines 137–151)
-
-```
-def topping_up_workspaces() -> WorkspaceCandidates
-```
-
-**Purpose**: This prepares a fleet-wide search for workspaces that currently need automatic refill. It avoids opening transactions for every workspace by first narrowing the list to only those with top-up enabled and a balance at or below the threshold.
-
-**Data flow**: It creates a candidate source based on a nested database query. The query selects workspace IDs whose auto-top-up amount is set and whose balance has reached the configured threshold. The function returns a WorkspaceCandidates object that can be used by a background job to visit only likely refill targets.
-
-**Call relations**: A periodic refill job uses this as its starting list. Inside it, short_of_its_line builds the exact database selection, and owner_candidates wraps that selection into the project’s workspace-candidate system.
-
-*Call graph*: 1 external calls (owner_candidates).
-
-
-##### `topping_up_workspaces.short_of_its_line`  (lines 144–149)
-
-```
-def short_of_its_line() -> sa.Select[tuple[UUID]]
-```
-
-**Purpose**: This is the database query builder used by topping_up_workspaces. It describes which workspaces are low enough to be considered for automatic top-up.
-
-**Data flow**: It takes no direct arguments, but closes over the balance table definitions. It builds a SQL select statement that returns workspace IDs where an auto-top-up amount exists and the current balance is less than or equal to the threshold. The output is a query object, not the query results themselves.
-
-**Call relations**: topping_up_workspaces hands this query-building function to owner_candidates. That lets the wider candidate system run the query at the right time and route refill work by workspace owner.
+**Call relations**: Other notification logic can ask this before reacting to a turn. It reads only a single matching id because it only needs a yes-or-no answer.
 
 *Call graph*: 1 external calls (select).
 
 
-##### `set_auto_topup`  (lines 154–174)
+##### `NotificationStore.deliverable`  (lines 447–457)
 
 ```
-async def set_auto_topup(connection: AsyncConnection, workspace_id: UUID, amount_micro_usd: int | None, threshold_micro_usd: int | None) -> bool
+async def deliverable(self, member_id: UUID, names: tuple[str, ...]) -> tuple[Notification, ...]
 ```
 
-**Purpose**: This turns automatic refill on or off for a workspace that already has a balance. It prevents half-configured settings by requiring both the refill amount and the trigger threshold, or neither.
+**Purpose**: Finds the named notifications for a member that have not yet been delivered. This lets delivery code validate a requested set of notification names before sending them somewhere.
 
-**Data flow**: It receives a database connection, workspace ID, optional top-up amount, and optional threshold. If only one of the two numbers is provided, it raises a ValueError. Otherwise it updates the workspace balance row with the new settings and timestamp. It returns true if exactly one balance row was updated, or false if the workspace had no balance row to update.
+**Data flow**: It receives a member id and a tuple of notification names → reads all workspace rows through NotificationStore.rows → keeps only rows whose name is requested, whose member matches, and whose delivery surface is still empty → returns those Notification objects.
 
-**Call relations**: Admin-facing billing code can call this when someone changes refill settings. The later refill flow reads these fields through read_auto_topup, configured_auto_topup, and topping_up_workspaces.
+**Call relations**: This function builds on the general rows reader instead of writing its own SQL. It relies on Notification.name to compare caller-provided names with stored notification ids.
 
-*Call graph*: 2 external calls (execute, update).
-
-
-##### `mark_topup_verified`  (lines 177–191)
-
-```
-async def mark_topup_verified(connection: AsyncConnection, workspace_id: UUID) -> None
-```
-
-**Purpose**: This records that a workspace has successfully paid for a top-up at least once. That proof earns the workspace a fixed grace allowance when deciding whether work may continue while a refill is in progress.
-
-**Data flow**: It receives a database connection and workspace ID. It updates the workspace balance row only if the verification timestamp is still empty, setting that timestamp and the updated time to now. It returns nothing.
-
-**Call relations**: Payment or refill code calls this after a card charge has settled. Later, read_headroom sees the verification timestamp and includes the fixed top-up grace amount in the numbers used by billing gates.
-
-*Call graph*: 2 external calls (execute, update).
+*Call graph*: calls 1 internal fn (rows).
 
 
-##### `configured_auto_topup`  (lines 203–224)
+##### `NotificationStore.mark_delivered`  (lines 459–472)
 
 ```
-async def configured_auto_topup(connection: AsyncConnection, workspace_id: UUID) -> AutoTopup | None
+async def mark_delivered(self, rows: tuple[Notification, ...], *, turn_id: UUID | None, surface: str) -> None
 ```
 
-**Purpose**: This reads the automatic top-up settings exactly as configured, whether or not the workspace is currently low on credit. It is useful for showing an admin what rule is saved.
+**Purpose**: Records that a set of notifications has been delivered to a particular surface. This prevents the same notification from being delivered again through the same flow.
 
-**Data flow**: It receives a database connection and workspace ID. It reads the top-up amount and threshold from the workspace balance row. If there is no row or no top-up amount, it returns None. Otherwise it returns an AutoTopup object with the saved amount and threshold.
+**Data flow**: It receives Notification objects, an optional delivery turn id, and a surface name → updates those rows in the current workspace → stores the delivery turn, delivery surface, and updated timestamp → returns nothing.
 
-**Call relations**: This differs from read_auto_topup, which only speaks up when the balance has crossed the threshold. Admin screens or settings APIs can call configured_auto_topup when they need to display the rule itself.
+**Call relations**: Delivery code calls this after it has handed notifications off to their destination. Later, deliverable filters out rows with a delivered surface, and is_delivery_turn can recognize turns created by delivery.
 
-*Call graph*: 3 external calls (__init__, execute, select).
-
-
-##### `read_headroom`  (lines 227–246)
-
-```
-async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Headroom | None
-```
-
-**Purpose**: This reads the small set of balance numbers needed before starting model work. It is deliberately lighter than the full balance read because it may run before every model round.
-
-**Data flow**: It receives a database connection and workspace ID. It reads the current balance, reserve amount, and top-up verification timestamp. If no balance row exists, it notes that absence in the short-lived cache and returns None. If a row exists, it returns a Headroom object containing the balance, required reserve, and either zero grace or the fixed grace amount for verified top-up workspaces.
-
-**Call relations**: Billing gates call this when deciding whether a workspace may begin more work. If no row exists, it calls _note_absent_balance so later checks can use balance_absent. Its returned Headroom values are the fast decision-making version of the fuller data read by read_balance.
-
-*Call graph*: calls 1 internal fn (_note_absent_balance); 3 external calls (__init__, execute, select).
+*Call graph*: 1 external calls (update).
 
 
-##### `recent_purchases`  (lines 260–293)
+### `extensions/enrichment/ufo_ext_enrichment/store.py`
 
-```
-async def recent_purchases(connection: AsyncConnection, workspace_id: UUID, limit: int) -> tuple[Purchase, ...]
-```
+`io_transport` · `background enrichment jobs and request handling`
 
-**Purpose**: This returns the newest balance credits for a workspace, up to a caller-specified limit. It supports screens or reports that explain where a balance came from.
+This file keeps the enrichment feature grounded in the database. Enrichment means looking up extra public information about a member or their company, but this code is careful about consent: a member is only looked up if there is a saved consent row saying they agreed. Think of it like a filing cabinet with three drawers. One drawer stores each member’s enriched profile. Another stores whether each member said yes or no, plus the website they confirmed. A third stores a temporary “come back later” note when the outside data provider refuses or rate-limits requests.
 
-**Data flow**: It receives a database connection, workspace ID, and maximum number of purchases to return. It queries purchase rows for that workspace, newest first, using the row ID to make the order stable when timestamps match. It converts each row into a Purchase object and returns them as a tuple.
+The file defines the shape of those records with SQLAlchemy tables, which describe database tables in Python, and Pydantic models, which check that JSON data has the expected fields. `Person`, `Company`, and `Profile` describe the information that can be saved and later shown. The `Profiles`, `Consents`, and `Backoff` classes are small database helpers used inside an existing database transaction. They find members ready for enrichment, write or delete profile rows, save consent decisions, and pause or resume work after provider failures.
 
-**Call relations**: Admin or operator views can call this alongside read_balance. read_balance gives the lifetime totals, while recent_purchases gives the visible recent entries behind those totals without loading an unbounded purchase history.
-
-*Call graph*: 3 external calls (__init__, execute, select).
-
-
-##### `read_balance`  (lines 296–326)
-
-```
-async def read_balance(connection: AsyncConnection, workspace_id: UUID) -> Balance | None
-```
-
-**Purpose**: This reads the full billing picture for a workspace: current balance, reserve, total credit ever granted, total money ever charged, and the latest purchase time. It is meant for admin or operator views rather than the frequent pre-work gate.
-
-**Data flow**: It receives a database connection and workspace ID. First it reads the workspace balance row. If none exists, it records that absence in the short-lived cache and returns None. If the row exists, it separately sums all purchase rows for that workspace and finds the most recent purchase timestamp. It returns a Balance object combining the current row and lifetime purchase totals.
-
-**Call relations**: Admin-facing code calls this when it needs the whole story. It calls _note_absent_balance on a missing row, just like read_headroom, so the fast absence shortcut stays informed.
-
-*Call graph*: calls 1 internal fn (_note_absent_balance); 3 external calls (__init__, execute, select).
-
-
-##### `credit`  (lines 329–387)
-
-```
-async def credit(connection: AsyncConnection, workspace_id: UUID, granted_micro_usd: int, charged_micro_usd: int, reference: str) -> bool
-```
-
-**Purpose**: This adds credit to a workspace balance exactly once for a given reference, such as a payment ID. It protects against duplicate delivery of the same payment event by refusing to apply the same workspace-reference pair twice.
-
-**Data flow**: It receives a database connection, workspace ID, granted amount, charged amount, and reference string. It inserts a purchase row with a new UUID; if a row with the same workspace and reference already exists, it does nothing and returns false. If the purchase is new, it inserts or updates the workspace balance by adding the granted amount, clears any cached “no balance” note, and returns true.
-
-**Call relations**: Payment fulfilment code calls this inside its own database transaction, so recording the payment source and crediting the balance succeed or fail together. If it returns true and the caller’s transaction commits, the caller can then call count_charge to emit the billing metric.
-
-*Call graph*: calls 1 internal fn (_forget_absent_balance); 2 external calls (execute, uuid4).
-
-
-##### `count_charge`  (lines 390–407)
-
-```
-def count_charge(charged_micro_usd: int) -> None
-```
-
-**Purpose**: This reports newly charged money to the metrics system after the database transaction has safely committed. It only counts positive charges, because counters can go up but cannot reliably be undone for refunds or corrections.
-
-**Data flow**: It receives a charged amount in micro-USD. If the amount is zero or negative, it returns without doing anything. If the amount is positive, it emits a metric named balance_charged_micro_usd_total with that amount. It does not change the database.
-
-**Call relations**: Callers use this after credit has returned true and after their transaction has committed. Keeping it outside credit avoids reporting a charge that later rolls back, and avoids double-counting when a payment event is retried.
-
-*Call graph*: 1 external calls (emit_metric).
-
-
-##### `debit`  (lines 410–430)
-
-```
-async def debit(connection: AsyncConnection, workspace_id: UUID, micro_usd: int) -> int
-```
-
-**Purpose**: This subtracts spent credit from a workspace balance. It records what was actually taken, and it allows the balance to go negative so the system does not lose the record of money already spent.
-
-**Data flow**: It receives a database connection, workspace ID, and amount to subtract. If the amount is zero, it immediately returns zero. Otherwise it updates the workspace balance row by reducing the balance and refreshing the timestamp. If one row was updated, it returns the requested amount; if the workspace has no balance row, it returns zero.
-
-**Call relations**: Usage-recording code calls this in the same transaction as the ledger entry for the work that burned credit. That way, the usage record and balance movement stay together: both are saved, or neither is.
-
-*Call graph*: 2 external calls (execute, update).
-
-
-##### `set_reserve`  (lines 433–444)
-
-```
-async def set_reserve(connection: AsyncConnection, workspace_id: UUID, reserve_micro_usd: int) -> bool
-```
-
-**Purpose**: This sets the reserve amount a workspace must keep before new work may start. The reserve acts like a safety buffer so a nearly empty workspace does not begin work it cannot meaningfully continue.
-
-**Data flow**: It receives a database connection, workspace ID, and reserve amount in micro-USD. It updates the existing workspace balance row with the new reserve and timestamp. It returns true if one row was updated, or false if the workspace had no balance row.
-
-**Call relations**: Admin or billing configuration code calls this when changing the workspace’s required buffer. Later, read_headroom includes this reserve in the numbers used by admission gates before model work begins.
-
-*Call graph*: 2 external calls (execute, update).
-
-
-### Billing integrations
-Connects internal usage and balance data to external Metronome reporting and Stripe prepaid payments.
-
-### `extensions/metronome/ufo_ext_metronome.py`
-
-`domain_logic` · `scheduled jobs, chat tool calls, and billing page requests`
-
-This extension is the bridge between UFO's internal money and usage records and two outside services. Metronome receives usage events so humans can see rated usage statements. Stripe stores cards, opens the customer billing portal, and charges saved cards when automatic top-ups are needed. Without this file, settled usage would not be shipped to Metronome, admins could not arrange cards through the product, and workspaces with automatic refill enabled would not be charged and credited.
-
-The file has three main jobs. First, UsageShipper drains frozen usage export records from core. It turns each record into a Metronome event with a stable transaction id, sends the batch, and only then marks those records as acknowledged. This is like mailing numbered receipts: if the process crashes, the same receipt can be mailed again without counting twice.
-
-Second, the manage_billing tool lets a workspace admin ask in chat for billing status, a Stripe portal link, or automatic refill settings. It checks that the speaker is an admin before doing anything.
-
-Third, BalanceTopup runs on a schedule. When core says a workspace balance is low enough to refill, it finds the saved card, creates a Stripe charge, and credits the workspace only after Stripe says the payment succeeded. The file also defines a billing route for a web page that shows balance, reserve, saved card details, autopay settings, and recent purchases.
+An important behavior is that missing consent is treated the same as refusal for enrichment purposes: no saved “yes” means no lookup. Another important behavior is backoff: repeated provider trouble makes the system wait longer, up to an hour, instead of hammering the provider every minute.
 
 #### Function details
 
-##### `StripeError.__init__`  (lines 189–191)
+##### `due_workspaces`  (lines 161–176)
 
 ```
-def __init__(self, message: str, status: int=0) -> None
+def due_workspaces() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: This builds an error object for a failed Stripe call and remembers the HTTP status code. The status matters because later code treats a declined card differently from a broken provider call.
+**Purpose**: Builds a database query for workspaces that have at least one member ready to be enriched. A workspace is ready only if a seated member gave consent, has no profile yet, and the workspace is not currently paused after a provider refusal.
 
-**Data flow**: It receives a message and an optional status code. It stores the message in the normal exception machinery and keeps the numeric status on the error object for callers to inspect.
+**Data flow**: It reads the current time and the member, consent, profile, and backoff table definitions. From that, it creates a SQL query that will return workspace IDs matching the rules. It does not run the query itself; it hands the query back to the caller.
 
-**Call relations**: The shared Stripe request helper creates this error when Stripe returns a non-success response. Charging code later reads the status to decide whether to wait, report a decline, or fail loudly.
+**Call relations**: This is used when the enrichment job is deciding which workspaces deserve attention next. It relies on `_has_profile` to exclude members who already have stored enrichment data, and it uses database query-building helpers to express the consent and pause checks.
 
-*Call graph*: called by 1 (_stripe).
+*Call graph*: calls 1 internal fn (_has_profile); 3 external calls (now, exists, select).
 
 
-##### `UsageShipper.run`  (lines 221–247)
+##### `_has_profile`  (lines 179–180)
 
 ```
-async def run(self) -> None
+def _has_profile() -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This sends one workspace's settled usage records to Metronome in safe batches. It is careful to mark records as sent only after Metronome accepts them, so a crash causes a harmless retry rather than lost usage.
+**Purpose**: Creates a small reusable database condition that answers: “does this member already have an enrichment profile?” It helps prevent duplicate enrichment work.
 
-**Data flow**: It reads the Metronome bearer token from the environment, finds the workspace's fixed backfill floor, repeatedly asks core for pending usage exports, converts them to event payloads, ensures the Metronome customer alias exists, posts the events, logs success, and acknowledges the exports. It stops when there is no more work or the final batch is smaller than the batch size.
+**Data flow**: It looks at the profile table definition and the current member row being considered in a larger query. It returns a SQL existence check, meaning a condition the database can evaluate later.
 
-**Call relations**: The scheduled _ship wrapper creates a UsageShipper and calls this method. During the run it relies on _floor for the time boundary, _note_usage_aging_out for warnings, _events for the Metronome payload, _ensure_metronome_customer before first send, and _ingest for the actual HTTP post.
+**Call relations**: This helper is called by `due_workspaces` and `Profiles.due` whenever they need to filter out members who already have profile rows. It is not a standalone operation; it is a building block inside bigger database queries.
 
-*Call graph*: calls 6 internal fn (_events, _floor, _note_usage_aging_out, _ensure_metronome_customer, _ingest, _require_env); 1 external calls (log).
+*Call graph*: called by 2 (due, due_workspaces); 1 external calls (exists).
 
 
-##### `UsageShipper._floor`  (lines 249–259)
+##### `Profiles.due`  (lines 190–212)
 
 ```
-async def _floor(self) -> datetime
+async def due(self, limit: int) -> tuple[SeatedMember, ...]
 ```
 
-**Purpose**: This returns the earliest usage time this workspace is allowed to ship. On the first run it records a floor a few days in the past, which prevents an accidental unlimited historical backfill.
+**Purpose**: Finds the next seated members in one workspace who gave consent and still need enrichment. It returns their member ID, email address, and confirmed website.
 
-**Data flow**: It reads a stored timestamp from the extension store. If none exists, it creates one based on the current time minus the backfill window, saves it, and returns it; otherwise it parses and returns the stored value.
+**Data flow**: The caller gives a limit. The method reads members and consent rows for this workspace, keeps only seated members with granted consent and no profile, orders them oldest-first, and returns a tuple of `SeatedMember` objects. The database is only read, not changed.
 
-**Call relations**: UsageShipper.run calls this before reading pending usage. That means core mints export intents only for usage on or after this stable floor.
+**Call relations**: A workspace-level enrichment job calls this after choosing a workspace to work on. It uses `_has_profile` for the “not enriched yet” check, then packages each result as a `SeatedMember` so later code can ask the provider for data.
 
-*Call graph*: called by 1 (run); 3 external calls (fromisoformat, now, timedelta).
+*Call graph*: calls 1 internal fn (_has_profile); 2 external calls (__init__, select).
 
 
-##### `UsageShipper._note_usage_aging_out`  (lines 261–282)
+##### `Profiles.seated`  (lines 214–224)
 
 ```
-def _note_usage_aging_out(self, exports: tuple[UsageExport, ...]) -> None
+async def seated(self, member_id: UUID) -> SeatedMember | None
 ```
 
-**Purpose**: This warns operators when pending usage is getting too old for Metronome's backdating window. It does not fix the data; it makes a silent billing risk visible.
+**Purpose**: Checks whether a particular member belongs to this workspace and is currently seated. This is useful before doing work that only makes sense for active, seated members.
 
-**Data flow**: It receives a batch of usage exports, finds the oldest occurrence time, compares it with the allowed backfill window, and emits a warning if the batch contains usage older than that window.
+**Data flow**: It receives a member ID. It queries the member table for that ID within the current workspace and requires `seated_at` to be present. If found, it returns a `SeatedMember` with the ID and email; otherwise it returns `None`.
 
-**Call relations**: UsageShipper.run calls this after it reads a batch and before sending it. It uses _rfc3339 to format the timestamp in the warning.
+**Call relations**: Other enrichment or portal code can call this before recording or displaying profile information for a specific member. It hands back a simple member object that later steps can use without needing the raw database row.
 
-*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run); 3 external calls (now, timedelta, warn).
+*Call graph*: 2 external calls (__init__, select).
 
 
-##### `UsageShipper._events`  (lines 284–303)
+##### `Profiles.write`  (lines 226–249)
 
 ```
-def _events(self, exports: tuple[UsageExport, ...]) -> list[dict[str, object]]
+async def write(self, member_id: UUID, profile: Profile) -> None
 ```
 
-**Purpose**: This turns UFO usage export records into the exact event dictionaries Metronome expects. It preserves important labels, including whether the workspace used its own provider key.
+**Purpose**: Saves an enrichment profile for a member, replacing an existing row if one is already there. This is how provider results or recorded profile data become durable database state.
 
-**Data flow**: It receives usage exports and reads the workspace id from the context. For each export it builds an event with a stable transaction id, customer id, event type, timestamp, and usage properties, then returns the list of events.
+**Data flow**: It receives a member ID and a `Profile` object. It turns nested person and company models into JSON-friendly dictionaries, then tries to update the existing profile row for this workspace and member. If no row was updated, it inserts a new row. Nothing is returned.
 
-**Call relations**: UsageShipper.run calls this immediately before _ingest. It uses _rfc3339 so event timestamps are sent in a standard text form.
+**Call relations**: After an enrichment lookup succeeds or a profile is otherwise produced, higher-level code calls this method to persist the result. It hands the actual database writing to SQL update and insert operations.
 
-*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run).
+*Call graph*: 2 external calls (insert, update).
 
 
-##### `_ship`  (lines 306–307)
+##### `Profiles.forget`  (lines 251–257)
 
 ```
-async def _ship(ctx: ExtensionContext) -> None
+async def forget(self, member_id: UUID) -> None
 ```
 
-**Purpose**: This is the scheduled job entry for shipping usage. It adapts the job system's context into a UsageShipper run.
+**Purpose**: Deletes a stored enrichment profile for one member in this workspace. This supports removing data when it should no longer be kept or shown.
 
-**Data flow**: It receives an extension context, creates a UsageShipper with the configured test or production transport, and awaits its run. It returns nothing except any error raised by the shipper.
+**Data flow**: It receives a member ID and sends a database delete for the matching workspace and member profile row. It returns nothing and does not complain if there was no matching row.
 
-**Call relations**: manifest registers this as the handler for the usage shipping job. The real work is handed to UsageShipper.run.
+**Call relations**: Higher-level privacy, cleanup, or member-change flows can call this when enrichment data should be removed. It delegates the removal to the database delete operation.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: 1 external calls (delete).
 
 
-##### `BillingConfig.from_env`  (lines 324–339)
+##### `Profiles.rows`  (lines 259–268)
 
 ```
-def from_env(cls) -> 'BillingConfig'
+async def rows(self, limit: int) -> tuple[StoredProfile, ...]
 ```
 
-**Purpose**: This reads the Stripe settings required for billing work. It fails before any Stripe object is created if the deployment is missing a needed setting.
+**Purpose**: Reads a batch of stored enrichment profiles for this workspace. This is useful for listing or exporting profile data in a stable order.
 
-**Data flow**: It reads the Stripe secret key and billing portal configuration id from environment variables. If either is missing, it raises an error naming all missing settings; otherwise it returns a validated BillingConfig object.
+**Data flow**: The caller supplies a maximum number of rows. The method selects profile columns for this workspace, orders them by fetch time and member ID, limits the result, and converts each raw database row into a `StoredProfile`. The database is not changed.
 
-**Call relations**: Billing tool actions, billing projection, and top-up jobs call this before talking to Stripe. Usage shipping does not use it because Metronome usage reporting has its own token.
+**Call relations**: Code that needs many saved profiles calls this method. For each row, it hands conversion to `_stored`, which rebuilds the typed `Profile` object from database values and JSON fields.
 
+*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
 
-##### `_billing_record`  (lines 352–354)
 
+##### `Profiles.one`  (lines 270–279)
+
+```
+async def one(self, member_id: UUID) -> StoredProfile | None
+```
+
+**Purpose**: Reads the stored enrichment profile for one specific member, if it exists. This supports member-specific display or decision-making.
+
+**Data flow**: It receives a member ID and queries the profile table for that member in the current workspace. If a row exists, it converts it into a `StoredProfile`; if not, it returns `None`.
+
+**Call relations**: Portal or workflow code can call this when it needs exactly one member’s enrichment. Like the batch reader, it relies on `_stored` to turn the raw database row into the typed shape used by the rest of the feature.
+
+*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
+
+
+##### `Profiles.by_email`  (lines 281–290)
+
+```
+async def by_email(self, email: str) -> StoredProfile | None
+```
+
+**Purpose**: Finds a stored enrichment profile by email address within this workspace. The match ignores letter case and trims extra spaces from the input email.
+
+**Data flow**: It receives an email string, strips surrounding whitespace, lowercases it, and compares it to lowercased stored emails in the profile table. If one row is found, it converts it to `StoredProfile`; otherwise it returns `None`.
+
+**Call relations**: Code that starts from an email address rather than a member ID can use this lookup. Once the database returns a row, `_stored` performs the same safe conversion used by the other profile readers.
+
+*Call graph*: calls 1 internal fn (_stored); 1 external calls (select).
+
+
+##### `Consents.record`  (lines 301–316)
+
+```
+async def record(self, member_id: UUID, *, granted: bool, website: str | None=None) -> None
+```
+
+**Purpose**: Saves a member’s enrichment consent decision: whether they granted permission and, optionally, the website they confirmed. This is the gatekeeper record that decides whether enrichment may happen.
+
+**Data flow**: It receives a member ID, a granted-or-not value, and an optional website. It stamps the decision with the current time, updates the existing consent row if present, or inserts a new one if not. It returns nothing.
+
+**Call relations**: Consent UI or member onboarding code calls this when a member answers the enrichment question. Later, `due_workspaces` and `Profiles.due` read these rows so only members with a saved granted decision are looked up.
+
+*Call graph*: 3 external calls (now, insert, update).
+
+
+##### `Backoff.pause`  (lines 328–354)
+
+```
+async def pause(self, retry_after: float | None) -> float
+```
+
+**Purpose**: Pauses enrichment work for this workspace after the provider refuses or asks the system to wait. It calculates how long to wait and saves that future retry time.
+
+**Data flow**: It reads the current number of failed attempts for the workspace. If the provider supplied a wait time, it uses that up to a maximum of one hour; otherwise it doubles the delay each time, starting at one minute and also capped at one hour. It writes the new attempt count and retry time to the backoff table, then returns the number of seconds chosen.
+
+**Call relations**: The enrichment job calls this when a provider response says “not now” or otherwise fails in a way that should slow future attempts. `due_workspaces` later reads the backoff table and skips the workspace until the saved retry time has passed.
+
+*Call graph*: 5 external calls (now, timedelta, insert, select, update).
+
+
+##### `Backoff.clear`  (lines 356–361)
+
+```
+async def clear(self) -> None
+```
+
+**Purpose**: Removes the pause record for this workspace. This lets enrichment resume normally after successful work.
+
+**Data flow**: It deletes the backoff row for the current workspace, if one exists. It returns nothing and leaves other workspaces untouched.
+
+**Call relations**: A job tick that successfully enriches somebody can call this to show the workspace is healthy again. After it clears the row, `due_workspaces` will no longer skip that workspace because of backoff.
+
+*Call graph*: 1 external calls (delete).
+
+
+##### `agent_is_main`  (lines 364–375)
+
+```
+async def agent_is_main(connection: AsyncConnection, workspace_id: UUID, agent_id: UUID) -> bool
+```
+
+**Purpose**: Checks whether a given agent is the main agent for a workspace. This mirrors a core member-page rule so enrichment can apply the same narrowing.
+
+**Data flow**: It receives a database connection, workspace ID, and agent ID. It queries the agent table for the matching row and reads its `is_main` flag. It returns `True` if the flag is present and true, otherwise `False`.
+
+**Call relations**: Higher-level code calls this when it needs to know whether an agent has the main-agent role before showing or using enrichment information. It performs one direct database read and returns a simple yes-or-no answer.
+
+*Call graph*: 2 external calls (execute, select).
+
+
+##### `_stored`  (lines 378–392)
+
+```
+def _stored(row: sa.Row) -> StoredProfile
+```
+
+**Purpose**: Turns a raw database profile row into the typed object used by the rest of the enrichment code. It is the translation step between stored JSON and normal Python models.
+
+**Data flow**: It receives a database row containing member ID, profile fields, optional person JSON, optional company JSON, and fetch time. It validates the JSON into `Person` and `Company` models when present, ensures the fetch time has a timezone, wraps everything in a `Profile`, and returns a `StoredProfile`.
+
+**Call relations**: `Profiles.rows`, `Profiles.one`, and `Profiles.by_email` call this after reading from the database. This keeps all profile-reading paths consistent, so the rest of the system receives the same clean shape no matter how the row was found.
+
+*Call graph*: called by 3 (by_email, one, rows); 2 external calls (__init__, __init__).
+
+
+### Automation scheduling stores
+Operational stores track monitors, delayed conversation wakeups, and recurring scheduled work for background automation.
+
+### `extensions/monitors/ufo_ext_monitors/monitors.py`
+
+`domain_logic` · `request handling and scheduled monitor runner`
+
+This file is the monitor extension’s storage layer and rulebook for monitor state. Think of each monitor as a scheduled alarm with a clipboard: it remembers which conversation and agent to return to, what command to run, what output counts as “normal,” when to check again, and whether a background worker has temporarily borrowed it to do the check. Without this file, monitors could not be armed, workers could double-run the same monitor, stopped monitors might still fire, and output could grow without limit.
+
+The file first defines constants, such as maximum output size and lease batch size, then declares the database table used only by this extension. Every query includes the workspace id because the database connection is not automatically limited to one workspace.
+
+A small `Monitor` value object represents one row in ordinary Python form. Helper functions turn raw database rows into this object and normalize timestamps so time comparisons stay reliable.
+
+The `MonitorStore` class is the main doorway. It can list armed monitors, insert a new one, lease due monitors for a runner, record the result of a probe, check whether a lease still owns a monitor, and delete a monitor after it fires or when a user disarms it. The lease acts like a library checkout slip: while one worker holds it, another worker should not process the same monitor.
+
+#### Function details
+
+##### `qualified_name`  (lines 73–84)
+
+```
+def qualified_name(conversation_id: UUID, slug: str) -> str
+```
+
+**Purpose**: Builds the stored monitor name from a conversation id and a human-chosen slug. This prevents two conversations in the same workspace from accidentally using the same monitor object name.
+
+**Data flow**: It receives a conversation UUID and a short slug → takes the first few hex characters of the conversation id and places them before the slug → returns one workspace-unique name string.
+
+**Call relations**: This is a naming helper used when a monitor is created or referred to by object name. It does not call other project functions; it simply enforces the same naming shape expected by the monitor table’s uniqueness rule.
+
+
+##### `capped`  (lines 87–97)
+
+```
+def capped(output: str) -> str
+```
+
+**Purpose**: Shrinks probe output to a safe maximum size while keeping the beginning and end. This matters because monitor output can be large, and a later fire should not carry an unlimited amount of text.
+
+**Data flow**: It receives an output string → converts it to bytes and checks its size → if it is small enough, returns it unchanged; otherwise returns the first half, an omission marker saying how many bytes were removed, and the last half.
+
+**Call relations**: This helper is used around probe output before it is compared or reported. It stands alone and does not call other project functions.
+
+
+##### `stderr_tail`  (lines 100–105)
+
+```
+def stderr_tail(stderr: str) -> str
+```
+
+**Purpose**: Keeps only the end of a failed command’s error output. The end of stderr is usually where shells and tools explain what went wrong.
+
+**Data flow**: It receives a stderr string → checks its byte length → returns the whole string if it is short, or only the final allowed bytes if it is too long.
+
+**Call relations**: This helper is meant for failed probe reporting. It has no project-level callees; it is a simple text-size guard.
+
+
+##### `_aware`  (lines 137–138)
+
+```
+def _aware(when: datetime) -> datetime
+```
+
+**Purpose**: Ensures a datetime has timezone information. This avoids mixing timezone-aware and timezone-less times, which can cause wrong comparisons or runtime errors.
+
+**Data flow**: It receives a datetime → if it already has a timezone, returns it as-is; if not, marks it as UTC → returns the normalized datetime.
+
+**Call relations**: `_row` calls this whenever it builds a `Monitor` from database data. The need comes from SQLite sometimes returning plain datetimes without timezone labels.
+
+*Call graph*: called by 1 (_row); 1 external calls (replace).
+
+
+##### `_row`  (lines 141–168)
+
+```
+def _row(row: sa.RowMapping) -> Monitor
+```
+
+**Purpose**: Converts one database row into a `Monitor` object that the rest of the extension can use safely. It also normalizes all stored times to UTC-aware datetimes.
+
+**Data flow**: It receives a SQLAlchemy row mapping from the monitor table → reads each column, fixes timestamp fields through `_aware`, and fills a `Monitor` dataclass → returns that `Monitor` object.
+
+**Call relations**: `MonitorStore.armed`, `MonitorStore.arm`, and `MonitorStore.claim_due` all call `_row` after reading rows from the database. It is the shared doorway that keeps every retrieved monitor shaped consistently.
+
+*Call graph*: calls 1 internal fn (_aware); called by 3 (arm, armed, claim_due); 1 external calls (__init__).
+
+
+##### `_claim_available`  (lines 171–172)
+
+```
+def _claim_available(now: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the database condition for “this monitor is not currently leased, or its lease has expired.” This is how workers avoid stepping on each other.
+
+**Data flow**: It receives the current time → creates a SQL condition checking for no claim or an expired claim time → returns that condition for use inside larger database queries.
+
+**Call relations**: `due_monitor_workspaces.due` uses it to find workspaces with runnable monitor work, and `MonitorStore.claim_due` uses it again when actually leasing monitor rows.
+
+*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
+
+
+##### `_due`  (lines 175–176)
+
+```
+def _due(now: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the database condition for “this monitor needs attention now.” A monitor is due if its next probe time has arrived or its deadline has arrived.
+
+**Data flow**: It receives the current time → creates a SQL condition comparing that time against `next_probe_at` and `deadline_at` → returns the condition for larger queries.
+
+**Call relations**: `due_monitor_workspaces.due` uses it to find candidate workspaces, and `MonitorStore.claim_due` uses it when selecting the specific monitor rows to lease.
+
+*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
+
+
+##### `due_monitor_workspaces`  (lines 179–196)
+
+```
+def due_monitor_workspaces() -> WorkspaceCandidates
+```
+
+**Purpose**: Provides the job system with a way to find workspaces that have monitor work ready to run. It returns candidates only when a due monitor is also free to be claimed and its agent is live.
+
+**Data flow**: It defines an inner query builder → gives that query builder to the job helper `owner_candidates` → returns a `WorkspaceCandidates` object that the scheduler can ask for workspaces.
+
+**Call relations**: The background monitor runner relies on this as its scheduling seam. It hands the inner `due` function to `owner_candidates`, which is responsible for turning the SQL query into workspace candidates for the job system.
+
+*Call graph*: 1 external calls (owner_candidates).
+
+
+##### `due_monitor_workspaces.due`  (lines 184–194)
+
+```
+def due() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: Builds the actual database query for workspaces that currently have due monitor work. It filters out monitors that are leased and monitors whose agent is not live.
+
+**Data flow**: It reads the current UTC time → creates a SQL select over monitor workspace ids → applies the “claim is free,” “monitor is due,” and “agent is live” conditions → returns a distinct workspace-id query.
+
+**Call relations**: This inner function is passed to `owner_candidates` by `due_monitor_workspaces`. It calls `_claim_available`, `_due`, and `agent_is_live` so the scheduler opens only workspaces where work can really proceed.
+
+*Call graph*: calls 2 internal fn (_claim_available, _due); 3 external calls (now, select, agent_is_live).
+
+
+##### `MonitorStore.armed`  (lines 205–211)
+
+```
+async def armed(self, conversation_id: UUID | None=None) -> tuple[Monitor, ...]
+```
+
+**Purpose**: Lists the monitors currently armed in this store’s workspace. It can list all monitors or only those belonging to one conversation.
+
+**Data flow**: It receives an optional conversation id → builds a database query scoped to the store’s workspace, with an extra conversation filter if provided → reads matching rows ordered by name → converts each row through `_row` → returns a tuple of `Monitor` objects.
+
+**Call relations**: This is the read path for callers that need to show or inspect active monitors. It relies on `_row` so every returned monitor has normalized timestamps and the same Python shape.
+
+*Call graph*: calls 1 internal fn (_row); 1 external calls (select).
+
+
+##### `MonitorStore.arm`  (lines 213–268)
+
+```
+async def arm(self, *, conversation_id: UUID, agent_id: UUID, name: str, audience: str, command: str, interval_minutes: int, deadline_at: datetime, reason: str, next_steps: str, metadata: dict[str, Js
+```
+
+**Purpose**: Creates a new armed monitor row. This is used when an agent or member asks the system to start watching something.
+
+**Data flow**: It receives all monitor setup details, including conversation, agent, command, interval, deadline, explanation text, metadata, baseline output, and first probe time → inserts a new row with fresh ids, zeroed counters, no current claim, and timestamps → converts the returned database row through `_row` → returns the newly created `Monitor`.
+
+**Call relations**: This is the write path that turns a monitor request into durable database state. It calls `uuid4` for the monitor id and `_row` to return the inserted row in the same form as other reads.
+
+*Call graph*: calls 1 internal fn (_row); 2 external calls (insert, uuid4).
+
+
+##### `MonitorStore.claim_due`  (lines 270–313)
+
+```
+async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_MONITORS) -> tuple[Monitor, ...]
+```
+
+**Purpose**: Leases a batch of due monitors for a worker to process. The lease prevents overlapping runners from probing and firing the same monitor at the same time.
+
+**Data flow**: It receives the current time, a lease length in seconds, and a maximum number of monitors → generates a claim id → selects due, unclaimed-or-expired monitors in this workspace whose agents are live → updates those rows with the claim id and claim expiry → returns the claimed rows as `Monitor` objects.
+
+**Call relations**: The monitor runner calls this when it is ready to do work. It uses `_claim_available` and `_due` to find eligible rows, `agent_is_live` to skip dead agents, and `_row` to hand claimed monitors back to the runner.
+
+*Call graph*: calls 3 internal fn (_claim_available, _due, _row); 5 external calls (timedelta, select, update, agent_is_live, uuid4).
+
+
+##### `MonitorStore.quiet_tick`  (lines 315–325)
+
+```
+async def quiet_tick(self, row: Monitor, probed_at: datetime, next_probe_at: datetime) -> None
+```
+
+**Purpose**: Records a successful probe whose output still matches the baseline. This means nothing needs to be posted, but the monitor should remember the quiet streak and schedule the next check.
+
+**Data flow**: It receives the claimed monitor row, the time the probe ran, and the next probe time → increases the probe count and quiet streak, resets the failure streak, keeps the skipped count → passes the new values to `_tick` → no value is returned.
+
+**Call relations**: `MonitorRunner._tick` calls this after a normal, unchanged probe. This function does not write directly; it hands the actual database update to `MonitorStore._tick`.
+
+*Call graph*: calls 1 internal fn (_tick); called by 1 (_tick).
+
+
+##### `MonitorStore.failed_tick`  (lines 327–339)
+
+```
+async def failed_tick(self, row: Monitor, probed_at: datetime, next_probe_at: datetime) -> None
+```
+
+**Purpose**: Records a probe that ran but exited with an error, when that error is not yet enough to fire the monitor. It advances the failure streak and breaks the quiet streak.
+
+**Data flow**: It receives the claimed monitor row, the probe time, and the next probe time → increases the probe count and failure streak, resets the quiet streak, keeps skipped unchanged → sends those values to `_tick` → no value is returned.
+
+**Call relations**: `MonitorRunner._tick` calls this when a command failure should be remembered but not yet delivered as a fire. `MonitorStore._tick` performs the guarded database update.
+
+*Call graph*: calls 1 internal fn (_tick); called by 1 (_tick).
+
+
+##### `MonitorStore.skipped_tick`  (lines 341–352)
+
+```
+async def skipped_tick(self, row: Monitor, next_probe_at: datetime) -> None
+```
+
+**Purpose**: Records that a probe could not run, for example because the client sandbox was unreachable. A skipped probe is counted separately from a failed command.
+
+**Data flow**: It receives the claimed monitor row and the next probe time → keeps the probe count, quiet streak, failure streak, and last probe time unchanged → increases the skipped count → passes the update to `_tick` → no value is returned.
+
+**Call relations**: `MonitorRunner._tick` calls this when the runner could not actually execute the probe. It delegates the database write to `MonitorStore._tick` like the other tick-result methods.
+
+*Call graph*: calls 1 internal fn (_tick); called by 1 (_tick).
+
+
+##### `MonitorStore._tick`  (lines 354–386)
+
+```
+async def _tick(self, row: Monitor, *, probes_run: int, quiet_streak: int, failure_streak: int, skipped: int, last_probe_at: datetime | None, next_probe_at: datetime) -> None
+```
+
+**Purpose**: Writes the new counters and schedule after a claimed monitor has been processed. It also releases the lease so the monitor can be claimed again later.
+
+**Data flow**: It receives a claimed monitor plus the updated counters, last probe time, and next probe time → refuses to proceed if the monitor was not claimed → updates only the row with the matching workspace, monitor id, and claim id → clears the claim and claim expiry → returns nothing.
+
+**Call relations**: `quiet_tick`, `failed_tick`, and `skipped_tick` all funnel into this method. The claim check is important: it makes sure a worker only updates the monitor it actually leased.
+
+*Call graph*: called by 3 (failed_tick, quiet_tick, skipped_tick); 1 external calls (update).
+
+
+##### `MonitorStore.claim_holds`  (lines 388–415)
+
+```
+async def claim_holds(self, row: Monitor) -> bool
+```
+
+**Purpose**: Checks whether a worker still owns the monitor lease immediately before firing. This prevents a monitor that was just disarmed from still delivering a fire.
+
+**Data flow**: It receives a claimed monitor → refuses to proceed if there is no claim id → looks for the row with the same workspace, monitor id, and claim id, locking it while checking → returns true if it still exists under that claim, otherwise false.
+
+**Call relations**: `MonitorRunner._fire` calls this right before delivering a fire. If the row was deleted by `disarm`, this returns false and the runner can avoid firing something the user stopped.
+
+*Call graph*: called by 1 (_fire); 1 external calls (select).
+
+
+##### `MonitorStore.retire`  (lines 417–429)
+
+```
+async def retire(self, row: Monitor) -> None
+```
+
+**Purpose**: Deletes a monitor after its fire has been delivered. This matches the rule that one armed monitor ends in exactly one fire.
+
+**Data flow**: It receives a claimed monitor → refuses if there is no claim id → deletes only the row with the matching workspace, monitor id, and claim id → returns nothing.
+
+**Call relations**: `MonitorRunner._fire` calls this after a fire is successfully delivered. The claim guard means an expired or lost lease cannot delete a row that another runner may now own.
+
+*Call graph*: called by 1 (_fire); 1 external calls (delete).
+
+
+##### `MonitorStore.disarm`  (lines 431–439)
+
+```
+async def disarm(self, row: Monitor) -> bool
+```
+
+**Purpose**: Stops watching by deleting a monitor row, regardless of whether it is currently claimed. It reports whether a row was actually removed.
+
+**Data flow**: It receives a monitor row → deletes the row with the same workspace and monitor id → checks the database’s deleted-row count → returns true if one row was deleted, false otherwise.
+
+**Call relations**: This is the user-driven stop path. It can race with a runner, so `claim_holds` exists on the fire path to notice when `disarm` removed the row before a fire is sent.
+
+*Call graph*: 1 external calls (delete).
+
+
+### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/pauses.py`
+
+`io_transport` · `scheduled task polling and pause resume handling`
+
+A pause means: “this workflow is sleeping until a certain time, then resume this conversation with this prompt.” This file defines the pause table and the small set of safe operations used to add, inspect, claim, and remove those pauses.
+
+The important rule is that each conversation can have only one active pause. If the same conversation is paused again, the old wait is replaced. That prevents one workflow from waiting for two different timers at once, like replacing an alarm rather than setting a second alarm beside it.
+
+The file also protects against multiple workers trying to wake the same pause. A worker must first “claim” a due pause, which is a short lease saying “I am working on this one.” Other workers skip pauses with a live claim. Before firing, the worker checks that the claim still belongs to the same pause, because the conversation may have been re-armed in the meantime. After the wake-up is fired or skipped, the worker retires the pause, but only if its claim still matches.
+
+The table belongs to this extension, not the core system schema. Every query filters by workspace, because the database connection is not automatically scoped to one workspace.
+
+#### Function details
+
+##### `_aware`  (lines 76–77)
+
+```
+def _aware(when: datetime) -> datetime
+```
+
+**Purpose**: This helper makes sure a date and time value clearly says it is in UTC time. It prevents later code from accidentally comparing a timezone-less time with a timezone-aware one.
+
+**Data flow**: It receives a datetime value. If the value already has timezone information, it returns it unchanged; if not, it adds UTC as the timezone. The output is always safe for the rest of this file to treat as UTC.
+
+**Call relations**: Rows from the database are converted through _row, and _row calls this helper for each stored timestamp. This matters especially for SQLite, which may return times without timezone information.
+
+*Call graph*: called by 1 (_row); 1 external calls (replace).
+
+
+##### `_row`  (lines 80–95)
+
+```
+def _row(row: sa.RowMapping) -> Pause
+```
+
+**Purpose**: This turns a raw database row into a Pause object that the rest of the extension can use. It is the one place where stored pause data is cleaned up after reading.
+
+**Data flow**: It receives a row mapping from the database. It pulls out the pause id, conversation, agent, wake-up time, recorded sequence numbers, prompt, creator, claim, and timestamps; it also normalizes all timestamps through _aware. It returns a Pause value object.
+
+**Call relations**: All read paths in PauseStore funnel their database results through this builder. arm uses it after inserting or updating a pause, armed uses it when listing stored pauses, and claim_due uses it after leasing due pauses.
+
+*Call graph*: calls 1 internal fn (_aware); called by 3 (arm, armed, claim_due); 1 external calls (__init__).
+
+
+##### `_claim_available`  (lines 98–99)
+
+```
+def _claim_available(now: datetime) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: This builds the database condition that says a pause is free to be claimed. A pause is available if nobody has claimed it, or if the previous claim has expired.
+
+**Data flow**: It receives the current time. It produces a SQL condition comparing that time with the pause row’s claim fields. Nothing is changed directly; the condition is used inside larger database queries.
+
+**Call relations**: The workspace scanner and the claim operation both rely on the same availability rule. due_pause_workspaces.due uses it to find workspaces worth opening, and PauseStore.claim_due uses it to actually lease pauses in one workspace.
+
+*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
+
+
+##### `due_pause_workspaces`  (lines 102–118)
+
+```
+def due_pause_workspaces() -> WorkspaceCandidates
+```
+
+**Purpose**: This tells the background job system which workspaces may have pauses ready to wake up. It is a quick first filter before doing detailed work inside each workspace.
+
+**Data flow**: It defines a query-producing helper that looks for distinct workspace ids with due, claimable pauses. It passes that helper to the job ownership system, which turns it into workspace candidates for workers.
+
+**Call relations**: The pause runner uses this as its candidate seam: instead of scanning every workspace blindly, the job system asks this file which workspaces have visible due work. The inner due query does the actual database selection.
+
+*Call graph*: 1 external calls (owner_candidates).
+
+
+##### `due_pause_workspaces.due`  (lines 107–116)
+
+```
+def due() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: This inner helper builds the database query for workspaces that currently have at least one due pause whose claim is free. It keeps the scheduler from waking workers for pauses that are already leased by someone else.
+
+**Data flow**: It reads the current UTC time, creates the claim-availability condition, and builds a SQL query for distinct workspace ids where resume_at is in the past or present. It returns the query, not the final rows.
+
+**Call relations**: due_pause_workspaces hands this query builder to owner_candidates. That outside job helper can then run the query when it needs to decide which workspaces should be assigned to workers.
+
+*Call graph*: calls 1 internal fn (_claim_available); 2 external calls (now, select).
+
+
+##### `PauseStore.arm`  (lines 127–183)
+
 ```
-async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None
+async def arm(self, *, conversation_id: UUID, agent_id: UUID, resume_at: datetime, origin_seq: int, origin_arrival_seq: int, prompt: str, created_by_member_id: UUID | None) -> Pause
 ```
 
-**Purpose**: This reads the saved Stripe customer id for a workspace, if one has already been provisioned. It is the local pointer from UFO's workspace to Stripe's customer record.
+**Purpose**: This creates or replaces the pause for one conversation. Someone uses it when a workflow says, “wait until this time, then resume with this prompt.”
 
-**Data flow**: It asks the extension store for the billing record. If nothing is stored it returns None; otherwise it validates the stored data and returns a BillingRecord.
+**Data flow**: It receives the conversation, agent, wake-up time, sequence watermarks, prompt, and optional member who created the pause. It opens the extension transaction, inserts a new row, or updates the existing row for that workspace and conversation. It gives the wait a fresh id and clears any old claim, then returns the stored pause as a Pause object.
 
-**Call relations**: Billing status, portal creation, autopay setup, the billing web page, and balance top-up all call this when they need to know whether the workspace already has a Stripe customer.
+**Call relations**: This is the write path for arming a wait. It hands the returned database row to _row so callers receive normalized data. Its fresh id behavior is important because PauseRunner later uses pause identity to avoid confusing an old fired wait with a newly re-armed one.
 
-*Call graph*: called by 5 (run, _billing_autopay, _billing_portal, _billing_projection, _billing_status).
+*Call graph*: calls 1 internal fn (_row); 1 external calls (uuid4).
 
 
-##### `manage_billing`  (lines 377–386)
+##### `PauseStore.armed`  (lines 185–191)
 
 ```
-async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult
+async def armed(self, conversation_id: UUID | None=None) -> tuple[Pause, ...]
 ```
 
-**Purpose**: This is the chat-facing billing action. It lets an admin request status, get a Stripe portal link, or set automatic refills.
+**Purpose**: This lists the currently armed pauses in the workspace, optionally for just one conversation. It is useful for inspection, tests, or code that needs to know what is waiting.
 
-**Data flow**: It receives the tool context and parsed user arguments. It first checks admin permission, then reads billing configuration, then dispatches to the status, portal, or autopay helper based on the requested operation, returning a tool result.
+**Data flow**: It receives an optional conversation id. It builds a workspace-scoped query, adds the conversation filter if one was given, orders results by wake-up time, reads the rows, and returns them as Pause objects.
 
-**Call relations**: The tool definition registered in manifest points to this function. It delegates permission checking to _admin_billing and the actual work to _billing_status, _billing_portal, or _billing_autopay.
+**Call relations**: This is a read-only view over the pause table. After the database returns rows, it sends each one through _row so the rest of the system sees the same clean Pause shape used by other operations.
 
-*Call graph*: calls 4 internal fn (_admin_billing, _billing_autopay, _billing_portal, _billing_status).
+*Call graph*: calls 1 internal fn (_row); 1 external calls (select).
 
 
-##### `_billing_autopay`  (lines 389–420)
+##### `PauseStore.claim_due`  (lines 193–234)
 
 ```
-async def _billing_autopay(ext: ExtensionContext, config: BillingConfig, args: ManageBillingInput) -> ToolResult
+async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_PAUSES) -> tuple[Pause, ...]
 ```
 
-**Purpose**: This sets or stops automatic balance refills for a workspace. It requires a saved payment method before enabling refills because future charges happen when no admin is present.
+**Purpose**: This leases a batch of pauses that are ready to fire. Leasing is how the system prevents two workers from waking the same conversation at the same time.
 
-**Data flow**: It receives the extension context, Stripe config, and autopay arguments. It validates that both dollar amounts are supplied together or neither is supplied, checks for a saved card when enabling, converts dollars to micro-dollars, writes the auto-top-up rule in a transaction, clears old refusal state, bumps the attempt marker, logs the change, and returns the new setting as JSON text.
+**Data flow**: It receives the current time, a lease length in seconds, and a maximum number of pauses to take. It creates a unique claim id, selects the oldest due and available rows for this workspace, updates those rows with the claim and expiry time, and returns the claimed pauses. The database update and return happen together so overlapping workers divide the work instead of duplicating it.
 
-**Call relations**: manage_billing calls this for the autopay operation. It uses _billing_record and _default_payment_method to confirm payment setup, set_auto_topup to write the rule, and _text_result to return the answer.
+**Call relations**: A pause runner calls this when polling a workspace for due work. It uses _claim_available for the shared availability rule and _row to turn leased rows into Pause objects that can later be checked and retired.
 
-*Call graph*: calls 4 internal fn (transaction, _billing_record, _default_payment_method, _text_result); called by 1 (manage_billing); 2 external calls (set_auto_topup, log).
+*Call graph*: calls 2 internal fn (_claim_available, _row); 4 external calls (timedelta, select, update, uuid4).
 
 
-##### `_admin_billing`  (lines 423–429)
+##### `PauseStore.claim_holds`  (lines 236–261)
 
 ```
-async def _admin_billing(ctx: ToolContext) -> ExtensionContext
+async def claim_holds(self, row: Pause) -> bool
 ```
 
-**Purpose**: This enforces that billing actions are only done by a speaking workspace admin. It protects billing controls from ordinary members and anonymous tool use.
+**Purpose**: This checks whether a worker still owns the pause it is about to fire. It is a last safety check before doing something that cannot be undone: sending the resume turn.
 
-**Data flow**: It reads the speaker member id and admin status from the tool context. If there is no speaker it raises SpeakerRequired; if the speaker is not an admin it raises an error; otherwise it returns the extension context.
+**Data flow**: It receives a Pause that should already have a claim id. If there is no claim id, it raises an error because an unclaimed pause must not fire. Otherwise it looks up the same row in the current workspace with the same claim and returns true if it still exists, false if it was replaced, cleared, or taken out from under this worker.
 
-**Call relations**: manage_billing calls this before any billing operation. The helpers that actually talk to Stripe or core only receive an extension context after this permission gate passes.
+**Call relations**: PauseRunner._fire calls this immediately before firing a pause. If a workflow re-armed the same conversation during the lease window, this check helps avoid firing an abandoned wait.
 
-*Call graph*: calls 1 internal fn (speaker_is_admin); called by 1 (manage_billing); 1 external calls (__init__).
+*Call graph*: called by 1 (_fire); 1 external calls (select).
 
 
-##### `_billing_status`  (lines 432–456)
+##### `PauseStore.retire`  (lines 263–276)
 
 ```
-async def _billing_status(ext: ExtensionContext, config: BillingConfig) -> ToolResult
+async def retire(self, row: Pause) -> None
 ```
+
+**Purpose**: This removes a pause after the worker is done with it, but only if the worker still owns the matching claim. It is the cleanup step after a pause has fired or has been deliberately settled.
+
+**Data flow**: It receives a claimed Pause. If the pause has no claim id, it raises an error. Otherwise it deletes the row with the same id, workspace, and claim id. If the claim expired or the row was replaced, the delete matches nothing, leaving the newer or differently-owned pause safe.
+
+**Call relations**: PauseRunner._fire calls this after handling a pause. The claim check in the delete statement pairs with claim_due and claim_holds so one worker cannot accidentally remove a pause that another worker or a re-arm now owns.
+
+*Call graph*: called by 1 (_fire); 1 external calls (delete).
 
-**Purpose**: This reports what balance the workspace has and whether Stripe currently has a default payment method for it. It answers the admin's question without changing anything.
 
-**Data flow**: It reads the balance from core inside a transaction, reads any stored Stripe customer record, checks Stripe for a default payment method if there is a customer, and returns a JSON text result with card-present status and balance fields.
+### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py`
 
-**Call relations**: manage_billing calls this for the status operation. It depends on _billing_record, _default_payment_method, read_balance, and _text_result.
+`domain_logic` · `request handling and background scheduled-task sweeps`
 
-*Call graph*: calls 4 internal fn (transaction, _billing_record, _default_payment_method, _text_result); called by 1 (manage_billing); 1 external calls (read_balance).
+Scheduled tasks need to survive process restarts and be safe when more than one worker is looking for work. This file gives them a durable home in the database and wraps that table in `ScheduleStore`, a small service that knows the rules for creating, editing, listing, claiming, and rescheduling tasks.
 
+A task row stores the task name, cron-like schedule text, prompt, next run time, optional expiry time, the conversation it reports into, and the agent that must execute it. The file is careful about boundaries: every database statement filters by workspace, and member-facing operations also stay inside the current object agent’s namespace. That prevents one workspace or agent from accidentally seeing or changing another’s tasks.
 
-##### `_billing_portal`  (lines 459–481)
+The most important behavior is leasing. When the runner asks for due tasks, `claim_due` marks a small batch with a temporary claim, like putting a sticky note on library books so two librarians do not both process the same ones. Before firing, the runner can check that the claim still holds, because a user may have edited or cancelled the task in the meantime. After a successful fire, the task is advanced to its next run time and the claim is cleared. Expired tasks are removed instead of fired.
 
+#### Function details
+
+##### `_utc`  (lines 124–125)
+
 ```
-async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolResult
+def _utc(value: datetime) -> datetime
 ```
 
-**Purpose**: This creates a short-lived Stripe Customer Portal link where an admin can save or update a payment method and view billing details. If the workspace has no Stripe customer yet, it creates one first.
+**Purpose**: Makes sure a datetime has a UTC timezone attached. This keeps time comparisons consistent even when the database returns a time without timezone information.
 
-**Data flow**: It reads the workspace id and local billing record. If no record exists, it creates a Stripe customer and stores the returned id. It then creates a portal session with a return URL back to the workspace billing screen, logs the action, and returns the portal URL and customer id as JSON text.
+**Data flow**: It receives one datetime. If the datetime already says what timezone it is in, it is returned as-is; otherwise the function labels it as UTC. The output is always a datetime that can be treated as UTC-aware.
 
-**Call relations**: manage_billing calls this for the portal operation. It uses _stripe_customer for first-time provisioning, _portal_session for the link, and _text_result for the tool response.
+**Call relations**: Rows turned into `ScheduledTask` objects pass their time fields through this helper, and status inspection does the same. `_utc_opt` also uses it for optional time fields.
 
-*Call graph*: calls 5 internal fn (home_url, _billing_record, _portal_session, _stripe_customer, _text_result); called by 1 (manage_billing); 2 external calls (__init__, log).
+*Call graph*: called by 3 (inspect_many, _task, _utc_opt); 1 external calls (replace).
 
 
-##### `_text_result`  (lines 484–485)
+##### `_utc_opt`  (lines 128–129)
 
 ```
-def _text_result(payload: dict[str, object]) -> ToolResult
+def _utc_opt(value: datetime | None) -> datetime | None
 ```
 
-**Purpose**: This wraps a small dictionary as a text ToolResult. It gives chat tools a consistent way to return machine-readable JSON as plain text content.
+**Purpose**: Does the same UTC cleanup as `_utc`, but for a time value that may be missing. It avoids forcing callers to repeat the same `None` check.
 
-**Data flow**: It receives a payload dictionary, converts it to a JSON string, puts that string in a TextContent object, and returns a ToolResult containing it.
+**Data flow**: It receives either a datetime or `None`. If the value is missing, it returns `None`; otherwise it sends the datetime to `_utc` and returns the normalized result.
 
-**Call relations**: The billing status, portal, and autopay helpers all call this when returning data to the chat tool caller.
+**Call relations**: It is used when building task objects and inspection results for fields such as `last_run_at` and `expires_at`, where a task may not have run yet or may not expire.
 
-*Call graph*: called by 3 (_billing_autopay, _billing_portal, _billing_status); 3 external calls (__init__, __init__, dumps).
+*Call graph*: calls 1 internal fn (_utc); called by 2 (inspect_many, _task).
 
 
-##### `_require_env`  (lines 499–503)
+##### `_claim_available`  (lines 132–136)
 
 ```
-def _require_env(name: str) -> str
+def _claim_available(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This reads a required environment variable and raises a clear error if it is missing. It prevents silent operation with missing credentials.
+**Purpose**: Builds the database condition for deciding whether a task can be claimed by a worker. A task is available if nobody has claimed it, or if its old claim has timed out.
 
-**Data flow**: It receives an environment variable name, reads its value, and returns the value if present. If the value is missing or empty, it raises a RuntimeError explaining that the Metronome extension needs it.
+**Data flow**: It receives the current time. It produces a SQL condition that matches rows with no `claimed_by` value or with a `claim_expires_at` earlier than that time.
 
-**Call relations**: UsageShipper.run calls this before touching the usage export seam, so a deployment without a Metronome token fails before creating pending export work.
+**Call relations**: The workspace candidate query and `ScheduleStore.claim_due` both use this exact condition, so the system agrees on which tasks are worth waking a worker for and which tasks can actually be leased.
 
-*Call graph*: called by 1 (run).
+*Call graph*: called by 2 (claim_due, due); 1 external calls (or_).
 
 
-##### `_stripe_customer`  (lines 506–523)
+##### `_expired`  (lines 139–143)
 
 ```
-async def _stripe_customer(config: BillingConfig, workspace_id: UUID, transport: httpx.AsyncBaseTransport | None) -> str
+def _expired(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This creates or reuses the one Stripe Customer for a workspace. It uses a stable idempotency key, meaning repeated create attempts settle on the same customer instead of making duplicates.
+**Purpose**: Builds the database condition for deciding whether a task has reached its expiry time. Expired tasks should be removed rather than fired again.
 
-**Data flow**: It receives billing config, a workspace id, and an optional HTTP transport. It posts customer details and workspace metadata to Stripe, then extracts and returns the customer id from Stripe's response.
+**Data flow**: It receives the current time. It produces a SQL condition matching rows that have an expiry time and whose expiry time is now or in the past.
 
-**Call relations**: _billing_portal calls this when a workspace asks for the billing portal before a Stripe customer record exists. It sends the HTTP request through _stripe and validates the returned id with _as_str.
+**Call relations**: The due-workspace finder uses it to wake a sweep for cleanup, and `ScheduleStore.claim_due` uses it to delete expired, claim-available tasks before leasing runnable ones.
 
-*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 1 (_billing_portal).
+*Call graph*: called by 2 (claim_due, due); 1 external calls (and_).
 
 
-##### `_portal_session`  (lines 526–551)
+##### `_task`  (lines 146–165)
 
 ```
-async def _portal_session(config: BillingConfig, customer_id: str, flow: str | None, transport: httpx.AsyncBaseTransport | None, return_url: str | None=None) -> str
+def _task(row: sa.RowMapping) -> ScheduledTask
 ```
 
-**Purpose**: This asks Stripe for a Customer Portal session URL. The URL lets an admin manage payment methods and billing details under the deployment's portal configuration.
+**Purpose**: Turns a raw database row into a `ScheduledTask` value that the rest of the extension can safely use. It is the single place that normalizes task timestamps from the database.
 
-**Data flow**: It receives billing config, a Stripe customer id, an optional portal flow type, an optional transport, and an optional return URL. It builds the Stripe request data, posts it, extracts the session URL, and returns it.
+**Data flow**: It receives a row mapping from a SQL query. It copies the row’s identifiers, text fields, claim marker, pause flag, and timestamps into a `ScheduledTask`, converting date fields to UTC-aware values on the way. The output is an in-memory task object.
 
-**Call relations**: _billing_portal calls this to create the link shown to admins. It relies on _stripe for the provider call and _as_str to ensure Stripe actually returned a URL.
+**Call relations**: Create, update, list, and claim operations all funnel returned rows through this builder. That means callers get the same shape of task no matter which database operation produced it.
 
-*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 1 (_billing_portal).
+*Call graph*: calls 2 internal fn (_utc, _utc_opt); called by 4 (claim_due, create, list, update); 1 external calls (__init__).
 
 
-##### `_default_payment_method`  (lines 554–566)
+##### `due_task_workspaces`  (lines 168–191)
 
 ```
-async def _default_payment_method(config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None) -> str | None
+def due_task_workspaces() -> WorkspaceCandidates
 ```
 
-**Purpose**: This checks whether a Stripe customer has a default payment method and returns its id. That id is needed for off-session charges, because the charge must name the card to use.
+**Purpose**: Provides the job system with a way to find workspaces that may have scheduled-task work to do. It looks for workspaces containing either runnable tasks or expired tasks needing cleanup.
 
-**Data flow**: It receives billing config, a customer id, and an optional transport. It fetches the customer from Stripe, looks inside invoice settings for a default payment method, and returns that method id or None.
+**Data flow**: It creates an inner query function that selects distinct workspace IDs with available due or expired tasks. It hands that query function to the job helper that turns workspace IDs into job candidates.
 
-**Call relations**: Autopay setup, billing status, balance top-up, and card display all call this before deciding whether a workspace has a usable saved payment method.
+**Call relations**: This is the scheduled-task runner’s doorway into the job scheduling system. It delegates the actual candidate wrapping to `owner_candidates`, while the nested `due` query describes what counts as interesting work.
 
-*Call graph*: calls 1 internal fn (_stripe); called by 4 (run, _billing_autopay, _billing_status, _card_on_file).
+*Call graph*: 1 external calls (owner_candidates).
 
 
-##### `_card_on_file`  (lines 581–596)
+##### `due_task_workspaces.due`  (lines 174–189)
 
 ```
-async def _card_on_file(config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None) -> CardOnFile | None
+def due() -> sa.Select[tuple[UUID]]
 ```
+
+**Purpose**: Builds the actual SQL query used to find workspaces with due scheduled-task activity. It includes expired tasks because cleanup should happen even if their next run time is not due.
+
+**Data flow**: It reads the current UTC time, then constructs a query for distinct workspace IDs where a task can be claimed and is either expired or due to run while not paused. The output is a selectable database query, not the rows themselves.
+
+**Call relations**: This nested function is supplied by `due_task_workspaces` to the job-candidate helper. It uses the same `_claim_available` and `_expired` rules as `claim_due`, keeping wake-up decisions aligned with the actual claiming step.
 
-**Purpose**: This reads friendly card details for the billing page: brand and last four digits. It returns None when there is no default card or the default payment method is not a card.
+*Call graph*: calls 2 internal fn (_claim_available, _expired); 5 external calls (now, and_, not_, or_, select).
+
+
+##### `ScheduleStore.workspace_id`  (lines 205–206)
+
+```
+def workspace_id(self) -> UUID
+```
 
-**Data flow**: It receives billing config, a customer id, and an optional transport. It first finds the default payment method id, then fetches that payment method from Stripe, extracts card brand and last four digits if present, and returns a CardOnFile object.
+**Purpose**: Returns the workspace ID from the extension context. This is the basic safety boundary used by the store’s database operations.
 
-**Call relations**: _billing_projection calls this when rendering the billing page. It builds on _default_payment_method and uses _stripe for the second Stripe lookup.
+**Data flow**: It reads `ctx.workspace_id` from the store’s context and returns that UUID. It does not change anything.
 
-*Call graph*: calls 2 internal fn (_default_payment_method, _stripe); called by 1 (_billing_projection); 1 external calls (__init__).
+**Call relations**: The store’s methods use this value when building their database filters, so every create, read, update, delete, claim, and inspection stays inside the current workspace.
 
 
-##### `_stripe`  (lines 599–620)
+##### `ScheduleStore.create`  (lines 208–267)
 
 ```
-async def _stripe(config: BillingConfig, method: str, path: str, transport: httpx.AsyncBaseTransport | None, data: dict[str, str] | None=None, idempotency_key: str | None=None) -> dict[str, object]
+async def create(self, conversation_id: UUID, name: str, schedule: str, prompt: str, description: str, next_run_at: datetime, created_by_member_id: UUID | None=None, expires_at: datetime | None=None,
 ```
 
-**Purpose**: This is the shared low-level Stripe HTTP helper. It adds authentication, pins the Stripe API version, sends the request, and turns failed responses into StripeError.
+**Purpose**: Creates a new recurring task for the current object agent. It refuses to create a task that reports into a conversation owned by a different agent, because the task must re-enter the right agent when it fires.
 
-**Data flow**: It receives billing config, HTTP method, Stripe path, optional form data, optional idempotency key, and optional transport. It sends the request to Stripe, raises StripeError for non-success responses, and returns the parsed JSON body for successful responses.
+**Data flow**: It receives the conversation, name, schedule text, prompt, description, first run time, optional creator, optional expiry, and paused flag. It checks the conversation’s agent, inserts a row with a new ID and timestamps, and returns the new `ScheduledTask`. If another task with the same workspace, agent, and name already exists, it raises an error.
 
-**Call relations**: All Stripe-specific helpers use this: customer creation, portal sessions, payment method reads, card reads, and top-up charges. StripeError.__init__ is used here to preserve the failed status code.
+**Call relations**: This is called when a member-facing operation wants to add a scheduled task. It uses `object_agent_id` to bind the task to the current agent, chooses the right database upsert style, and sends the returned row through `_task`.
 
-*Call graph*: calls 1 internal fn (__init__); called by 5 (_charge, _card_on_file, _default_payment_method, _portal_session, _stripe_customer); 1 external calls (AsyncClient).
+*Call graph*: calls 1 internal fn (_task); 2 external calls (object_agent_id, uuid4).
 
 
-##### `_as_str`  (lines 623–627)
+##### `ScheduleStore.update`  (lines 269–323)
 
 ```
-def _as_str(value: object, field: str) -> str
+async def update(self, expected: ScheduledTask, schedule: str, prompt: str, description: str, next_run_at: datetime, expires_at: datetime | None=None, *, paused: bool) -> ScheduledTask
 ```
 
-**Purpose**: This validates that a provider response field is a non-empty string. It catches malformed or unexpected Stripe responses close to where they are read.
+**Purpose**: Edits an existing task’s schedule, prompt, description, next run time, expiry, and paused state without rewriting its run history. It uses the caller’s expected task as a guard so an edit does not silently overwrite a task that changed meanwhile.
 
-**Data flow**: It receives a value and a human-readable field name. If the value is a non-empty string it returns it; otherwise it raises a ValueError naming the missing field.
+**Data flow**: It receives the task version the caller believes exists plus the new editable fields. It checks that the current agent still matches, updates only the exact row matching the old identity and creator, clears any active claim, and returns the updated task. If no row matches, it raises an error saying the task changed while editing.
 
-**Call relations**: _stripe_customer uses it for customer ids, and _portal_session uses it for portal URLs.
+**Call relations**: Member-facing edit flows use this after reading a task. It relies on `_creator_matches` to handle creator ownership correctly, uses SQL update to change the row, and turns the result back into a `ScheduledTask` with `_task`.
 
-*Call graph*: called by 2 (_portal_session, _stripe_customer).
+*Call graph*: calls 2 internal fn (_creator_matches, _task); 2 external calls (update, object_agent_id).
 
 
-##### `_metronome_fault`  (lines 630–641)
+##### `ScheduleStore.cancel`  (lines 325–341)
 
 ```
-def _metronome_fault(call: str, response: httpx.Response) -> str
+async def cancel(self, expected: ScheduledTask) -> None
 ```
 
-**Purpose**: This creates a safe, concise error message for a failed Metronome call. It includes the call name, status code, and Metronome's message field without dumping the whole response body.
+**Purpose**: Deletes an existing scheduled task, but only if it is still the same task version the caller expected. This protects against cancelling the wrong row after a concurrent edit or ownership change.
 
-**Data flow**: It receives a call label and an HTTP response. It tries to parse JSON, reads a message if one exists, and returns a short text fault string.
+**Data flow**: It receives the expected task. It checks that the current object agent is still the task’s executor, deletes the row matching workspace, ID, agent, conversation, name, and creator, and returns nothing. If no row was deleted, it raises an error.
 
-**Call relations**: Customer lookup, customer creation, and ingest posting use this when they need to raise a MetronomeError. This keeps job failure records useful without exposing full request or response data.
+**Call relations**: Cancel operations call this to remove a member’s task. It shares `_creator_matches` with `update`, so creatorless tasks and member-created tasks are matched safely.
 
-*Call graph*: called by 3 (_customer_by_alias, _ensure_metronome_customer, _ingest); 1 external calls (json).
+*Call graph*: calls 1 internal fn (_creator_matches); 2 external calls (delete, object_agent_id).
 
 
-##### `_ensure_metronome_customer`  (lines 644–693)
+##### `ScheduleStore._creator_matches`  (lines 343–348)
 
 ```
-async def _ensure_metronome_customer(ctx: ExtensionContext, token: str, transport: httpx.AsyncBaseTransport | None) -> None
+def _creator_matches(self, expected: ScheduledTask) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: This makes sure Metronome has a live customer whose ingest alias is the workspace UUID. Without that alias, Metronome may accept usage events but fail to attach them to the right customer.
+**Purpose**: Builds the database condition that says whether a stored task has the same creator as the expected task. It treats “no creator” carefully, because database `NULL` values need special matching.
 
-**Data flow**: It receives an extension context, Metronome token, and optional transport. It looks up a customer by alias; if one exists it returns. If not, it tries to create a customer with that alias, handles alias conflicts by re-reading, raises clear errors for missing customer permissions or failed responses, and logs successful creation.
+**Data flow**: It receives an expected `ScheduledTask`. If the expected task has no creator, it returns a SQL `IS NULL` condition; otherwise it returns a SQL equality condition for that creator ID.
 
-**Call relations**: UsageShipper.run calls this once before sending the first batch in a pass. It depends on _customer_by_alias for lookups and _metronome_fault for readable provider errors.
+**Call relations**: Both `update` and `cancel` use this helper when protecting mutations. It prevents an operation authorized for one creator’s task from accidentally landing on a creatorless task, or the other way around.
 
-*Call graph*: calls 2 internal fn (_customer_by_alias, _metronome_fault); called by 1 (run); 4 external calls (__init__, __init__, AsyncClient, log).
+*Call graph*: called by 2 (cancel, update).
 
 
-##### `_customer_by_alias`  (lines 703–718)
+##### `ScheduleStore._listing`  (lines 350–371)
 
 ```
-async def _customer_by_alias(http: httpx.AsyncClient, headers: dict[str, str], alias: str) -> str | None
+def _listing(self, selected: tuple[sa.ColumnElement[Any], ...], *, conversation_id: UUID | None, names: tuple[str, ...] | None, visible_to_member_id: UUID | None, include_all_owners: bool, limit: int
 ```
 
-**Purpose**: This looks up the live Metronome customer that owns a given ingest alias. It returns None if no visible customer currently has the alias.
+**Purpose**: Builds a filtered and ordered query for task listings. It centralizes the common rules for workspace, agent, conversation, name, owner visibility, and limit.
 
-**Data flow**: It receives an HTTP client, headers, and an alias string. It calls Metronome's customer list endpoint with the alias filter, raises if the token lacks permission or the response fails, and returns the first customer id found or None.
+**Data flow**: It receives the columns to select and optional filters such as conversation ID, task names, visible member, owner scope, and limit. It creates a SQL select for the current workspace and current object agent, adds any requested filters, orders by task name, and optionally caps the number of rows.
 
-**Call relations**: _ensure_metronome_customer calls this before creating a customer and again after a conflict. That second read distinguishes a harmless race from an alias held by something the token cannot see.
+**Call relations**: `ScheduleStore.list` calls this to avoid duplicating listing rules. It uses `object_agent_id` so member-facing reads only see tasks belonging to the selected object agent.
 
-*Call graph*: calls 1 internal fn (_metronome_fault); called by 1 (_ensure_metronome_customer); 3 external calls (__init__, __init__, get).
+*Call graph*: called by 1 (list); 2 external calls (select, object_agent_id).
 
 
-##### `BalanceTopup.run`  (lines 737–820)
+##### `ScheduleStore.list`  (lines 373–392)
 
 ```
-async def run(self) -> None
+async def list(self, *, conversation_id: UUID | None=None, names: tuple[str, ...] | None=None, visible_to_member_id: UUID | None=None, include_all_owners: bool=True, limit: int | None=None) -> tuple[S
 ```
 
-**Purpose**: This performs an automatic prepaid balance refill for one workspace when core says the balance is low. It charges the saved Stripe payment method and credits the workspace only after the charge succeeds.
+**Purpose**: Returns scheduled tasks visible under the requested filters. It is the basic read operation for listing task definitions.
 
-**Data flow**: It reads the desired auto-top-up rule, skips if none exists, observes short retry pauses for missing cards and longer pauses for card refusals, loads Stripe config, finds the workspace's Stripe customer and default payment method, checks current charged totals, attempts a charge, records refusal state if declined, and on success credits the workspace and logs the top-up.
+**Data flow**: It receives optional filters for conversation, names, visible member, owner scope, and limit. It asks `_listing` to build the query, executes it in a transaction, converts each returned row with `_task`, and returns a tuple of `ScheduledTask` objects.
 
-**Call relations**: The scheduled _top_up wrapper creates BalanceTopup and calls this method. It uses _billing_record and _default_payment_method to find payment setup, _charge to ask Stripe for money, and core balance functions to credit and verify the refill.
+**Call relations**: Member-facing listing code can call this directly when it only needs task rows. `list_reported` builds on it when it also needs conversation audience and surface-label information.
 
-*Call graph*: calls 3 internal fn (_charge, _billing_record, _default_payment_method); 9 external calls (fromisoformat, now, count_charge, credit, mark_topup_verified, read_auto_topup, read_balance, log, warn).
+*Call graph*: calls 2 internal fn (_listing, _task); called by 1 (list_reported).
 
 
-##### `BalanceTopup._charge`  (lines 822–879)
+##### `ScheduleStore.list_reported`  (lines 394–428)
 
 ```
-async def _charge(self, config: BillingConfig, customer_id: str, payment_method: str, wanted: AutoTopup, workspace_id: UUID, attempt: str) -> str | None
+async def list_reported(self, *, conversation_id: UUID | None=None, names: tuple[str, ...] | None=None, visible_to_member_id: UUID | None=None, include_all_owners: bool=True, limit: int | None=None) -
 ```
 
-**Purpose**: This creates and confirms a Stripe PaymentIntent for an automatic top-up. It returns the payment intent id only when money has actually moved.
+**Purpose**: Lists tasks together with the live conversation details needed to decide how they should be shown to a member. This matters because a task’s visibility comes from the conversation it reports into.
 
-**Data flow**: It receives Stripe config, customer id, payment method id, the desired top-up amount, workspace id, and an attempt key. It converts micro-dollars to cents, posts a confirmed off-session payment intent to Stripe with a stable idempotency key, returns the intent id if succeeded, returns None for declined or non-succeeded payments, and raises a special in-flight error for Stripe conflicts.
+**Data flow**: It receives the same filters as `list`. It first gets the matching tasks, then asks the context for facts about their conversations, and returns `ListedTask` objects containing each task plus audience and surface label. If a task’s conversation is gone, that task is left out.
 
-**Call relations**: BalanceTopup.run calls this when it is time to refill. It uses _stripe for the request, and its result tells the caller whether to credit the balance, wait, or mark a refusal.
+**Call relations**: This is the richer listing path used by member-facing surfaces. It reuses `list` for task selection, then combines those results with conversation facts before constructing `ListedTask` values.
 
-*Call graph*: calls 1 internal fn (_stripe); called by 1 (run); 2 external calls (__init__, warn).
+*Call graph*: calls 1 internal fn (list); 1 external calls (__init__).
 
 
-##### `_top_up`  (lines 882–883)
+##### `ScheduleStore.claim_due`  (lines 430–486)
 
 ```
-async def _top_up(ctx: ExtensionContext) -> None
+async def claim_due(self, now: datetime, lease_seconds: int, limit: int=CLAIM_BATCH_MAX_TASKS) -> tuple[ScheduledTask, ...]
 ```
 
-**Purpose**: This is the scheduled job entry for automatic balance refills. It adapts the job system's context into a BalanceTopup run.
+**Purpose**: Lets a background worker lease a small batch of due tasks so it can fire them without another worker firing the same rows at the same time. It also cleans up expired tasks that are safe to remove.
 
-**Data flow**: It receives an extension context, creates a BalanceTopup with the configured test or production transport, and awaits its run. It returns nothing unless the top-up logic raises an error.
+**Data flow**: It receives the current time, lease length in seconds, and a maximum batch size. It creates a fresh claim ID, deletes expired claim-available rows, finds the oldest due unpaused rows that are available, stamps them with the claim and claim expiry time, and returns those claimed tasks.
 
-**Call relations**: manifest registers this as the handler for the balance top-up job. The actual decision-making is in BalanceTopup.run.
+**Call relations**: The scheduled-task runner calls this during a sweep to get work. It uses `_expired` and `_claim_available` to match the workspace-candidate logic, uses SQL delete for cleanup, SQL update for atomic leasing, and `_task` to return usable task objects.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 3 internal fn (_claim_available, _expired, _task); 6 external calls (timedelta, delete, not_, select, update, uuid4).
 
 
-##### `_ingest`  (lines 886–894)
+##### `ScheduleStore.claim_holds`  (lines 488–519)
 
 ```
-async def _ingest(token: str, events: list[dict[str, object]], transport: httpx.AsyncBaseTransport | None) -> None
+async def claim_holds(self, task: ScheduledTask) -> bool
 ```
 
-**Purpose**: This posts a batch of usage events to Metronome's ingest API. It raises a job fault if Metronome refuses the batch.
+**Purpose**: Checks whether a claimed task is still exactly the same task before the runner fires it. This narrows the chance of firing something that was edited, cancelled, or reclaimed after it was leased.
 
-**Data flow**: It receives a bearer token, a list of event dictionaries, and an optional transport. It sends the events as JSON with the token in the Authorization header, returns on success, and raises MetronomeError with a formatted fault on failure.
+**Data flow**: It receives a claimed `ScheduledTask`. If the task has no claim ID, it raises an error. Otherwise it locks and rereads the row by workspace, ID, claim, conversation, agent, name, and schedule, then returns `true` if that exact row still exists and `false` if it does not.
 
-**Call relations**: UsageShipper.run calls this after preparing events and confirming the customer alias. It uses _metronome_fault to produce the error text for failed sends.
+**Call relations**: `ScheduledTaskRunner._fire` calls this immediately before invoking a task. The function does not hand off to other local helpers; it directly asks the database for proof that the lease still owns the same task version.
 
-*Call graph*: calls 1 internal fn (_metronome_fault); called by 1 (run); 2 external calls (__init__, AsyncClient).
+*Call graph*: called by 1 (_fire); 1 external calls (select).
 
 
-##### `_rfc3339`  (lines 897–899)
+##### `ScheduleStore.retire_if_expired`  (lines 521–535)
 
 ```
-def _rfc3339(moment: datetime) -> str
+async def retire_if_expired(self, task: ScheduledTask, now: datetime) -> bool
 ```
 
-**Purpose**: This formats a datetime for provider-facing text fields. If the time has no timezone, it treats it as UTC so the timestamp is not ambiguous.
+**Purpose**: Removes a claimed task if its expiry time has passed before it is invoked. This prevents the runner from firing a task that should already be dead.
 
-**Data flow**: It receives a datetime. It leaves timezone-aware values alone, adds UTC to naive values, and returns the ISO-formatted timestamp string.
+**Data flow**: It receives a claimed task and the current time. It raises an error if there is no claim, returns `false` if the task has no expiry or has not expired yet, and otherwise deletes the claimed row and returns `true`.
 
-**Call relations**: UsageShipper._events uses this for Metronome event timestamps, and UsageShipper._note_usage_aging_out uses it in warning logs.
+**Call relations**: `ScheduledTaskRunner._fire` calls this during the firing flow. If it returns `true`, the runner can stop because the task was retired instead of invoked.
 
-*Call graph*: called by 2 (_events, _note_usage_aging_out); 1 external calls (replace).
+*Call graph*: called by 1 (_fire); 1 external calls (delete).
 
 
-##### `_billing_request_workspace`  (lines 908–913)
+##### `ScheduleStore.reschedule`  (lines 537–567)
 
 ```
-def _billing_request_workspace(request: Request) -> UUID | None
+async def reschedule(self, task: ScheduledTask, next_run_at: datetime, last_run_at: datetime, last_turn_id: UUID | None=None) -> bool
 ```
 
-**Purpose**: This identifies which workspace a billing page request belongs to by reading the signed session cookie. If it cannot find a workspace claim, the route should not proceed.
+**Purpose**: Advances a claimed task after it has fired. It records the run time, optionally records the turn that was created, clears the claim, and sets the next run time.
 
-**Data flow**: It receives an HTTP request, reads the session cookie, asks the bearer-token helper for the workspace claim, and returns a workspace UUID or None.
+**Data flow**: It receives a claimed task, the next run time, the last run time, and optionally the last turn ID. It raises an error if the task was not claimed, updates the matching claimed row with the new timing and cleared claim, and returns whether a row was actually updated.
 
-**Call relations**: manifest registers this as the identify function for the billing route. Core uses its answer to bind the route request to a workspace before _billing_projection runs.
+**Call relations**: `ScheduledTaskRunner._fire` calls this after a fire has been accepted. The stored `last_turn_id` later lets inspection show the latest outcome and response text.
 
-*Call graph*: 1 external calls (workspace_claim).
+*Call graph*: called by 1 (_fire); 1 external calls (update).
 
 
-##### `_billing_projection`  (lines 916–983)
+##### `ScheduleStore.inspect`  (lines 569–573)
 
 ```
-async def _billing_projection(ext: ExtensionContext, request: Request) -> Response
+async def inspect(self, expected: ScheduledTask) -> TaskInspection | None
 ```
 
-**Purpose**: This serves the billing status page data. It shows balance limits, card details if readable, automatic refill settings, and recent purchases without charging anything or changing settings.
+**Purpose**: Returns the live status picture for one scheduled task. It is a convenience wrapper around the batch inspection path.
 
-**Data flow**: It receives an extension context and HTTP request. It verifies the session cookie for the bound workspace, checks that the email belongs to an admin member, reads headroom, balance, autopay, and purchase history from core, optionally reads card details from Stripe, and returns a JSON response. If the user is not signed in or not an admin, it returns an error response.
+**Data flow**: It receives one expected task, calls `inspect_many` with a one-item tuple, and returns the inspection for that task ID if present. If the task no longer matches or is gone, it returns `None`.
 
-**Call relations**: The billing route registered in manifest calls this after _billing_request_workspace identifies the workspace. It uses core balance and seat helpers for local facts, _billing_record and _card_on_file for Stripe card display, and deliberately keeps the page usable even if Stripe cannot be read.
+**Call relations**: Status-rendering code can call this for one task without dealing with a dictionary. The real work is delegated to `inspect_many`, which keeps single-task and multi-task inspection consistent.
 
-*Call graph*: calls 3 internal fn (transaction, _billing_record, _card_on_file); 9 external calls (configured_auto_topup, read_balance, read_headroom, recent_purchases, verify_token, JSONResponse, warn, member_by_email, member_is_admin).
+*Call graph*: calls 1 internal fn (inspect_many).
 
 
-##### `manifest`  (lines 986–1024)
+##### `ScheduleStore.inspect_many`  (lines 575–611)
 
 ```
-def manifest() -> Manifest
+async def inspect_many(self, expected: tuple[ScheduledTask, ...]) -> dict[UUID, TaskInspection]
 ```
 
-**Purpose**: This tells the UFO extension system what this extension provides. It registers the chat tool, scheduled jobs, billing route, prompt guidance, and one credential slot.
+**Purpose**: Returns status information for several expected tasks, including their timing marks and the outcome of their latest fired turn. This is what lets a user see not just the schedule, but what happened last time.
 
-**Data flow**: It builds and returns a Manifest containing the extension name and version, the manage_billing tool, the usage shipping and balance top-up job specs, the billing HTTP route, the billing prompt section, and the Anthropic bring-your-own-key credential slot.
+**Data flow**: It receives expected `ScheduledTask` objects. It queries matching rows in the current workspace and agent, gathers any recorded last turn IDs, asks the context for those turn outcomes, and builds a dictionary from task ID to `TaskInspection`. Rows whose name or conversation no longer match the expected task are skipped.
 
-**Call relations**: The extension loader calls this to discover the file's capabilities. The handlers it names are _ship for usage shipping, _top_up for balance refills, _billing_projection for the billing route, and manage_billing through the tool definition.
+**Call relations**: `inspect` calls this for the one-task case, and multi-task status pages can call it directly. It uses `object_agent_id` for the agent boundary, `_utc` and `_utc_opt` for time cleanup, and `TaskInspection` to package the result.
 
-*Call graph*: 7 external calls (__init__, __init__, __init__, __init__, __init__, metered_workspaces, topping_up_workspaces).
+*Call graph*: calls 2 internal fn (_utc, _utc_opt); called by 1 (inspect); 3 external calls (__init__, select, object_agent_id).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The merged deployment settings that tell the service how to start, where storage is, and which runtime options are enabled.
-- `reg-pack-extension-registry` — The approved set of installed packs and extensions, including what tools, jobs, agents, hooks, providers, and surfaces they add.
-- `reg-model-provider-catalog` — The shared list of available AI models and providers, including limits, prices, credentials, and adapter rules.
-- `reg-agent-records` — The saved assistant profiles, including their model choice, tools policy, setup needs, visibility, reasoning level, and spawn contracts.
-- `reg-workspace-member-seat-state` — The shared record of workspaces, members, admins, invitations, seats, and workspace-level limits.
-- `reg-egress-proxy-policy` — The network access rules and proxy state that decide which outside hosts can be reached and when secrets may be attached.
-- `reg-credential-vault-connections` — The lockbox of account connections, OAuth grants, API keys, BYOK attempts, and agent permissions to use outside services.
-- `reg-billing-ledger-balance` — The shared money and usage record, including spend caps, model costs, sandbox and egress usage, prepaid balances, and export progress.
-- `reg-product-census-telemetry` — Derived product analytics/census state summarizing workspace activity, onboarding progress, tool connections, and payment funnel status for dashboards.
-- `reg-external-client-connection-pools` — Process-global HTTP/gRPC client sessions, proxy clients, DNS/TLS state, and connection pools used for model providers, connectors, cloud storage, and sandbox services.
-- `reg-provider-rate-limit-backoff` — Shared throttling, retry-after, backoff, and concurrency state for AI providers and external connector APIs, separate from billing spend caps.
-- `reg-turn-assembly-snapshot` — The resolved per-turn host package handed into execution, including selected agent/model, effective prompts, allowed tools/spawn menu, seeded file digests, skills, and routing choices.
-- `reg-turn-token-budget-state` — Per-turn context and token budget state used to trim history, set completion limits, manage prompt-cache assumptions, and reconcile model usage with billing.
+- `reg-schema-version` — The database upgrade position that says which schema changes have already been applied.
+- `reg-persistence-handles` — The shared database and blob-storage connections used to read and save durable system data.
+- `reg-skill-library` — The stored and packaged reusable skill instructions and files available to agents.
+- `reg-workspace-directory` — The shared record of workspaces, members, seats, admins, invitations, and onboarding status.
+- `reg-credential-connections` — The encrypted outside-account credentials, reusable connections, and grants that let agents use them.
+- `reg-agent-registry` — The saved agents, their owners, visibility, model choices, tool policies, and sandbox settings.
+- `reg-conversation-transcripts` — The durable conversation history, compacted records, audiences, and readable timeline data.
+- `reg-turn-queue-state` — The durable state of conversation turns, including pending, running, paused, cancelled, and finished work.
+- `reg-live-update-streams` — The shared live progress channels that stream text, status, costs, and completion events to clients.
+- `reg-surface-routing-state` — The saved routing state for web, Slack, iMessage, terminal, and other public conversation surfaces.
+- `reg-inbound-delivery-ledger` — The durable deduplication and delivery records for inbound messages, writebacks, and mid-turn replies.
+- `reg-environment-documents` — The saved per-agent run environment describing prompts, tools, skills, files, and model overrides.
+- `reg-sandbox-handles` — The remembered sandbox workspaces and conversation sandbox handles used to resume or clean up execution.
+- `reg-subagent-delivery-state` — The parent-child task links and owed-result records used when agents spawn helper agents.
+- `reg-object-store-and-journal` — The shared workspace object records and change history for agents, tasks, memories, sites, and related items.
+- `reg-source-index` — The stored external sources, synced pages, permissions, indexing status, and retry/backoff state.
+- `reg-memory-store` — The remembered facts and searchable memory chunks that can be retrieved or condensed later.
+- `reg-artifact-blob-store` — The shared files, media blobs, previews, metadata, and signed-download records created by agent work.
+- `reg-hosted-site-registry` — The saved hosted-site names, owners, visibility, ports, files, previews, and ingress routing state.
+- `reg-scheduled-work-store` — The durable records for recurring tasks, delayed resumes, scheduled fires, and background job claims.
+- `reg-notification-inbox` — The stored pending notifications and delivery state used to batch notices and wake conversations.
+- `reg-monitor-objective-state` — The saved monitors, objectives, plans, steps, evidence, and blocks that survive across turns.
+- `reg-runtime-fleet-liveness` — The shared record of running service and worker instances, heartbeats, listener claims, and stuck work.
+- `reg-usage-ledger-balance` — The money and usage ledger that tracks costs, prepaid balances, limits, exports, and billing status.
+- `reg-extension-state-store` — Generic per-workspace extension-owned durable key/value or configuration state not covered by a named core store.
+- `reg-credential-request-state` — Pending and fulfilled credential-connection requests, OAuth/device-code callback context, and idempotency markers for credential fulfillment.
+- `reg-workspace-change-log` — Durable per-conversation sandbox file-change snapshots and summaries used after tool execution and shown in workspace-change slots.
+- `reg-enrichment-profile-store` — Cached or recorded person/company enrichment data together with permissions controlling who may use it.
+- `reg-transcript-access-audit` — Durable audit records of privileged/admin reads of private member transcripts for compliance and safety review.
+- `reg-egress-policy-cache-state` — Per-workspace egress-rule generation and cache-freshness state used by proxies to detect stale sandbox network-access rules.
+- `reg-turn-billing-snapshot` — Per-turn frozen billing identity and BYOK attempt state captured before execution and consumed later for stable accounting.
+- `reg-workflow-checkpoints` — Durable per-turn workflow checkpoints, serialized runner state, and step/tool-output idempotency records used to resume, cancel, or recover work without rerunning completed actions.
+- `reg-proposal-review-state` — Durable reviewable-change proposals with source/target digests, creator, approval state, and publication lifecycle outside the self-improvement prompt-promotion loop.

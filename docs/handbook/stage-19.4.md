@@ -1,121 +1,140 @@
-# Public SDK workspace, billing, audience, and surface helpers  `stage-19.4`
+# SDK access, identity, billing, and visibility facades  `stage-19.4`
 
-This stage is shared support for people writing code against the public SDK. It is not the main work loop itself. Instead, it is like a set of labeled front doors into deeper parts of the system, so extension authors do not have to import from changing internal paths.
+This stage is a set of public front doors for extension authors and other SDK users. It is shared behind-the-scenes support, not the main work loop. Its job is to let outside code use approved identity, access, billing, and visibility tools without depending on private internal paths that may change.
 
-The accounting and balance modules expose spending summaries, billing balances, and related functions used by workspace screens and command-line spending tools. The seats module does the same for seat types and helpers, which describe who can occupy or use workspace capacity. The audience module collects tools for describing who a conversation is meant for, while subjects provides standard names and helpers for saying who can see a piece of data. Delivery_register publishes fixed text constants used by delivery registration. Hub gathers public hub-related types. Listings exposes listing and paging helpers, which help callers fetch results in chunks. Surfaces is the broad doorway for building channel integrations, collecting the types, constants, errors, and helpers needed to let UFO communicate through outside places.
+The files mostly re-export trusted pieces from deeper runtime code. accounting exposes the objects used to describe workspace cost reports, while balance exposes tools for prepaid credit, payments, and auto top-ups. authority publishes the allowed execution authority names, and authproxy publishes authentication-proxy types. bearer provides only safe bearer-token checking, meaning it can verify login tokens but not create secret ones. credentials exposes credential objects, and grants exposes grant and connection audit tools. operator gives operator-only web pages the same session helpers and access rules as the runtime. seats exposes seat state and rules for membership or licensing. subjects names who can see disclosed data, such as a whole shared workspace or a specific member. surface_token exposes helpers for tokens used by surface-facing authentication. Together, these files act like a reception desk: callers get the right approved tools without entering the engine room.
 
 ## Files in this stage
 
-### Spending and entitlements
-Public SDK doorways for accounting summaries, billing balance tools, and seat-related workspace access helpers.
+### Billing and spend facades
+Public SDK entry points for cost-reporting objects and prepaid billing balance operations.
 
 ### `core/src/ufo/sdk/accounting.py`
 
-`data_model` · `cross-cutting; active when SDK users import accounting or when spending reports are displayed`
+`data_model` · `cross-cutting`
 
-This module is a public doorway, not a place where new calculations happen. Its job is to make the accounting parts of the project easy and stable for outside code to use. Instead of asking SDK users to know the deeper internal paths where billing models live, it re-exports the important names from those internal modules.
+This file is a small public doorway into UFO’s accounting data. Instead of asking users to know the internal package layout, it lets them import spending report types from `ufo.sdk.accounting`. That matters because internal code can move around over time, while the SDK import path can stay friendly and stable.
 
-In plain terms, it is like a labeled shelf in a library. The books are stored elsewhere, but this shelf tells visitors, “If you need spending reports, usage exports, totals by dimension, or the micro-dollar conversion constant, get them here.”
+The objects exposed here are used for reporting workspace spend: totals by dimension, member-level spending, full spend reports, usage exports, and a helper for finding metered workspaces. A “metered” workspace is one whose usage can be measured and turned into cost. The file also exposes `MICRO_USD_PER_USD`, a conversion constant for money stored in micro-dollars, meaning one-millionth of a US dollar. This avoids floating-point rounding problems when adding costs.
 
-The objects exposed here are used to describe and report workspace spending. For example, a surface can show `SurfaceContext.spend_rollup`, and the command-line tool `ufoctl spend` can print the same kind of totals. Keeping these names available through `ufo.sdk.accounting` means callers do not need to depend on the project’s internal folder layout. If the internal implementation moves later, this public import path can stay the same.
-
-There are no functions in this file. It simply imports selected accounting-related values and types, then makes them available as part of the SDK’s named public surface.
+Think of this module like a labeled shelf at the front of a warehouse. The items still live deeper inside the system, but users do not need to wander the aisles to find them. They can use this shelf as the supported public surface for accounting-related SDK imports.
 
 
 ### `core/src/ufo/sdk/balance.py`
 
-`other` · `cross-cutting import-time public API`
+`other` · `cross-cutting`
 
-This module is like a signposted front desk for balance-related billing features. The real work lives deeper in `ufo.runtime.billing.balance`, where the system knows how to read a workspace's prepaid balance, add credit after a payment, count charges, track auto top-ups, and report recent purchases. Instead of asking outside code to import from that internal runtime location, this file exposes the same names through the public SDK package.
+This is a thin doorway into the system’s billing balance code. The real rules and storage logic live in `ufo.runtime.billing.balance`; this file simply re-exports the important names from there under the public `ufo.sdk.balance` module.
 
-That matters because extensions should not need to know the project's internal folder layout. A billing extension can import `read_balance`, `credit`, `set_auto_topup`, or the `Balance` and `Purchase` types from `ufo.sdk.balance` and trust that this is the intended public doorway. If the internal implementation moves later, this file can keep the public import path steady.
+That matters because extensions should not need to know the project’s internal folder layout. A billing extension can import from this stable SDK path to read a workspace’s prepaid balance, record a settled payment as credit, inspect recent purchases, or configure automatic top-ups. If the internal runtime code moves later, this SDK file can keep the public import path the same.
 
-There is no extra logic here, no validation, and no data transformation. Each imported name is re-exported exactly as itself. In plain terms, this file does not decide what a balance means or when to top up an account; it only makes the core billing rules available to code that is allowed to use them.
+An everyday analogy: this file is like a reception desk. It does not perform the accounting itself, but it tells callers where to get the official forms and services. The accounting rules remain in the core billing module, while outside code gets a clean, named place to access them.
+
+There are no functions defined here. Every exported item is imported from the runtime billing balance module and made available unchanged.
+
+
+### Authority and access facades
+Stable public imports for execution authority, authentication proxy, bearer verification, credentials, and grants.
+
+### `core/src/ufo/sdk/authority.py`
+
+`other` · `cross-cutting`
+
+This file is a small public-facing wrapper. It does not create new behavior itself. Instead, it re-exports selected authority objects, types, and helper functions from `ufo.runtime.authority` so extension authors can import them from the SDK path.
+
+In plain terms, an execution authority describes whose permission or workspace context some extension-owned work should run under. For example, work may belong to a whole workspace or to a specific member. Without a public SDK file like this, extension code would need to reach into internal runtime modules directly, which makes the project harder to change safely. This file is like a reception desk: it points outsiders to the right approved tools without exposing the whole back office.
+
+The exported names include authority types such as `ExecutionAuthority`, `WorkspaceAuthority`, and `MemberAuthority`; a ready-made `WORKSPACE_AUTHORITY`; an `AuthorityUnavailable` error; and helpers that convert between member identifiers and authority objects. Keeping these imports centralized makes the SDK contract clear: these are the authority concepts extension code may rely on.
+
+
+### `core/src/ufo/sdk/authproxy.py`
+
+`other` · `cross-cutting`
+
+This file exists to make the project’s extension API easier and safer to use. An authentication proxy is the part of an extension that can turn a saved account choice or provider setting into a usable credential, such as a token or key, for a connector that talks to an outside service.
+
+Instead of asking extension authors to import these pieces from deeper internal modules, this file re-exports them from a stable SDK path. That means outside code can depend on `ufo.sdk.authproxy` without needing to know where the runtime keeps its connector and manifest definitions internally. It is like a front desk: visitors ask here for the forms they need, even though the forms are stored in back-office cabinets.
+
+The exported pieces describe the contract between an extension and the feed-sync system: `AuthProxySpec` declares an auth backend in an extension manifest, `AuthProxy` is the interface the backend implements, `Credential` is what gets produced for a connector to authenticate with, and `DIRECT_ACCOUNT` marks sources that should resolve credentials directly through the selected auth backend rather than through a broker connection.
+
+There is no active logic here. Nothing is calculated or stored. Its importance is in keeping the public API clean and insulating extension code from internal module layout changes.
+
+
+### `core/src/ufo/sdk/bearer.py`
+
+`other` · `request handling and cross-cutting authentication`
+
+This file is a small public doorway into the project’s bearer-token authentication code. A bearer token is like a temporary wristband: if a request carries a valid one, the system can trust that it came from someone who was already allowed in. The actual implementation lives in `ufo.harness.auth.bearer`, but this SDK file exposes the parts that outside surface extensions are meant to use.
+
+The important safety choice is that extensions can verify tokens without ever receiving the signing secret, which is the private value used to create trustworthy tokens. Each verification function looks up `UFO_TOKEN_SECRET` for itself inside the core authentication code. That means an extension can ask, “Is this token valid, and what workspace does it belong to?” without being handed the key that could mint new tokens.
+
+The file re-exports route and cookie names such as login, logout, and session cookie constants, plus helpers for checking a token and reading trusted claims from it. Without this file, extension authors would either have to import from an internal module directly or duplicate authentication knowledge, both of which would make the system more fragile and less safe.
+
+
+### `core/src/ufo/sdk/credentials.py`
+
+`other` · `cross-cutting import surface`
+
+This file does not create new credential behavior itself. Instead, it re-exports selected credential tools from the deeper runtime package, like putting approved items from a locked storeroom onto a public counter. The real implementations live in `ufo.runtime.access.credentials`, but this file decides which of those names are part of the public SDK surface.
+
+That matters because extensions should not depend directly on internal runtime paths. Internal code can be reorganized later, but the SDK path can stay stable. Without this file, extension authors would either need to know the project’s internal layout or import private implementation details, which would make their code more fragile.
+
+The exported names cover credential request errors, credential value errors, the credential store interface, and helper functions for naming credential objects and reading deployment environment information. In plain terms, these are the pieces an extension may need when asking for secrets or credentials safely, checking whether those requests are valid, and referring to credential-related objects in the expected way.
+
+
+### `core/src/ufo/sdk/grants.py`
+
+`other` · `cross-cutting import-time public API surface`
+
+This module is like a labeled service window at the front of a building. The real work happens deeper inside the project, in `ufo.runtime.access.grants`, but outside users should not have to know that internal layout. Instead, they can import connection and grant audit views from `ufo.sdk.grants`.
+
+The file exposes names such as `ConnectionSummary`, `GrantSummary`, `ConnectionRecorded`, and `ConnectionPermissionDenied`. These are used to inspect or report which extension objects were allowed to connect to which accounts or connectors, and when a connection was refused. It also exposes helper functions such as `connection_summaries`, `grant_summaries`, and `main_agent_connections`, which provide readable audit information.
+
+The comment at the top explains an important project rule: `ufo.sdk` keeps its package initializer empty, so public SDK items live in named modules like this one. Without this file, extension code would need to import directly from internal runtime paths. That would make extensions more fragile, because an internal file move could break their imports even if the public feature still exists.
+
+
+### Sessions, seats, and visibility facades
+SDK-facing contracts for operator sessions, seat state, disclosed-row subjects, and surface token helpers.
+
+### `core/src/ufo/sdk/operator.py`
+
+`util` · `cross-cutting; imported by operator/debug surfaces during startup and request handling`
+
+This file is a small public doorway into the operator web-session system. An “operator” here means a trusted human or tool using special internal/debug web pages, not an ordinary user-facing surface. Those pages need a consistent way to decide which workspace a request is for, confirm that the request belongs to the operator domain, attach the shared operator session cookie, and keep a directory of fleet/workspace entries they can index by.
+
+Rather than making every caller import from the deeper runtime package, this file re-exports three names from `ufo.runtime.ext.operator`: `FleetDirectory`, `bind_operator_session`, and `resolve_operator_workspace`. This is like putting the most-used switches for a machine on a clean front panel, even though the wiring lives behind the wall.
+
+The important behavior is that this module is only a facade. If the real operator session logic changes, it changes in the runtime module, while code using the SDK can keep importing from this stable location. Without this file, operator-only tools would either depend directly on internal paths or each choose their own imports, making the public API more fragile and harder to keep consistent.
 
 
 ### `core/src/ufo/sdk/seats.py`
 
-`util` · `cross-cutting`
+`other` · `cross-cutting`
 
-This module is like a front desk for seat-related features. In this project, a “seat” appears to mean a recorded user or membership slot, along with facts such as their email, admin status, and workspace access. The actual rules and data structures live in `ufo.runtime.seats`, but external extension code is expected to import them through `ufo.sdk.seats` instead.
+This module does not create new behavior of its own. Instead, it re-exports selected names from `ufo.runtime.seats`, which is where the real seat logic lives. A “seat” here means a recorded place or membership slot for a person in a workspace-like system. The exported pieces include the seat data shapes, such as `SeatEntry` and `Seats`, plus helper functions for common questions like finding a member by email, checking whether a member is an admin, listing a member’s workspaces, and reading a workspace domain.
 
-That separation matters because it gives the project a public doorway. If outside code imported deep runtime files directly, later internal reorganizations could break it. By re-exporting selected names here, the project can say, “these are the seat tools you may rely on,” while keeping the implementation owned by the core runtime.
+The reason this file exists is to give outside extension code a clean, intentional import path: `ufo.sdk.seats`. That matters because it separates the public SDK from the project’s internal layout. If the runtime package changes later, the project can keep this small wrapper stable so extensions do not have to be rewritten. Think of it like a reception desk: visitors ask for what they need at the front desk, while the office can reorganize rooms behind the scenes.
 
-The file exposes `SeatEntry`, `Seats`, and helper functions such as `member_by_email`, `member_is_admin`, `member_workspaces`, and `workspace_domain`. The comment at the top explains the design: the core system keeps the validation rules for seat state, while an extension or job decides when to apply those rules. There are no functions defined here, no calculations, and no side effects beyond making these names available under the SDK namespace.
-
-
-### Audience and visibility
-Stable imports for conversation audience tools and subject helpers that describe data visibility.
-
-### `core/src/ufo/sdk/audience.py`
-
-`data_model` · `cross-cutting`
-
-This file is a public doorway into the project's audience system. An “audience” here means who a conversation turn is meant for or visible to, such as a shared room, a specific room, or a foreign room. Instead of asking outside code to import these pieces from the internal runtime path, this file re-exports them through the SDK path.
-
-Think of it like a front desk in a building. The actual offices are elsewhere, but visitors should not need to learn the hallway map. They come to the front desk and get the service they need. In the same way, code using the SDK can import `Audience`, `parse_audience`, `room_audience`, and related helpers from `ufo.sdk.audience`.
-
-There is no new behavior here. The file simply points each public name at the real implementation in `ufo.runtime.turns.audience`. That matters because it creates a stable boundary: the project can reorganize internal runtime files later while keeping the SDK import path steady for users.
+Without this file, extension authors would need to import directly from runtime code, which would blur the line between supported public API and internal implementation details.
 
 
 ### `core/src/ufo/sdk/subjects.py`
 
-`util` · `cross-cutting`
+`data_model` · `cross-cutting`
 
-This file exists so outside code can talk about disclosure subjects without needing to know the internal runtime module where they are implemented. A “subject” here means an audience label: for example, something shared with the whole workspace, or something meant for one specific member. Think of it like putting a mailing label on each row of data so the system knows who is allowed to receive it.
+This file is a public doorway into a lower-level part of the system. In this project, a “subject” is a label that represents an audience: for example, everyone in a shared workspace, or one specific member. These labels are used when deciding who may see a row of data, and the same idea is also used to describe a conversation audience.
 
-The file does not create new behavior of its own. Instead, it re-exports four items from the runtime: the shared workspace subject, the prefix used for member-specific subjects, a helper that builds a member subject, and a helper that checks whether a subject means “shared.” This matters because it gives callers a stable SDK-level import path. If every caller reached into the runtime package directly, internal reorganizing would be harder and more fragile.
+Rather than making outside code import directly from the runtime internals, this file re-exports the important subject pieces through the SDK. That matters because SDK users can rely on this file as the stable, friendly import path, while the internal implementation can stay tucked away.
 
-The comment at the top explains the larger idea: conversation audiences and disclosed rows use the same subject atoms. That lets other parts of the system decide whether a row belongs to a broad shared source or a narrower conversation thread by reading these standard audience labels.
-
-
-### Workspace registries and catalogs
-SDK re-exports for delivery-register constants, hub-facing types, and listing or paging helpers.
-
-### `core/src/ufo/sdk/delivery_register.py`
-
-`util` · `cross-cutting import time`
-
-This is a very small “front desk” file. The real definitions live deeper inside the runtime, in `ufo.runtime.turns.delivery_register`, but outside code should not have to reach into that internal area directly. Instead, this file re-exports the public names `DELIVERY_REGISTER_BLOCK` and `SUBAGENT_RESULT_DESCRIPTION` from a simpler SDK path.
-
-The delivery register is a shared instruction block used when a direct model call needs to write its output into the same place that the shell and subagent prompts already use. In plain terms, it helps keep results arriving in the expected mailbox. Without this public re-export, extensions would either duplicate that wording or import it from an internal module, making them more fragile if the project’s internal layout changes.
-
-There is no runtime logic here beyond importing and re-naming the same objects. Its value is in setting a boundary: `ufo.sdk.delivery_register` is the supported public doorway, while the runtime module remains the internal storage room.
+The file does not create new behavior. It simply brings four names from `ufo.runtime.turns.subjects` into the SDK namespace: a prefix used for member subjects, the shared subject value, a helper that builds a member subject, and a helper that checks whether a subject is the shared one. Think of it like a labeled shelf at the front desk: the actual tools live in the workshop, but users know they can always pick them up here.
 
 
-### `core/src/ufo/sdk/hub.py`
+### `core/src/ufo/sdk/surface_token.py`
 
-`other` · `import time and public SDK use`
+`other` · `cross-cutting`
 
-This module exists to make the project’s public interface cleaner and safer. Instead of asking users to know where hub classes and event types live inside the internal package layout, it lets them import from `ufo.sdk.hub`. Think of it like a reception desk: visitors do not need to wander through the building to find the right office; the desk points them to the right people.
+This module is like a signpost at the public entrance of the project. A “surface token” is used for permanent link addresses that a surface can mint and later verify, without the surface needing to hold the deploy-wide secret directly. That matters because it keeps the public SDK tidy and safer: outside code can import the token tools from `ufo.sdk.surface_token` without needing to know where the deeper authentication code lives.
 
-The hub appears to be the part of the system that reports or carries live activity frames, such as replies, text changes, terminal output, cost updates, and agent activity. This file re-exports those public building blocks from `ufo.runtime.hub` and also re-exports `TextDelta` from the harness interface models. A re-export means the name is imported here and then made available to users of this module as if it belonged here.
+The file re-exports two functions from `ufo.harness.auth.surface_token`: one for minting a surface token and one for verifying it. “Re-export” means the function is defined somewhere else, but this file makes it available under a friendlier public path. This is useful for keeping the project’s internal layout flexible. The maintainers can move or refactor the real implementation later while preserving the public import path that users rely on.
 
-The comment at the top explains an important design rule: `ufo.sdk` uses named modules like this one for its public surface because package `__init__.py` files are intentionally kept empty. Without this file, extension authors would need to import directly from deeper internal paths, which would make their code more tightly tied to the project’s internal layout and more likely to break if files are reorganized.
-
-
-### `core/src/ufo/sdk/listings.py`
-
-`data_model` · `extension development and request handling`
-
-When an extension answers a portal listing, it may need to return results in pages rather than all at once. This is like showing search results one screen at a time, with a bookmark that says where to continue next. This file exists so extension code can import the needed paging pieces from `ufo.sdk.listings` instead of reaching into deeper runtime modules.
-
-The file does not define new behavior itself. Instead, it re-exports selected names from `ufo.runtime.listings`: `ListingCursor`, `ListingPage`, `MalformedCursor`, `page_of`, and `page_query`. Re-exporting means it imports something from another module and exposes it again under this module’s public name.
-
-That matters because it creates a cleaner boundary. The runtime module can contain the actual implementation, while the SDK module acts as the official front desk for extension developers. If the internal layout changes later, callers that use this public SDK path may not need to change. Without this file, extensions would either need to know internal module paths or duplicate paging logic, both of which would make the system more fragile.
-
-
-### Surface extensions
-The public import surface for extension authors building integrations that connect UFO to outside channels.
-
-### `core/src/ufo/sdk/surfaces.py`
-
-`other` · `import time and extension development`
-
-This file does not define new behavior of its own. Instead, it acts like a clearly labeled shelf in a toolbox: if someone is writing a surface extension, they can import the tools they need from `ufo.sdk.surfaces` without knowing where each tool lives inside the deeper runtime code.
-
-A “surface” is an outer communication layer, such as a chat app, inbox, terminal-like workspace, or another place where users and agents exchange messages. Surface extensions need shared vocabulary: what a route is, what context a handler receives, how writeback works, how attachments and transcript records are represented, and what errors mean when credentials, connections, or workspaces are missing or invalid.
-
-The project intentionally keeps `ufo.sdk` modules thin. The package `__init__.py` is empty by rule, so named modules like this one become the public import points. That matters because it separates the public SDK from the internal file layout. If the runtime later moves `SurfaceSpec` or `Writeback` to another internal module, extension code can keep importing from this file.
-
-Without this file, extension authors would have to import from many internal modules directly. That would make extensions more fragile and harder to understand, because they would depend on implementation details instead of a stable public interface.
+There is no extra behavior here, no setup, and no hidden state. When Python imports this module, it imports the two real functions and exposes them under the same names. Without this file, SDK users would have to reach into internal harness modules, which would make their code more tightly coupled to project internals.
