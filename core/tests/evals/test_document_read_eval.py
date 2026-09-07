@@ -3,10 +3,17 @@
 from pathlib import Path
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
-from evals.suites.document_read import CASES, DOCX_PATH, RENDER_TUNNEL_REFUSED
+from evals.suites.document_read import (
+    CASES,
+    DOCX_PATH,
+    RENDER_TUNNEL_REFUSED,
+    REPL_PACKAGE_MISSING,
+    XLSX_PATH,
+)
 from ufo.harness.sandbox.preview import PREVIEW_HOST
 
 EGRESS_SOURCE = Path(__file__).parents[3] / "client" / "src" / "egress.rs"
+SANDBOX_TEMPLATE = Path(__file__).parents[3] / "sandbox" / "build_template.py"
 ANSWER = "ANSWER: DOCX layout page two"
 PAGE_TWO = "DOCX layout page two"
 TUNNEL_502 = (
@@ -18,6 +25,8 @@ RENDER_ANSWERED_401 = (
     "preview token rejected"
 )
 DOCX_CASE = next(case for case in CASES if case.name == "docx-second-page")
+XLSX_CASE = next(case for case in CASES if case.name == "xlsx-formula-structure")
+FORMULA_ANSWER = "ANSWER: =SUM(D4:D7)"
 
 
 def _output(*calls: ToolInvocation) -> CapabilityOutput:
@@ -151,3 +160,37 @@ def test_the_exclusion_marker_is_the_refusal_line_the_client_prints() -> None:
     instead of turning every answered render back into an exclusion."""
     assert RENDER_TUNNEL_REFUSED in TUNNEL_502
     assert RENDER_TUNNEL_REFUSED.replace(PREVIEW_HOST, "{host}") in EGRESS_SOURCE.read_text()
+
+
+def _repl(result: str) -> ToolInvocation:
+    return ToolInvocation(
+        "xlsx_repl", {"code": "import openpyxl"}, result, True, result.startswith("Traceback")
+    )
+
+
+async def test_the_formula_case_excludes_the_sample_when_the_repl_carries_no_openpyxl() -> None:
+    """The local carrier runs host subprocesses, so the REPL's interpreter is the machine's own and
+    holds no openpyxl. The model's cell was right; the carrier could not run it."""
+    verdict = await XLSX_CASE.grader(
+        CapabilityOutput(FORMULA_ANSWER, (_repl(f"Traceback\n{REPL_PACKAGE_MISSING}\n"),))
+    )
+
+    assert verdict.excluded
+    assert not verdict.passed
+
+
+async def test_the_formula_case_scores_a_repl_that_ran_and_answered_wrong() -> None:
+    """Only the missing interpreter excludes. A REPL that ran is the model's to get right."""
+    verdict = await XLSX_CASE.grader(
+        CapabilityOutput("ANSWER: =SUM(D1:D9)", (_repl('{"stdout": "=SUM(D4:D7)"}'),))
+    )
+
+    assert not verdict.excluded
+    assert not verdict.passed
+
+
+def test_the_sandbox_image_carries_the_package_the_repl_case_needs() -> None:
+    """The case is answerable because the sandbox image installs openpyxl. If that ever stops, the
+    exclusion above would hide a real gap rather than name a carrier's."""
+    assert '"openpyxl"' in SANDBOX_TEMPLATE.read_text()
+    assert XLSX_PATH in XLSX_CASE.message

@@ -25,6 +25,12 @@ FIXTURES = Path(__file__).parents[2] / "servers" / "preview" / "tests" / "fixtur
 # path prints the render URL in every failure text, including one the service answered with a
 # status, so the host alone does not say the request never arrived — this line does.
 RENDER_TUNNEL_REFUSED = f"refused the tunnel to {PREVIEW_HOST}"
+# `xlsx_repl` runs `python3` inside the sandbox, and `openpyxl` reaches it from the sandbox image
+# (`sandbox/build_template.py`). The local carrier runs host subprocesses instead, where that
+# interpreter is the machine's own and carries no such package, so the import fails before the
+# workbook is opened. That is an environment the case does not describe, the same as a deploy
+# running no preview service.
+REPL_PACKAGE_MISSING = "ModuleNotFoundError: No module named 'openpyxl'"
 DOCX_PATH = "/workspace/fixture-layout.docx"
 XLSX_PATH = "/workspace/fixture-print-layout.xlsx"
 # The heading each fixture prints on its second page: the answer the case asks for, and the text a
@@ -79,6 +85,28 @@ def document_read_scorer(path: str, page_text: str) -> Grader:
     return DescribedGrader(f"read returns {page_text!r} from {path!r}", grade)
 
 
+def repl_hosted_scorer() -> Grader:
+    """The workbook question is answerable only where the REPL's interpreter carries `openpyxl`.
+    A carrier that runs host subprocesses does not, so the import fails on the cell the model
+    wrote correctly, and charging that to the model files a carrier gap as a capability
+    regression. A REPL that ran and answered anything else is the model's, and is scored."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        missing = any(
+            call.name == "xlsx_repl" and REPL_PACKAGE_MISSING in call.result
+            for call in output.calls
+        )
+        if missing:
+            return CapabilityVerdict(
+                False,
+                f"the REPL interpreter carries no openpyxl: {REPL_PACKAGE_MISSING}",
+                excluded=True,
+            )
+        return CapabilityVerdict(True, "the REPL interpreter carries openpyxl")
+
+    return DescribedGrader("the REPL's interpreter carries openpyxl", grade)
+
+
 CASES = (
     CapabilityCase(
         "docx-second-page",
@@ -101,6 +129,7 @@ CASES = (
         f"What exact formula is stored in Overview!D8 of {XLSX_PATH}? Inspect the workbook's "
         "cell structure, then reply with one line: 'ANSWER: <formula>'.",
         combine(
+            repl_hosted_scorer(),
             exact_scorer("=SUM(D4:D7)"),
             skill_scorer("office-xlsx", "office-docx"),
             required_tools_scorer(("xlsx_repl",)),
