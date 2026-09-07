@@ -37,6 +37,7 @@ from evals.suites import (
     connector_refs,
     credential_handoff,
     dead_route_repeat,
+    dispatch_recovery,
     document_read,
     document_visual,
     fanout,
@@ -105,6 +106,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("skill_routing", skill_routing.CASES),
     capability_task("skill_tail_search", skill_tail_search.CASES, serial=True),
     capability_task("tool_calling", tool_calling.CASES),
+    capability_task("dispatch_recovery", dispatch_recovery.CASES),
     capability_task("sandbox_cli", sandbox_cli.CASES),
     capability_task(
         "bash_waiting", bash_waiting.CASES, wait_seconds=bash_waiting.WORKFLOW_WAIT_SECONDS

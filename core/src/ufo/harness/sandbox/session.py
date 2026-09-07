@@ -35,6 +35,10 @@ from ufo.runtime.authority import (
 )
 
 WORKSPACE_DIR = "/workspace"
+WORKSPACE_SCOPE_HINT = (
+    f": a file tool reaches {WORKSPACE_DIR} and nothing above it, so name a path under "
+    f"{WORKSPACE_DIR}."
+)
 WORKSPACE_WRITE_MODE = 0o644
 assert containment_module.__file__ is not None
 CONTAINMENT_SOURCE = Path(containment_module.__file__).read_text()
@@ -817,12 +821,14 @@ def host_argv(argv: tuple[str, ...], root: str) -> tuple[str, ...]:
 
 def workspace_path(path: str) -> str:
     """Resolve a tool-supplied path under WORKSPACE_DIR and reject any escape from the subtree —
-    the container's mount already scopes the filesystem, this scopes the arguments tools pass."""
+    the container's mount already scopes the filesystem, this scopes the arguments tools pass. The
+    refusal names the scope, because the path came from a model that can only correct it by knowing
+    which tree it may name."""
     candidate = PurePosixPath(path if path.startswith("/") else f"{WORKSPACE_DIR}/{path}")
     resolved = PurePosixPath(*_resolve_parts(candidate.parts))
     root = PurePosixPath(WORKSPACE_DIR)
     if resolved != root and root not in resolved.parents:
-        raise ValueError(f"path {path!r} escapes {WORKSPACE_DIR}")
+        raise ValueError(f"path {path!r} escapes {WORKSPACE_DIR}{WORKSPACE_SCOPE_HINT}")
     return str(resolved)
 
 

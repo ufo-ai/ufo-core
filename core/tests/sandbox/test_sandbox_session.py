@@ -31,6 +31,7 @@ from ufo.harness.sandbox.session import (
     SYSTEM_SKILL_SYNC_PROG,
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
+    WORKSPACE_SCOPE_HINT,
     ExecResult,
     ProbeToken,
     ProbeTokenCodec,
@@ -45,6 +46,7 @@ from ufo.harness.sandbox.session import (
     runtime_relative,
     shell_path,
     ufo_fs_file_op,
+    workspace_path,
 )
 from ufo.host.tools.builtins import BashInput, bash_handler
 from ufo.runtime.authority import (
@@ -872,6 +874,18 @@ async def _check_file_reads_accept_only_the_current_runtime_namespace() -> None:
         await session.run_ufo_fs("write", {"path": "$UFO_HOME/runs/current/tool-output/call.txt"})
 
 
+def _check_workspace_path_refusal_names_the_tree_a_tool_may_name() -> None:
+    """The path came from a model, which can only correct it by knowing which tree it may name, so
+    the refusal carries the scope beside the rejected path. A path inside the tree still
+    resolves."""
+    for path in ("/etc/passwd", "../escape", f"{WORKSPACE_DIR}/../outside"):
+        with pytest.raises(ValueError) as refused:
+            workspace_path(path)
+        assert str(refused.value) == f"path {path!r} escapes {WORKSPACE_DIR}{WORKSPACE_SCOPE_HINT}"
+        assert WORKSPACE_DIR in WORKSPACE_SCOPE_HINT
+    assert workspace_path("notes/summary.md") == f"{WORKSPACE_DIR}/notes/summary.md"
+
+
 def _check_runtime_relative_refuses_an_escape() -> None:
     for path in ("", "../escape", "tasks/../escape", "/absolute"):
         with pytest.raises(ValueError, match="invalid runtime path"):
@@ -1414,6 +1428,7 @@ def test_sandbox_session_sync_contract() -> None:
         _check_host_argv_names_a_logical_path_under_the_host_root,
         _check_host_argv_leaves_the_substring_that_is_not_this_workspace,
         _check_runtime_relative_refuses_an_escape,
+        _check_workspace_path_refusal_names_the_tree_a_tool_may_name,
     ):
         check()
 

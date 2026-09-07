@@ -272,6 +272,21 @@ DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>
 REQUESTED_BY_HINT = (
     " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
 )
+NO_REQUESTER_HINT = (
+    " No member message is active in this turn, so there is no message_ref to name and this call "
+    "cannot carry member authority now. Do the part of the work that needs no member, and report "
+    "what a member must ask for."
+)
+BOUND_MEMBER_HINT = (
+    " This member's own message is already bound as the speaker, so no message_ref names it and "
+    "requested_by belongs nowhere in this call. Name the account owner the act needs, or drop "
+    "requested_by, and retry."
+)
+SCHEMA_HINT = (
+    " {model} takes these fields at the top level of the input: {fields}. Pass each one there, "
+    "under that exact name, and pass no field this tool's schema does not declare."
+)
+SCHEMA_HINT_KINDS = frozenset({"missing", "extra_forbidden"})
 INTERRUPTED_TURN_NOTICE = (
     "<interrupted_turn>The turn above ended before it answered. Everything it ran is above and "
     "already happened — treat those results as done, and do not repeat them.</interrupted_turn>"
@@ -541,6 +556,7 @@ class _BoundToolCall:
     context: ToolContext
     effective: EffectiveCall
     member_refs: tuple[UUID, ...] = ()
+    member_bound: bool = False
 
     @property
     def call(self) -> ToolUseBlock:
@@ -822,17 +838,46 @@ def _bounded(content: str) -> str:
     return clipped(content, MAX_TOOL_RESULT_CHARS)
 
 
-def _speaker_hint(error: Exception, member_refs: Sequence[UUID]) -> str:
+def _speaker_hint(error: Exception, member_refs: Sequence[UUID], member_bound: bool = False) -> str:
     """What a refusal for want of a member carries beyond its own text: the active member refs a
     retry may name. One refusal class earns it wherever the round can name a ref, so a handler's
-    refusal and a `requested_by` that names no active message are answered alike. Empty for every
-    other error, and where no ref can be named."""
-    if not isinstance(error, SpeakerRequired) or not member_refs:
+    refusal and a `requested_by` that names no active message are answered alike. Where no ref can
+    be named the refusal says so instead — the gate is a security rule and stands, but a round with
+    nothing to name cannot read a bare refusal as a ref it spelled wrong. No ref is two different
+    rounds: the member's own conversation binds their live message as the speaker and offers no ref
+    for it, so the retry there names an account owner or drops `requested_by`, while a round with no
+    member message at all can carry no member authority at all. Empty for every other error."""
+    if not isinstance(error, SpeakerRequired):
         return ""
+    if not member_refs:
+        return BOUND_MEMBER_HINT if member_bound else NO_REQUESTER_HINT
     return REQUESTED_BY_HINT.format(refs=", ".join(str(ref) for ref in member_refs))
 
 
-def _error_text(tool_name: str, error: Exception, member_refs: Sequence[UUID] = ()) -> str:
+def _schema_hint(error: Exception, input_model: type[BaseModel] | None) -> str:
+    """What a rejected payload carries beyond pydantic's own report: the field names the tool's
+    input model accepts. Pydantic names the field that is missing or forbidden, never the set the
+    call should have passed, so a round that nested the whole input one level down reads only that
+    the field it did pass is absent. A missing or forbidden field earns it; a value of the wrong
+    type is already named by its own error."""
+    if input_model is None or not isinstance(error, ValidationError):
+        return ""
+    if not any(detail["type"] in SCHEMA_HINT_KINDS for detail in error.errors()):
+        return ""
+    fields = ", ".join(
+        f"{field.alias or name}{'' if field.is_required() else ' (optional)'}"
+        for name, field in input_model.model_fields.items()
+    )
+    return SCHEMA_HINT.format(model=input_model.__name__, fields=fields)
+
+
+def _error_text(
+    tool_name: str,
+    error: Exception,
+    member_refs: Sequence[UUID] = (),
+    input_model: type[BaseModel] | None = None,
+    member_bound: bool = False,
+) -> str:
     """What a failed call tells the model, on every path that turns an exception into tool text:
     a raising handler, a rejected call, and the gates that refuse before the handler runs. An
     exception class carries the whole diagnostic only when it was given a message; raised bare,
@@ -840,14 +885,15 @@ def _error_text(tool_name: str, error: Exception, member_refs: Sequence[UUID] = 
     tell that from a message truncated to nothing, so a bare raise says it is bare — the class
     stays, because which exception it was is the one fact still available, and the notice says
     there is nothing further to read. A refusal for want of a member then carries the refs a retry
-    can name, so one builder answers both questions on every path."""
+    can name, and a payload the tool's input model rejected carries that model's own field names,
+    so one builder answers every one of those questions on every path."""
     detail = str(error).strip()
     text = (
         f"{type(error).__name__}: {detail}"
         if detail
         else BARE_RAISE_NOTICE.format(cls=type(error).__name__, tool=tool_name)
     )
-    return text + _speaker_hint(error, member_refs)
+    return text + _speaker_hint(error, member_refs, member_bound) + _schema_hint(error, input_model)
 
 
 def _meter_dispatch(
@@ -3177,7 +3223,7 @@ class TurnEngine:
         try:
             args = tool.input_model.model_validate(wire.input)
         except ValidationError as error:
-            return self._rejected(call, error, dimensions=dimensions)
+            return self._rejected(call, error, dimensions=dimensions, input_model=tool.input_model)
         return replace(effective, action_args=args)
 
     def _rejected(
@@ -3186,10 +3232,12 @@ class TurnEngine:
         error: Exception,
         dimensions: Mapping[str, str] | None = None,
         member_refs: tuple[UUID, ...] = (),
+        input_model: type[BaseModel] | None = None,
+        member_bound: bool = False,
     ) -> _RejectedToolCall:
         return _RejectedToolCall(
             call=call,
-            text=_error_text(call.name, error, member_refs),
+            text=_error_text(call.name, error, member_refs, input_model, member_bound),
             outcome="invalid_call" if isinstance(error, (ValueError, KeyError)) else "step_failed",
             error_class=type(error).__name__,
             dimensions={} if dimensions is None else dimensions,
@@ -3210,6 +3258,7 @@ class TurnEngine:
                 context=bound_context,
                 effective=replace(item, call=call),
                 member_refs=self._member_refs(requesters),
+                member_bound=self._own_member(requesters) is not None,
             )
         except asyncio.CancelledError as error:
             _meter_dispatch(
@@ -3239,6 +3288,7 @@ class TurnEngine:
                 error,
                 dimensions=item.meter_dimensions(),
                 member_refs=self._member_refs(requesters),
+                member_bound=self._own_member(requesters) is not None,
             )
 
     async def _dispatch(
@@ -3599,7 +3649,13 @@ class TurnEngine:
                     target,
                     result=DispatchResult(
                         tool_use_id=call.id,
-                        text=_error_text(call.name, error, bound.member_refs),
+                        text=_error_text(
+                            call.name,
+                            error,
+                            bound.member_refs,
+                            tool.input_model,
+                            bound.member_bound,
+                        ),
                         is_error=True,
                         activity=True,
                     ),
@@ -3614,7 +3670,9 @@ class TurnEngine:
                     target,
                     result=DispatchResult(
                         tool_use_id=call.id,
-                        text=_error_text(call.name, error, bound.member_refs),
+                        text=_error_text(
+                            call.name, error, bound.member_refs, member_bound=bound.member_bound
+                        ),
                         is_error=True,
                         activity=True,
                     ),
@@ -3711,7 +3769,9 @@ class TurnEngine:
             raise parked from error
         except Exception as error:
             return _HandlerOutput(
-                _error_text(bound.call.name, error, bound.member_refs),
+                _error_text(
+                    bound.call.name, error, bound.member_refs, member_bound=bound.member_bound
+                ),
                 True,
                 tool.untrusted or isinstance(error, UntrustedContentError),
                 (),

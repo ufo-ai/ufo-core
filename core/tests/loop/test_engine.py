@@ -115,6 +115,7 @@ from ufo.runtime.compaction import (
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
     BARE_RAISE_NOTICE,
+    BOUND_MEMBER_HINT,
     FINISH_DESCRIPTION,
     FINISH_TOOL,
     FORCE_FINAL_PROMPT,
@@ -126,12 +127,14 @@ from ufo.runtime.engine import (
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
     NO_DIAGNOSTIC_NOTICE,
+    NO_REQUESTER_HINT,
     OBJECT_APPLY_TOOL,
     OFFLOAD_NOTICE,
     PREEMPTED,
     REQUESTED_BY_HINT,
     SANDBOX_PROVIDER_RETRY_LIMIT,
     SANDBOX_PROVIDER_RETRY_SECONDS,
+    SCHEMA_HINT,
     TOOL_IMAGE_EDGE_LIMIT,
     TOOL_RESULT_PREVIEW_CHARS,
     TRUNCATION_FEEDBACK,
@@ -1566,9 +1569,10 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
     """A refusal for want of a member gets its error extended with the active member message refs
     exactly where `requested_by` could have carried one — a shared conversation with members
     speaking. A `requested_by` the model guessed wrong is refused before the handler runs and
-    carries the same refs, so both refusals answer the retry the same way. A background turn has no
-    member to name; the member's own conversation was not offered the ref, so the refusal stands
-    alone there too."""
+    carries the same refs, so both refusals answer the retry the same way. Where no ref can be named
+    the refusal says which round it is: the member's own conversation already binds their live
+    message as the speaker, so the retry there names an account owner or drops `requested_by`, while
+    a background turn holds no member message at all and can carry no member authority."""
 
     class StrictInput(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -1607,9 +1611,9 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
             _engine(own, EchoModel(), tmp_path, member_id=founder),
             {own.id: ActiveMessage(member_id=founder, rendered="mine")},
             {},
-            refusal,
+            refusal + BOUND_MEMBER_HINT,
         ),
-        (_engine(background, EchoModel(), tmp_path), {}, {}, refusal),
+        (_engine(background, EchoModel(), tmp_path), {}, {}, refusal + NO_REQUESTER_HINT),
     )
     for engine, requesters, tool_input, expected in cases:
         engine = replace(engine, tools=ToolRegistry((probe,)))
@@ -6735,6 +6739,59 @@ async def test_dispatch_names_the_class_when_a_handler_raises_it_bare(
 
     spoken = await _dispatch(engine, context, ToolUseBlock(id="c2", name="spoken", input={}), {})
     assert spoken.content == "ValueError: the port is taken"
+
+
+async def test_a_rejected_payload_names_the_fields_the_tool_accepts(
+    db: None, tmp_path: Path
+) -> None:
+    """Pydantic names the field that is missing or forbidden, never the set the call should have
+    passed, so a round that nested the whole input one level down reads only that the field it did
+    pass is absent. The refusal carries the model's own field names there, and stays as pydantic
+    wrote it where the fault is a value of the wrong type."""
+
+    class PayloadInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        target: str
+        count: int = 1
+
+    async def handler(context: ToolContext, args: PayloadInput) -> ToolResult:
+        return ToolResult(content=(TextContent(text=args.target),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="probe", description="d", input_model=PayloadInput, handler=handler),)
+        ),
+    )
+    context = _dispatch_context(engine)
+    hint = SCHEMA_HINT.format(model="PayloadInput", fields="target, count (optional)")
+
+    nested = await _dispatch(
+        engine,
+        context,
+        ToolUseBlock(id="c1", name="probe", input={"payload": {"target": "child"}}),
+        {},
+    )
+    mistyped = await _dispatch(
+        engine,
+        context,
+        ToolUseBlock(id="c2", name="probe", input={"target": "child", "count": "many"}),
+        {},
+    )
+    accepted = await _dispatch(
+        engine, context, ToolUseBlock(id="c3", name="probe", input={"target": "child"}), {}
+    )
+
+    assert nested.is_error
+    assert isinstance(nested.content, str)
+    assert nested.content.startswith("ValidationError:")
+    assert nested.content.endswith(hint)
+    assert mistyped.is_error
+    assert isinstance(mistyped.content, str)
+    assert hint not in mistyped.content
+    assert accepted.content == "child"
 
 
 async def test_a_call_rejected_before_its_handler_reads_a_bare_raise_as_bare(

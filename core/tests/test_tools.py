@@ -32,6 +32,7 @@ from ufo.host.ext.loader import skill_registry
 from ufo.host.tools.builtins import (
     BUILTIN_TOOLS,
     FILE_TOOL_RESULT_MAX_CHARS,
+    READ_FIRST_HINT,
     REQUEST_CREDENTIALS_TOOL_DEF,
     SHARE_PREFLIGHT_CMD,
     SpawnInput,
@@ -414,6 +415,61 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
             file_path="code.py",
             edits=[{"old_string": "x = 1", "new_string": "x = 2"}],
         )
+
+
+async def test_the_read_guard_refusals_name_the_read_that_clears_them(tmp_path: Path) -> None:
+    """The guard states the rule; the refusal has to state the act. The edit guard raises beside the
+    read set, the write guard raises beside the files and its text arrives from `ufo fs`, so both
+    refusals are extended here where the path the model must read is known."""
+
+    @dataclass
+    class RefusingSandbox(FakeSandbox):
+        error: Exception = field(default_factory=lambda: ValueError("boom"))
+
+        async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+            raise self.error
+
+    guard = ValueError("file /workspace/notes.md must be read before it is written")
+    ctx = make_context(FakeSandbox(), tmp_path)
+    with pytest.raises(ValueError) as edited:
+        await run("edit", ctx, file_path="code.py", edits=[{"old_string": "a", "new_string": "b"}])
+    with pytest.raises(ValueError) as written:
+        await run(
+            "write",
+            make_context(RefusingSandbox(error=guard), tmp_path),
+            file_path="/workspace/notes.md",
+            content="body",
+        )
+    staging = ValueError("staged file is gone")
+    with pytest.raises(ValueError) as unrelated:
+        await run(
+            "write",
+            make_context(RefusingSandbox(error=staging), tmp_path),
+            file_path="/workspace/notes.md",
+            content="body",
+        )
+
+    assert str(edited.value).endswith(READ_FIRST_HINT.format(path="code.py"))
+    assert str(written.value).endswith(READ_FIRST_HINT.format(path="/workspace/notes.md"))
+    assert str(unrelated.value) == "staged file is gone"
+
+
+async def test_a_write_the_turn_already_read_carries_no_read_first_hint(tmp_path: Path) -> None:
+    """A read path that still fails failed for another reason, so the hint would name an act the
+    turn has already done."""
+
+    @dataclass
+    class RefusingSandbox(FakeSandbox):
+        async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+            raise ValueError("file /workspace/notes.md must be read before it is written")
+
+    ctx = make_context(RefusingSandbox(), tmp_path)
+    ctx.read_paths.add("/workspace/notes.md")
+
+    with pytest.raises(ValueError) as refused:
+        await run("write", ctx, file_path="/workspace/notes.md", content="body")
+
+    assert READ_FIRST_HINT.format(path="/workspace/notes.md") not in str(refused.value)
 
 
 @pytest.mark.integration

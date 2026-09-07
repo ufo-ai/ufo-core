@@ -106,6 +106,8 @@ from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 
 GREP_HEAD_LIMIT = 100
+WRITE_GUARD_REFUSAL = "must be read before it is written"
+READ_FIRST_HINT = " Call read on {path} first, then repeat this call."
 FILE_PATH_JSON_MAX_CHARS = 10_000
 FILE_TOOL_RESULT_MAX_CHARS = 20_000
 ARTIFACT_FALLBACK_NAME = "download"
@@ -512,14 +514,14 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
     data = args.content.encode()
     staged = f"{WORKSPACE_DIR}/ufo-write-{uuid4().hex}.stage"
     await ctx.sandbox.write_file(staged, data)
-    result = await ctx.sandbox.run_ufo_fs(
-        "write",
-        {
-            "path": args.file_path,
-            "staged_path": staged,
-            "allow_existing": args.file_path in ctx.read_paths,
-        },
-    )
+    allow_existing = args.file_path in ctx.read_paths
+    try:
+        result = await ctx.sandbox.run_ufo_fs(
+            "write",
+            {"path": args.file_path, "staged_path": staged, "allow_existing": allow_existing},
+        )
+    except ValueError as error:
+        raise _write_refusal(args.file_path, allow_existing, error) from error
     trailing = 1 if data and not data.endswith(b"\n") else 0
     result.update(
         {
@@ -533,9 +535,23 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
     return tool_result
 
 
+def _write_refusal(path: str, allow_existing: bool, error: ValueError) -> ValueError:
+    """The write guard's refusal with the one act that clears it. The guard runs beside the files,
+    where the rename it protects happens, so the refusal text is the client's; what the model must
+    do next is known here, where the read set the guard was told about lives. Only the
+    unread-overwrite refusal earns the hint — a staging or rename failure is not one read away
+    from landing."""
+    if allow_existing or WRITE_GUARD_REFUSAL not in str(error):
+        return error
+    return ValueError(f"{error}.{READ_FIRST_HINT.format(path=path)}")
+
+
 async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
     if args.file_path not in ctx.read_paths:
-        raise ValueError(f"file {args.file_path} must be read before it is edited")
+        raise ValueError(
+            f"file {args.file_path} must be read before it is edited."
+            + READ_FIRST_HINT.format(path=args.file_path)
+        )
     edits = [
         {
             "old_string_b64": b64encode(e.old_string.encode(), altchars=b"-_").decode(),
