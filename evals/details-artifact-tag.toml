@@ -32,9 +32,10 @@ path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = '''When detail crosses the chosen register's inline boundary, put it in one artifact and never
 duplicate its body inline. For a member, the artifact is a Markdown file in /workspace — one you
 wrote, or one a subagent wrote in your sandbox — carried by a tag at the end of the closing message,
-under the file's own name:
+under the file's own name. The tag's text is the link the member clicks: for a report, Open detailed
+report; never the file's name.
 
-<artifact path="/workspace/nightly-runner-queue.md"/>
+<artifact path="/workspace/nightly-runner-queue.md" text="Open detailed report"/>
 
 The member's surface offers the file as a download beside the reply, so the reply says nothing about
 where the write-up is or that it can be sent, and never names a /workspace path, as text or as a
@@ -69,7 +70,8 @@ path = "extensions/research/ufo_ext_research/skills/research-report/SKILL.md"
 old = '''### Where the report goes
 
 **Write the report to `/workspace/<topic>.md` and carry it in the closing message as
-`<artifact path="/workspace/<topic>.md"/>`; as a subagent, name that path in your result instead.
+`<artifact path="/workspace/<topic>.md" text="Open detailed report"/>`; as a subagent, name that
+path in your result instead.
 Share it with `share_file` only when the user asked for a file, a document, or a format.**
 
 - Derive the filename from the query topic: `<topic>.md`
@@ -105,12 +107,13 @@ name = "no-example"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
-old = '''the file's own name:
+old = '''report; never the file's name.
 
-<artifact path="/workspace/nightly-runner-queue.md"/>
+<artifact path="/workspace/nightly-runner-queue.md" text="Open detailed report"/>
 
 The member's surface'''
-new = '''the file's own name, `<artifact path="/workspace/topic.md"/>`. The member's surface'''
+new = '''report; never the file's name: `<artifact path="/workspace/topic.md" text="Open detailed report"/>`.
+The member's surface'''
 
 [[arm]]
 name = "no-silence-clause"

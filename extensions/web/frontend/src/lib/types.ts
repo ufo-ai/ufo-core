@@ -130,6 +130,7 @@ export type ChatFile = {
   preview_url: string | null;
   media_type: string;
   role?: "file" | "details";
+  subject?: string | null;
 };
 
 /** One application a reply's turn created, as the card that opens it draws it: the app's own mark

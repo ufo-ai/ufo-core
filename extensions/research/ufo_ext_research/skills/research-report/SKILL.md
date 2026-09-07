@@ -9,7 +9,8 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 ### Where the report goes
 
 **Write the report to `/workspace/<topic>.md` and carry it in the closing message as
-`<artifact path="/workspace/<topic>.md"/>`; as a subagent, name that path in your result instead.
+`<artifact path="/workspace/<topic>.md" text="Open detailed report"/>`; as a subagent, name that
+path in your result instead.
 Share it with `share_file` only when the user asked for a file, a document, or a format.**
 
 - Derive the filename from the query topic: `<topic>.md`
