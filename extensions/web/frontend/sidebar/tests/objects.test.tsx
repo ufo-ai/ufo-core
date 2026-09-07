@@ -10,6 +10,7 @@ import { Pane } from "@/kernel/pane";
 import { Viewer } from "@/lib/audience";
 import { friendlyMoment, fullMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { chatHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -91,26 +92,6 @@ const TASK_DETAIL = {
   links: [{ relation: "reports_to", kind: "conversation", name: CONVO_ID, opens: true }],
   created_at: "2026-07-01T09:00:00Z",
   updated_at: "2026-07-02T09:00:00Z",
-};
-
-const CONVERSATION_DETAIL = {
-  kind: "conversation",
-  fields: ["surface", "surface_label"],
-  spec_schema: {
-    properties: {
-      surface: { type: "string" },
-      surface_label: { type: "string" },
-      audience: { type: "string" },
-    },
-  },
-  applies: false,
-  name: CONVO_ID,
-  summary: "web conversation, created 2026-07-01",
-  spec: { surface: "web", surface_label: null, audience: "member:m1" },
-  status: { surface: "web" },
-  links: [{ relation: "scoped_to", kind: "agent", name: "assistant", opens: false }],
-  created_at: "2026-07-01T09:00:00Z",
-  updated_at: null,
 };
 
 beforeEach(() => {
@@ -205,7 +186,6 @@ const ROLL_DETAIL = { ...TASK_DETAIL, name: "weekly-roll", links: [] };
  *  record each link names. */
 function tasks() {
   return wire({
-    ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
     "/objects/scheduled_task/daily-brief": () => json(LINKED_TASK),
     "/objects/scheduled_task/weekly-roll": () => json(ROLL_DETAIL),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW, SECOND_TASK_ROW]),
@@ -216,7 +196,6 @@ function link(said: string): HTMLElement {
   return screen.getByRole("button", { name: said });
 }
 
-const REPORTS_TO = "reports_to conversation " + CONVO_ID;
 const FOLLOWS = "follows scheduled task weekly-roll";
 
 /** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
@@ -708,9 +687,8 @@ test("the index read across the audience names the agent and leaves the creator 
 
 /** A link inside a record opens what it names immediately to the right of the record it was
  *  followed from, and shuts whatever stood there: the path is what the member walked, so a record
- *  reached from a branch they have left does not stay standing. A link the projection marks closed
- *  opens nothing and is not a control. */
-test("a link inside a record replaces the visible sheet and closing returns to its source", async () => {
+ *  reached from a branch they have left does not stay standing. */
+test("an object link replaces the visible sheet and closing returns to its source", async () => {
   tasks();
   mount();
 
@@ -723,20 +701,29 @@ test("a link inside a record replaces the visible sheet and closing returns to i
 
   await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
   await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
+});
 
-  await userEvent.click(link(REPORTS_TO));
+test("a task links its conversation field and reports-to link to the conversation", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({
+        ...TASK_DETAIL,
+        status: { ...TASK_DETAIL.status, conversation: CONVO_ID },
+      }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+  });
+  mount();
 
-  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
-  expect(standing()).toEqual([CONVO_ID]);
-  expect(screen.getByText("member:m1")).toBeTruthy();
-  const shut = screen.getByText("scoped_to agent assistant");
-  expect(shut.tagName).toBe("SPAN");
-  expect(screen.queryByRole("button", { name: "scoped_to agent assistant" })).toBeNull();
-
-  await userEvent.click(
-    within(screen.getByRole("dialog", { name: CONVO_ID })).getByRole("button", { name: "Close" }),
+  await openRow("daily-brief");
+  const links = await screen.findAllByRole("link", { name: CONVO_ID });
+  expect(links).toHaveLength(2);
+  expect(links.map((conversation) => conversation.getAttribute("href"))).toEqual([
+    chatHash(CONVO_ID),
+    chatHash(CONVO_ID),
+  ]);
+  expect(links[1].closest('[data-part="link"]')?.textContent).toBe(
+    "reports_to conversation " + CONVO_ID,
   );
-  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
 });
 
 test("a modifier press retains the source behind the one visible sheet", async () => {
@@ -813,8 +800,8 @@ test("the index row whose record is standing is marked, and no other", async () 
  *  beside it reports what happened to itself and nothing else. */
 test("an outcome does not leak into the sheet that replaces its record", async () => {
   wire({
-    ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
-    "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
+    "/objects/scheduled_task/daily-brief": () => json(LINKED_TASK),
+    "/objects/scheduled_task/weekly-roll": () => json(ROLL_DETAIL),
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
     "/intents": () => json({ applied: false, message: "The workspace refuses it." }),
   });
@@ -825,11 +812,11 @@ test("an outcome does not leak into the sheet that replaces its record", async (
   await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
   expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
 
-  await userEvent.click(screen.getByText("reports_to conversation " + CONVO_ID));
+  await userEvent.click(screen.getByRole("button", { name: FOLLOWS }));
 
-  const opened = await screen.findByRole("dialog", { name: CONVO_ID });
+  const opened = await screen.findByRole("dialog", { name: "weekly-roll" });
   expect(within(opened).queryByText("The workspace refuses it.")).toBeNull();
-  expect(standing()).toEqual([CONVO_ID]);
+  expect(standing()).toEqual(["weekly-roll"]);
 });
 
 test("a spec the kind elides reads as the row's own summary, with no form to submit", async () => {

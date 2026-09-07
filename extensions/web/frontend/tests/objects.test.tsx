@@ -10,6 +10,7 @@ import { Pane } from "@/kernel/pane";
 import { Viewer } from "@/lib/audience";
 import { friendlyMoment, fullMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { chatHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -286,7 +287,6 @@ function link(said: string): HTMLElement {
   return screen.getByRole("button", { name: said });
 }
 
-const REPORTS_TO = "reports_to conversation " + CONVO_ID;
 const FOLLOWS = "follows source trigger github-pulls";
 
 /** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
@@ -785,9 +785,8 @@ test("the index read across the audience names the agent and leaves the creator 
 
 /** A link inside a record opens what it names immediately to the right of the record it was
  *  followed from, and shuts whatever stood there: the path is what the member walked, so a record
- *  reached from a branch they have left does not stay standing. A link the projection marks closed
- *  opens nothing and is not a control. */
-test("a link inside a record replaces the visible sheet and closing returns to its source", async () => {
+ *  reached from a branch they have left does not stay standing. */
+test("an object link replaces the visible sheet and closing returns to its source", async () => {
   triggers();
   mount([AGENT], "source_trigger");
 
@@ -800,20 +799,47 @@ test("a link inside a record replaces the visible sheet and closing returns to i
 
   await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
   await waitFor(() => expect(standing()).toEqual(["github-issues"]));
+});
 
-  await userEvent.click(link(REPORTS_TO));
-
-  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
-  expect(standing()).toEqual([CONVO_ID]);
-  expect(screen.getByText("member:m1")).toBeTruthy();
-  const shut = screen.getByText("scoped_to agent assistant");
-  expect(shut.tagName).toBe("SPAN");
-  expect(screen.queryByRole("button", { name: "scoped_to agent assistant" })).toBeNull();
-
-  await userEvent.click(
-    within(screen.getByRole("dialog", { name: CONVO_ID })).getByRole("button", { name: "Close" }),
+test("an open conversation link goes to the conversation", async () => {
+  wire({
+    "/objects/notification/n-1": () =>
+      json({
+        kind: "notification",
+        fields: ["occurrences", "triaged"],
+        spec_schema: null,
+        applies: false,
+        deletes: true,
+        name: "n-1",
+        summary: "A notification.",
+        spec: { subject: "invoice", body: "The invoice is ready." },
+        status: { occurrences: 1, triaged: false },
+        links: [
+          { relation: "created_in", kind: "conversation", name: CONVO_ID, opens: true },
+        ],
+        created_at: "2026-07-01T09:00:00Z",
+        updated_at: null,
+      }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Pane>
+        <ObjectDetail
+          agentId={AGENT_ID}
+          kind="notification"
+          name="n-1"
+          onOpen={() => {}}
+          onBack={() => {}}
+        />
+      </Pane>
+    </MainAgentProvider>,
   );
-  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
+
+  const conversation = await screen.findByRole("link", { name: CONVO_ID });
+  expect(conversation.getAttribute("href")).toBe(chatHash(CONVO_ID));
+  expect(conversation.closest('[data-part="link"]')?.textContent).toBe(
+    "created_in conversation " + CONVO_ID,
+  );
 });
 
 test("a modifier press retains the source behind the one visible sheet", async () => {
@@ -890,8 +916,8 @@ test("the index row whose record is standing is marked, and no other", async () 
  *  beside it reports what happened to itself and nothing else. */
 test("an outcome does not leak into the sheet that replaces its record", async () => {
   wire({
-    ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
-    "/objects/source_trigger/github-issues": () => json(TRIGGER_DETAIL),
+    "/objects/source_trigger/github-issues": () => json(LINKED_TRIGGER),
+    "/objects/source_trigger/github-pulls": () => json(PULLS_DETAIL),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, [TRIGGER_ROW]),
     "/intents": () => json({ applied: false, message: "The workspace refuses it." }),
   });
@@ -902,11 +928,11 @@ test("an outcome does not leak into the sheet that replaces its record", async (
   await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
   expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
 
-  await userEvent.click(screen.getByText("reports_to conversation " + CONVO_ID));
+  await userEvent.click(screen.getByRole("button", { name: FOLLOWS }));
 
-  const opened = await screen.findByRole("dialog", { name: CONVO_ID });
+  const opened = await screen.findByRole("dialog", { name: "github-pulls" });
   expect(within(opened).queryByText("The workspace refuses it.")).toBeNull();
-  expect(standing()).toEqual([CONVO_ID]);
+  expect(standing()).toEqual(["github-pulls"]);
 });
 
 test("a spec the kind elides reads as the row's own summary, with no form to submit", async () => {

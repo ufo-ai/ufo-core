@@ -822,7 +822,12 @@ function SpecAndStatus({
               const said = link.relation + " " + noun(link.kind) + " " + link.name;
               return (
                 <li key={link.relation + link.kind + link.name} className="py-2xs">
-                  {link.opens ? (
+                  {link.opens && link.kind === CONVERSATION_FIELD ? (
+                    <span data-part="link">
+                      {link.relation + " " + noun(link.kind) + " "}
+                      <ConversationLink id={link.name} />
+                    </span>
+                  ) : link.opens ? (
                     <button
                       type="button"
                       data-part="link"

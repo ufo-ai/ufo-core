@@ -33,6 +33,7 @@ import { DataTable, OPEN, type Column } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
+import { ConversationLink } from "@/lib/conversationLink";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Moment, isMoment } from "@/lib/moments";
@@ -166,6 +167,8 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null): Rea
   if (typeof value === "number") return String(value);
   if (isMoment(value)) return <Moment at={value} />;
   if (enumerated(schema, field)) return <Chip>{value}</Chip>;
+  if (field === CONVERSATION_FIELD && typeof value === "string")
+    return <ConversationLink id={value} />;
   if (typeof value === "string" && ADDRESS.test(value))
     return (
       <a
@@ -774,7 +777,12 @@ function ObjectRecord({
                         const said = link.relation + " " + noun(link.kind) + " " + link.name;
                         return (
                           <li key={link.relation + link.kind + link.name} className="py-2xs">
-                            {link.opens ? (
+                            {link.opens && link.kind === CONVERSATION_FIELD ? (
+                              <span data-part="link">
+                                {link.relation + " " + noun(link.kind) + " "}
+                                <ConversationLink id={link.name} />
+                              </span>
+                            ) : link.opens ? (
                               <button
                                 type="button"
                                 data-part="link"
