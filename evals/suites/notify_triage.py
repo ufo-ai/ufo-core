@@ -7,10 +7,21 @@ Three batches: twelve rows of which three merit a push (a churn spike taking the
 accounts, a deploy that failed on main and rolled back, an investor's data-room deadline going
 unanswered) beside nine routine ones (green runs, dependabot merges, receipts, newsletters, a small
 refund, a payout that landed as usual); nine routine rows alone; and one urgent row — production
-down after a rollout — among eight routine ones. Pass is one `deliver` naming exactly the rows that
-merit it and no `notify` (the app cannot raise a notification about its own batch; the allowlist
-already withholds the tool, so the grader's check is a second reading of the same fence), or no
-`deliver` at all on the routine batch.
+down after a rollout — among eight routine ones. Pass is one delivered message naming exactly the
+rows that merit it and no `notify` (the app cannot raise a notification about its own batch; the
+allowlist already withholds the tool, so the grader's check is a second reading of the same fence),
+or nothing delivered at all on the routine batch.
+
+A call the action refused delivered nothing, so it is not a delivery: what the member reads is the
+calls that reached the handler, and a model that mis-shapes its first call and repairs it has sent
+one message. The grader counts those, and holds the delivery to the surface it landed on — the
+seed gives the member a conversation on a durable surface, so a batch that merits a push proves the
+whole chain rather than the portal fallback a member with no reach takes.
+
+A surface is durable only where the deploy installs an extension that posts, so the task names the
+one pack that ships those. Under a pack without them the reach seed is inert, every delivery answers
+the portal fallback, and the two cases that merit a push fail for every model however well it
+judged.
 
 The seed writes the rows the batch names, for the workspace's member, so `deliver` finds them; the
 message is the drain's own rendering of that batch. Deterministic graders and one sample per case:
@@ -20,7 +31,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
 import sqlalchemy as sa
-from ufo_ext_app_notification.deliver import DELIVER_ACTION_ID
+from ufo_ext_app_notification.deliver import DELIVER_ACTION_ID, DELIVERED
 from ufo_ext_app_notification.drain import drain_message
 from ufo_ext_app_notification.notify_tool import NOTIFICATION_AGENT_NAME, NOTIFY_TOOL_NAME
 from ufo_ext_app_notification.store import NOTIFICATION_KIND, Notification
@@ -35,12 +46,16 @@ from evals.harness.capability import (
 )
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 
 NOTIFY_TRIAGE_NAMESPACE = UUID("6e0a4d1c-3b7f-4f52-9a8e-2c1d0b9f7e31")
 RAISED_AT = datetime(2026, 9, 4, 6, 0, tzinfo=UTC)
+SPOKE_AT = datetime(2026, 9, 4, 5, 0, tzinfo=UTC)
 PRODUCER = "assistant"
+REACH_SURFACE = "slack"
+REACH_MESSAGE = "morning"
 
 Entry = tuple[str, str, int]
 
@@ -130,6 +145,69 @@ async def _member_id() -> UUID:
         ).scalar_one()
 
 
+async def _main_agent_id() -> UUID:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == ws_current().workspace_id,
+                    tables.agent.c.is_main,
+                )
+            )
+        ).scalar_one()
+
+
+async def _give_the_member_reach(member_id: UUID) -> None:
+    """The member's own conversation on a durable surface, with them speaking in it: what
+    `member_reach` answers and `deliver` invokes into. Without one every delivery takes the portal
+    fallback, and the case grades a push that reached nobody.
+
+    Opened once and kept: an earlier case's delivery founded its relay turn here, so the room
+    outlives the batch that used it the way the member's own thread does."""
+    workspace_id = ws_current().workspace_id
+    conversation_id = uuid5(NOTIFY_TRIAGE_NAMESPACE, f"reach:{workspace_id}")
+    agent_id = await _main_agent_id()
+    async with workspace_tx() as connection:
+        held = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.id == conversation_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if held is not None:
+            return
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=REACH_SURFACE,
+                queue_key=f"D{conversation_id.hex[:9].upper()}",
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                created_at=SPOKE_AT,
+                updated_at=SPOKE_AT,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid5(NOTIFY_TRIAGE_NAMESPACE, f"spoke:{workspace_id}"),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                terminal={"status": "done", "text": REACH_MESSAGE},
+                inbound=REACH_MESSAGE,
+                speaker_member_id=member_id,
+                created_at=SPOKE_AT,
+                updated_at=SPOKE_AT,
+            )
+        )
+
+
 def _seed_batch(entries: tuple[Entry, ...]) -> CapabilitySeed:
     """Replace the member's inbox with exactly these rows, so the refs the message names are the
     rows `deliver` finds and nothing from an earlier case stands beside them. Every subject in a
@@ -141,6 +219,7 @@ def _seed_batch(entries: tuple[Entry, ...]) -> CapabilitySeed:
 
     async def seed(_workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
         member_id = await _member_id()
+        await _give_the_member_reach(member_id)
         rows = tuple(
             _row(member_id, agent_id, subject, body, count) for subject, body, count in entries
         )
@@ -185,29 +264,39 @@ def _message(entries: tuple[Entry, ...]) -> str:
 
 
 def _delivers_exactly(merit: tuple[Entry, ...]) -> Grader:
+    """One message reaches the member, naming exactly the rows that merit it, on the surface they
+    speak on. A refused call is not a message: it reached no handler and the member read nothing,
+    so what counts is the calls that landed."""
     wanted = {_ref(entry) for entry in merit}
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         if NOTIFY_TOOL_NAME in output.tools:
             return CapabilityVerdict(False, f"the app called {NOTIFY_TOOL_NAME} on its own batch")
-        deliveries = [call for call in output.calls if call.call == DELIVER_ACTION_ID]
+        delivered = [
+            call for call in output.calls if call.call == DELIVER_ACTION_ID and call.succeeded
+        ]
         if not wanted:
-            if deliveries:
+            if delivered:
                 return CapabilityVerdict(
-                    False, f"delivered {len(deliveries)} time(s) on a routine batch"
+                    False, f"delivered {len(delivered)} message(s) on a routine batch"
                 )
             return CapabilityVerdict(True, "delivered nothing")
-        if len(deliveries) != 1:
-            return CapabilityVerdict(
-                False, f"{DELIVER_ACTION_ID} was called {len(deliveries)} times, not once"
-            )
-        refs = deliveries[0].arguments.get("refs")
+        if len(delivered) != 1:
+            return CapabilityVerdict(False, f"delivered {len(delivered)} messages, wanted one")
+        landed = delivered[0]
+        refs = landed.arguments.get("refs")
         if not isinstance(refs, list):
-            return CapabilityVerdict(False, "deliver carried no refs")
+            return CapabilityVerdict(False, "the delivered message carried no refs")
         named = {str(ref) for ref in refs}
         if named != wanted:
             return CapabilityVerdict(False, f"delivered {sorted(named)}, wanted {sorted(wanted)}")
-        return CapabilityVerdict(True, f"delivered exactly {sorted(entry[0] for entry in merit)}")
+        if landed.result.strip() != DELIVERED.format(surface=REACH_SURFACE):
+            return CapabilityVerdict(
+                False, f"the message did not reach {REACH_SURFACE}: {landed.result.strip()!r}"
+            )
+        return CapabilityVerdict(
+            True, f"delivered exactly {sorted(entry[0] for entry in merit)} on {REACH_SURFACE}"
+        )
 
     return grade
 

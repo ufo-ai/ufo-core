@@ -1714,3 +1714,13 @@ def test_ufo_app_suites_are_explicit() -> None:
     assert not {"ufo-app-bench", "ufo-app-copy"} & {task.name for task in selected_run_tasks()}
     assert [task.name for task in selected_run_tasks(("ufo-app-bench",))] == ["ufo-app-bench"]
     assert [task.name for task in selected_run_tasks(("ufo-app-copy",))] == ["ufo-app-copy"]
+
+
+def test_a_run_without_task_names_carries_no_pack_or_agent_pin() -> None:
+    """`python -m evals` with no `--task` runs this set, and the argument gate rejects the whole
+    invocation when one task names a pack or an agent the run is not under. A pinned suite is
+    therefore reachable by name only."""
+    pinned = {task.name for task in selected_run_tasks() if task.packs or task.agent is not None}
+
+    assert pinned == set()
+    assert [task.name for task in selected_run_tasks(("notify_triage",))] == ["notify_triage"]
