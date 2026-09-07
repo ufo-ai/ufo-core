@@ -14,7 +14,7 @@ class SecondConnector(AsanaConnector):
 
 
 def test_registry_maps_every_connector_name_once() -> None:
-    assert len(CONNECTORS) == 53
+    assert len(CONNECTORS) == 54
     assert all(name == connector_type.name for name, connector_type in CONNECTORS.items())
 
 
@@ -32,18 +32,20 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
     cutoff at all.
 
     So declaring a window on a stream obliges the connector to take delivery of one. Overriding
-    `paginate_source` is how a connector does that (gmail and outlook do; slack overrides it for the
-    acting identity instead and declares no window)."""
+    `paginate_source` is how a REST connector does that (gmail and outlook do; slack overrides it
+    for the acting identity instead and declares no window). A `ToolConnector` is obliged by its own
+    ABC — `paginate` takes the floor as an argument — so granola_mcp meets it by construction."""
     obliged = {
         name: [stream.name for stream in cls().streams() if stream.backfill_window_days is not None]
         for name, cls in CONNECTORS.items()
     }
     declaring = {name: streams for name, streams in obliged.items() if streams}
-    assert set(declaring) == {"github", "gmail", "outlook", "slack"}
+    assert set(declaring) == {"github", "gmail", "granola_mcp", "outlook", "slack"}
 
     deaf = [
         f"{name} declares a window on {streams} but does not override paginate_source"
         for name, streams in declaring.items()
-        if CONNECTORS[name].paginate_source is RestConnector.paginate_source
+        if issubclass(CONNECTORS[name], RestConnector)
+        and CONNECTORS[name].paginate_source is RestConnector.paginate_source
     ]
     assert deaf == []

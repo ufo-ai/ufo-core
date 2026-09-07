@@ -30,6 +30,7 @@ from ufo_ext_sources.providers.googledocs import GoogleDocsConnector
 from ufo_ext_sources.providers.googledrive import GoogleDriveConnector
 from ufo_ext_sources.providers.googlemeet import GoogleMeetConnector
 from ufo_ext_sources.providers.googlesheets import GoogleSheetsConnector
+from ufo_ext_sources.providers.granola import GranolaConnector
 from ufo_ext_sources.providers.greenhouse import GreenhouseConnector
 from ufo_ext_sources.providers.hubspot import HubSpotConnector
 from ufo_ext_sources.providers.instagram import InstagramConnector
@@ -98,6 +99,7 @@ CONNECTORS = _connector_registry(
         GoogleDriveConnector,
         GoogleMeetConnector,
         GoogleSheetsConnector,
+        GranolaConnector,
         GreenhouseConnector,
         HubSpotConnector,
         InstagramConnector,

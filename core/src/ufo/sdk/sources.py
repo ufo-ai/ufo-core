@@ -19,6 +19,10 @@ skipped, not failed — committing no pages, so nothing is tombstoned. A backend
 when the provider answers a shape the stream cannot read, and the failure event carries the reason
 the backend authored rather than an exception message built out of the response.
 
+A provider that publishes no REST host at all — an MCP-only service a broker fronts — subclasses
+`ToolConnector` instead and pages through `ToolExecutor` tool executions the broker runs
+server-side.
+
 Rather than implement `SourceBackend` from scratch, a REST provider subclasses `RestConnector` —
 declaring its `StreamSpec`s and a `Pagination` strategy (or overriding `paginate`) — and wraps it in
 `ConnectorBackend`, the adapter that drives one stream to completion per run and collapses its pages
@@ -32,6 +36,9 @@ per-partition page factory, so the per-partition cursor-map codec and bounded-ba
 once here, not in each connector. The concrete shapes live in `ufo.runtime.sources`, reached only
 here."""
 
+from ufo.runtime.access.connectors import (
+    ToolExecutor as ToolExecutor,
+)
 from ufo.runtime.sources.backend import (
     ConnectorBackend as ConnectorBackend,
 )
@@ -127,4 +134,7 @@ from ufo.runtime.sources.sync import (
 )
 from ufo.runtime.sources.sync import (
     feed_handle as feed_handle,
+)
+from ufo.runtime.sources.tool import (
+    ToolConnector as ToolConnector,
 )

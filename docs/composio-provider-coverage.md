@@ -63,6 +63,27 @@ requires connectability, so these fail loud at the connect request instead, and 
 them out so discovery never names a service the member cannot then connect. The predicate is read
 off the live catalog record, so it covers all 1052 toolkits rather than a hand-kept blocklist.
 
+### The one exception: a config an operator created by hand
+
+`CUSTOM_AUTH_CONFIGS` maps a toolkit slug to the name of an auth config an operator created on this
+deploy's Composio project. A slug listed there passes the credential check on that config instead
+of on managed credentials, and its consent leg rides that config alone — the managed create is
+never attempted, and no other config for the toolkit is taken. A deploy whose project holds no
+config of that name fails loud on the connect request.
+
+One entry today: `granola_mcp`, Composio's mirror of Granola's official MCP server
+(`get_meetings`, `get_meeting_transcript`, `list_meetings`, `query_meetings`). Granola registers an
+OAuth client per user (DCR), so no broker can mint one; the operator registered the client and
+stored it in the config named `granola_mcp-ropkzh`, and Composio holds and refreshes the tokens.
+
+Granola also syncs a feed, over a second connector kind. A `RestConnector` issues provider REST
+over a `Credential`, and the broker transport proxies each request to the provider's own host;
+Granola publishes no such host, so a REST connector has nothing to dial. `ToolConnector` reads
+through tool executions the broker runs server-side instead: `ComposioBroker.credential` carries
+an executor beside its transport, and `GranolaConnector` pages its `meetings` stream through
+`GRANOLA_MCP_LIST_MEETINGS` and `GRANOLA_MCP_GET_MEETINGS`. Such a connector dials no host, so it
+declares `dials_host` False and takes no row in `TENANT_URL_RULES`.
+
 ### Where the scope axis is not evidence
 
 Comparing granted scopes to each tool's declared requirement only means something when both sides

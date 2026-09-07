@@ -436,10 +436,15 @@ class Connector(ABC):
     A connector declares its API address in one of two shapes. `base_url` alone is a complete fixed
     host every account of the provider shares. `base_url` empty is a per-tenant host — a subdomain,
     a data centre, a company file — carried by the connection, which its owner names and the grant
-    store's tenant rule for the provider admits or refuses."""
+    store's tenant rule for the provider admits or refuses.
+
+    `dials_host` False says the connector dials no provider host at all: it reads through tool
+    executions the broker runs server-side (`ToolConnector`), so an empty `base_url` is its whole
+    address rather than a per-tenant one the connection must name."""
 
     name: ClassVar[str] = ""
     base_url: ClassVar[str] = ""
+    dials_host: ClassVar[bool] = True
 
     @abstractmethod
     def streams(self) -> list[StreamSpec]:

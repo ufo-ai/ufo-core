@@ -39,6 +39,7 @@ ACTIVE_STATUS = "ACTIVE"
 TOOL_PAGE_LIMIT = 100
 MAX_LISTED_TOOLS = 500
 TOOLKIT_SEARCH_LIMIT = 10
+AUTH_CONFIG_PAGE_LIMIT = 100
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
 IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
@@ -107,6 +108,20 @@ from it, because scope metadata both over- and under-reports. Every entry's evid
 for what earns one, is in docs/composio-provider-coverage.md."""
 
 
+CUSTOM_AUTH_CONFIGS: dict[str, str] = {
+    "granola_mcp": "granola_mcp-ropkzh",
+}
+"""Toolkits reached through an auth config an operator created on this deploy's Composio project,
+keyed by slug to that config's name.
+
+Composio holds no managed credentials for these, so the managed route (`POST /auth_configs`) mints
+nothing and the open namespace would refuse the slug. Granola brokers its official MCP server and
+requires the member's own dynamically registered OAuth client, which no broker can mint — the
+operator registered that client with Granola and stored it in the named config, and Composio holds
+and refreshes the tokens from there. A slug listed here therefore rides its named config and never
+creates one: creating a managed config would bind a grant against credentials Granola refuses."""
+
+
 def connectable(slug: str, toolkit: Mapping[str, object]) -> bool:
     """Whether a member can reach a toolkit's tools through this deploy: `slug` is the identifier
     the caller already trusts, `toolkit` the record Composio's catalog carries for it (either the
@@ -122,16 +137,21 @@ def connectable(slug: str, toolkit: Mapping[str, object]) -> bool:
     Three preconditions, and a toolkit failing any brokers nothing worth having here. The consent
     leg rides Composio-managed credentials (`_auth_config` creates a managed config when the project
     holds none), so a toolkit Composio holds no managed credentials for cannot mint a working link —
-    `POST /auth_configs` refuses it outright. A toolkit cataloguing no tool has nothing for the
-    dynamic connector tools to search or execute. And a toolkit named in `BANNED` is withheld by
-    judgement. Checked before a slug is claimed rather than after, so the
-    failure lands on the connect request instead of a dead grant."""
+    `POST /auth_configs` refuses it outright, unless `CUSTOM_AUTH_CONFIGS` names the config an
+    operator already created for the slug, which is a credential the consent leg can ride. A toolkit
+    cataloguing no tool has nothing for the dynamic connector tools to search or execute. And a
+    toolkit named in `BANNED` is withheld by judgement. Checked before a slug is claimed rather than
+    after, so the failure lands on the connect request instead of a dead grant."""
     if slug.lower() in BANNED:
         return False
     schemes = toolkit.get(MANAGED_AUTH_SCHEMES_KEY)
     meta = toolkit.get(TOOLKIT_META_KEY)
     tools = meta.get(TOOLS_COUNT_KEY) if isinstance(meta, Mapping) else None
-    return bool(isinstance(schemes, list) and schemes and isinstance(tools, int) and tools > 0)
+    if not (isinstance(tools, int) and tools > 0):
+        return False
+    if slug.lower() in CUSTOM_AUTH_CONFIGS:
+        return True
+    return bool(isinstance(schemes, list) and schemes)
 
 
 class ComposioError(RuntimeError):
@@ -353,7 +373,11 @@ class ComposioClient:
         """The auth config the consent leg rides: the project's existing config for the toolkit —
         managed or custom, so an operator-created config (e.g. the deploy's own Google client
         requesting only the scopes a connector needs) wins — else a Composio-managed one is
-        created."""
+        created. A toolkit in `CUSTOM_AUTH_CONFIGS` rides the config that names it and nothing
+        else."""
+        named = CUSTOM_AUTH_CONFIGS.get(toolkit.lower())
+        if named is not None:
+            return await self._named_auth_config(toolkit, named)
         existing = await self._get("/auth_configs", params={"toolkit_slug": toolkit, "limit": "1"})
         config_id = _auth_config_id(existing)
         if config_id:
@@ -368,6 +392,28 @@ class ComposioClient:
         if not isinstance(created_id, str):
             raise ComposioError(502, f"auth config carried no id: {created!r}")
         return created_id
+
+    async def _named_auth_config(self, toolkit: str, name: str) -> str:
+        """The id of the operator-created config called `name`, refusing loudly when the project
+        holds no such config. The toolkit holds the member's own OAuth credentials in that one
+        config, so neither another config for the toolkit nor a freshly created managed one
+        authenticates anything — a link minted against either dies at the provider's consent."""
+        listing = await self._get(
+            "/auth_configs",
+            params={"toolkit_slug": toolkit, "limit": str(AUTH_CONFIG_PAGE_LIMIT)},
+        )
+        items = listing.get("items")
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or item.get("name") != name:
+                continue
+            config_id = item.get("id")
+            if isinstance(config_id, str) and config_id:
+                return config_id
+        raise ComposioError(
+            404,
+            f"toolkit {toolkit!r} connects through the auth config named {name!r}, which this "
+            "Composio project does not hold — create it with the provider's own OAuth credentials",
+        )
 
     async def _get(self, path: str, params: dict[str, str] | None = None) -> dict[str, object]:
         async with self._http() as http:

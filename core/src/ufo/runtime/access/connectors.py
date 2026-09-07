@@ -31,9 +31,9 @@ fallback backend (`[connectors] auth_backend`, the `auth_proxies` Manifest point
 brokers gmail through one broker and github through another while keyed providers sync through
 `direct`."""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import httpx
@@ -44,23 +44,39 @@ from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
+ToolExecutor = Callable[[str, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
+"""Run one of the provider's broker tools by slug and return its response payload.
+
+The broker holds the account's token and injects it itself, so this seam carries arguments and
+results only. A provider that publishes no REST host reads its records through this rather than
+over HTTP."""
+
 
 @dataclass(frozen=True, repr=False)
 class Credential:
     """One way to authenticate a provider request, produced by an `AuthProxy` for a connector to
-    build its HTTP client from. Exactly one path is populated: a `transport` that rewrites the
+    build its HTTP client from. Exactly one HTTP path is populated: a `transport` that rewrites the
     request through a broker (the secret stays server-side), a `bearer` token, or auth `headers`.
+
+    `execute` is the second seam, not a fourth HTTP path: a broker that runs the provider's tools
+    server-side offers it beside its `transport`, and a connector whose provider publishes no REST
+    host (an MCP-only service) reads its records through it. A key read from the credential store
+    carries none — a member's API key cannot execute a broker's tool.
+
     A value object — never persisted, never logged, never leaves the process."""
 
     transport: httpx.AsyncBaseTransport | None = None
     bearer: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
+    execute: ToolExecutor | None = None
 
     def __repr__(self) -> str:
         """Redact the secret — an accidental log line or exception-with-locals must never leak the
         token behind `bearer`/`headers`; the shape is enough to debug with."""
         if self.transport is not None:
             return "Credential(<transport: redacted>)"
+        if self.execute is not None:
+            return "Credential(<execute: redacted>)"
         if self.bearer is not None:
             return "Credential(<bearer: redacted>)"
         if self.headers:
@@ -428,6 +444,18 @@ class _ConnectionTransport(httpx.AsyncBaseTransport):
 
 
 @dataclass(frozen=True)
+class _ConnectionExecutor:
+    inner: ToolExecutor
+    workspace_id: UUID
+    connection_id: UUID
+    provider: str
+
+    async def __call__(self, slug: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        await _live_account(self.workspace_id, self.connection_id, self.provider)
+        return await self.inner(slug, arguments)
+
+
+@dataclass(frozen=True)
 class _BoundSourceCredentials:
     registry: ConnectorRegistry
     connection_id: UUID
@@ -444,17 +472,28 @@ class _BoundSourceCredentials:
         if broker is None:
             raise RuntimeError(f"no connector broker resolves {provider!r} credentials")
         credential = await broker.credential(workspace_id, provider, account)
-        if credential.transport is None:
+        if credential.transport is None and credential.execute is None:
             raise RuntimeError(
-                f"brokered {provider!r} source credentials did not provide a proxy transport"
+                f"brokered {provider!r} source credentials did not provide a proxy transport or a "
+                "tool executor"
             )
         return Credential(
-            transport=_ConnectionTransport(
+            transport=None
+            if credential.transport is None
+            else _ConnectionTransport(
                 inner=credential.transport,
                 workspace_id=workspace_id,
                 connection_id=self.connection_id,
                 provider=provider,
-            )
+            ),
+            execute=None
+            if credential.execute is None
+            else _ConnectionExecutor(
+                inner=credential.execute,
+                workspace_id=workspace_id,
+                connection_id=self.connection_id,
+                provider=provider,
+            ),
         )
 
 

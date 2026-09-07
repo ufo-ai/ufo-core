@@ -1205,9 +1205,15 @@ def _tenant_rule_failures() -> list[str]:
     control is the provider's row in `TENANT_URL_RULES`. The two sets are one set: a per-tenant
     connector with no rule can never take a URL, and a rule for a fixed-host connector admits a
     host the connector never dials. Either is a table that has drifted from the connectors it
-    guards."""
+    guards.
+
+    A connector that dials no host at all (`dials_host` False — it reads through broker tool
+    executions) is in neither set: its empty `base_url` is its whole address, so a rule for it
+    would admit a host nothing ever dials."""
     per_tenant = {
-        name for name, connector_type in CONNECTORS.items() if not connector_type.base_url
+        name
+        for name, connector_type in CONNECTORS.items()
+        if not connector_type.base_url and connector_type.dials_host
     }
     ruled = set(TENANT_URL_RULES)
     failures = []

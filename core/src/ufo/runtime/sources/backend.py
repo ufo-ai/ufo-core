@@ -239,7 +239,7 @@ class ConnectorBackend:
 
     def _base_url(self, auth: SourceAuth) -> str:
         base_url = auth.base_url or self.connector.base_url
-        if base_url:
+        if base_url or not self.connector.dials_host:
             return base_url
         raise RuntimeError(
             f"connector source {self.connector.name!r} resolved no base_url: it is a "

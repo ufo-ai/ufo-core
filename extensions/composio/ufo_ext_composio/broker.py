@@ -9,7 +9,9 @@ predates it, or a broker org rotation) tells the agent to have the member reconn
 answering with tool slugs; `search` rides the Tool Router; `credential` confirms
 the account is owned by this workspace's broker user (metadata, never a token — the confused-deputy
 guard) and returns a `Credential` whose transport proxies provider HTTP through Composio's
-proxy-execute, so a feed-sync source holds no secret.
+proxy-execute, so a feed-sync source holds no secret. That credential also carries an executor for
+the toolkit's own tools, which is how a source of a toolkit with no REST host (an MCP-only service)
+reads its records at all.
 
 Files cross as references: `file_outputs` finds the `{name, mimetype, s3url}` objects an execute
 response carries (presigned URLs on Composio's file store), and `stage_upload` mints an upload slot
@@ -135,7 +137,10 @@ class ComposioBroker:
                 api_key=client.api_key,
                 connected_account_id=account,
                 inner=client.transport or httpx.AsyncHTTPTransport(),
-            )
+            ),
+            execute=_AccountExecutor(
+                broker=self, workspace_id=workspace_id, provider=provider, account=account
+            ),
         )
 
     async def _slug_miss(
@@ -159,6 +164,24 @@ class ComposioBroker:
         names = ", ".join(tool.slug for tool in tools)
         return composio.ComposioError(
             error.status, f"{error.body} — tools available on {provider}: {names}"
+        )
+
+
+@dataclass(frozen=True)
+class _AccountExecutor:
+    """The bound tool executor a feed-sync source of an MCP-only toolkit reads through: one account
+    of one provider, every call routed through the broker's own `execute` so a slug miss and a
+    stale grant answer as they do for an agent's tool call. A sync read repeats safely, so it takes
+    no idempotency key."""
+
+    broker: ComposioBroker
+    workspace_id: UUID
+    provider: str
+    account: str
+
+    async def __call__(self, slug: str, arguments: Mapping[str, object]) -> dict[str, object]:
+        return await self.broker.execute(
+            self.workspace_id, self.provider, slug, arguments, self.account, None
         )
 
 

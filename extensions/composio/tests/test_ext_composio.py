@@ -95,16 +95,23 @@ SECOND_PAGE_CURSOR = "cursor_page_two"
 SECOND_PAGE_SLUG = "GITHUB_FIND_ISSUE"
 DISCOVERY_QUERY = "find an issue on a repository"
 BANNED_SLUG = "attio"
+CUSTOM_CONFIG_SLUG = "granola_mcp"
+CUSTOM_CONFIG_NAME = composio.CUSTOM_AUTH_CONFIGS[CUSTOM_CONFIG_SLUG]
+CUSTOM_CONFIG_ID = "ac_granola"
+GRANOLA_SLUG = "GRANOLA_MCP_LIST_MEETINGS"
 TOOLKIT_CATALOG = {
     "github": ("GitHub", ["OAUTH2"], 871),
     "notion": ("Notion", ["OAUTH2"], 45),
     "stripe": ("Stripe", ["OAUTH2"], 425),
     "xero": ("Xero", [], 53),
+    CUSTOM_CONFIG_SLUG: ("Granola MCP", [], 4),
     BANNED_SLUG: ("Attio", ["OAUTH2"], 99),
 }
 """The catalog Composio answers with, as `(label, managed auth schemes, tool count)`, holding one
 of each shape the namespace refuses. `xero` is the real shape of a toolkit Composio brokers but
-holds no managed credentials for — the consent leg has no client to ride. `attio` is the opposite,
+holds no managed credentials for — the consent leg has no client to ride. `granola_mcp` carries the
+same shape and connects anyway, because `CUSTOM_AUTH_CONFIGS` names the config an operator created
+for it. `attio` is the opposite,
 and the reason the ban cannot be derived: fully credentialed, rich in tools, yet on `BANNED`."""
 
 
@@ -332,6 +339,97 @@ async def test_connectable_toolkit_refuses_a_toolkit_composio_cannot_broker() ->
     assert await client.connectable_toolkit("notion") == "Notion"
     assert await client.connectable_toolkit("xero") is None
     assert await client.connectable_toolkit(BANNED_SLUG) is None
+
+
+async def test_connectable_toolkit_claims_a_slug_an_operator_created_a_config_for() -> None:
+    """Granola holds no Composio-managed credentials, the shape that refuses `xero`, yet its slug is
+    claimed: `CUSTOM_AUTH_CONFIGS` names the config an operator created for it, so the consent leg
+    has a credential to ride."""
+    assert await _mock_client().connectable_toolkit(CUSTOM_CONFIG_SLUG) == "Granola MCP"
+
+
+async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolkit() -> None:
+    """Granola's consent leg opens the config named in `CUSTOM_AUTH_CONFIGS` — the one holding the
+    member's own OAuth client — and never another config for the toolkit, and never creates one."""
+    lookups: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/auth_configs"):
+            lookups.append(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": "ac_stale", "name": "granola_mcp-old"},
+                        {"id": CUSTOM_CONFIG_ID, "name": CUSTOM_CONFIG_NAME},
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/connected_accounts/link"):
+            assert json.loads(request.content)["auth_config_id"] == CUSTOM_CONFIG_ID
+            return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    redirect = await client.connect_link(
+        toolkit=CUSTOM_CONFIG_SLUG, user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+    )
+    assert redirect == COMPOSIO_CONSENT_URL
+    assert lookups == [
+        {"toolkit_slug": CUSTOM_CONFIG_SLUG, "limit": str(composio.AUTH_CONFIG_PAGE_LIMIT)}
+    ]
+
+
+async def test_feed_sync_credential_executes_the_toolkits_tools_for_its_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feed-sync source of an MCP-only toolkit reads through `Credential.execute`: each call runs
+    on Composio's execute API under the workspace's broker user and the bound account, so the
+    connector holds no token and dials no provider host."""
+    workspace_id = uuid4()
+    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
+    executed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: _mock_client(
+            owner=owner, executed=executed, toolkit=CUSTOM_CONFIG_SLUG, tool_slug=GRANOLA_SLUG
+        ),
+    )
+
+    credential = await ComposioBroker().credential(
+        workspace_id, CUSTOM_CONFIG_SLUG, COMPOSIO_ACCOUNT
+    )
+
+    assert credential.execute is not None
+    payload = await credential.execute(GRANOLA_SLUG, {"time_range": "last_30_days"})
+    assert payload == {"successful": True, "data": {"items": []}}
+    assert executed == [
+        {
+            "user_id": owner,
+            "arguments": {"time_range": "last_30_days"},
+            "connected_account_id": COMPOSIO_ACCOUNT,
+        }
+    ]
+
+
+async def test_connect_link_refuses_a_custom_credential_toolkit_with_no_named_config() -> None:
+    """A deploy whose Composio project never got the config fails loud on the connect request. The
+    managed fallback is not taken: Granola refuses credentials it did not issue, so a link minted
+    against a created config would bind a dead grant."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/auth_configs"):
+            return httpx.Response(200, json={"items": []})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    with pytest.raises(composio.ComposioError, match=CUSTOM_CONFIG_NAME):
+        await client.connect_link(
+            toolkit=CUSTOM_CONFIG_SLUG,
+            user_id="ufo_ws",
+            callback_url="https://ufo.example.com/back",
+        )
 
 
 async def test_connect_flow_classifies_banned_without_a_broker_key_and_fails_others(
