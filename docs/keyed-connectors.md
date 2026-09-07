@@ -58,15 +58,16 @@ approved-partner token — both are the provider's own limit on the key, not thi
 also holds a Pipedream allowlist entry, so a member may connect it either way.
 
 The same three keys now also feed sync. `sources.registry` ships a `mercury`, `apollo` and
-`pandadoc` feed-sync connector, and a source registered with the `DIRECT_ACCOUNT` handle resolves
-its key through `DirectAuthProxy`, which reads the slot named for the provider — `mercury`,
+`pandadoc` feed-sync connector, and a source hanging off a connection with no account handle — the
+workspace's own — resolves its key through `DirectAuthProxy`, which reads the slot named for the
+provider — `mercury`,
 `apollo`, `pandadoc` — and hands the connector a raw key. That slot is the sources extension's own,
 separate from the row's `<provider>_api_key` slot the egress proxy injects for a sandbox turn, so a
 member who wants both surfaces fills both slots. Each connector re-applies the scheme its row names
 (a plain bearer for Mercury, `X-Api-Key` for Apollo, `API-Key` for PandaDoc), because a synced run
 calls the provider host-side and never passes the injecting proxy. PandaDoc's second path also
-carries over: a PandaDoc source registered against its Pipedream connection syncs through the
-broker's transport instead, with no key at rest.
+carries over: a PandaDoc stream hanging off its Pipedream connection syncs through the broker's
+transport instead, with no key at rest.
 
 ## How a member connects one
 

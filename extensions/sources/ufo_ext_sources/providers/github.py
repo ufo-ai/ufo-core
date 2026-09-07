@@ -115,14 +115,13 @@ def _stream(
 ALL_STREAMS: list[StreamSpec] = [
     _stream("repositories", cursor_field="updated_at", canonical=True),
     _stream("issues", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
-    _stream("issue_milestones", cursor_field="updated_at", canonical=True),
+    _stream("issue_milestones", cursor_field="updated_at"),
     _stream("comments", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
-    _stream("users", cursor_field=None, canonical=True),
+    _stream("users", cursor_field=None),
     _stream("assignees", cursor_field=None),
     _stream("branches", primary_key="name", cursor_field=None),
     _stream("collaborators", cursor_field=None),
-    _stream("commit_comment_reactions", cursor_field=None),
-    _stream("commit_comments", cursor_field="updated_at"),
+    _stream("commit_comments", cursor_field="updated_at", canonical=True),
     _stream(
         "commits",
         primary_key="sha",
@@ -139,7 +138,6 @@ ALL_STREAMS: list[StreamSpec] = [
         ordering=Ordering.newest_first,
         backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
     ),
-    _stream("issue_comment_reactions", cursor_field=None),
     _stream(
         "issue_events",
         cursor_field="created_at",
@@ -147,34 +145,21 @@ ALL_STREAMS: list[StreamSpec] = [
         backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
     ),
     _stream("issue_labels", cursor_field=None),
-    _stream("issue_reactions", cursor_field=None),
-    _stream("issue_timeline_events", cursor_field="created_at"),
     _stream("organizations", cursor_field=None),
-    _stream("project_cards", cursor_field="updated_at"),
-    _stream("project_columns", cursor_field="updated_at"),
     _stream("projects", cursor_field="updated_at"),
-    _stream("pull_request_comment_reactions", cursor_field=None),
-    _stream("pull_request_commits", primary_key="sha", cursor_field=None),
-    _stream("pull_request_stats", cursor_field="updated_at"),
-    _stream("pull_requests", cursor_field="updated_at"),
-    _stream("releases", cursor_field="created_at"),
-    _stream("review_comments", cursor_field="updated_at"),
-    _stream("reviews", cursor_field=None),
+    _stream("pull_requests", cursor_field="updated_at", canonical=True),
+    _stream("releases", cursor_field="created_at", canonical=True),
+    _stream("review_comments", cursor_field="updated_at", canonical=True),
     _stream("stargazers", cursor_field="starred_at", created_at_field="starred_at"),
     _stream("tags", primary_key="name", cursor_field=None),
-    _stream("team_members", cursor_field=None),
-    _stream("team_memberships", cursor_field=None),
     _stream("teams", cursor_field=None),
-    _stream("workflow_jobs", cursor_field="completed_at"),
-    _stream("workflow_runs", cursor_field="updated_at"),
+    _stream("workflow_runs", cursor_field="updated_at", canonical=True),
     _stream("workflows", cursor_field="updated_at"),
 ]
 
 
 # Per-stream API paths. `{owner}`/`{repo}`/`{org}` are resolved at fetch time from the granted-org
-# repo catalog. Only streams with a wired path are runnable; sub-streams that need a bespoke
-# parent-id walk (reactions, project cards/columns, PR commits/stats/reviews, workflow_jobs,
-# team_members/team_memberships, issue_timeline_events) are catalogued for parity, not yet driven.
+# repo catalog.
 _PATHS: dict[str, str] = {
     "assignees": "/repos/{owner}/{repo}/assignees",
     "branches": "/repos/{owner}/{repo}/branches",
@@ -209,11 +194,6 @@ class GitHubConnector(RestConnector):
     base_url = "https://api.github.com"
     streams_list = ALL_STREAMS
     checkpoint = staticmethod(text_checkpoint)
-
-    def streams(self) -> list[StreamSpec]:
-        """The runnable subset: streams whose `_PATHS` dispatch is wired. Adding a path promotes a
-        catalogued stream into the runnable set automatically."""
-        return [stream for stream in self.streams_list if stream.name in _PATHS]
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)

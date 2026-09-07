@@ -43,6 +43,7 @@ NOTION_STREAMS: list[StreamSpec] = [
         cursor_field="last_edited_time",
         created_at_field="created_time",
         updated_at_field="last_edited_time",
+        canonical=True,
     ),
     StreamSpec(
         name="data_sources",
@@ -51,6 +52,7 @@ NOTION_STREAMS: list[StreamSpec] = [
         cursor_field="last_edited_time",
         created_at_field="created_time",
         updated_at_field="last_edited_time",
+        canonical=True,
     ),
     StreamSpec(
         name="comments",
@@ -59,7 +61,6 @@ NOTION_STREAMS: list[StreamSpec] = [
         cursor_field="created_time",
         created_at_field="created_time",
         updated_at_field=None,
-        canonical=False,
     ),
     StreamSpec(
         name="blocks",
@@ -68,7 +69,6 @@ NOTION_STREAMS: list[StreamSpec] = [
         cursor_field="last_edited_time",
         created_at_field="created_time",
         updated_at_field="last_edited_time",
-        canonical=False,
     ),
 ]
 

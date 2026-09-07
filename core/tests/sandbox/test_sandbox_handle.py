@@ -522,7 +522,6 @@ async def _seed_grant(workspace_id: UUID, conversation_id: UUID, shared: bool) -
             account_id="acct-1",
             host="api.hub.test",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=shared,
         )
     return agent_id, member_id
@@ -701,7 +700,6 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
             account_id="acct-shared",
             host="api.hub.test",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=True,
         )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
@@ -744,7 +742,6 @@ async def test_open_sandbox_exports_nothing_when_the_shared_tier_is_ambiguous(
             account_id="acct-shared-2",
             host="api.hub.test",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=True,
         )
     other_member = uuid4()
@@ -792,7 +789,6 @@ async def test_open_sandbox_exports_nothing_when_the_account_is_ambiguous(
             account_id="acct-2",
             host="api.hub.test",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
@@ -1110,7 +1106,6 @@ async def test_open_sandbox_exports_the_committer_identity_of_the_pushing_accoun
             account_id="acct-gh",
             host="api.github.com",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
             account_label="alexg-ufo",
             commit=CommitIdentity(
@@ -1150,7 +1145,6 @@ async def test_open_sandbox_exports_no_identity_for_a_connection_that_recorded_n
             account_id="acct-gh",
             host="api.github.com",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
             account_label="alexg-ufo",
         )
@@ -1726,7 +1720,6 @@ async def test_open_sandbox_commits_as_the_shared_account_another_member_connect
             account_id="acct-gh",
             host="api.github.com",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=True,
             account_label="alexg-ufo",
             commit=CommitIdentity(
@@ -1766,7 +1759,6 @@ async def test_open_sandbox_withdraws_the_identity_when_two_clis_claim_it(
                 account_id=account,
                 host=f"api.{provider}.test",
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=False,
                 account_label="alexg-ufo",
                 commit=identity,

@@ -1,21 +1,40 @@
-"""The map between a link and the pages a source replays, one rule set per provider.
+"""The map between a link and the pages a connection replays, one rule set per provider.
 
 `canonical_resource` reads a link against the provider that owns it and answers the one URL a
 narrowed trigger stores. `resource_matches` answers the other direction — whether one replayed page
 body is about that resource, on the URL forms the provider's own records carry. `_about_resource` is
-where a narrowed trigger's changes pass through the second."""
+where a narrowed trigger's changes pass through the second.
 
+The trigger those rules serve is a `source_trigger` row carrying its resource, so the store tests
+below drive `SourceTriggerStore` against a conversation holding the whole feed of one connection and
+one resource of it at once — the two rows the key admits — and pin the order each read hands them
+back in. The last one disconnects the account and reads the rows back gone, which is the only thing
+that ever removes a trigger."""
+
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
+import sqlalchemy as sa
+from ufo_ext_sources.manifest import NAME
+from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.resources import canonical_resource, resource_digest, resource_matches
 from ufo_ext_sources.tools import _about_resource
-from ufo_ext_sources.triggers import SourceTrigger
+from ufo_ext_sources.triggers import SourceTrigger, SourceTriggerStore, source_trigger
 
+from ufo.db import workspace_tx
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.sources import PageChange
 
 GITHUB = "github"
 PR = "https://github.com/metalcraftai/ufo/pull/1684"
+ISSUE = "https://github.com/metalcraftai/ufo/issues/1684"
+CONNECTION = UUID("2f7c0f5e-1d0a-4c2b-9d3f-6b1f9a0c5e11")
 CONVERSATION = UUID("29c88018-22cd-4e44-bb1e-7eae9cf5bf43")
 
 
@@ -25,7 +44,7 @@ def _trigger(resource: str) -> SourceTrigger:
         id=uuid4(),
         conversation_id=CONVERSATION,
         agent_id=uuid4(),
-        binding="github-ee65f064",
+        connection_id=CONNECTION,
         resource=resource,
         delivery="current",
         created_by_member_id=None,
@@ -128,7 +147,7 @@ def test_a_resource_digest_is_one_stable_path_segment() -> None:
     assert resource_digest(PR) != resource_digest("https://github.com/metalcraftai/ufo/pull/1685")
 
 
-def test_a_whole_binding_trigger_takes_every_change() -> None:
+def test_a_whole_feed_trigger_takes_every_change() -> None:
     changes = [_page('{"html_url": "https://github.com/metalcraftai/ufo/pull/1"}'), _page("{}")]
     assert _about_resource(GITHUB, _trigger(""), changes) == changes
 
@@ -148,3 +167,214 @@ def test_a_watch_under_a_provider_without_rules_wakes_nothing() -> None:
     wakes nobody rather than everybody — a widened promise is the firehose the narrowing avoids."""
     changes = [_page('{"url": "https://linear.app/x/issue/UFO-1"}')]
     assert _about_resource("linear", _trigger("https://linear.app/x/issue/UFO-1"), changes) == []
+
+
+@dataclass(frozen=True)
+class _Seeded:
+    workspace_id: UUID
+    member_id: UUID
+    agent_id: UUID
+    conversation_id: UUID
+    connection_id: UUID
+    later_connection_id: UUID
+
+
+async def _seed() -> _Seeded:
+    seeded = _Seeded(uuid4(), uuid4(), uuid4(), uuid4(), uuid4(), uuid4())
+    created_at = datetime(2026, 7, 20, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=seeded.workspace_id, created_at=created_at, updated_at=created_at
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=seeded.member_id,
+                workspace_id=seeded.workspace_id,
+                email=f"{seeded.member_id.hex}@x.test",
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=seeded.agent_id,
+                workspace_id=seeded.workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                is_main=True,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=seeded.conversation_id,
+                workspace_id=seeded.workspace_id,
+                agent_id=seeded.agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                member_id=None,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection),
+            [
+                {
+                    "id": connection_id,
+                    "workspace_id": seeded.workspace_id,
+                    "provider": GITHUB,
+                    "account_id": account_id,
+                    "host": "github.com",
+                    "owner_member_id": seeded.member_id,
+                    "shared": True,
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                }
+                for connection_id, account_id in (
+                    (seeded.connection_id, "acct-one"),
+                    (seeded.later_connection_id, "acct-two"),
+                )
+            ],
+        )
+    return seeded
+
+
+async def _rows(workspace_id: UUID) -> list[tuple[UUID, str]]:
+    async with workspace_tx() as connection:
+        listed = (
+            await connection.execute(
+                sa.select(source_trigger.c.id, source_trigger.c.resource)
+                .where(source_trigger.c.workspace_id == workspace_id)
+                .order_by(source_trigger.c.resource)
+            )
+        ).all()
+    return [(row.id, row.resource) for row in listed]
+
+
+async def _stamp(trigger: SourceTrigger, created_at: datetime) -> SourceTrigger:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(source_trigger)
+            .values(created_at=created_at)
+            .where(source_trigger.c.id == trigger.id)
+        )
+    return replace(trigger, created_at=created_at)
+
+
+async def test_one_conversation_holds_a_whole_feed_and_a_narrowed_trigger(db: None) -> None:
+    """Both kinds of trigger on one connection for one conversation, which is what
+    (workspace_id, conversation_id, connection_id, resource) is keyed to admit: both land as rows of
+    `source_trigger` carrying their own resource. Each read then answers over the two — `waking`
+    hands the sweep both, `watched` reports the narrowed resource alone so the whole feed is never
+    mistaken for an offer already taken, `list_reported` orders the whole feed ahead of its
+    resources — and a repeat of either refuses in the store's own vocabulary. `remove` takes the one
+    row it names whichever kind it is, refuses a row already gone, leaves its neighbour reporting,
+    and the key readmits what it removed."""
+    seeded = await _seed()
+    feed = seeded.connection_id
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
+        whole = await store.create(seeded.conversation_id, feed, "current")
+        narrowed = await store.create(
+            seeded.conversation_id, feed, "per_page", seeded.member_id, PR
+        )
+
+        assert whole.resource == ""
+        assert narrowed.resource == PR
+        assert await _rows(seeded.workspace_id) == [(whole.id, ""), (narrowed.id, PR)]
+        assert set(await store.waking(feed)) == {whole, narrowed}
+        assert await store.watched(seeded.conversation_id) == frozenset({(feed, PR)})
+        listed = await store.list_reported(conversation_id=seeded.conversation_id)
+        assert [row.trigger for row in listed] == [whole, narrowed]
+        assert {row.audience for row in listed} == {SHARED_AUDIENCE}
+        assert {row.surface_label for row in listed} == {None}
+
+        for resource in ("", PR):
+            with pytest.raises(ValueError, match="already watches"):
+                await store.create(seeded.conversation_id, feed, "current", resource=resource)
+
+        await store.remove(narrowed)
+        assert await store.waking(feed) == (whole,)
+        assert await store.watched(seeded.conversation_id) == frozenset()
+        assert [row.trigger for row in await store.list_reported()] == [whole]
+        with pytest.raises(ValueError, match="changed while removing"):
+            await store.remove(narrowed)
+
+        narrowed = await store.create(
+            seeded.conversation_id, feed, "per_page", seeded.member_id, PR
+        )
+        assert await _rows(seeded.workspace_id) == [(whole.id, ""), (narrowed.id, PR)]
+
+        await store.remove(whole)
+        assert await store.waking(feed) == (narrowed,)
+        assert await store.watched(seeded.conversation_id) == frozenset({(feed, PR)})
+
+
+async def test_disconnecting_the_account_takes_every_trigger_on_it(db: None) -> None:
+    """A trigger names its connection by foreign key, so disconnecting takes the whole feed's
+    triggers with the source rows and the pages — across every agent that subscribed, and whether
+    the trigger watched the whole feed or one resource of it. Nothing sweeps them, because the
+    cascade is the sweep, and a trigger left behind would watch a feed nobody can reach."""
+    seeded = await _seed()
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
+        await store.create(seeded.conversation_id, seeded.connection_id, "current")
+        await store.create(seeded.conversation_id, seeded.connection_id, "per_page", resource=PR)
+        kept = await store.create(seeded.conversation_id, seeded.later_connection_id, "current")
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.connection).where(
+                    tables.connection.c.id == seeded.connection_id,
+                )
+            )
+
+        assert await _rows(seeded.workspace_id) == [(kept.id, "")]
+        assert await store.waking(seeded.connection_id) == ()
+        assert await store.watched(seeded.conversation_id) == frozenset()
+        assert [row.trigger for row in await store.list_reported()] == [kept]
+
+
+async def test_the_alert_sweep_reads_a_feeds_triggers_oldest_first(db: None) -> None:
+    """`waking` hands the sweep one order — oldest first, the id breaking a tie — so one batch
+    wakes conversations in the order they subscribed however the rows sit in the table. These three
+    are stamped counter to the order they were written in, which is the order a read that skipped
+    the sort would answer with."""
+    seeded = await _seed()
+    feed = seeded.connection_id
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
+        newest = await _stamp(
+            await store.create(seeded.conversation_id, feed, "per_page", resource=PR),
+            datetime(2026, 7, 20, 14, tzinfo=UTC),
+        )
+        oldest = await _stamp(
+            await store.create(seeded.conversation_id, feed, "current"),
+            datetime(2026, 7, 20, 12, tzinfo=UTC),
+        )
+        middle = await _stamp(
+            await store.create(seeded.conversation_id, feed, "per_page", resource=ISSUE),
+            datetime(2026, 7, 20, 13, tzinfo=UTC),
+        )
+        assert await store.waking(feed) == (oldest, middle, newest)
+
+
+async def test_a_listing_heads_each_feed_with_its_whole_feed(db: None) -> None:
+    """`list_reported` orders by connection and then by resource, so a member reads a feed's whole
+    stream above the resources of it and the feeds in one order every time. These four are written
+    in none of that order, which is the order a listing that skipped the sort would draw."""
+    seeded = await _seed()
+    first, second = sorted((seeded.connection_id, seeded.later_connection_id))
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
+        later_feed = await store.create(seeded.conversation_id, second, "current")
+        pull_request = await store.create(seeded.conversation_id, first, "per_page", resource=PR)
+        whole = await store.create(seeded.conversation_id, first, "current")
+        issue = await store.create(seeded.conversation_id, first, "per_page", resource=ISSUE)
+        listed = await store.list_reported()
+        assert [row.trigger for row in listed] == [whole, issue, pull_request, later_feed]

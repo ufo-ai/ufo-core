@@ -57,7 +57,7 @@ def _stream(
 RECURLY_STREAMS: list[StreamSpec] = [
     _stream("accounts", canonical=True),
     _stream("subscriptions", canonical=True),
-    _stream("plans", canonical=True),
+    _stream("plans"),
     _stream("invoices", canonical=True),
     _stream("transactions", canonical=True),
     _stream("account_coupon_redemptions"),
@@ -68,7 +68,7 @@ RECURLY_STREAMS: list[StreamSpec] = [
     _stream("coupons"),
     _stream("measured_units"),
     _stream("shipping_methods"),
-    _stream("credit_payments"),
+    _stream("credit_payments", canonical=True),
     _stream("line_items"),
     _stream("unique_coupons"),
     _stream("unique_coupons_parent", source_object="coupons"),

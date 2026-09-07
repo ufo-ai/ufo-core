@@ -113,20 +113,20 @@ GOOGLE_SHEETS_STREAMS: list[StreamSpec] = [
         primary_key="spreadsheetId",
         cursor_field="updated_at",
         updated_at_field="updated_at",
+        canonical=True,
     ),
     StreamSpec(
         name="sheets",
         source_object="sheets",
         primary_key="id",
         cursor_field="updated_at",
-        canonical=False,
     ),
     StreamSpec(
         name="sheet_values",
         source_object="values",
         primary_key="id",
         cursor_field="updated_at",
-        canonical=False,
+        canonical=True,
     ),
 ]
 

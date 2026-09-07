@@ -73,7 +73,7 @@ _PARAMS: dict[str, dict[str, Any]] = {
 }
 
 CONFLUENCE_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="spaces", source_object="spaces", primary_key="id"),
+    StreamSpec(name="spaces", source_object="spaces", primary_key="id", canonical=True),
     StreamSpec(
         name="pages",
         source_object="pages",
@@ -81,6 +81,7 @@ CONFLUENCE_STREAMS: list[StreamSpec] = [
         cursor_field="version.createdAt",
         created_at_field="createdAt",
         updated_at_field="version.createdAt",
+        canonical=True,
     ),
     StreamSpec(
         name="blog_posts",
@@ -89,6 +90,7 @@ CONFLUENCE_STREAMS: list[StreamSpec] = [
         cursor_field="version.createdAt",
         created_at_field="createdAt",
         updated_at_field="version.createdAt",
+        canonical=True,
     ),
     StreamSpec(
         name="comments",
@@ -97,9 +99,9 @@ CONFLUENCE_STREAMS: list[StreamSpec] = [
         cursor_field="version.createdAt",
         created_at_field="createdAt",
         updated_at_field="version.createdAt",
-        canonical=False,
+        canonical=True,
     ),
-    StreamSpec(name="groups", source_object="group", primary_key="id", canonical=False),
+    StreamSpec(name="groups", source_object="group", primary_key="id"),
     StreamSpec(
         name="audit",
         source_object="audit",
@@ -107,7 +109,6 @@ CONFLUENCE_STREAMS: list[StreamSpec] = [
         cursor_field="creationDate",
         created_at_field="creationDate",
         updated_at_field=None,
-        canonical=False,
     ),
 ]
 

@@ -85,13 +85,16 @@ class CorpusAttestor:
 
     async def attest(self) -> CorpusReadiness:
         page_rows, memory_rows, mirror_rows, chunk_rows, source_row, cursors = await self._rows()
+        if source_row is None:
+            raise RuntimeError("memory_100 folder source is missing")
         expected_source_id = source_row_id(
-            self.workspace_id, FOLDER_BACKEND, {"root": str(self.pages_root)}
+            self.workspace_id,
+            FOLDER_BACKEND,
+            {"root": str(self.pages_root)},
+            connection_id=source_row.connection_id,
         )
         if self.source_id != expected_source_id:
             raise RuntimeError("memory_100 folder source id is not canonical")
-        if source_row is None:
-            raise RuntimeError("memory_100 folder source is missing")
         if (
             source_row.workspace_id != self.workspace_id
             or source_row.backend != FOLDER_BACKEND

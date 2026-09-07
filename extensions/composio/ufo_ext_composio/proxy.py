@@ -6,7 +6,7 @@ the provider directly. This transport rewrites each provider request to Composio
 provider's status/body/headers, so a connector issues ordinary provider HTTP over an
 `httpx.AsyncClient` bound to the provider host and header-driven pagination still works. The
 connected-account id rides in the proxy payload; ownership is confirmed against the workspace's
-broker user before the transport is built (`ComposioAuthProxy.credential`), so a foreign account id
+broker user before the transport is built (`ComposioBroker.credential`), so a foreign account id
 is refused before a page is fetched."""
 
 import json

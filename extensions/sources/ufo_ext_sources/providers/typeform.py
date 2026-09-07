@@ -29,6 +29,7 @@ TYPEFORM_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="last_updated_at",
         updated_at_field="last_updated_at",
+        canonical=True,
     ),
     StreamSpec(
         name="responses",
@@ -37,11 +38,12 @@ TYPEFORM_STREAMS: list[StreamSpec] = [
         cursor_field="submitted_at",
         created_at_field="submitted_at",
         updated_at_field=None,
+        canonical=True,
     ),
     StreamSpec(name="workspaces", source_object="workspaces", primary_key="id"),
-    StreamSpec(name="images", source_object="images", primary_key="id", canonical=False),
-    StreamSpec(name="themes", source_object="themes", primary_key="id", canonical=False),
-    StreamSpec(name="webhooks", source_object="webhooks", primary_key="id", canonical=False),
+    StreamSpec(name="images", source_object="images", primary_key="id"),
+    StreamSpec(name="themes", source_object="themes", primary_key="id"),
+    StreamSpec(name="webhooks", source_object="webhooks", primary_key="id"),
 ]
 
 

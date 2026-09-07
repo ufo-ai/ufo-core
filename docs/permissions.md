@@ -24,7 +24,7 @@ flowchart TD
 | Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/runtime/ext/surface.py`, `core/src/ufo/harness/auth/bearer.py` |
 | Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/runtime/surfaces/admission.py`, `core/src/ufo/runtime/seats.py` |
 | Authority | who does this act speak for | `ExecutionAuthority`; nullable ids only at admission, persistence, and signed-token codecs | `core/src/ufo/runtime/authority.py`, `surfaces/admission.py`, `engine.py`, `tools/context.py` |
-| Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/runtime/access/grants.py`, `credentials.py` |
+| Grants | which external capability | `connector_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/runtime/access/grants.py`, `credentials.py` |
 | Wire | what leaves the sandbox | egress proxy rules derived from manifests and grants, keyed by a signed run token | `core/src/ufo/harness/sandbox/proxy/` |
 | Reads | who may see it | the conversation `Audience` atom, per-kind gates | `core/src/ufo/runtime/turns/audience.py`, `objects.py` |
 
@@ -80,7 +80,7 @@ flowchart TD
     OWN -->|yes| SP
     OWN -->|no| OB{"turn carries an<br/>on_behalf_of member?"}
     OB -->|yes| BEH["MemberAuthority(on_behalf_of)<br/>(task creator, spawn requester, monitor armer)"]
-    OB -->|no| NONE["WorkspaceAuthority — common work:<br/>shared grants only"]
+    OB -->|no| NONE["WorkspaceAuthority — common work:<br/>shared grants; a shipped agent's own attachments"]
     SP --> ACT["MemberAuthority"]
     BEH --> ACT
     ACT --> USE["use: connector accounts, private read subjects,<br/>member-authorized sandbox token"]
@@ -291,8 +291,8 @@ Capabilities accumulate through grants made in chat, never borrowed from caller 
 flowchart LR
     M["member"] -->|"owns"| CONN["connection<br/>provider account · shared flag"]
     CONN -->|"connector_grant<br/>one edge per agent"| AG["agent"]
-    M -->|"registers"| SRC["source<br/>subject: shared or member-private"]
-    SRC -->|"source_grant<br/>one recall edge per agent"| AG
+    CONN -->|"one row per canonical stream"| SRC["source<br/>a stream of this connection"]
+    SRC -->|"pages, disclosed as the connection is"| AG
     ADMIN["admin"] -->|"fills via sealed prompt"| CRED["credential<br/>workspace BYOK slot"]
     CRED -->|"sentinel → wire injection"| PROXY["egress proxy"]
     ADMIN -->|"web audience grant"| AG
@@ -310,21 +310,30 @@ just the edge. The portal's Attach connection control is the same act on the tar
 intent lane.
 
 At use time, account resolution admits **`MemberAuthority`'s private attachments plus shared
-connections, preferring private wholesale**; `WorkspaceAuthority` admits shared connections only.
+connections, preferring private wholesale**. `WorkspaceAuthority` on the main agent admits shared
+connections only, because that agent holds every member's connections at once and so must spend the
+speaker's; on a non-main agent it admits the attachments that agent holds, private ones included —
+a grant means grant, and an agent shipped with an account spends it.
 Two candidates inside the winning tier is a hard error naming them (the sandbox env export skips
 instead of guessing). Connector tools, the sandbox CLI environment, and the proxy all receive the
 same authority value; the proxy applies own-or-shared per grant without tiering because its
 sentinel already names one account.
 
-**Sources and source grants.** A source is one member-owned, agent-neutral synced dataset. Its
-member visibility is its `subject` (`shared` or `member:<uuid>`); its agent
-access is the separate `source_grant` edge — sharing with members never grants an agent, and
-granting an agent never widens members. Registering a persistent source from a connection is
-owner-only, even on a shared connection. One exception exists: the **main agent** may read a
-member's own ungranted source while that exact member is the **live speaker** — a scheduled run
-or subagent carries its initiator's use authority but never this exception. Sync resolves the
-owner's connection independently of agent grants and re-validates it on every HTTP request, so a
-disconnect kills in-flight syncs.
+**Sources.** A source is one stream of one connection — not nameable, not shareable, not grantable
+on its own. Connecting an account creates one row per canonical stream of its connector; deleting
+the connection deletes them and their pages by cascade. Both halves of access come from the
+connection: its `shared` flag is the disclosure every page it syncs is stamped with, and the
+`connector_grant` edge is which agents may reach it. There is no separate recall edge, so sharing
+with members and granting an agent cannot disagree. One exception exists: the **main agent** reads
+every shared connection with no grant, and reads a member's private connection while that exact
+member is the **live speaker** — a scheduled run or subagent carries its initiator's use authority
+but never this exception. Sync re-reads the connection on every HTTP request, so a disconnect kills
+in-flight syncs.
+
+A connection also carries what its streams read: `base_url`, the tenant API URL for a provider that
+needs one, and `backfill_days`, how far back the first sync reaches (at most 36500 — a century,
+which is every provider's whole history). Both are the owner's or an admin's to set, through the
+`connection` kind.
 
 **Credentials (BYOK).** Workspace-scoped encrypted slots declared by extension manifests. A
 speaking **admin** fills one through the sealed `request_credentials` handoff — the value crosses
@@ -343,25 +352,25 @@ member object (in chat, or the admin view's intent lane), govern per-member acce
 every agent. An out-of-audience
 agent is not-found on every portal route.
 
-Sharing semantics differ by object:
+Sharing is one act on one row:
 
-| Axis | Connection | Source |
-|---|---|---|
-| Sharing lives in | `shared` boolean on the connection | `subject` string on the source |
-| Widening | monotonic on reconnect; explicit act otherwise | one-way flip to `shared`, restamps live pages |
-| What sharing means | any member may **use** the account through any granted agent | any member may **see** the dataset in recall — agents still need their own edge |
+| Axis | Connection |
+|---|---|
+| Sharing lives in | `shared` boolean on the connection; a stream has none of its own |
+| Widening | monotonic on reconnect; explicit act otherwise; either way every live page the connection's streams synced is restamped in the same transaction |
+| Narrowing | the owner or an admin, from any thread; a connection nobody owns cannot be made private |
+| What sharing means | any member may **use** the account through any granted agent, and any member may **see** what its streams synced in recall — one flag answers both |
 | Admin may | unshare, revoke, disconnect — never share or attach another member's private connection | inspect, resync, delete — never edit; narrowing to private is refused for everyone |
 | Chat visibility (`connection` kind) | owner or admin only, even when shared | its own gate: shared, owned, or admin |
-| Portal visibility | a shared connection names its owner to every member who can use it | same rule via source listing |
+| Portal visibility | a shared connection names its owner to every member who can use it | a workspace connection has no owner to name |
 
 Revocation cascades:
 
 | Act | Effect |
 |---|---|
 | Revoke one grant | that agent's edge only; connection and other edges survive |
-| Disconnect a connection | one transaction: source grants deleted, sources stopped and tombstoned, grant edges cascade, connection row deleted |
-| Unshare | flips every attached agent's use back to owner-only at once |
-| Remove a source | `removed_at` stamped, every `source_grant` deleted, live pages tombstoned |
+| Disconnect a connection | one `DELETE`: source rows, their pages, and grant edges all cascade away with the connection |
+| Unshare | flips every attached agent's use back to owner-only at once, and restamps the connection's pages to their owner in the same transaction |
 | Revoke a seat | admission refuses and running turns park; grants and rows persist |
 
 Revocation does not wait for turn end: the connector tools re-read grants per call, and every

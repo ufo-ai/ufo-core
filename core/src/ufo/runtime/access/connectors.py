@@ -25,10 +25,11 @@ injects it itself), and resolves the feed-sync `Credential` for that provider's 
 extension (Composio, Pipedream) declares one per provider through the `connectors` Manifest point;
 `serve` merges every declaration into the one `ConnectorRegistry`, threads it onto the turn's
 ToolContext for the dynamic connector tools, and hands its connection-bound credential resolver to
-the sync runner. A source holding `DIRECT_ACCOUNT` (the member set a key, not a connection) reaches
-the deploy-selected fallback backend (`[connectors] auth_backend`, the `auth_proxies` Manifest
-point), so one deploy brokers gmail through one broker and github through another while keyed
-providers sync through `direct`."""
+the sync runner. A source hanging off a connection with no account handle — the workspace's own,
+where the member set a provider key rather than connecting an account — reaches the deploy-selected
+fallback backend (`[connectors] auth_backend`, the `auth_proxies` Manifest point), so one deploy
+brokers gmail through one broker and github through another while keyed providers sync through
+`direct`."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ import httpx
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
+from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
@@ -66,23 +68,38 @@ class Credential:
         return "Credential(<empty>)"
 
 
-DIRECT_ACCOUNT = "default"
-"""The account handle a feed-sync source carries when it authenticates with the workspace's own
-provider key instead of a broker connection. A source registers with it when the member set the
-provider's credential rather than connecting an account, so the run replays the decision
-registration made. It has to be the handle that carries it: the provider name alone cannot tell a
-keyed source from a connected one."""
+FEED_HANDLE_PREFIX = "{"
+
+
+def brokered_account(account_id: str) -> str | None:
+    """The broker's connected-account id this connection authenticates as, or None where it holds
+    none and the workspace's own provider key answers instead.
+
+    Three handles name no broker account. The workspace's keyed feed carries an empty handle; a
+    member keeping such a feed private carries their member atom instead, so two members' private
+    feeds over one workspace key stay distinct rows under `connection_identity`; and a feed no key
+    backs — a repository, a folder root — carries its config's identity JSON (`feed_handle`), which
+    begins `{` as no broker's account id does. All three route to the key rather than to a broker
+    holding no account for them."""
+    if (
+        not account_id
+        or account_id.startswith(MEMBER_SUBJECT_PREFIX)
+        or account_id.startswith(FEED_HANDLE_PREFIX)
+    ):
+        return None
+    return account_id
 
 
 class AuthProxy(Protocol):
     """Resolves the `Credential` a feed-sync source authenticates a provider with, given the
-    workspace the sync runs for, the connector's provider name, and the source's account handle. A
-    broker-backed proxy returns a `transport` (the secret never leaves the broker); a BYOK/direct
-    proxy reads a member-added key from the credential store host-side and returns a `bearer` (or
-    auth `headers`). Core never mints or holds a provider token itself — it selects one proxy
-    backend at boot and threads it onto the sync runner."""
+    workspace the sync runs for and the connector's provider name. Which account it authenticates
+    as is the bound connection's to say, never the caller's. A broker-backed proxy returns a
+    `transport` (the secret never leaves the broker); a BYOK/direct proxy reads a member-added key
+    from the credential store host-side and returns a `bearer` (or auth `headers`). Core never mints
+    or holds a provider token itself — it selects one proxy backend at boot and threads it onto the
+    sync runner."""
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential: ...
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential: ...
 
 
 class UnknownBrokerTool(LookupError):
@@ -373,47 +390,26 @@ def _broker(registry: ConnectorRegistry, provider: str) -> ConnectorBroker | Non
     return None
 
 
-async def _credential(
-    registry: ConnectorRegistry,
-    workspace_id: UUID,
-    provider: str,
-    account: str,
-) -> Credential:
-    if account != DIRECT_ACCOUNT:
-        broker = _broker(registry, provider)
-        if broker is not None:
-            return await broker.credential(workspace_id, provider, account)
-        raise RuntimeError(f"no connector broker resolves {provider!r} credentials")
-    if registry.fallback is not None:
-        return await registry.fallback.credential(workspace_id, provider, account)
-    raise RuntimeError(f"no [connectors] auth_backend resolves {provider!r} credentials")
-
-
-async def _require_source_connection(
-    workspace_id: UUID,
-    connection_id: UUID,
-    owner_member_id: UUID,
-    provider: str,
-    account: str,
-) -> None:
+async def _live_account(workspace_id: UUID, connection_id: UUID, provider: str) -> str:
+    """The account handle this connection still authenticates as, empty where it holds none and the
+    workspace's own key answers instead. A connection that has been disconnected answers nothing at
+    all, and the run stops rather than spending an authority that is gone."""
     with ws(workspace_id):
         async with workspace_tx() as connection:
-            authorized = (
+            account = (
                 await connection.execute(
-                    sa.select(tables.connection.c.id).where(
+                    sa.select(tables.connection.c.account_id).where(
                         tables.connection.c.workspace_id == workspace_id,
                         tables.connection.c.id == connection_id,
-                        tables.connection.c.owner_member_id == owner_member_id,
                         tables.connection.c.provider == provider,
-                        tables.connection.c.account_id == account,
                     )
                 )
             ).scalar_one_or_none()
-    if authorized is None:
+    if account is None:
         raise ValueError(
-            f"the {provider!r} connection for account {account!r} "
-            "is no longer active for this source"
+            f"the {provider!r} connection {connection_id} is no longer active for this source"
         )
+    return account
 
 
 @dataclass(frozen=True)
@@ -421,18 +417,10 @@ class _ConnectionTransport(httpx.AsyncBaseTransport):
     inner: httpx.AsyncBaseTransport
     workspace_id: UUID
     connection_id: UUID
-    owner_member_id: UUID
     provider: str
-    account: str
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        await _require_source_connection(
-            self.workspace_id,
-            self.connection_id,
-            self.owner_member_id,
-            self.provider,
-            self.account,
-        )
+        await _live_account(self.workspace_id, self.connection_id, self.provider)
         return await self.inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -442,26 +430,20 @@ class _ConnectionTransport(httpx.AsyncBaseTransport):
 @dataclass(frozen=True)
 class _BoundSourceCredentials:
     registry: ConnectorRegistry
-    connection_id: UUID | None
-    owner_member_id: UUID | None
+    connection_id: UUID
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
-        if account == DIRECT_ACCOUNT:
-            if self.connection_id is not None:
-                raise ValueError("a connection-bound source cannot use direct credentials")
-            return await _credential(self.registry, workspace_id, provider, account)
-        if self.connection_id is None or self.owner_member_id is None:
-            raise ValueError(
-                f"source has no member-owned {provider!r} connection for account {account!r}"
-            )
-        await _require_source_connection(
-            workspace_id,
-            self.connection_id,
-            self.owner_member_id,
-            provider,
-            account,
-        )
-        credential = await _credential(self.registry, workspace_id, provider, account)
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
+        account = brokered_account(await _live_account(workspace_id, self.connection_id, provider))
+        if account is None:
+            if self.registry.fallback is None:
+                raise RuntimeError(
+                    f"no [connectors] auth_backend resolves {provider!r} credentials"
+                )
+            return await self.registry.fallback.credential(workspace_id, provider)
+        broker = _broker(self.registry, provider)
+        if broker is None:
+            raise RuntimeError(f"no connector broker resolves {provider!r} credentials")
+        credential = await broker.credential(workspace_id, provider, account)
         if credential.transport is None:
             raise RuntimeError(
                 f"brokered {provider!r} source credentials did not provide a proxy transport"
@@ -471,9 +453,7 @@ class _BoundSourceCredentials:
                 inner=credential.transport,
                 workspace_id=workspace_id,
                 connection_id=self.connection_id,
-                owner_member_id=self.owner_member_id,
                 provider=provider,
-                account=account,
             )
         )
 
@@ -482,9 +462,5 @@ class _BoundSourceCredentials:
 class SourceCredentialResolver:
     registry: ConnectorRegistry
 
-    def bind(self, connection_id: UUID | None, owner_member_id: UUID | None) -> AuthProxy:
-        return _BoundSourceCredentials(
-            registry=self.registry,
-            connection_id=connection_id,
-            owner_member_id=owner_member_id,
-        )
+    def bind(self, connection_id: UUID) -> AuthProxy:
+        return _BoundSourceCredentials(registry=self.registry, connection_id=connection_id)

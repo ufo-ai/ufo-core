@@ -290,10 +290,13 @@ class SourceConfig(BaseModel):
 
 class SourceEntry(BaseModel):
     """One content source: which backend, with its config. `register_sources` lands each as a
-    source row the sync driver polls. `backend` names core's `folder` or a backend an extension
-    registers through its Manifest `sources` point; serve refuses an unknown name at boot. A
-    configured source is operator authority: its pages sync workspace-shared, and a local
-    directory root enters only here, never from a chat act."""
+    source row of a connection of its own, keyed by `feed_handle` — the authority a feed nobody
+    owns runs under, one per feed so removing one root never takes another's pages — which the sync
+    driver then polls. `backend` names core's `folder` or a backend an
+    extension registers through its Manifest `sources` point; serve refuses an unknown name at boot.
+    A configured source is operator authority: nobody owns that connection, so it is shared and its
+    pages sync workspace-shared, and a local directory root enters only here, never from a chat
+    act."""
 
     model_config = ConfigDict(extra="forbid")
     backend: str = Field(min_length=1)

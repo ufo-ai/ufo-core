@@ -27,7 +27,7 @@ PAGE_LIMIT = 200
 _REFUSAL_STATUS = frozenset({401, 403})
 
 
-def _stream(name: str, *, sobject: str, canonical: bool = True) -> StreamSpec:
+def _stream(name: str, *, sobject: str, canonical: bool = False) -> StreamSpec:
     return StreamSpec(
         name=name,
         source_object=sobject,
@@ -40,33 +40,33 @@ def _stream(name: str, *, sobject: str, canonical: bool = True) -> StreamSpec:
 
 
 SALESFORCE_STREAMS: list[StreamSpec] = [
-    _stream("accounts", sobject="Account"),
-    _stream("contacts", sobject="Contact"),
-    _stream("opportunities", sobject="Opportunity"),
-    _stream("tasks", sobject="Task"),
-    _stream("leads", sobject="Lead", canonical=False),
-    _stream("users", sobject="User", canonical=False),
-    _stream("opportunity_line_items", sobject="OpportunityLineItem", canonical=False),
-    _stream("opportunity_contact_roles", sobject="OpportunityContactRole", canonical=False),
-    _stream("products", sobject="Product2", canonical=False),
-    _stream("pricebooks", sobject="Pricebook2", canonical=False),
-    _stream("pricebook_entries", sobject="PricebookEntry", canonical=False),
-    _stream("quotes", sobject="Quote", canonical=False),
-    _stream("quote_line_items", sobject="QuoteLineItem", canonical=False),
-    _stream("orders", sobject="Order", canonical=False),
-    _stream("order_items", sobject="OrderItem", canonical=False),
-    _stream("contracts", sobject="Contract", canonical=False),
-    _stream("assets", sobject="Asset", canonical=False),
-    _stream("cases", sobject="Case", canonical=False),
-    _stream("case_comments", sobject="CaseComment", canonical=False),
-    _stream("solutions", sobject="Solution", canonical=False),
-    _stream("campaigns", sobject="Campaign", canonical=False),
-    _stream("campaign_members", sobject="CampaignMember", canonical=False),
-    _stream("events", sobject="Event", canonical=False),
-    _stream("email_messages", sobject="EmailMessage", canonical=False),
-    _stream("content_notes", sobject="ContentNote", canonical=False),
-    _stream("content_documents", sobject="ContentDocument", canonical=False),
-    _stream("content_versions", sobject="ContentVersion", canonical=False),
+    _stream("accounts", sobject="Account", canonical=True),
+    _stream("contacts", sobject="Contact", canonical=True),
+    _stream("opportunities", sobject="Opportunity", canonical=True),
+    _stream("tasks", sobject="Task", canonical=True),
+    _stream("leads", sobject="Lead", canonical=True),
+    _stream("users", sobject="User"),
+    _stream("opportunity_line_items", sobject="OpportunityLineItem"),
+    _stream("opportunity_contact_roles", sobject="OpportunityContactRole"),
+    _stream("products", sobject="Product2"),
+    _stream("pricebooks", sobject="Pricebook2"),
+    _stream("pricebook_entries", sobject="PricebookEntry"),
+    _stream("quotes", sobject="Quote"),
+    _stream("quote_line_items", sobject="QuoteLineItem"),
+    _stream("orders", sobject="Order"),
+    _stream("order_items", sobject="OrderItem"),
+    _stream("contracts", sobject="Contract", canonical=True),
+    _stream("assets", sobject="Asset"),
+    _stream("cases", sobject="Case", canonical=True),
+    _stream("case_comments", sobject="CaseComment", canonical=True),
+    _stream("solutions", sobject="Solution"),
+    _stream("campaigns", sobject="Campaign"),
+    _stream("campaign_members", sobject="CampaignMember"),
+    _stream("events", sobject="Event", canonical=True),
+    _stream("email_messages", sobject="EmailMessage", canonical=True),
+    _stream("content_notes", sobject="ContentNote", canonical=True),
+    _stream("content_documents", sobject="ContentDocument"),
+    _stream("content_versions", sobject="ContentVersion"),
 ]
 
 

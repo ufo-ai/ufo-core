@@ -6,11 +6,11 @@ offer is text; the agent applies the trigger, or does not. These cases grade tha
 durable act alone: a successful `object_apply` of a `source_trigger` whose `resource` canonicalizes
 to the case's pull request. Two cases ask for the watch and should apply it, once from the member's
 own words and once from a file a tool read; two name a link in passing, or a repository, and should
-apply nothing. The workspace syncs one shared GitHub source, seeded directly and pinned far ahead so
-the sync driver never calls GitHub for it."""
+apply nothing. The workspace holds one shared GitHub connection, seeded directly with its streams
+pinned far ahead so the sync driver never calls GitHub for it."""
 
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 import yaml
@@ -33,7 +33,6 @@ from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.sources import ConnectorSourceConfig
@@ -52,9 +51,12 @@ PR_NOTE = WorkspaceFile(
 
 
 async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
-    """One shared GitHub source the case's agent may read, with its next sync pinned far ahead: the
-    offer needs a binding that syncs the resource, not the pages themselves, and no credential backs
-    the account."""
+    """One shared GitHub connection the case's agent is granted, carrying a stream apiece with its
+    next sync pinned far ahead: the offer needs a connection whose streams sync the resource, not
+    the pages themselves, and no credential backs the account.
+
+    Settles rather than inserts. Every case of this suite seeds the same account into the same
+    workspace, so a plain insert makes the first case the only one that runs."""
     async with workspace_tx() as connection:
         owner_id = (
             await connection.execute(
@@ -64,15 +66,57 @@ async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
                 .limit(1)
             )
         ).scalar_one()
+        connection_id = (
+            await connection.execute(
+                sa.select(tables.connection.c.id).where(
+                    tables.connection.c.workspace_id == workspace_id,
+                    tables.connection.c.provider == GITHUB,
+                    tables.connection.c.account_id == ACCOUNT,
+                )
+            )
+        ).scalar_one_or_none()
+        if connection_id is None:
+            connection_id = uuid4()
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider=GITHUB,
+                    account_id=ACCOUNT,
+                    host="github.com",
+                    owner_member_id=owner_id,
+                    shared=True,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        granted = (
+            await connection.execute(
+                sa.select(tables.connector_grant.c.id).where(
+                    tables.connector_grant.c.workspace_id == workspace_id,
+                    tables.connector_grant.c.agent_id == agent_id,
+                    tables.connector_grant.c.connection_id == connection_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if granted is None:
+            await connection.execute(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    connection_id=connection_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
     with ws(workspace_id), agent(agent_id):
         ext = context_for(NAME, frozenset(CONNECTORS))
         for stream in STREAMS:
             source_id = await ext.register_source(
                 GITHUB,
-                ConnectorSourceConfig(account=ACCOUNT, stream=stream),
-                subject=SHARED_SUBJECT,
-                owner_member_id=owner_id,
-                agent_id=agent_id,
+                ConnectorSourceConfig(stream=stream),
+                connection_id=connection_id,
             )
             async with workspace_tx() as connection:
                 await connection.execute(
@@ -83,8 +127,8 @@ async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
 
 
 def _trigger_resource(call: ToolInvocation) -> str | None:
-    """The canonical resource a `source_trigger` apply narrows to — "" for a whole-binding trigger,
-    None for a call that applies no source trigger."""
+    """The canonical resource a `source_trigger` apply narrows to — "" for a trigger on the whole
+    connection, None for a call that applies no source trigger."""
     if call.name != "object_apply":
         return None
     manifest = call.input.get("manifest")

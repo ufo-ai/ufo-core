@@ -83,6 +83,7 @@ CONTACTS = StreamSpec(
     cursor_field="lastModifiedDateTime",
     created_at_field="createdDateTime",
     updated_at_field="lastModifiedDateTime",
+    canonical=True,
 )
 MESSAGES = StreamSpec(
     name="messages",
@@ -92,6 +93,7 @@ MESSAGES = StreamSpec(
     created_at_field="createdDateTime",
     updated_at_field="lastModifiedDateTime",
     backfill_window_days=MAIL_BACKFILL_WINDOW_DAYS,
+    canonical=True,
 )
 CONVERSATIONS = StreamSpec(
     name="conversations",
@@ -101,6 +103,7 @@ CONVERSATIONS = StreamSpec(
     created_at_field="created_at",
     updated_at_field="updated_at",
     backfill_window_days=MAIL_BACKFILL_WINDOW_DAYS,
+    canonical=True,
 )
 EVENTS = StreamSpec(
     name="events",
@@ -109,12 +112,12 @@ EVENTS = StreamSpec(
     cursor_field="lastModifiedDateTime",
     created_at_field="createdDateTime",
     updated_at_field="lastModifiedDateTime",
+    canonical=True,
 )
 MAIL_FOLDERS = StreamSpec(
     name="mail_folders",
     source_object="mailFolders",
     primary_key="id",
-    canonical=False,
 )
 
 ALL_STREAMS = [CONTACTS, MESSAGES, CONVERSATIONS, EVENTS, MAIL_FOLDERS]

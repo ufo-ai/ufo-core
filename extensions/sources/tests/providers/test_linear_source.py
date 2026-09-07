@@ -26,14 +26,12 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
-
 
 @dataclass(frozen=True)
 class _MockProxy:
     handler: Callable[[httpx.Request], httpx.Response]
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -45,7 +43,7 @@ async def _fetch(
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler))
     return await ConnectorBackend(connector=LinearConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+        ConnectorSourceConfig(stream=stream), cursor, auth
     )
 
 

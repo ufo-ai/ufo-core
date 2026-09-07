@@ -33,7 +33,7 @@ MEETINGS_PAGE_LIMIT = 200  # /v2/meetings max
 CALL_RECORDINGS_PAGE_LIMIT = 200  # /v2/meetings/{id}/call_recordings max
 
 
-def _records_stream(name: str, *, object_slug: str, canonical: bool = True) -> StreamSpec:
+def _records_stream(name: str, *, object_slug: str, canonical: bool = False) -> StreamSpec:
     return StreamSpec(
         name=name,
         source_object=object_slug,
@@ -45,16 +45,15 @@ def _records_stream(name: str, *, object_slug: str, canonical: bool = True) -> S
 
 
 ATTIO_STREAMS: list[StreamSpec] = [
-    _records_stream("companies", object_slug="companies"),
-    _records_stream("people", object_slug="people"),
-    _records_stream("deals", object_slug="deals"),
+    _records_stream("companies", object_slug="companies", canonical=True),
+    _records_stream("people", object_slug="people", canonical=True),
+    _records_stream("deals", object_slug="deals", canonical=True),
     StreamSpec(name="tasks", source_object="tasks", primary_key="task_id", delete_missing=True),
     StreamSpec(
         name="notes",
         source_object="notes",
         primary_key="note_id",
         delete_missing=True,
-        canonical=False,
     ),
     StreamSpec(
         name="meetings", source_object="meetings", primary_key="meeting_id", delete_missing=True

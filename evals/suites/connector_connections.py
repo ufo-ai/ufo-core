@@ -104,7 +104,6 @@ async def _seed_email_connection(agent_id: UUID, owner_id: UUID, *, shared: bool
             account_id=ACCOUNT_ID,
             host=EMAIL_HOST,
             grantor_member_id=owner_id,
-            conversation_id=conversation_id,
             shared=shared,
         )
 

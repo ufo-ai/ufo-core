@@ -416,7 +416,7 @@ test("a private grant is shared with the agent from the settings connectors sect
   await pressRow("github");
   await userEvent.click(screen.getByRole("button", { name: "Share with app" }));
   await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toMatchObject({ verb: "apply", kind: "connector_grant", name: "g1" });
+  expect(posted[0]).toMatchObject({ verb: "apply", kind: "connection", name: "g1" });
 });
 
 test("the agent's own section lists what is shared with it and not what is held privately", async () => {

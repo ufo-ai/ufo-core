@@ -57,8 +57,8 @@ def _stream(
 
 KLAVIYO_STREAMS: list[StreamSpec] = [
     _stream("profiles", canonical=True),
-    _stream("lists", canonical=True),
-    _stream("segments", canonical=True),
+    _stream("lists"),
+    _stream("segments"),
     _stream(
         "campaigns",
         cursor_field="updated_at",
@@ -66,13 +66,12 @@ KLAVIYO_STREAMS: list[StreamSpec] = [
         updated_at_field="updated_at",
         canonical=True,
     ),
-    _stream("flows", canonical=True),
+    _stream("flows"),
     _stream(
         "events",
         cursor_field="datetime",
         created_at_field="datetime",
         updated_at_field=None,
-        canonical=True,
     ),
     _stream("metrics"),
     _stream("templates", source_object="templates"),
@@ -97,12 +96,14 @@ KLAVIYO_STREAMS: list[StreamSpec] = [
     ),
     _stream("push_tokens", source_object="push-tokens", cursor_field=None),
     _stream("webhooks", cursor_field=None),
-    _stream("reviews", cursor_field="updated"),
+    _stream("reviews", cursor_field="updated", canonical=True),
     _stream(
         "data_privacy_deletion_jobs", source_object="data-privacy-deletion-jobs", cursor_field=None
     ),
     _stream("accounts", cursor_field=None),
-    _stream("campaign_messages", source_object="campaign-messages", cursor_field=None),
+    _stream(
+        "campaign_messages", source_object="campaign-messages", cursor_field=None, canonical=True
+    ),
 ]
 
 

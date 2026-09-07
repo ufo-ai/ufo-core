@@ -606,8 +606,9 @@ async def test_sample_broker_answers_the_dynamic_tool_surface() -> None:
 async def test_sample_auth_proxy_resolves_a_credential() -> None:
     """The consumer half of the `auth_proxies` seam through the probe: the registered proxy resolves
     a `Credential` through the same protocol the connector backend calls — a real object exercised,
-    not a mock."""
-    credential = await sample.SampleAuthProxy().credential(uuid4(), "provider", "account")
+    not a mock. It is asked for a workspace and a provider and nothing else: which account the
+    credential authenticates as is the bound connection's to say, never the caller's."""
+    credential = await sample.SampleAuthProxy().credential(uuid4(), "provider")
     assert credential.bearer == sample.AUTH_PROXY_BEARER
     assert credential.transport is None
 
@@ -1082,7 +1083,6 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
             account_id=sample.CONNECTOR_ACCOUNT,
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
     manifest = _sample_manifest()
@@ -1182,6 +1182,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
             "get",
             "rotate",
             "stored",
+            "stored_slots",
             "workspace_id",
             "declared",
         }

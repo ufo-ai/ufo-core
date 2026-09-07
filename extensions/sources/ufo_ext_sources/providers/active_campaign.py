@@ -117,20 +117,20 @@ def _stream(
 
 ACTIVECAMPAIGN_STREAMS: list[StreamSpec] = [
     _stream("contacts", canonical=True),
-    _stream("lists", canonical=True),
-    _stream("segments", cursor_field=None, canonical=True),
+    _stream("lists"),
+    _stream("segments", cursor_field=None),
     _stream("campaigns", cursor_field="mdate", canonical=True),
-    _stream("automations", cursor_field="mdate", canonical=True),
+    _stream("automations", cursor_field="mdate"),
     _stream(
         "campaign_messages", source_object="campaignMessages", cursor_field=None, canonical=True
     ),
-    _stream("deals", cursor_field="mdate"),
+    _stream("deals", cursor_field="mdate", canonical=True),
     _stream("deal_groups", source_object="dealGroups"),
     _stream("deal_stages", source_object="dealStages"),
     _stream("deal_activities", source_object="dealActivities", cursor_field="cdate"),
-    _stream("deal_tasks", source_object="dealTasks", cursor_field="udate"),
+    _stream("deal_tasks", source_object="dealTasks", cursor_field="udate", canonical=True),
     _stream("deal_task_types", source_object="dealTaskTypes", cursor_field=None),
-    _stream("accounts", cursor_field="udate"),
+    _stream("accounts", cursor_field="udate", canonical=True),
     _stream("account_contacts", source_object="accountContacts", cursor_field="udate"),
     _stream("account_custom_field_meta", source_object="accountCustomFieldMeta", cursor_field=None),
     _stream(
@@ -146,7 +146,7 @@ ACTIVECAMPAIGN_STREAMS: list[StreamSpec] = [
     _stream("field_values", source_object="fieldValues", cursor_field="udate"),
     _stream("field_options", source_object="fieldOptions", cursor_field=None),
     _stream("field_relationships", source_object="fieldRels", cursor_field=None),
-    _stream("notes", cursor_field="mdate"),
+    _stream("notes", cursor_field="mdate", canonical=True),
     _stream("saved_responses", source_object="savedResponses", cursor_field=None),
     _stream("templates"),
     _stream("messages", cursor_field="mdate"),

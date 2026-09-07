@@ -124,9 +124,17 @@ class StreamSpec:
     repos/channels checkpoints and resumes each partition soundly. `pagination` routes a declared
     strategy; None means the connector's `paginate` handles the stream directly.
 
-    `backfill_window_days` is how far back this stream's FIRST sync reaches when the member names no
-    window; None declares none, and such a stream takes no override either. It is a declaration and
-    nothing more — read once at registration, where it resolves into the instant the row persists.
+    `canonical` marks a stream as the content this account exists to carry — a core collection
+    (issues, messages, invoices, candidates), never a lookup list a join would want (custom-field
+    definitions, pipelines, tags, users). Connecting an account syncs its connector's canonical
+    streams and nothing else, so this field alone decides what a connection reads. It defaults to
+    False, exactly as every provider helper defaults it, because a stream nobody has judged is not
+    content; a connector that marks none would sync nothing, which `gates.py` refuses.
+
+    `backfill_window_days` is how far back this stream's FIRST sync reaches when the connection
+    names no window; None declares none, and such a stream takes no override either. It is a
+    declaration and nothing more — read once at registration, where it resolves into the instant the
+    row persists.
     Every field here is a connector constant, so the run's own floor is not one: it arrives beside
     the spec as `fetch_page`'s `backfill_after`. Keeping them apart is what stops a connector
     recomputing `now - N days` per run."""
@@ -138,7 +146,7 @@ class StreamSpec:
     created_at_field: str | None = "created_at"
     updated_at_field: str | None = "updated_at"
     delete_missing: bool = False
-    canonical: bool = True
+    canonical: bool = False
     ordering: Ordering = Ordering.none
     pagination: Pagination | None = None
     backfill_window_days: int | None = None
@@ -427,8 +435,8 @@ class Connector(ABC):
 
     A connector declares its API address in one of two shapes. `base_url` alone is a complete fixed
     host every account of the provider shares. `base_url` empty is a per-tenant host — a subdomain,
-    a data centre, a company file — carried by the source row, which the registering member's submit
-    names and the provider's own URL rule validates."""
+    a data centre, a company file — carried by the connection, which its owner names and the grant
+    store's tenant rule for the provider admits or refuses."""
 
     name: ClassVar[str] = ""
     base_url: ClassVar[str] = ""

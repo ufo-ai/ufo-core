@@ -59,6 +59,7 @@ ALL_STREAMS: list[StreamSpec] = [
         source_object="conversations.list",
         primary_key="id",
         delete_missing=True,
+        canonical=True,
     ),
     StreamSpec(
         name="conversation_threads",
@@ -66,6 +67,7 @@ ALL_STREAMS: list[StreamSpec] = [
         primary_key="id",
         ordering=Ordering.newest_first,
         backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
+        canonical=True,
     ),
     StreamSpec(
         name="messages",
@@ -75,6 +77,7 @@ ALL_STREAMS: list[StreamSpec] = [
         updated_at_field=None,
         ordering=Ordering.newest_first,
         backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
+        canonical=True,
     ),
     StreamSpec(
         name="message_participants",

@@ -1169,7 +1169,6 @@ async def _seeded_workspace(
                     account_id="acct",
                     host="composio",
                     owner_member_id=member_id,
-                    conversation_id=conversation_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -1180,7 +1179,6 @@ async def _seeded_workspace(
                     workspace_id=workspace_id,
                     agent_id=agent_id,
                     connection_id=connection_id,
-                    conversation_id=conversation_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

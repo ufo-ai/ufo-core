@@ -1,9 +1,10 @@
 """The adapter that puts a connector on the core source seam.
 
 A connector speaks in streams and async page generators; the source seam speaks in one `SyncResult`
-per run. `ConnectorBackend` bridges them: one `source` row is one (account, stream), so `fetch`
-resolves the account's `Credential` through the runner's auth proxy, drives the connector's one
-stream, and renders each record into a recallable `Page` — one record the page model rejects, or one
+per run. `ConnectorBackend` bridges them: one `source` row is one stream of one connection, so
+`fetch` resolves that connection's `Credential` through the runner's auth proxy, drives the
+connector's one stream, and renders each record into a recallable `Page` — one record the page
+model rejects, or one
 that carries no value for its stream's declared `primary_key`, is dropped, warned, and counted onto
 the result's `dropped` rather than failing the run (`_page`).
 A full-collection stream (`delete_missing`) returns as an authoritative `snapshot` so the driver
@@ -54,12 +55,11 @@ either way it is used in-process by the sync job in the jobs role and NEVER reac
 agent surface, which is the invariant this preserves. Keep the `Credential` out of any structured
 log. The manifest registers one backend per connector in the registry."""
 
-import hashlib
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -94,47 +94,24 @@ class _BackfillEnvelope(BaseModel):
     watermark: str | None
 
 
-BINDING_NAME_DIGEST_HEX = 8
-
-
-def binding_name(provider: str, account: str, base_url: str | None) -> str:
-    """The source kind's one identity rule: a binding's object name derives from what it
-    authenticates as — provider, resolved account handle, and tenant URL — so the same binding
-    answers to the same name wherever it is named (the object verbs, the portal's per-row
-    actions, page attribution)."""
-    digest = hashlib.sha256(
-        json.dumps(
-            {"account": account, "base_url": base_url, "provider": provider}, sort_keys=True
-        ).encode()
-    ).hexdigest()[:BINDING_NAME_DIGEST_HEX]
-    return f"{provider.replace('_', '-')}-{digest}"
-
-
 class ConnectorSourceConfig(SourceRowConfig):
-    """Which account + stream one connector source row syncs. `account` is the handle the registry
-    routes the credential on (a broker connected-account id under Composio, `DIRECT_ACCOUNT` under
-    the direct backend, whose key is keyed by the provider name instead); `stream` is the connector
-    stream this row pulls. `base_url` overrides the connector's host for a per-tenant provider
-    (Freshdesk's `https://<account>.freshdesk.com`, Zendesk's `<subdomain>.zendesk.com`), whose
-    connector class leaves `base_url` empty; it is part of the config the `source_row_id` hashes, so
-    two tenants of the same provider settle on distinct rows. The backend never reads a raw token —
-    it asks the proxy for a `Credential`.
+    """Which stream one connector source row syncs. The account it authenticates as and the tenant
+    URL it dials are the connection's, so the row names neither: `stream` is the whole of what this
+    row is, within the connection it hangs off. The backend never reads a raw token — it asks the
+    proxy for a `Credential`.
 
-    `backfill_days` is what the registering member asked this row's first sync to reach — None takes
-    the stream's declared `backfill_window_days`, `"all"` the whole history — and `backfill_after`
-    is that request resolved against the instant of registration, replayed by every run so a
-    `CursorExpired` reset refetches the same window. It is None where the stream declares no window;
-    the request is still stored on every row of the binding, so the binding reads back one window
-    whichever row answers. `backfill_after` alone is `resolved`, since concurrent registrations of
-    one `backfill_days` differ by microseconds."""
+    `backfill_days` is how far back this row's first sync reaches — the connection's window where it
+    names one, else the stream's declared `backfill_window_days` — and `backfill_after` is that
+    resolved against the instant of registration, replayed by every run so a `CursorExpired` reset
+    refetches the same window. Both are None where the stream declares no window. `backfill_after`
+    alone is `resolved`, since concurrent registrations of one `backfill_days` differ by
+    microseconds."""
 
     non_identity_fields: ClassVar[frozenset[str]] = frozenset({"backfill_days", "backfill_after"})
     resolved_fields: ClassVar[frozenset[str]] = frozenset({"backfill_after"})
 
-    account: str
     stream: str
-    base_url: str | None = None
-    backfill_days: int | Literal["all"] | None = None
+    backfill_days: int | None = None
     backfill_after: datetime | None = None
 
 
@@ -150,7 +127,7 @@ class ConnectorBackend:
     ) -> SyncResult:
         credential = await self._credential(config, auth)
         stream = self._stream(config.stream)
-        base_url = self._base_url(config)
+        base_url = self._base_url(auth)
         envelope = None if stream.delete_missing else self._decode_cursor(cursor)
         if envelope is None:
             origin, skip_target, watermark = cursor, 0, cursor
@@ -253,23 +230,21 @@ class ConnectorBackend:
                 "(install the provider's broker extension, or set [connectors] auth_backend)"
             )
         try:
-            return await auth.auth_proxy.credential(
-                auth.workspace_id, self.connector.name, config.account
-            )
+            return await auth.auth_proxy.credential(auth.workspace_id, self.connector.name)
         except GrantUnusable as unusable:
             raise StreamSkipped(
                 f"{self.connector.name}: {config.stream!r} {unusable}",
                 awaits_grant=unusable.awaits_grant,
             ) from unusable
 
-    def _base_url(self, config: ConnectorSourceConfig) -> str:
-        base_url = config.base_url or self.connector.base_url
+    def _base_url(self, auth: SourceAuth) -> str:
+        base_url = auth.base_url or self.connector.base_url
         if base_url:
             return base_url
         raise RuntimeError(
             f"connector source {self.connector.name!r} resolved no base_url: it is a "
-            "per-tenant provider (its connector class leaves base_url empty) and the source "
-            "row set no base_url — a misconfigured source fails its run rather than dial an "
+            "per-tenant provider (its connector class leaves base_url empty) and its connection "
+            "names no tenant URL — a misconfigured source fails its run rather than dial an "
             "empty host"
         )
 

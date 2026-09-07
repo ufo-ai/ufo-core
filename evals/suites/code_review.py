@@ -59,6 +59,8 @@ STALE_OBJECTIVE_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000008")
 LAUNCH_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000009")
 RECOVERY_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000a")
 PUBLISH_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000b")
+FIXTURE_CONNECTION_ID = UUID("31000000-0000-0000-0000-000000000001")
+FIXTURE_PROVIDER = "fixture"
 EVAL_GITHUB_PROVIDER = "eval_github"
 EVAL_GITHUB_ACCOUNT = "eval-env-account"
 PUBLICATION_SURFACE = "code-review-publication"
@@ -426,7 +428,6 @@ async def _grant_publication(agent_id: UUID) -> None:
             account_id=EVAL_GITHUB_ACCOUNT,
             host="",
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=True,
         )
 
@@ -462,27 +463,53 @@ async def _seed_page(
     await blob.put(body_ref, body)
     async with workspace_tx() as connection:
         await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_id))
-        await connection.execute(
-            sa.delete(tables.source_grant).where(tables.source_grant.c.source_id == source_id)
-        )
         await connection.execute(sa.delete(tables.source).where(tables.source.c.id == source_id))
+        held = (
+            await connection.execute(
+                sa.select(tables.connection.c.id).where(
+                    tables.connection.c.id == FIXTURE_CONNECTION_ID
+                )
+            )
+        ).scalar_one_or_none()
+        if held is None:
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=FIXTURE_CONNECTION_ID,
+                    workspace_id=workspace_id,
+                    provider=FIXTURE_PROVIDER,
+                    account_id="",
+                    host="",
+                    owner_member_id=None,
+                    shared=True,
+                    created_at=FIXTURE_TIME,
+                    updated_at=FIXTURE_TIME,
+                )
+            )
         await connection.execute(
-            sa.insert(tables.source).values(
-                id=source_id,
+            sa.delete(tables.connector_grant).where(
+                tables.connector_grant.c.workspace_id == workspace_id,
+                tables.connector_grant.c.agent_id == agent_id,
+                tables.connector_grant.c.connection_id == FIXTURE_CONNECTION_ID,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
                 workspace_id=workspace_id,
-                backend="fixture",
-                config={},
-                subject="shared",
-                next_sync_at=FIXTURE_TIME,
+                agent_id=agent_id,
+                connection_id=FIXTURE_CONNECTION_ID,
                 created_at=FIXTURE_TIME,
                 updated_at=FIXTURE_TIME,
             )
         )
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.source).values(
+                id=source_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                agent_id=agent_id,
+                backend=FIXTURE_PROVIDER,
+                config={},
+                connection_id=FIXTURE_CONNECTION_ID,
+                next_sync_at=FIXTURE_TIME,
                 created_at=FIXTURE_TIME,
                 updated_at=FIXTURE_TIME,
             )

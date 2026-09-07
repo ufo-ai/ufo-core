@@ -22,7 +22,7 @@ _REFUSAL_STATUS = frozenset({401, 403})
 RECRUITEE_STREAMS: list[StreamSpec] = [
     StreamSpec(name="candidates", source_object="candidates", primary_key="id", canonical=True),
     StreamSpec(name="offers", source_object="offers", primary_key="id", canonical=True),
-    StreamSpec(name="departments", source_object="departments", primary_key="id", canonical=False),
+    StreamSpec(name="departments", source_object="departments", primary_key="id"),
 ]
 
 

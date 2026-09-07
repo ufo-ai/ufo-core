@@ -20,6 +20,7 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
@@ -145,10 +146,6 @@ def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
     for index, value in axes:
         values[index] = value
     return tuple(values)
-
-
-def _reader(subjects: frozenset[str]) -> SourceReader:
-    return SourceReader(agent_id=uuid4(), requesting_member_id=None, subjects=subjects)
 
 
 class StubEmbed:
@@ -395,6 +392,26 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+async def _seed_connection(connection: AsyncConnection, workspace_id: UUID, backend: str) -> UUID:
+    """The workspace-shared connection one seeded source hangs off. Reach is the connection's, so
+    one source here is one grantable feed."""
+    connection_id = uuid4()
+    await connection.execute(
+        sa.insert(tables.connection).values(
+            id=connection_id,
+            workspace_id=workspace_id,
+            provider=backend,
+            account_id=connection_id.hex,
+            host="",
+            owner_member_id=None,
+            shared=True,
+            created_at=WHEN,
+            updated_at=WHEN,
+        )
+    )
+    return connection_id
+
+
 async def _seed_page(
     blob: FilesystemBlobStore,
     workspace_id: UUID,
@@ -411,6 +428,7 @@ async def _seed_page(
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
+                connection_id=await _seed_connection(connection, workspace_id, "folder"),
                 cursor=None,
                 next_sync_at=WHEN,
                 created_at=sa.func.now(),
@@ -445,7 +463,7 @@ async def _seed_page_authority(
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
-                subject=subject,
+                connection_id=await _seed_connection(connection, workspace_id, "test"),
                 next_sync_at=WHEN,
                 created_at=WHEN,
                 updated_at=WHEN,
@@ -553,8 +571,9 @@ def _store(workspace_id: UUID, vector: tuple[float, ...]) -> MemoryStore:
 
 
 async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -> SourceReader:
-    """An agent holding the grant for each named source, as recall's source authority reads it: a
-    page-derived fact reaches recall only through a reader granted the feed it came from."""
+    """An agent holding a connector grant on the connection behind each named source, as recall's
+    source authority reads it: a page-derived fact reaches recall only through a reader that may
+    read the feed it came from."""
     agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -569,11 +588,17 @@ async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -
             )
         )
         for source_id in source_ids:
+            granted = (
+                await connection.execute(
+                    sa.select(tables.source.c.connection_id).where(tables.source.c.id == source_id)
+                )
+            ).scalar_one()
             await connection.execute(
-                sa.insert(tables.source_grant).values(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
                     workspace_id=workspace_id,
-                    source_id=source_id,
                     agent_id=agent_id,
+                    connection_id=granted,
                     created_at=WHEN,
                     updated_at=WHEN,
                 )
@@ -2162,7 +2187,7 @@ async def test_a_members_band_is_written_under_the_heading_they_read(db: None) -
     member_id = await _seed_admin(workspace_id)
     subject = member_subject(member_id)
     shared_feed = await _seed_wiki_feed(workspace_id)
-    member_feed = await _seed_wiki_feed(workspace_id, subject)
+    member_feed = await _seed_wiki_feed(workspace_id)
     start = datetime.now(UTC) - timedelta(hours=3)
     for index, body in enumerate(TASK_ROWS):
         await _seed_wiki_row(
@@ -2224,7 +2249,7 @@ async def _seed_page_facts(
     an overview is written from, and enough of it to clear the pass's own floor. Each row is
     distilled from a synced page of its own and bound to the revision that page stands at, because
     a row off its page is one no pass here may write a paragraph from."""
-    source_id = await _seed_wiki_feed(workspace_id, subject)
+    source_id = await _seed_wiki_feed(workspace_id)
     start = datetime.now(UTC) - timedelta(hours=3)
     bodies = tuple(f"Acme Corp — Shipped release {index}." for index in range(count))
     for index, body in enumerate(bodies):
@@ -2555,9 +2580,10 @@ def _page_pass(workspace_id: UUID, client: ModelClient | None) -> PagePass:
     )
 
 
-async def _seed_wiki_feed(workspace_id: UUID, subject: str = SHARED_SUBJECT) -> UUID:
+async def _seed_wiki_feed(workspace_id: UUID) -> UUID:
     """The synced feed a subject's wiki is written from. A page-derived row reaches a member only
-    through a grant on the feed its page came from, so one grant on this covers the whole page."""
+    through a grant on the connection behind the feed its page came from, so one grant on this
+    covers the whole page. Which subject its rows carry is the page's, never the feed's."""
     source_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -2566,7 +2592,7 @@ async def _seed_wiki_feed(workspace_id: UUID, subject: str = SHARED_SUBJECT) -> 
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
-                subject=subject,
+                connection_id=await _seed_connection(connection, workspace_id, "folder"),
                 next_sync_at=WHEN,
                 created_at=WHEN,
                 updated_at=WHEN,
@@ -3089,8 +3115,8 @@ async def test_a_page_refused_leaves_the_next_subjects_page_curated(db: None) ->
     never be curated at all. The two pages differ only in how many rows they hold, so the same nine
     retirements sit past the bar on one and under it on the other."""
     workspace_id = await _workspace()
-    refused_feed = await _seed_wiki_feed(workspace_id, REFUSED_SUBJECT)
-    curated_feed = await _seed_wiki_feed(workspace_id, CURATED_SUBJECT)
+    refused_feed = await _seed_wiki_feed(workspace_id)
+    curated_feed = await _seed_wiki_feed(workspace_id)
     start = datetime.now(UTC) - timedelta(hours=3)
     for index in range(PAGE_PASS_MIN_ROWS):
         await _seed_wiki_row(

@@ -1,7 +1,7 @@
 """The BambooHR connector over a mock transport: the single-shot directory (list under `employees`)
 hitting the per-tenant gateway host, the HTTP Basic auth built from a direct key (password `"x"`),
 and a refusal surfacing as `StreamSkipped`. The class base URL is empty (per-tenant), so the tenant
-host is bound through `ConnectorSourceConfig.base_url`. Offline — a canned transport, no token."""
+host is bound through `SourceAuth.base_url`. Offline — a canned transport, no token."""
 
 import base64
 from collections.abc import Callable
@@ -15,7 +15,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 BASE_URL = "https://api.bamboohr.com/api/gateway.php/acme"
 
 
@@ -23,14 +22,14 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
 async def _fetch(stream: str, handler: Callable[[httpx.Request], httpx.Response]) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=BASE_URL)
     return await ConnectorBackend(connector=BambooHRConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), None, auth
+        ConnectorSourceConfig(stream=stream), None, auth
     )
 
 

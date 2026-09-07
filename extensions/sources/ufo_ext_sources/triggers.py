@@ -1,23 +1,23 @@
-"""The source-trigger tables and the scoped store that owns them.
+"""The source-trigger table and the scoped store that owns it.
 
-A trigger is one conversation's standing interest in one shared source. It can send each batch to
-that conversation or partition changes into one stable agent conversation per page. The row carries
-the owning conversation, the agent it invokes, the delivery mode, and the member who asked for it.
+A trigger is one conversation's standing interest in one connection's feed. It can send each batch
+to that conversation or partition changes into one stable agent conversation per page. The row
+carries the connection it watches, the owning conversation, the agent it invokes, the delivery
+mode, and the member who asked for it.
 
-A trigger narrows to one resource of that source — a pull request, an issue — and a narrowed one is
-a row of `source_resource_watch`, keyed by the conversation, the binding and the resource, so a
-thread watches the two pull requests it is talking about and the whole feed beside them. Those rows
-keep a table of their own because `source_trigger` keys one row per (workspace, conversation,
-binding) and the release this one replaces inserts into it with `ON CONFLICT (workspace_id,
-conversation_id, binding)`: that key answers the outgoing image through the roll, so a second row
-over one pair cannot live in that table. The store reads both and hands out one `SourceTrigger`
-either way — a caller asks what a conversation watches, not which table holds it.
+A trigger narrows to one resource of that feed — a pull request, an issue — named by the row's
+`resource`, which joins the conversation and the connection in the table's unique key, so a thread
+watches the two pull requests it is talking about and the whole feed beside them. The trigger on
+the whole feed is the row whose resource is empty.
+
+The connection is a foreign key that cascades, so disconnecting an account takes its triggers with
+its source rows and its pages: nothing here sweeps them, and no trigger outlives the feed it
+watches.
 
 Every statement filters `workspace_id` itself — `ExtensionContext.transaction` yields an unscoped
-connection. The alert sweep and a binding's removal run workspace-wide, because a source belongs to
-the workspace and the conversations waking on it belong to whichever agents subscribed; a
-member-facing listing also filters the selected object namespace, which defaults to the turn's
-agent."""
+connection. The alert sweep runs workspace-wide, because a connection belongs to the workspace and
+the conversations waking on it belong to whichever agents subscribed; a member-facing listing also
+filters the selected object namespace, which defaults to the turn's agent."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,25 +39,8 @@ source_trigger = sa.Table(
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
-    sa.Column("binding", sa.Text, nullable=False),
-    sa.Column("delivery", sa.Text, nullable=False),
-    sa.Column("created_by_member_id", sa.Uuid, nullable=True),
-    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.UniqueConstraint(
-        "workspace_id", "conversation_id", "binding", name="source_trigger_conversation"
-    ),
-)
-
-source_resource_watch = sa.Table(
-    "source_resource_watch",
-    _metadata,
-    sa.Column("id", sa.Uuid, primary_key=True),
-    sa.Column("workspace_id", sa.Uuid, nullable=False),
-    sa.Column("conversation_id", sa.Uuid, nullable=False),
-    sa.Column("agent_id", sa.Uuid, nullable=False),
-    sa.Column("binding", sa.Text, nullable=False),
-    sa.Column("resource", sa.Text, nullable=False),
+    sa.Column("connection_id", sa.Uuid, nullable=False),
+    sa.Column("resource", sa.Text, nullable=False, server_default=""),
     sa.Column("delivery", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -65,9 +48,9 @@ source_resource_watch = sa.Table(
     sa.UniqueConstraint(
         "workspace_id",
         "conversation_id",
-        "binding",
+        "connection_id",
         "resource",
-        name="source_resource_watch_resource",
+        name="source_trigger_conversation",
     ),
 )
 
@@ -75,23 +58,12 @@ _COLUMNS = (
     source_trigger.c.id,
     source_trigger.c.conversation_id,
     source_trigger.c.agent_id,
-    source_trigger.c.binding,
+    source_trigger.c.connection_id,
+    source_trigger.c.resource,
     source_trigger.c.delivery,
     source_trigger.c.created_by_member_id,
     source_trigger.c.created_at,
     source_trigger.c.updated_at,
-)
-
-_WATCH_COLUMNS = (
-    source_resource_watch.c.id,
-    source_resource_watch.c.conversation_id,
-    source_resource_watch.c.agent_id,
-    source_resource_watch.c.binding,
-    source_resource_watch.c.resource,
-    source_resource_watch.c.delivery,
-    source_resource_watch.c.created_by_member_id,
-    source_resource_watch.c.created_at,
-    source_resource_watch.c.updated_at,
 )
 
 
@@ -106,7 +78,7 @@ class SourceTrigger:
     id: UUID
     conversation_id: UUID
     agent_id: UUID
-    binding: str
+    connection_id: UUID
     resource: str
     delivery: SourceTriggerDelivery
     created_by_member_id: UUID | None
@@ -131,9 +103,7 @@ def _utc(value: datetime) -> datetime:
 
 
 def _trigger(row: sa.RowMapping) -> SourceTrigger:
-    """One row of either table as a handler reads it. A `source_trigger` row carries no `resource`
-    column — that table keeps the shape the release being replaced writes — and a row of it watches
-    the whole binding, which is what the empty key says."""
+    """One row as a handler reads it. An empty `resource` is the trigger on the whole feed."""
     match row["delivery"]:
         case "current" | "per_page" as delivery:
             pass
@@ -143,8 +113,8 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         id=row["id"],
         conversation_id=row["conversation_id"],
         agent_id=row["agent_id"],
-        binding=row["binding"],
-        resource=row.get("resource", ""),
+        connection_id=row["connection_id"],
+        resource=row["resource"],
         delivery=delivery,
         created_by_member_id=row["created_by_member_id"],
         created_at=_utc(row["created_at"]),
@@ -165,17 +135,18 @@ class SourceTriggerStore:
     async def create(
         self,
         conversation_id: UUID,
-        binding: str,
+        connection_id: UUID,
         delivery: SourceTriggerDelivery,
         created_by_member_id: UUID | None = None,
         resource: str = "",
     ) -> SourceTrigger:
-        """Create one delivery rule on one binding, over the whole binding or over the one resource
-        of it `resource` names. The owning conversation is checked against the
-        object namespace, so a trigger can never invoke as an agent other than its owner. A
-        pair already watched refuses in this vocabulary rather than as a constraint violation: two
-        turns can read no trigger and both write one, and the loser of that race is a caller to
-        answer, not a driver error to surface."""
+        """Create one delivery rule on one connection's feed, over the whole feed or over the one
+        resource of it `resource` names. The owning conversation is checked against the object
+        namespace, so a trigger can never invoke as an agent other than its owner. What this
+        conversation already watches — the whole feed, or that one resource of it — refuses in this
+        vocabulary rather than as a constraint violation: two turns can read no trigger and both
+        write one, and the loser of that race is a caller to answer, not a driver error to
+        surface."""
         agent_id = object_agent_id()
         if await self.ctx.conversation_agent(conversation_id) != agent_id:
             raise ValueError(
@@ -186,7 +157,8 @@ class SourceTriggerStore:
             "workspace_id": self.workspace_id,
             "conversation_id": conversation_id,
             "agent_id": agent_id,
-            "binding": binding,
+            "connection_id": connection_id,
+            "resource": resource,
             "delivery": delivery,
             "created_by_member_id": created_by_member_id,
             "created_at": sa.func.now(),
@@ -194,131 +166,96 @@ class SourceTriggerStore:
         }
         async with self.ctx.transaction() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
-            if resource:
-                statement = (
-                    insert(source_resource_watch)
-                    .values(**values, resource=resource)
-                    .on_conflict_do_nothing(
-                        index_elements=(
-                            source_resource_watch.c.workspace_id,
-                            source_resource_watch.c.conversation_id,
-                            source_resource_watch.c.binding,
-                            source_resource_watch.c.resource,
-                        )
+            statement = (
+                insert(source_trigger)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=(
+                        source_trigger.c.workspace_id,
+                        source_trigger.c.conversation_id,
+                        source_trigger.c.connection_id,
+                        source_trigger.c.resource,
                     )
-                    .returning(*_WATCH_COLUMNS)
                 )
-            else:
-                statement = (
-                    insert(source_trigger)
-                    .values(**values)
-                    .on_conflict_do_nothing(
-                        index_elements=(
-                            source_trigger.c.workspace_id,
-                            source_trigger.c.conversation_id,
-                            source_trigger.c.binding,
-                        )
-                    )
-                    .returning(*_COLUMNS)
-                )
+                .returning(*_COLUMNS)
+            )
             row = (await connection.execute(statement)).mappings().one_or_none()
         if row is None:
-            watched = f"{resource} on {binding}" if resource else binding
-            raise ValueError(f"this conversation already watches {watched!r}")
+            watched = repr(resource) if resource else "this feed"
+            raise ValueError(f"this conversation already watches {watched}")
         return _trigger(row)
 
     async def remove(self, expected: SourceTrigger) -> None:
         agent_id = object_agent_id()
         if expected.agent_id != agent_id:
             raise ValueError("source trigger executor changed while removing")
-        table = source_resource_watch if expected.resource else source_trigger
         async with self.ctx.transaction() as connection:
             deleted = await connection.execute(
-                sa.delete(table).where(
-                    table.c.workspace_id == self.workspace_id,
-                    table.c.id == expected.id,
-                    table.c.agent_id == expected.agent_id,
-                    table.c.conversation_id == expected.conversation_id,
-                    table.c.binding == expected.binding,
+                sa.delete(source_trigger).where(
+                    source_trigger.c.workspace_id == self.workspace_id,
+                    source_trigger.c.id == expected.id,
+                    source_trigger.c.agent_id == expected.agent_id,
+                    source_trigger.c.conversation_id == expected.conversation_id,
+                    source_trigger.c.connection_id == expected.connection_id,
                 )
             )
         if deleted.rowcount == 0:
-            raise ValueError(f"source trigger on {expected.binding!r} changed while removing")
+            raise ValueError(f"source trigger {expected.id} changed while removing")
 
-    async def remove_binding(self, binding: str) -> None:
-        """Drop every workspace trigger on one binding — what a source's removal takes with it,
-        across every agent that subscribed, since nothing else ever will. The resource watches on
-        that binding go with them: the feed their changes would have arrived on is gone."""
-        async with self.ctx.transaction() as connection:
-            for table in (source_trigger, source_resource_watch):
-                await connection.execute(
-                    sa.delete(table).where(
-                        table.c.workspace_id == self.workspace_id,
-                        table.c.binding == binding,
-                    )
-                )
-
-    async def watched(self, conversation_id: UUID) -> frozenset[tuple[str, str]]:
-        """The (binding, resource) pairs one conversation's narrowed triggers watch — what an offer
-        to watch a link is checked against, so a conversation is never offered what it already
-        has."""
+    async def watched(self, conversation_id: UUID) -> frozenset[tuple[UUID, str]]:
+        """The (connection, resource) pairs one conversation's narrowed triggers watch — what an
+        offer to watch a link is checked against, so a conversation is never offered what it
+        already has."""
         async with self.ctx.transaction() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(
-                        source_resource_watch.c.binding, source_resource_watch.c.resource
-                    ).where(
-                        source_resource_watch.c.workspace_id == self.workspace_id,
-                        source_resource_watch.c.conversation_id == conversation_id,
+                    sa.select(source_trigger.c.connection_id, source_trigger.c.resource).where(
+                        source_trigger.c.workspace_id == self.workspace_id,
+                        source_trigger.c.conversation_id == conversation_id,
+                        source_trigger.c.resource != "",
                     )
                 )
             ).all()
-        return frozenset((row.binding, row.resource) for row in rows)
+        return frozenset((row.connection_id, row.resource) for row in rows)
 
-    async def waking(self, binding: str) -> tuple[SourceTrigger, ...]:
-        """Every delivery rule for this binding, workspace-wide — the alert sweep's read, over both
-        the whole-binding triggers and the resource watches. It spans agents on purpose: a source
-        belongs to the workspace, and each row names its agent."""
-        whole = sa.select(*_COLUMNS).where(
+    async def waking(self, connection_id: UUID) -> tuple[SourceTrigger, ...]:
+        """Every delivery rule for this connection, workspace-wide — the alert sweep's read, the
+        whole-feed triggers and the narrowed ones in one pass, oldest first with the id breaking a
+        tie, so one batch wakes conversations in the order they subscribed. It spans agents on
+        purpose: a connection belongs to the workspace, and each row names its agent."""
+        query = sa.select(*_COLUMNS).where(
             source_trigger.c.workspace_id == self.workspace_id,
-            source_trigger.c.binding == binding,
-        )
-        narrowed = sa.select(*_WATCH_COLUMNS).where(
-            source_resource_watch.c.workspace_id == self.workspace_id,
-            source_resource_watch.c.binding == binding,
+            source_trigger.c.connection_id == connection_id,
         )
         async with self.ctx.transaction() as connection:
-            rows = (await connection.execute(whole)).mappings().all()
-            watches = (await connection.execute(narrowed)).mappings().all()
-        woken = [_trigger(row) for row in (*rows, *watches)]
+            rows = (await connection.execute(query)).mappings().all()
+        woken = [_trigger(row) for row in rows]
         return tuple(sorted(woken, key=lambda trigger: (trigger.created_at, trigger.id)))
 
     async def list_reported(
         self, *, conversation_id: UUID | None = None
     ) -> tuple[ListedTrigger, ...]:
         """This agent's triggers, each beside the audience and surface label of its owning
-        conversation — the read a member-facing surface answers visibility from. The facts are
-        read live rather than snapshotted onto the row: an audience never changes, but a channel's
-        label does when it is renamed, and a listing showing a channel's old name is one that lies.
-        A trigger whose conversation is gone is absent from this page."""
+        conversation — the read a member-facing surface answers visibility from, ordered by
+        connection and then by resource so a connection's whole feed heads the resources of it. The
+        facts are read live rather than snapshotted onto the row: an audience never changes, but a
+        channel's label does when it is renamed, and a listing showing a channel's old name is one
+        that lies. A trigger whose conversation is gone is absent from this page."""
         agent_id = object_agent_id()
-        whole = sa.select(*_COLUMNS).where(
+        query = sa.select(*_COLUMNS).where(
             source_trigger.c.workspace_id == self.workspace_id,
             source_trigger.c.agent_id == agent_id,
         )
-        narrowed = sa.select(*_WATCH_COLUMNS).where(
-            source_resource_watch.c.workspace_id == self.workspace_id,
-            source_resource_watch.c.agent_id == agent_id,
-        )
         if conversation_id is not None:
-            whole = whole.where(source_trigger.c.conversation_id == conversation_id)
-            narrowed = narrowed.where(source_resource_watch.c.conversation_id == conversation_id)
+            query = query.where(source_trigger.c.conversation_id == conversation_id)
         async with self.ctx.transaction() as connection:
-            rows = (await connection.execute(whole)).mappings().all()
-            watches = (await connection.execute(narrowed)).mappings().all()
-        listed = [_trigger(row) for row in (*rows, *watches)]
+            rows = (await connection.execute(query)).mappings().all()
+        listed = [_trigger(row) for row in rows]
         triggers = tuple(
-            sorted(listed, key=lambda trigger: (trigger.binding, trigger.resource, trigger.id))
+            sorted(
+                listed,
+                key=lambda trigger: (trigger.connection_id, trigger.resource, trigger.id),
+            )
         )
         if not triggers:
             return ()

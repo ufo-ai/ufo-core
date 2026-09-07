@@ -10,8 +10,5 @@ from ufo.runtime.access.credentials import (
     CredentialValueInvalid as CredentialValueInvalid,
 )
 from ufo.runtime.access.credentials import (
-    credential_object_name as credential_object_name,
-)
-from ufo.runtime.access.credentials import (
     deploy_env as deploy_env,
 )

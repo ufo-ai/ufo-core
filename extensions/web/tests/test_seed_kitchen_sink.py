@@ -365,7 +365,6 @@ async def test_a_run_a_member_spoke_in_survives_a_reseed(seeded: Seeded) -> None
                     account_id="octocat",
                     host="github.com",
                     owner_member_id=seeded.member_id,
-                    conversation_id=first,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -390,7 +389,7 @@ async def test_a_run_a_member_spoke_in_survives_a_reseed(seeded: Seeded) -> None
                 await connection.execute(
                     sa.select(sa.func.count())
                     .select_from(tables.connection)
-                    .where(tables.connection.c.conversation_id == first)
+                    .where(tables.connection.c.owner_member_id == seeded.member_id)
                 )
             ).scalar_one()
     assert spend == 1

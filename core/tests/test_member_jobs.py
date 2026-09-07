@@ -254,7 +254,8 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
 ) -> None:
     workspace_id, member_id, other_member_id, brief_id = await _seed()
     now = datetime.now(UTC)
-    source_id, page_id, missing_page_id, invalid_page_id = uuid4(), uuid4(), uuid4(), uuid4()
+    connection_id, source_id = uuid4(), uuid4()
+    page_id, missing_page_id, invalid_page_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         main_id = (
             await connection.execute(
@@ -379,21 +380,26 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
             )
         )
         await connection.execute(
-            sa.insert(tables.source).values(
-                id=source_id,
+            sa.insert(tables.connection).values(
+                id=connection_id,
                 workspace_id=workspace_id,
-                backend="probe",
-                config={},
-                next_sync_at=now,
+                provider="probe",
+                account_id="",
+                host="",
+                owner_member_id=None,
+                shared=True,
                 created_at=now,
                 updated_at=now,
             )
         )
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.source).values(
+                id=source_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                agent_id=main_id,
+                backend="probe",
+                config={},
+                connection_id=connection_id,
+                next_sync_at=now,
                 created_at=now,
                 updated_at=now,
             )

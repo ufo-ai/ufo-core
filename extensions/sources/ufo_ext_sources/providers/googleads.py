@@ -32,18 +32,18 @@ CAMPAIGNS = StreamSpec(
     name="campaigns",
     source_object="campaign",
     primary_key="resource_name",
+    canonical=True,
 )
 AD_GROUPS = StreamSpec(
     name="ad_groups",
     source_object="ad_group",
     primary_key="resource_name",
-    canonical=False,
 )
 ADS = StreamSpec(
     name="ads",
     source_object="ad_group_ad",
     primary_key="resource_name",
-    canonical=False,
+    canonical=True,
 )
 CAMPAIGN_METRICS = StreamSpec(
     name="campaign_metrics",
@@ -52,13 +52,11 @@ CAMPAIGN_METRICS = StreamSpec(
     cursor_field="date",
     created_at_field="date",
     updated_at_field=None,
-    canonical=False,
 )
 CUSTOMER_CLIENTS = StreamSpec(
     name="customer_clients",
     source_object="customer_client",
     primary_key="resource_name",
-    canonical=False,
 )
 
 ALL_STREAMS = [CUSTOMERS, CAMPAIGNS, AD_GROUPS, ADS, CAMPAIGN_METRICS, CUSTOMER_CLIENTS]

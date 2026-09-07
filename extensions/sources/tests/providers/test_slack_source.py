@@ -30,14 +30,12 @@ from ufo.runtime.sources.sync import (
 )
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
-
 
 class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
@@ -55,7 +53,7 @@ async def _fetch(
         self_user_id=self_user_id,
     )
     return await ConnectorBackend(connector=SlackConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, backfill_after=backfill_after),
+        ConnectorSourceConfig(stream=stream, backfill_after=backfill_after),
         cursor,
         auth,
     )

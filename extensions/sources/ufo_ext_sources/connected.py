@@ -1,51 +1,41 @@
-"""A connected account's feeds are created with the connection: the registrar the
-`connection_recorded` hook fires, and the job that retries a creation which did not land.
+"""A connection's feeds are created with the connection: the registrar the `connection_recorded`
+hook fires, and the job that retries a creation which did not land.
 
-Connecting an account records a grant — an edge over an account — while a feed is one `source` row
-per stream, so a member who connected a provider still had to ask for its content. This closes that
-gap with no second member act and no wait: the connect flow publishes the connection it just
-committed, and this gives it one row per canonical stream of its connector, private to the member
-who owns the connection, granted to the main agent alone (`register_source` grants the main agent
-when the caller names none). Canonical streams are the provider's core collections — the ones a
-connector marks as the objects it exists to carry, one to nine per provider — so the feed is what
-the account is for rather than every list its API publishes. Each stream's first sync reaches back
-exactly as far as that stream declares.
+A connection is one account's authority and a feed is one `source` row per canonical stream of its
+connector, so connecting an account is the whole of what a member does to sync it. Canonical
+streams are the provider's core collections — the ones a connector marks as the objects it exists
+to carry, one to nine per provider — so the feed is what the account is for rather than every list
+its API publishes. Which agents read what it syncs is the grant's answer at read time, so this asks
+nothing about grants and nothing about disclosure: the connection carries both.
 
-The job is the retry path, never the producer: a hook that raised, a process that died between the
-connection and its rows, or a main-agent grant that arrived by another path leaves streams
-uncreated, and the next tick creates exactly those.
+A provider no broker grants is connected the same way from the other end: a member fills its
+credential slot, and the job mints the workspace's own connection to it — no account handle, and
+nobody's to keep private — so the one act of adding a key starts the feed, and the one act of
+clearing the slot ends it: the next tick removes that connection, and its streams, their pages and
+its grants go with it. A provider already holding a connection keeps it, whoever made it.
 
-Nothing marks a connection done, because the rows are the record. The gate is per stream, and both
-paths read the same two facts about the row a stream would take: `ext.sources()` holds it already,
-so it is left exactly as it is — the member's or ours; or `removed_source_ids` says the member
-removed it, so it stays removed, since registering again would reset its `removed_at`. A stream a
-later connector release marks canonical therefore reaches accounts that already have feeds, and a
-removal is permanent whichever path runs next — whether the member deleted the whole binding or
-re-applied it with fewer streams, which removes the rows of the ones they dropped.
+The job is the retry path for everything else, never the producer: a hook that raised, or a process
+that died between the connection and its rows, leaves streams uncreated, and the next tick creates
+exactly those. It is also how a per-tenant provider's rows arrive — a connector that declares no
+host of its own dials the connection's `base_url`, and a connection that carries none registers
+nothing until the member names it, which the next tick reads.
 
-A stream added to an account that already holds a binding joins that binding instead of splitting
-it, and takes its backfill request, because a binding reports the window of whichever of its rows
-sorts first. It never takes that binding's disclosure: every row this creates is private to the
-connection's owner, exactly as the first row is. An account holding a row the member took into
-workspace-shared content is therefore left exactly as it is and gains nothing — only the member
-widens what the workspace reads, through the `source` kind's own apply. So a canonical stream the
-member never selected reaches neither workspace recall nor a shared binding's `per_page` trigger.
-
-A per-tenant provider (its connector class leaves `base_url` empty, so a row without one fails every
-run) is never auto-registered: only the member knows the tenant URL, so those wait for the `source`
-kind's own apply."""
+Nothing marks a connection done, because the rows are the record: a stream a later connector release
+marks canonical reaches accounts that already sync. Each stream's first sync reaches back as far as
+the connection's `backfill_days` asks, and where it asks nothing, as far as the stream declares.
+Raising that window re-pins the rows it now reaches further back and refetches them; lowering it
+leaves them where they are, because the pages between the two floors would otherwise be stranded —
+never re-walked, never tombstoned."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from ufo.sdk.context import ExtensionContext, SourceRecord
-from ufo.sdk.grants import ConnectionRecorded, MainAgentConnection, main_agent_connections
+from ufo.sdk.grants import ConnectionRecorded, FeedConnection, feed_connections
 from ufo.sdk.manifest import HookContext, HookOutcome
-from ufo.sdk.sources import Connector, ConnectorSourceConfig
-from ufo.sdk.subjects import member_subject
+from ufo.sdk.sources import ConnectorSourceConfig, StreamSpec
 from ufo_ext_sources.registry import CONNECTORS
-from ufo_ext_sources.tools import effective_days
 
 
 async def on_connection_recorded(ctx: HookContext) -> HookOutcome:
@@ -63,67 +53,125 @@ async def retry_connected_sources(ctx: ExtensionContext) -> None:
     await ConnectedSources(ext=ctx).register()
 
 
+def backfill_days(connection: FeedConnection, stream: StreamSpec) -> int | None:
+    """How far back one row's first sync reaches: the connection's window where it names one, else
+    the window the stream declares. A stream declaring none reads its whole history and takes no
+    cutoff at all, which is what None on the row means."""
+    if stream.backfill_window_days is None:
+        return None
+    if connection.backfill_days is None:
+        return stream.backfill_window_days
+    return connection.backfill_days
+
+
 @dataclass(frozen=True)
 class ConnectedSources:
-    """Register the canonical streams of a connected account the main agent holds — one connection
-    for the hook that fires as it lands, every one of them for the job that retries. See the module
-    docstring."""
+    """Register the canonical streams of a connection — one connection for the hook that fires as it
+    lands, every one of them for the job that retries. See the module docstring."""
 
     ext: ExtensionContext
 
     async def register(self, connection_id: UUID | None = None) -> None:
+        if connection_id is None:
+            await self._settle_keyed_connections()
         live = await self.ext.sources()
-        for connection in await main_agent_connections():
+        for connection in await feed_connections():
             if connection_id is not None and connection.id != connection_id:
                 continue
             connector_cls = CONNECTORS.get(connection.provider)
-            if connector_cls is None or not connector_cls.base_url:
+            if connector_cls is None or not (connector_cls.base_url or connection.base_url):
                 continue
-            await self._register(connection, connector_cls(), live)
+            streams = {stream.name: stream for stream in connector_cls().streams()}
+            await self._create(connection, streams, live)
+            await self._rewindow(connection, streams, live)
 
-    async def _register(
+    async def _settle_keyed_connections(self) -> None:
+        """The workspace's own connection to each provider whose credential slot a member filled,
+        and none to a provider whose slot is empty — the slot is the whole of a keyed feed's
+        lifecycle. Filling it mints the connection here and its canonical streams register below on
+        the same tick; clearing it removes the connection here, and its streams, their pages and
+        every grant on it go by cascade, so nothing keeps asking for a key that is gone and nothing
+        it synced stays recallable.
+
+        A provider already holding a connection is left alone, whoever made it. An account someone
+        connected is the authority for that provider, and a second connection beside it would sync
+        the same content twice under two disclosures."""
+        connections = await feed_connections()
+        keyed = await self.ext.credentials.stored_slots()
+        for connection in connections:
+            if (
+                connection.provider in CONNECTORS
+                and connection.owner_member_id is None
+                and connection.account_id == ""
+                and connection.provider not in keyed
+            ):
+                await self.ext.remove_connection(connection.id)
+        connected = {connection.provider for connection in connections}
+        for provider in sorted((CONNECTORS.keys() - connected) & keyed):
+            await self.ext.register_connection(provider)
+
+    async def _create(
         self,
-        connection: MainAgentConnection,
-        connector: Connector,
+        connection: FeedConnection,
+        streams: dict[str, StreamSpec],
         live: tuple[SourceRecord, ...],
     ) -> None:
-        subject = member_subject(connection.owner_member_id)
-        bound = [record for record in live if record.connection_id == connection.id]
-        if any(record.subject != subject for record in bound):
-            return
-        request = (
-            None
-            if not bound
-            else ConnectorSourceConfig.model_validate(bound[0].config).backfill_days
-        )
-        registered_at = datetime.now(UTC)
+        """One row per canonical stream the connection does not hold yet. The row a stream would
+        take is derived, not searched, so a stream already syncing is left exactly as it is and a
+        stream a later connector release marks canonical joins a connection registered long ago."""
         held = {record.id for record in live}
-        fresh: dict[UUID, ConnectorSourceConfig] = {}
-        for stream in connector.streams():
+        registered_at = datetime.now(UTC)
+        for stream in streams.values():
             if not stream.canonical:
                 continue
-            days = (
-                None
-                if stream.backfill_window_days is None
-                else effective_days(request, stream.backfill_window_days)
-            )
+            days = backfill_days(connection, stream)
             config = ConnectorSourceConfig(
-                account=connection.account_id,
                 stream=stream.name,
-                backfill_days=request,
+                backfill_days=days,
                 backfill_after=None if days is None else registered_at - timedelta(days=days),
             )
             source_id = self.ext.source_id(connection.provider, config, connection_id=connection.id)
-            if source_id not in held:
-                fresh[source_id] = config
-        deleted = await self.ext.removed_source_ids(tuple(fresh))
-        for source_id, config in fresh.items():
-            if source_id in deleted:
+            if source_id in held:
                 continue
-            await self.ext.register_source(
-                connection.provider,
-                config,
-                subject=subject,
-                owner_member_id=connection.owner_member_id,
-                connection_id=connection.id,
+            await self.ext.register_source(connection.provider, config, connection_id=connection.id)
+
+    async def _rewindow(
+        self,
+        connection: FeedConnection,
+        streams: dict[str, StreamSpec],
+        live: tuple[SourceRecord, ...],
+    ) -> None:
+        """Re-pin the rows a raised window now reaches past, and refetch them, so a connection that
+        reads further back actually reads it.
+
+        The new floor is measured from the instant each row was registered, reconstructed as its own
+        pin plus the days it was pinned with. Against `now` instead, widening an old connection
+        would pin a LATER floor than the one it replaced.
+
+        Only a widening lands. Narrowing would strand the pages between the two floors — never
+        re-walked, never tombstoned — so a lowered window leaves every live row exactly where it is
+        and governs only the rows registered after it."""
+        configs: dict[UUID, ConnectorSourceConfig] = {}
+        for record in live:
+            if record.connection_id != connection.id:
+                continue
+            config = ConnectorSourceConfig.model_validate(record.config)
+            stream = streams.get(config.stream)
+            if stream is None or config.backfill_after is None:
+                continue
+            pinned = (
+                stream.backfill_window_days
+                if config.backfill_days is None
+                else config.backfill_days
             )
+            if pinned is None:
+                raise RuntimeError(f"source {record.id} is pinned to a window it does not name")
+            days = backfill_days(connection, stream)
+            anchor = config.backfill_after + timedelta(days=pinned)
+            pin = None if days is None else anchor - timedelta(days=days)
+            if pin is not None and pin >= config.backfill_after:
+                continue
+            configs[record.id] = ConnectorSourceConfig(
+                stream=config.stream, backfill_days=days, backfill_after=pin
+            )
+        await self.ext.rewindow_sources(configs, refetch=frozenset(configs))

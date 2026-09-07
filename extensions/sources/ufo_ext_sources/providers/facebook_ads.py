@@ -38,6 +38,7 @@ FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
         cursor_field="updated_time",
         created_at_field="created_time",
         updated_at_field="updated_time",
+        canonical=True,
     ),
     StreamSpec(
         name="ad_sets",
@@ -46,7 +47,6 @@ FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
         cursor_field="updated_time",
         created_at_field="created_time",
         updated_at_field="updated_time",
-        canonical=False,
     ),
     StreamSpec(
         name="ads",
@@ -55,7 +55,7 @@ FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
         cursor_field="updated_time",
         created_at_field="created_time",
         updated_at_field="updated_time",
-        canonical=False,
+        canonical=True,
     ),
     StreamSpec(
         name="ads_insights",
@@ -64,7 +64,6 @@ FACEBOOK_ADS_STREAMS: list[StreamSpec] = [
         cursor_field="date_stop",
         created_at_field="date_stop",
         updated_at_field=None,
-        canonical=False,
     ),
 ]
 

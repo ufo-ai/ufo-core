@@ -393,7 +393,6 @@ async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) ->
             account_id=ACCOUNT,
             host=HOST,
             grantor_member_id=seeded.member_id,
-            conversation_id=seeded.conversation_id,
             shared=True,
         )
     tokens = _Tokens()
@@ -741,7 +740,6 @@ async def _seed_git_cli(
             account_id=ACCOUNT,
             host=HOST,
             grantor_member_id=seeded.member_id,
-            conversation_id=seeded.conversation_id,
             shared=shared,
         )
     tokens = _Tokens(fault=fault)

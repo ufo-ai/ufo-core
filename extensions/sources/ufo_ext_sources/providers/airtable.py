@@ -26,9 +26,9 @@ PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
 
 AIRTABLE_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="bases", source_object="bases", primary_key="id", canonical=True),
-    StreamSpec(name="tables", source_object="tables", primary_key="id", canonical=False),
-    StreamSpec(name="records", source_object="records", primary_key="id", canonical=False),
+    StreamSpec(name="bases", source_object="bases", primary_key="id"),
+    StreamSpec(name="tables", source_object="tables", primary_key="id"),
+    StreamSpec(name="records", source_object="records", primary_key="id", canonical=True),
 ]
 
 

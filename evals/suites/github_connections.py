@@ -87,7 +87,6 @@ def github_state(*, connected: bool) -> CapabilitySeed:
                 account_id=GITHUB_ACCOUNT_ID,
                 host=GITHUB_HOST,
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=True,
             )
 

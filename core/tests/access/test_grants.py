@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -8,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -40,6 +42,8 @@ from ufo.runtime.access.grants import (
     GrantSummary,
     OAuthAccount,
     UnknownProvider,
+    _tenant_url,
+    connection_summaries,
     grant_summaries,
     install_connect_flow,
 )
@@ -54,9 +58,11 @@ from ufo.runtime.turns.audience import (
     conversation_audience,
     foreign_room_audience,
 )
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
+from ufo.schema.tables import MAX_BACKFILL_DAYS
 from ufo.sdk.callback_page import (
     CLOSE_THIS_PAGE,
     CONSENT_WINDOW_MARK,
@@ -70,6 +76,7 @@ HOST_B = "api.bbb.test"
 REDIRECT_URI = "http://surface/v1/connect/callback"
 PORTAL_URL = "https://ufo.example.com/surface/web"
 LOCK_WAIT_TIMEOUT_SECONDS = 5
+STREAM_SYNCED_AT = datetime(2026, 8, 3, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -151,14 +158,13 @@ async def _record(
     conversation_id: UUID,
     shared: bool,
     commit: CommitIdentity | None = None,
-) -> None:
+) -> UUID:
     with ws(workspace_id), agent(agent_id):
-        await store.record(
+        return await store.record(
             provider=provider,
             account_id=account_id,
             host=host,
             grantor_member_id=grantor_member_id,
-            conversation_id=conversation_id,
             shared=shared,
             commit=commit,
         )
@@ -174,12 +180,12 @@ async def _set_shared(
     workspace_id: UUID,
     agent_id: UUID,
     actor_member_id: UUID,
-    grant_id: UUID,
+    connection_id: UUID,
     shared: bool,
 ) -> bool:
     with ws(workspace_id), agent(agent_id):
         return await store.set_shared(
-            grant_id,
+            connection_id,
             shared,
             actor_member_id=actor_member_id,
         )
@@ -699,7 +705,11 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     assert len(summaries) == 1
     summary = summaries[0]
     assert (summary.agent, summary.provider, summary.account_id) == ("assistant", "stub", "acct-42")
-    assert (summary.owner_member_id, summary.conversation_id) == (member_id, conversation_id)
+    assert (summary.owner_member_id, summary.host, summary.shared) == (
+        member_id,
+        GRANTED_HOST,
+        False,
+    )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -780,11 +790,17 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
 
 
 def _turn_context(
-    workspace_id: UUID, agent_id: UUID, conversation_id: UUID, member_id: UUID | None
+    workspace_id: UUID,
+    agent_id: UUID,
+    conversation_id: UUID,
+    member_id: UUID | None,
+    *,
+    main: bool = False,
 ) -> ToolContext:
     """A tool context whose only live fields the connect tool reads are the turn (workspace, agent,
     conversation) and the speaking member; the sandbox and other capabilities the tool never touches
-    stay unset."""
+    stay unset. `main` says the turn runs on the workspace's main agent, which is what decides
+    whether a speakerless call reads the agent's own attachments or shared connections alone."""
     turn = Turn(
         id=uuid4(),
         workspace_id=workspace_id,
@@ -799,7 +815,7 @@ def _turn_context(
         sandbox=None,
         blob=None,
         turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        agent=Agent(prompt="p", model="claude-opus-4-8", is_main=main),
         spawn=None,
         speaker_member_id=member_id,
         audience=conversation_audience(member_id),
@@ -1234,7 +1250,6 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
                     tables.connection.c.account_id,
                     tables.connector_grant.c.agent_id,
                     tables.connection.c.owner_member_id,
-                    tables.connector_grant.c.conversation_id,
                 )
                 .select_from(
                     tables.connector_grant.join(
@@ -1247,7 +1262,7 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
         ).all()
     assert len(rows) == 1
     assert (rows[0].account_id, rows[0].agent_id) == ("acct-42", agent_id)
-    assert (rows[0].owner_member_id, rows[0].conversation_id) == (member_id, conversation_id)
+    assert rows[0].owner_member_id == member_id
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1397,7 +1412,6 @@ async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) ->
                 await store.attach(
                     provider="stub",
                     account_id="acct-42",
-                    conversation_id=conversation_id,
                     actor_member_id=actor,
                     shared=False,
                 )
@@ -1405,7 +1419,6 @@ async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) ->
             await store.attach(
                 provider="stub",
                 account_id="acct-42",
-                conversation_id=conversation_id,
                 actor_member_id=owner_id,
                 shared=True,
             )
@@ -1413,7 +1426,6 @@ async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) ->
             await store.attach(
                 provider="stub",
                 account_id="acct-42",
-                conversation_id=conversation_id,
                 actor_member_id=owner_id,
                 shared=False,
             )
@@ -1423,7 +1435,6 @@ async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) ->
             await store.attach(
                 provider="stub",
                 account_id="missing",
-                conversation_id=conversation_id,
                 actor_member_id=owner_id,
                 shared=False,
             )
@@ -1433,13 +1444,15 @@ async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) ->
     assert attached.account_id == "acct-42"
     assert attached.connection_shared is False
     (initial,) = await _active(store, workspace_id, agent_id)
-    assert await _set_shared(store, workspace_id, agent_id, owner_id, initial.id, True) is True
+    assert (
+        await _set_shared(store, workspace_id, agent_id, owner_id, initial.connection_id, True)
+        is True
+    )
     with ws(workspace_id), agent(second_agent):
         assert (
             await store.attach(
                 provider="stub",
                 account_id="acct-42",
-                conversation_id=conversation_id,
                 actor_member_id=other_id,
                 shared=True,
             )
@@ -1538,9 +1551,14 @@ async def test_same_owner_replacements_refuse_stale_generations(db: None) -> Non
     assert regranted.connection_id == reconnected.connection_id
     assert regranted.id != reconnected.id
     with ws(workspace_id), agent(agent_id):
-        assert await store.set_shared(reconnected.id, False, actor_member_id=member_id) is False
+        # sharing is the connection's own act, so it outlives the grant generation that
+        # asked for it; revoking is the edge's, so a stale grant id reaches nothing
+        assert (
+            await store.set_shared(regranted.connection_id, False, actor_member_id=member_id)
+            is True
+        )
         assert await store.revoke(reconnected.id, actor_member_id=member_id) is False
-    assert (await _active(store, workspace_id, agent_id)) == (regranted,)
+    assert (await _active(store, workspace_id, agent_id))[0].id == regranted.id
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1575,9 +1593,13 @@ async def test_admin_may_narrow_and_revoke_but_not_widen(db: None) -> None:
     private = (await _active(store, workspace_id, agent_id))[0]
     with ws(workspace_id), agent(agent_id):
         with pytest.raises(ConnectionPermissionDenied):
-            await store.set_shared(private.id, True, actor_member_id=admin_id)
-        assert await store.set_shared(private.id, False, actor_member_id=admin_id) is True
-        assert await store.set_shared(private.id, True, actor_member_id=member_id) is True
+            await store.set_shared(private.connection_id, True, actor_member_id=admin_id)
+        assert (
+            await store.set_shared(private.connection_id, False, actor_member_id=admin_id) is True
+        )
+        assert (
+            await store.set_shared(private.connection_id, True, actor_member_id=member_id) is True
+        )
         assert await store.revoke(private.id, actor_member_id=admin_id) is True
     assert await _active(store, workspace_id, agent_id) == ()
 
@@ -1641,15 +1663,11 @@ async def test_stale_owner_mutation_cannot_touch_a_reconnected_account(db: None)
     )
     current = (await _active(store, workspace_id, agent_id))[0]
     with ws(workspace_id), agent(agent_id):
-        assert await store.set_shared(stale.id, True, actor_member_id=alice) is False
+        assert await store.set_shared(stale.connection_id, True, actor_member_id=alice) is False
         assert await store.revoke(stale.id, actor_member_id=alice) is False
         assert await store.disconnect(stale.connection_id, actor_member_id=alice) is False
         with pytest.raises(ConnectionPermissionDenied):
-            await store.set_shared(
-                current.id,
-                True,
-                actor_member_id=alice,
-            )
+            await store.set_shared(current.connection_id, True, actor_member_id=alice)
         with pytest.raises(ConnectionPermissionDenied):
             await store.revoke(current.id, actor_member_id=alice)
         with pytest.raises(ConnectionPermissionDenied):
@@ -1744,11 +1762,70 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_shipped_agent_spends_the_attachments_it_was_given(db: None) -> None:
+    """A shipped agent with no member in the turn spends the connections attached to it, private
+    ones included. The member who attached a connector to that agent attached it for exactly the
+    work it does on its own initiative, and there is no speaker whose ladder could name it — a
+    scheduled run would otherwise reach nothing and the attachment would mean nothing.
+
+    The main agent is not that case: it holds every member's connections at once, so a speakerless
+    turn on it still sees shared connections alone. And the moment a member IS acting, that member's
+    own ladder decides whichever agent it is, so an agent several members reach never spends one
+    member's private account on another member's request."""
+    workspace_id = await _workspace()
+    grantor_id, agent_id = await _member_agent(workspace_id)
+    speaker_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=speaker_id,
+                workspace_id=workspace_id,
+                email="speaker@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _conversation(workspace_id, grantor_id)
+    store = GrantStore()
+    for account_id, shared in (("acct-attached", False), ("acct-shared", True)):
+        await _record(
+            store,
+            workspace_id,
+            agent_id,
+            provider="stub",
+            account_id=account_id,
+            host=GRANTED_HOST,
+            grantor_member_id=grantor_id,
+            conversation_id=conversation_id,
+            shared=shared,
+        )
+    with ws(workspace_id), agent(agent_id):
+        shipped = replace(
+            _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
+        )
+        assert await shipped.connector_accounts("stub") == ("acct-attached", "acct-shared")
+        assert await shipped.connector_account("stub", "acct-attached") == "acct-attached"
+
+        as_main = replace(
+            _turn_context(workspace_id, agent_id, conversation_id, None, main=True), grants=store
+        )
+        assert await as_main.connector_accounts("stub") == ("acct-shared",)
+
+        spoken_to = replace(
+            _turn_context(workspace_id, agent_id, conversation_id, speaker_id), grants=store
+        )
+        assert await spoken_to.connector_accounts("stub") == ("acct-shared",)
+
+
 async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(db: None) -> None:
-    """The runtime check: a private grant resolves only for its grantor's turns; a shared grant
-    for anyone's; a speakerless (scheduled/internal) turn sees only shared grants. A speakerless
-    miss that a member ref would have unlocked is `SpeakerRequired`; a provider nobody connected
-    is a plain refusal."""
+    """The runtime check on the MAIN agent: a private grant resolves only for its grantor's turns;
+    a shared grant for anyone's; a speakerless (scheduled/internal) turn sees only shared grants,
+    because the main agent holds every member's connections at once and so must spend the speaker's.
+    A speakerless miss that a member ref would have unlocked is `SpeakerRequired`; a provider nobody
+    connected is a plain refusal.
+
+    A shipped agent answers the speakerless case differently — see
+    `test_a_shipped_agent_spends_the_attachments_it_was_given`."""
     workspace_id = await _workspace()
     grantor_id, agent_id = await _member_agent(workspace_id)
     other_id = uuid4()
@@ -1781,12 +1858,12 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
             conversation_id=conversation_id,
             shared=shared,
         )
-    ctx = _turn_context(workspace_id, agent_id, conversation_id, grantor_id)
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, grantor_id, main=True)
     ctx = replace(ctx, grants=store)
     with ws(workspace_id), agent(agent_id):
         assert await ctx.connector_accounts("stub") == ("acct-private", "acct-shared")
         speakerless = replace(
-            _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
+            _turn_context(workspace_id, agent_id, conversation_id, None, main=True), grants=store
         )
         assert await speakerless.connector_accounts("stub") == ("acct-shared",)
         with pytest.raises(ValueError, match="acct-other-private"):
@@ -1804,8 +1881,11 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
     db: None,
 ) -> None:
     """A scheduled fire or subagent carries the initiating member as on_behalf_of, so it keeps that
-    member's private connections even with no live speaker — a turn with no member at all sees only
-    shared grants."""
+    member's private connections even with no live speaker, whichever agent it runs on. A turn with
+    no member at all on the MAIN agent sees only shared grants — that agent holds every member's
+    connections at once, so it must spend the speaker's and there is none. A shipped agent answers
+    that case from its own attachments instead; see
+    `test_a_shipped_agent_spends_the_attachments_it_was_given`."""
     workspace_id = await _workspace()
     initiator_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, initiator_id)
@@ -1831,7 +1911,10 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
     assert on_behalf.speaker_member_id is None
     with ws(workspace_id), agent(agent_id):
         assert await on_behalf.connector_accounts("stub") == ("acct-initiator-private",)
-    anonymous = replace(_turn_context(workspace_id, agent_id, conversation_id, None), grants=store)
+    anonymous = replace(
+        _turn_context(workspace_id, agent_id, conversation_id, None, main=True),
+        grants=store,
+    )
     with ws(workspace_id), agent(agent_id):
         assert await anonymous.connector_accounts("stub") == ()
 
@@ -1845,7 +1928,11 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
     A channel shared outside the workspace asks the same way but names no member address: the
     refusal is read back into a room another organization sits in. The owner's own call resolves
     the connection. A member's own conversation names nobody else, so a miss there stays the plain
-    refusal."""
+    refusal.
+
+    The memberless calls run on the main agent, because asking for a member is only the right answer
+    where the speaker's account is what a call spends. A shipped agent with no member in the turn
+    spends its own attachments and has nobody to ask for."""
     workspace_id = await _workspace()
     owner_id, agent_id = await _member_agent(workspace_id)
     asker_id = uuid4()
@@ -1874,7 +1961,7 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
     )
     owner_email = f"{owner_id.hex[:8]}@x.test"
     channel = replace(
-        _turn_context(workspace_id, agent_id, conversation_id, None),
+        _turn_context(workspace_id, agent_id, conversation_id, None, main=True),
         grants=store,
         audience=SHARED_AUDIENCE,
     )
@@ -2090,3 +2177,406 @@ async def test_a_grant_refuses_an_archived_app_name(db: None) -> None:
             ctx,
             ConnectAccountInput(provider="stub", agent="notes"),
         )
+
+
+async def _seed_streams(
+    workspace_id: UUID, connection_id: UUID, streams: tuple[str, ...], subject: str
+) -> dict[str, tuple[UUID, UUID]]:
+    """One source row per stream of `connection_id`, each holding a live page and a tombstoned one,
+    with every page stamped `subject` — the state a first sync leaves. Answers each stream's
+    (source id, live page id)."""
+    seeded: dict[str, tuple[UUID, UUID]] = {}
+    async with workspace_tx() as connection:
+        for stream in streams:
+            source_id, live_id, tombstoned_id = uuid4(), uuid4(), uuid4()
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=source_id,
+                    workspace_id=workspace_id,
+                    backend="stub",
+                    config={"stream": stream},
+                    connection_id=connection_id,
+                    next_sync_at=STREAM_SYNCED_AT,
+                    created_at=STREAM_SYNCED_AT,
+                    updated_at=STREAM_SYNCED_AT,
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.page),
+                [
+                    {
+                        "id": page_id,
+                        "workspace_id": workspace_id,
+                        "source_id": source_id,
+                        "digest": f"sha256:{stream}-{page_id.hex[:8]}",
+                        "body_ref": f"sources/{source_id}/{page_id}",
+                        "stream": stream,
+                        "title": stream.title(),
+                        "subject": subject,
+                        "tombstone": tombstone,
+                        "created_at": STREAM_SYNCED_AT,
+                        "updated_at": STREAM_SYNCED_AT,
+                    }
+                    for page_id, tombstone in ((live_id, False), (tombstoned_id, True))
+                ],
+            )
+            seeded[stream] = (source_id, live_id)
+    return seeded
+
+
+async def _page_subjects(workspace_id: UUID) -> dict[UUID, tuple[str, bool, datetime]]:
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(
+                        tables.page.c.id,
+                        tables.page.c.subject,
+                        tables.page.c.tombstone,
+                        tables.page.c.updated_at,
+                    ).where(tables.page.c.workspace_id == workspace_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return {
+        row["id"]: (
+            row["subject"],
+            bool(row["tombstone"]),
+            row["updated_at"]
+            if row["updated_at"].tzinfo is not None
+            else row["updated_at"].replace(tzinfo=UTC),
+        )
+        for row in rows
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_disconnecting_takes_the_streams_and_their_pages_with_it(db: None) -> None:
+    """Disconnecting is one `DELETE` on the connection; its source rows, their pages, and its grant
+    edges follow by cascade. Nothing outlives the authority that fetched it — a page left behind
+    would keep answering members out of an account the workspace no longer holds, and no other
+    writer would ever come for it. A second member's connection is untouched, so the cascade is the
+    connection's own and not a sweep of the provider."""
+    workspace_id = await _workspace()
+    owner_id, agent_id = await _member_agent(workspace_id)
+    peer_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=peer_id,
+                workspace_id=workspace_id,
+                email="peer@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _conversation(workspace_id, owner_id)
+    store = GrantStore()
+    connection_id = await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-owned",
+        host=GRANTED_HOST,
+        grantor_member_id=owner_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    peer_connection_id = await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-peer",
+        host=GRANTED_HOST,
+        grantor_member_id=peer_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    await _seed_streams(workspace_id, connection_id, ("messages", "files"), f"member:{owner_id}")
+    await _seed_streams(workspace_id, peer_connection_id, ("messages",), f"member:{peer_id}")
+
+    with ws(workspace_id), agent(agent_id):
+        assert await store.disconnect(connection_id, actor_member_id=owner_id)
+
+    async with workspace_tx() as connection:
+        connections = (
+            (
+                await connection.execute(
+                    sa.select(tables.connection.c.id).where(
+                        tables.connection.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        sources = (
+            (
+                await connection.execute(
+                    sa.select(tables.source.c.connection_id).where(
+                        tables.source.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        grants = (
+            (
+                await connection.execute(
+                    sa.select(tables.connector_grant.c.connection_id).where(
+                        tables.connector_grant.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        pages = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.page)
+                .where(tables.page.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert list(connections) == [peer_connection_id]
+    assert list(sources) == [peer_connection_id]
+    assert list(grants) == [peer_connection_id]
+    assert pages == 2  # the peer's one live page and its one tombstone
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_sharing_a_connection_restamps_every_page_its_streams_already_synced(
+    db: None,
+) -> None:
+    """The flag IS the disclosure, so flipping it has to reach the pages already on disk or the
+    workspace reads a member's private account until the next sync — and a stream that never changes
+    again would never be restamped at all. One call covers every stream of the connection in one
+    transaction, so a multi-stream account cannot tear across per-stream commits, and each restamped
+    page takes a fresh `updated_at` so the page-change replay re-indexes it under the new subject
+    exactly as an edit does. A tombstoned page is left alone: its chunks are already gone."""
+    workspace_id = await _workspace()
+    owner_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, owner_id)
+    store = GrantStore()
+    connection_id = await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-owned",
+        host=GRANTED_HOST,
+        grantor_member_id=owner_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    private = f"member:{owner_id}"
+    seeded = await _seed_streams(workspace_id, connection_id, ("messages", "files"), private)
+    live = {seeded[stream][1] for stream in ("messages", "files")}
+
+    assert await _set_shared(store, workspace_id, agent_id, owner_id, connection_id, True)
+    shared_now = await _page_subjects(workspace_id)
+    assert {shared_now[page_id][0] for page_id in live} == {SHARED_SUBJECT}
+    assert all(shared_now[page_id][2] > STREAM_SYNCED_AT for page_id in live)
+    tombstoned = {
+        page_id: value for page_id, value in shared_now.items() if value[1] and page_id not in live
+    }
+    assert len(tombstoned) == 2
+    assert {value[0] for value in tombstoned.values()} == {private}
+    assert {value[2] for value in tombstoned.values()} == {STREAM_SYNCED_AT}
+
+    assert await _set_shared(store, workspace_id, agent_id, owner_id, connection_id, False)
+    private_again = await _page_subjects(workspace_id)
+    assert {private_again[page_id][0] for page_id in live} == {private}
+    assert all(private_again[page_id][2] >= shared_now[page_id][2] for page_id in live)
+
+
+REFUSED_TENANT_URLS = (
+    "http://acme.zendesk.com",  # not https: the token would cross the wire in clear
+    "https://user:pass@acme.zendesk.com",  # credentials in a column, logged with every dial
+    "https://acme.zendesk.com:8443",  # a port names a service this is not
+    "https://acme.zendesk.com?tenant=acme",  # a query the connector would carry onto every path
+    "https://acme.zendesk.com#frag",  # a fragment no request ever sends
+    "https://",  # no host at all
+    "https://acme.zendesk.com:notaport",  # unparseable port
+)
+
+
+def test_a_tenant_url_is_admitted_only_under_its_providers_rule() -> None:
+    """A stream sends the workspace's provider credential to whatever host the connection stores,
+    and an admin who can apply the connection has no other read path to that credential — so the
+    rule table is the boundary between a member naming their tenant and an admin exporting the key.
+    A fixed-host provider takes no URL at all; a per-tenant provider takes only a host and path its
+    rule admits, so a look-alike host is refused as firmly as a foreign one. A trailing slash is
+    dropped so one tenant is one string."""
+    assert _tenant_url("zendesk", "https://acme.zendesk.com") == "https://acme.zendesk.com"
+    assert _tenant_url("zendesk", "https://acme.zendesk.com/") == "https://acme.zendesk.com"
+    assert _tenant_url("zendesk", "  https://acme.zendesk.com/  ") == "https://acme.zendesk.com"
+    assert (
+        _tenant_url("quickbooks", "https://quickbooks.api.intuit.com/v3/company/4620816365/")
+        == "https://quickbooks.api.intuit.com/v3/company/4620816365"
+    )
+
+    for provider in ("github", "zendesk"):
+        assert _tenant_url(provider, None) is None
+        assert _tenant_url(provider, "") is None
+        assert _tenant_url(provider, "   ") is None
+
+    for exfiltrating in (
+        "https://api.github.com",
+        "https://acme.zendesk.com",
+        "https://evil.example.com",
+    ):
+        with pytest.raises(ValueError, match="'github' has a fixed API host"):
+            _tenant_url("github", exfiltrating)
+
+    for foreign in (
+        "https://evil.example.com",
+        "https://acme.zendesk.com.evil.example.com",
+        "https://acme.zendesk.com/api/v2",
+    ):
+        with pytest.raises(ValueError, match=re.escape("https://<subdomain>.zendesk.com")):
+            _tenant_url("zendesk", foreign)
+
+    with pytest.raises(ValueError, match=re.escape("/v3/company/<realmId>")):
+        _tenant_url("quickbooks", "https://quickbooks.api.intuit.com")
+
+    for refused in REFUSED_TENANT_URLS:
+        with pytest.raises(ValueError, match="base_url"):
+            _tenant_url("zendesk", refused)
+
+
+async def test_set_feed_stores_what_the_streams_dial_and_how_far_back_they_reach(db: None) -> None:
+    """The two things a member names about a connection's content, written through the same
+    owner-or-admin gate every connection edit holds to, and read back off the connection rather than
+    off any stream. The URL goes through the provider's tenant rule on the way in, read off the row
+    being edited, so a connection can never hold a host its provider does not dial; clearing both is
+    how a member takes a tenant back."""
+    workspace_id = await _workspace()
+    owner_id, agent_id = await _member_agent(workspace_id)
+    stranger_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=stranger_id,
+                workspace_id=workspace_id,
+                email="stranger@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _conversation(workspace_id, owner_id)
+    store = GrantStore()
+    connection_id = await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="zendesk",
+        account_id="acct-owned",
+        host=GRANTED_HOST,
+        grantor_member_id=owner_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    fixed_host_id = await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-fixed",
+        host=GRANTED_HOST,
+        grantor_member_id=owner_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+
+    with ws(workspace_id), agent(agent_id):
+        assert await store.set_feed(
+            connection_id,
+            base_url="https://acme.zendesk.com/",
+            backfill_days=90,
+            actor_member_id=owner_id,
+        )
+        held = {row.id: row for row in await connection_summaries()}[connection_id]
+        assert (held.base_url, held.backfill_days) == ("https://acme.zendesk.com", 90)
+
+        with pytest.raises(ValueError, match="base_url"):
+            await store.set_feed(
+                connection_id,
+                base_url="http://acme.zendesk.com",
+                backfill_days=90,
+                actor_member_id=owner_id,
+            )
+        with pytest.raises(ValueError, match="'stub' has a fixed API host"):
+            await store.set_feed(
+                fixed_host_id,
+                base_url="https://acme.zendesk.com",
+                backfill_days=90,
+                actor_member_id=owner_id,
+            )
+        with pytest.raises(ConnectionPermissionDenied):
+            await store.set_feed(
+                connection_id,
+                base_url="https://elsewhere.zendesk.com",
+                backfill_days=1,
+                actor_member_id=stranger_id,
+            )
+        unchanged = {row.id: row for row in await connection_summaries()}[connection_id]
+        assert (unchanged.base_url, unchanged.backfill_days) == ("https://acme.zendesk.com", 90)
+
+        assert await store.set_feed(
+            connection_id, base_url=None, backfill_days=None, actor_member_id=owner_id
+        )
+        cleared = {row.id: row for row in await connection_summaries()}[connection_id]
+        assert (cleared.base_url, cleared.backfill_days) == (None, None)
+
+        assert not await store.set_feed(
+            uuid4(), base_url=None, backfill_days=None, actor_member_id=owner_id
+        )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_backfill_window_outside_the_admitted_range_is_refused_by_the_database(
+    db: None,
+) -> None:
+    """`backfill_days` is a number of days, and the check bounds it at one and at all history. A
+    zero or negative window names no content; a larger one is a column value no provider would be
+    asked for. The database holds it, so no writer can leave a row the sync driver would resolve to
+    a nonsense floor."""
+    workspace_id = await _workspace()
+    owner_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, owner_id)
+    store = GrantStore()
+    connection_id = await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-owned",
+        host=GRANTED_HOST,
+        grantor_member_id=owner_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+
+    with ws(workspace_id), agent(agent_id):
+        assert await store.set_feed(
+            connection_id,
+            base_url=None,
+            backfill_days=MAX_BACKFILL_DAYS,
+            actor_member_id=owner_id,
+        )
+        for refused in (0, -1, MAX_BACKFILL_DAYS + 1):
+            with pytest.raises(sa_exc.IntegrityError):
+                await store.set_feed(
+                    connection_id,
+                    base_url=None,
+                    backfill_days=refused,
+                    actor_member_id=owner_id,
+                )
+        (held,) = await connection_summaries()
+    assert held.backfill_days == MAX_BACKFILL_DAYS

@@ -260,7 +260,7 @@ def _stream(
     name: str,
     *,
     object_type: str,
-    canonical: bool = True,
+    canonical: bool = False,
     modified_property: str = "hs_lastmodifieddate",
 ) -> StreamSpec:
     return StreamSpec(
@@ -283,6 +283,7 @@ def _product_api_stream(
     created_at_field: str | None = "createdAt",
     updated_at_field: str | None = "updatedAt",
     pagination: Pagination | None = None,
+    canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -291,7 +292,7 @@ def _product_api_stream(
         cursor_field=cursor_field,
         created_at_field=created_at_field,
         updated_at_field=updated_at_field,
-        canonical=False,
+        canonical=canonical,
         pagination=pagination,
     )
 
@@ -320,18 +321,19 @@ def _junction(name: str, *, parent_object: str) -> StreamSpec:
         source_object=parent_object,
         primary_key="id",
         cursor_field=None,
-        canonical=False,
     )
 
 
-COMPANIES = _stream("companies", object_type="companies")
-CONTACTS = _stream("contacts", object_type="contacts", modified_property="lastmodifieddate")
-DEALS = _stream("deals", object_type="deals")
-TASKS = _stream("tasks", object_type="tasks")
+COMPANIES = _stream("companies", object_type="companies", canonical=True)
+CONTACTS = _stream(
+    "contacts", object_type="contacts", modified_property="lastmodifieddate", canonical=True
+)
+DEALS = _stream("deals", object_type="deals", canonical=True)
+TASKS = _stream("tasks", object_type="tasks", canonical=True)
 
-LEADS = _stream("leads", object_type="leads", canonical=False)
-TICKETS = _stream("tickets", object_type="tickets", canonical=False)
-USERS = _stream("users", object_type="users", canonical=False)
+LEADS = _stream("leads", object_type="leads", canonical=True)
+TICKETS = _stream("tickets", object_type="tickets", canonical=True)
+USERS = _stream("users", object_type="users")
 OWNERS = _product_api_stream(
     "owners",
     source_object="owners",
@@ -346,31 +348,31 @@ OWNER_TEAMS = _product_api_stream(
     updated_at_field=None,
 )
 
-APPOINTMENTS = _stream("appointments", object_type="appointments", canonical=False)
-NOTES = _stream("notes", object_type="notes", canonical=False)
-MEETINGS = _stream("meetings", object_type="meetings", canonical=False)
-CALLS = _stream("calls", object_type="calls", canonical=False)
-EMAILS = _stream("emails", object_type="emails", canonical=False)
-COMMUNICATIONS = _stream("communications", object_type="communications", canonical=False)
-POSTAL_MAIL = _stream("postal_mail", object_type="postal_mail", canonical=False)
+APPOINTMENTS = _stream("appointments", object_type="appointments", canonical=True)
+NOTES = _stream("notes", object_type="notes", canonical=True)
+MEETINGS = _stream("meetings", object_type="meetings", canonical=True)
+CALLS = _stream("calls", object_type="calls", canonical=True)
+EMAILS = _stream("emails", object_type="emails", canonical=True)
+COMMUNICATIONS = _stream("communications", object_type="communications", canonical=True)
+POSTAL_MAIL = _stream("postal_mail", object_type="postal_mail", canonical=True)
 
-PRODUCTS = _stream("products", object_type="products", canonical=False)
-LINE_ITEMS = _stream("line_items", object_type="line_items", canonical=False)
-QUOTES = _stream("quotes", object_type="quotes", canonical=False)
-DISCOUNTS = _stream("discounts", object_type="discounts", canonical=False)
-FEES = _stream("fees", object_type="fees", canonical=False)
-TAXES = _stream("taxes", object_type="taxes", canonical=False)
+PRODUCTS = _stream("products", object_type="products")
+LINE_ITEMS = _stream("line_items", object_type="line_items")
+QUOTES = _stream("quotes", object_type="quotes")
+DISCOUNTS = _stream("discounts", object_type="discounts")
+FEES = _stream("fees", object_type="fees")
+TAXES = _stream("taxes", object_type="taxes")
 
-COURSES = _stream("courses", object_type="courses", canonical=False)
-LISTINGS = _stream("listings", object_type="listings", canonical=False)
-PROJECTS = _stream("projects", object_type="projects", canonical=False)
-SERVICES = _stream("services", object_type="services", canonical=False)
+COURSES = _stream("courses", object_type="courses", canonical=True)
+LISTINGS = _stream("listings", object_type="listings", canonical=True)
+PROJECTS = _stream("projects", object_type="projects", canonical=True)
+SERVICES = _stream("services", object_type="services", canonical=True)
 
 FEEDBACK_SUBMISSIONS = _stream(
-    "feedback_submissions", object_type="feedback_submissions", canonical=False
+    "feedback_submissions", object_type="feedback_submissions", canonical=True
 )
 
-GOAL_TARGETS = _stream("goal_targets", object_type="goal_targets", canonical=False)
+GOAL_TARGETS = _stream("goal_targets", object_type="goal_targets")
 LISTS = _product_api_stream("lists", source_object="lists", primary_key="listId")
 WORKFLOWS = _product_api_stream(
     "workflows",
@@ -388,6 +390,7 @@ MARKETING_EMAILS = _product_api_stream(
     source_object="marketing_emails",
     cursor_field="updatedAt",
     pagination=_hubspot_get_pagination("/marketing/emails/2026-03"),
+    canonical=True,
 )
 MARKETING_EVENTS = _product_api_stream(
     "marketing_events",
@@ -415,6 +418,7 @@ CONVERSATIONS = _product_api_stream(
     source_object="conversations",
     cursor_field="updatedAt",
     pagination=_hubspot_get_pagination("/conversations/v3/conversations/threads"),
+    canonical=True,
 )
 CONVERSATION_MESSAGES = _product_api_stream(
     "conversation_messages",
@@ -424,6 +428,7 @@ CONVERSATION_MESSAGES = _product_api_stream(
 KNOWLEDGE_ARTICLES = _product_api_stream(
     "knowledge_articles",
     source_object="knowledge_articles",
+    canonical=True,
 )
 CAMPAIGN_ASSETS = _product_api_stream(
     "campaign_assets",
@@ -436,6 +441,7 @@ SITE_PAGES = _product_api_stream(
     created_at_field="created",
     updated_at_field="updated",
     pagination=_hubspot_get_pagination("/cms/pages/2026-03/site-pages"),
+    canonical=True,
 )
 LANDING_PAGES = _product_api_stream(
     "landing_pages",
@@ -444,6 +450,7 @@ LANDING_PAGES = _product_api_stream(
     created_at_field="created",
     updated_at_field="updated",
     pagination=_hubspot_get_pagination("/cms/pages/2026-03/landing-pages"),
+    canonical=True,
 )
 BLOG_POSTS = _product_api_stream(
     "blog_posts",
@@ -452,6 +459,7 @@ BLOG_POSTS = _product_api_stream(
     created_at_field="created",
     updated_at_field="updated",
     pagination=_hubspot_get_pagination("/cms/blogs/2026-03/posts"),
+    canonical=True,
 )
 FILES = _product_api_stream(
     "files",
@@ -531,13 +539,13 @@ SEQUENCE_ENROLLMENTS = _product_api_stream(
     cursor_field="updatedAt",
 )
 
-CUSTOM_OBJECTS = _stream("custom_objects", object_type="custom_objects", canonical=False)
+CUSTOM_OBJECTS = _stream("custom_objects", object_type="custom_objects", canonical=True)
 
-CARTS = _stream("carts", object_type="carts", canonical=False)
-ORDERS = _stream("orders", object_type="orders", canonical=False)
-SUBSCRIPTIONS = _stream("subscriptions", object_type="subscriptions", canonical=False)
-INVOICES = _stream("invoices", object_type="invoices", canonical=False)
-COMMERCE_PAYMENTS = _stream("commerce_payments", object_type="commerce_payments", canonical=False)
+CARTS = _stream("carts", object_type="carts")
+ORDERS = _stream("orders", object_type="orders")
+SUBSCRIPTIONS = _stream("subscriptions", object_type="subscriptions")
+INVOICES = _stream("invoices", object_type="invoices")
+COMMERCE_PAYMENTS = _stream("commerce_payments", object_type="commerce_payments")
 
 DEAL_CONTACTS = _junction("deal_contacts", parent_object="deals")
 DEAL_COMPANIES = _junction("deal_companies", parent_object="deals")
@@ -979,7 +987,6 @@ class HubSpotConnector(RestConnector):
                 cursor_field="hs_lastmodifieddate",
                 created_at_field="createdAt",
                 updated_at_field="hs_lastmodifieddate",
-                canonical=False,
             )
             async for page in self._paginate_custom_object_records(
                 client,

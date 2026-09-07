@@ -51,7 +51,6 @@ pytestmark = [
     pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
 ]
 
-ACCOUNT = "acct-1"
 QUOTA_WINDOW_SECONDS = 60.0
 STATED_RESET_SECONDS = 45.0
 
@@ -64,7 +63,7 @@ class _MockProxy:
 
     handler: Callable[[httpx.Request], httpx.Response]
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -76,7 +75,7 @@ async def _fetch(
     connector: Connector, stream: str, handler: Callable[[httpx.Request], httpx.Response]
 ):
     return await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), None, _auth(handler)
+        ConnectorSourceConfig(stream=stream), None, _auth(handler)
     )
 
 
@@ -493,7 +492,7 @@ async def test_incremental_stream_advances_watermark_and_tombstones_deletes() ->
     )
     page = StreamPage(records=[{"id": "5", "updated_at": "2026-02-02T00:00:00Z"}], deletes=("9",))
     result = await ConnectorBackend(connector=_CannedConnector(stream, [page])).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="tickets"), "2026-02-01T00:00:00Z", _auth(_ok)
+        ConnectorSourceConfig(stream="tickets"), "2026-02-01T00:00:00Z", _auth(_ok)
     )
     assert result.snapshot is False
     assert result.next_cursor == "2026-02-02T00:00:00Z"
@@ -504,18 +503,18 @@ async def test_incremental_stream_advances_watermark_and_tombstones_deletes() ->
 async def test_connector_backend_fails_loud_without_an_auth_proxy() -> None:
     with pytest.raises(RuntimeError, match="needs an auth proxy"):
         await ConnectorBackend(connector=AsanaConnector()).fetch(
-            ConnectorSourceConfig(account=ACCOUNT, stream="workspaces"),
+            ConnectorSourceConfig(stream="workspaces"),
             None,
             SourceAuth(workspace_id=uuid4()),
         )
 
 
-# --- per-tenant base_url carried by the source config --------------------------------------------
+# --- per-tenant base_url carried by the connection -----------------------------------------------
 
 
 class _PerTenantConnector(RestConnector):
     """A per-tenant connector whose class `base_url` is empty (like Freshdesk/Zendesk): the host
-    must come from the source row's `ConnectorSourceConfig.base_url`, not a class default."""
+    must come from the connection's own tenant URL on `SourceAuth`, not a class default."""
 
     name = "pertenant"
     base_url = ""
@@ -531,8 +530,8 @@ class _PerTenantConnector(RestConnector):
 
 
 async def test_per_tenant_fetch_without_a_base_url_fails_loud() -> None:
-    """A per-tenant connector (class `base_url=""`) whose source row set no `base_url` fails its run
-    naming the connector, rather than dialing an empty host."""
+    """A per-tenant connector (class `base_url=""`) whose connection names no tenant URL fails its
+    run naming the connector, rather than dialing an empty host."""
     with pytest.raises(RuntimeError, match=r"pertenant.*resolved no base_url"):
         await _fetch(_PerTenantConnector(), "rows", _ok)
 
@@ -625,9 +624,7 @@ async def test_direct_backend_returns_a_bearer_read_from_the_credential_store(db
     await store.put(workspace_id, "github", "ghp_realkey")
     access = CredentialAccess(declared=frozenset({"github"}))
     with ws(workspace_id):
-        credential = await DirectAuthProxy(credentials=access).credential(
-            workspace_id, "github", ACCOUNT
-        )
+        credential = await DirectAuthProxy(credentials=access).credential(workspace_id, "github")
     assert credential == Credential(bearer="ghp_realkey")
 
 
@@ -636,7 +633,7 @@ async def test_direct_backend_refuses_a_provider_slot_it_never_declared() -> Non
 
     access = CredentialAccess(declared=frozenset())
     with pytest.raises(UndeclaredCredentialSlot):
-        await DirectAuthProxy(credentials=access).credential(uuid4(), "github", ACCOUNT)
+        await DirectAuthProxy(credentials=access).credential(uuid4(), "github")
 
 
 # --- credential shapes at the REST client --------------------------------------------------------

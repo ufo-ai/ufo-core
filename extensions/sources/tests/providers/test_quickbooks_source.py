@@ -14,7 +14,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 REALM = "9130347596"
 COMPANY_PATH = f"/v3/company/{REALM}"
 COMPANY_BASE_URL = f"https://quickbooks.api.intuit.com{COMPANY_PATH}"
@@ -26,7 +25,7 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
@@ -37,9 +36,9 @@ async def _fetch(
     cursor: str | None = None,
     base_url: str = COMPANY_BASE_URL,
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=base_url)
     return await ConnectorBackend(connector=QuickBooksConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=base_url), cursor, auth
+        ConnectorSourceConfig(stream=stream), cursor, auth
     )
 
 

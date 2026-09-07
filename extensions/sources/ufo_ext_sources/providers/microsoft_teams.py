@@ -27,8 +27,8 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _REFUSAL_STATUS = frozenset({401, 403})
 _PARENT_SKIP_STATUS = frozenset({403, 404})
 
-TEAMS = StreamSpec(name="teams", source_object="joinedTeams", primary_key="id")
-CHANNELS = StreamSpec(name="channels", source_object="channels", primary_key="id")
+TEAMS = StreamSpec(name="teams", source_object="joinedTeams", primary_key="id", canonical=True)
+CHANNELS = StreamSpec(name="channels", source_object="channels", primary_key="id", canonical=True)
 CHANNEL_MESSAGES = StreamSpec(
     name="channel_messages",
     source_object="messages",
@@ -36,8 +36,9 @@ CHANNEL_MESSAGES = StreamSpec(
     cursor_field="lastModifiedDateTime",
     created_at_field="createdDateTime",
     updated_at_field="lastModifiedDateTime",
+    canonical=True,
 )
-CHATS = StreamSpec(name="chats", source_object="chats", primary_key="id", canonical=False)
+CHATS = StreamSpec(name="chats", source_object="chats", primary_key="id", canonical=True)
 CHAT_MESSAGES = StreamSpec(
     name="chat_messages",
     source_object="messages",
@@ -45,7 +46,6 @@ CHAT_MESSAGES = StreamSpec(
     cursor_field="lastModifiedDateTime",
     created_at_field="createdDateTime",
     updated_at_field="lastModifiedDateTime",
-    canonical=False,
 )
 
 ALL_STREAMS = [TEAMS, CHANNELS, CHANNEL_MESSAGES, CHATS, CHAT_MESSAGES]

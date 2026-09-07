@@ -21,7 +21,7 @@ core/src/ufo/
   tools/         registry, context, builtins/
   sandbox/       carrier (+docker), image/, proxy/ (rewriters, sentinel swap, metering)
   memory/        service (store+recall), index (pgvector), pipeline (condensers), embed
-  sources.py     SourceBackend + folder + sync driver         grants.py   connection + agent edge
+  sources/       SourceBackend + folder + sync driver         grants.py   connection + agent edge
   credentials.py encrypted BYOK store                         accounting.py ledger, caps, prices
   surfaces/      slack, web, cli, onboarding                  ext/        loader, rule derivation
   sdk/           the ONLY public import surface for extensions
@@ -31,9 +31,10 @@ core/src/ufo/
 ## Records (`schema/`, Pydantic)
 
 ```python
-class Grant(BaseModel):            id: UUID; agent_id: UUID; kind: Literal["connector", "credential", "tool_group"]
-                                   ref: str; account_id: str | None
-                                   granted_by: UUID; conversation_id: UUID | None          # the granting act, audited
+class Connection(BaseModel):       id: UUID; provider: str; account_id: str; host: str        # one provider account
+                                   owner_member_id: UUID | None; shared: bool                # null owner = the workspace's own
+                                   base_url: str | None; backfill_days: int | None           # what its streams dial and reach
+class ConnectorGrant(BaseModel):   id: UUID; agent_id: UUID; connection_id: UUID             # the one access edge
 class Credential(BaseModel):       slot: str; ciphertext: bytes                            # encrypted at rest, values never logged
 class MemoryItem(BaseModel):       id: UUID; subject: str; body: str; item_class: Literal["fact", "episodic", "semantic"]
                                    embedding_digest: str; superseded_by: UUID | None
@@ -150,19 +151,23 @@ Recall fuses lexical + vector (RRF). Member and room audiences include `shared`;
 audiences include only their sealed subject. Derivation runs as jobs, batch-at-interval, never
 inline with a write.
 
-## sources.py
+## sources/
 
 ```python
-class SourceAuth:               workspace_id: UUID; self_user_id: str | None
+class SourceAuth:               workspace_id: UUID; self_user_id: str | None; base_url: str | None
 class SourceBackend(Protocol):
     async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult: ...
 class SyncResult(BaseModel):  pages: tuple[Page, ...]; next_cursor: str | None
 ```
-Core ships `folder`; S3/GitHub/connector-API backends are extensions. Config `[[sources]]` blocks
-register source rows at boot. The sync driver is a core job — claim (dialect-native lock) → fetch →
-store bodies + upsert pages (skip unchanged by digest, tombstone removed) → advance cursor; it
-writes no chunks. The page index job derives chunks (owner_kind `page`), and `memory_search` recalls
-them via `search_sources`.
+A `source` row is one stream of one `connection` (`connection_id` NOT NULL, ON DELETE CASCADE):
+it is not nameable, shareable or grantable, carries no subject and no owner, and its id hashes
+over the connection plus the config fields that say which dataset it is. Disclosure derives from
+`connection.shared`; reach is `connector_grant`. Core ships `folder`; S3/GitHub/connector-API
+backends are extensions. Config `[[sources]]` blocks are folder roots, each a source under the one
+workspace-owned `folder` connection, registered at boot. The sync driver is a core job — claim
+(dialect-native lock) → fetch → store bodies + upsert pages (skip unchanged by digest, tombstone
+removed) → advance cursor; it writes no chunks. The page index job derives chunks (owner_kind
+`page`), and `memory_search` recalls them via `search_sources`.
 
 ## surfaces/ (U6 remainder)
 
@@ -194,7 +199,7 @@ ledger rows gain attribution (agent/member) and price-digest audit columns with 
 class Manifest:
     name: str; version: str
     tools: tuple[ToolDef, ...] = ();            subagents: tuple[SubagentProfile, ...] = ()
-    connectors: tuple[ConnectorSpec, ...] = (); sources: tuple[SourceSpec, ...] = ()
+    connectors: tuple[ConnectorSpec, ...] = (); sources: tuple[SourceProvider, ...] = ()
     hooks: tuple[HookSpec, ...] = ();           jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ();         credentials: tuple[CredentialSlot, ...] = ()
     onboarding: tuple[OnboardingStep, ...] = ();packs: tuple[PackRef, ...] = ()

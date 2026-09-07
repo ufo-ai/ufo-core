@@ -15,14 +15,12 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
-
 
 class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self.handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -34,7 +32,7 @@ async def _fetch(
     stream: str, handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
 ):
     return await ConnectorBackend(connector=GoogleDriveConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, _auth(handler)
+        ConnectorSourceConfig(stream=stream), cursor, _auth(handler)
     )
 
 

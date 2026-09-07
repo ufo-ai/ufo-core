@@ -13,10 +13,10 @@ from ufo.runtime.access.grants import (
     ConnectionSummary as ConnectionSummary,
 )
 from ufo.runtime.access.grants import (
-    GrantSummary as GrantSummary,
+    FeedConnection as FeedConnection,
 )
 from ufo.runtime.access.grants import (
-    MainAgentConnection as MainAgentConnection,
+    GrantSummary as GrantSummary,
 )
 from ufo.runtime.access.grants import (
     account_object_name as account_object_name,
@@ -25,8 +25,11 @@ from ufo.runtime.access.grants import (
     connection_summaries as connection_summaries,
 )
 from ufo.runtime.access.grants import (
-    grant_summaries as grant_summaries,
+    feed_connections as feed_connections,
 )
 from ufo.runtime.access.grants import (
-    main_agent_connections as main_agent_connections,
+    grant_summaries as grant_summaries,
+)
+from ufo.schema.tables import (
+    MAX_BACKFILL_DAYS as MAX_BACKFILL_DAYS,
 )

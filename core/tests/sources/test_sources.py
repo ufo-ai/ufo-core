@@ -64,6 +64,7 @@ from ufo.runtime.sources import rest, sync
 from ufo.runtime.sources.backend import ConnectorSourceConfig
 from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
+    SOURCE_EMPTY_IDLE_THRESHOLD,
     SOURCE_PARK_RETRY_SECONDS,
     SOURCE_REFUSAL_PARK_THRESHOLD,
     SOURCE_SYNC_CHECK,
@@ -84,6 +85,7 @@ from ufo.runtime.sources.sync import (
     StreamSkipped,
     SyncDriver,
     SyncResult,
+    feed_handle,
     page_id_for,
     register_sources,
     source_body_ref_matches,
@@ -161,6 +163,74 @@ async def _workspace() -> UUID:
             )
         )
     return workspace_id
+
+
+async def _member(workspace_id: UUID, email: str = "owner@example.com") -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
+async def _connection(
+    workspace_id: UUID,
+    provider: str = FOLDER_BACKEND,
+    *,
+    account_id: str = "",
+    owner_member_id: UUID | None = None,
+    shared: bool = True,
+    base_url: str | None = None,
+) -> UUID:
+    async with workspace_tx() as connection:
+        held = (
+            await connection.execute(
+                sa.select(tables.connection.c.id).where(
+                    tables.connection.c.workspace_id == workspace_id,
+                    tables.connection.c.provider == provider,
+                    tables.connection.c.account_id == account_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if held is not None:
+            return held
+        connection_id = uuid4()
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                account_id=account_id,
+                host="",
+                base_url=base_url,
+                owner_member_id=owner_member_id,
+                shared=shared,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return connection_id
+
+
+async def _grant(workspace_id: UUID, agent_id: UUID, connection_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                connection_id=connection_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
 
 
 def _wire(
@@ -383,33 +453,25 @@ async def test_folder_sync_preserves_bare_carriage_returns(
     assert page["digest"] == "sha256:" + hashlib.sha256(body).hexdigest()
 
 
-async def test_the_driver_stamps_pages_with_the_source_rows_subject(
+async def test_the_driver_stamps_pages_with_its_connections_disclosure(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
     (root / "note.md").write_text("member scoped note")
-    member_id = uuid4()
-    source_id = uuid4()
+    member_id = await _member(workspace_id, "member@example.com")
+    connection_id = await _connection(
+        workspace_id, owner_member_id=member_id, shared=False, account_id="acct"
+    )
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.insert(tables.member).values(
-                id=member_id,
-                workspace_id=workspace_id,
-                email="member@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
             sa.insert(tables.source).values(
-                id=source_id,
+                id=uuid4(),
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": str(root)},
-                subject=member_subject(member_id),
-                owner_member_id=member_id,
+                connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
                 claimed_by=None,
@@ -427,125 +489,146 @@ async def test_the_driver_stamps_pages_with_the_source_rows_subject(
     assert pages[0]["subject"] == f"member:{member_id}"
 
 
-async def test_register_source_refuses_a_live_row_with_a_different_subject(db: None) -> None:
+async def test_register_source_settles_on_one_row_per_connection_and_config(db: None) -> None:
+    """One stream of one connection is one row however many callers register it, and the same
+    config under a second connection is a second row — the connection is half the identity, so two
+    accounts syncing the same stream never collapse onto each other's pages."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
     config = SourceConfig(root="/shared")
+    first_connection = await _connection(workspace_id, account_id="one")
+    second_connection = await _connection(workspace_id, account_id="two")
     with ws(workspace_id):
-        first = await ctx.register_source(
-            FOLDER_BACKEND, config, subject=SHARED_SUBJECT, owner_member_id=None
+        first = await ctx.register_source(FOLDER_BACKEND, config, connection_id=first_connection)
+        assert (
+            await ctx.register_source(FOLDER_BACKEND, config, connection_id=first_connection)
+            == first
         )
-        second = await ctx.register_source(
-            FOLDER_BACKEND, config, subject=SHARED_SUBJECT, owner_member_id=None
+        second = await ctx.register_source(FOLDER_BACKEND, config, connection_id=second_connection)
+    assert second != first
+    async with workspace_tx() as connection:
+        held = dict(
+            (
+                await connection.execute(
+                    sa.select(tables.source.c.id, tables.source.c.connection_id)
+                )
+            ).all()
         )
-        assert first == second
-
-        with pytest.raises(ValueError, match="already registered"):
-            await ctx.register_source(
-                FOLDER_BACKEND,
-                config,
-                subject=member_subject(uuid4()),
-                owner_member_id=uuid4(),
-            )
+    assert held == {first: first_connection, second: second_connection}
 
 
-async def test_registering_a_live_source_for_a_second_agent_grants_that_agent(db: None) -> None:
-    """A source syncs once however many agents read it, so adding an already-registered feed for a
-    second agent settles on the same row — and must still grant that agent, since registering
-    through an agent is what grants it. Reporting the source id while granting nothing leaves the
-    agent silently mute about the feed a member just added for it."""
-    workspace_id = await _workspace()
+async def test_register_source_refuses_a_connection_that_is_not_the_backends(db: None) -> None:
+    """A source row's backend and its connection's provider are one fact stated twice, so they must
+    agree: a `gmail` row hanging off a Slack connection would authenticate its fetch as an account
+    that cannot serve it, and its pages would carry a disclosure the member never granted for mail.
+    A connection from another workspace fails the same check — the whole model rests on that
+    boundary, so registering across it is refused rather than silently scoped away."""
+    workspace_id, other = await _workspace(), await _workspace()
     ctx = context_for("probe", frozenset())
     config = SourceConfig(root="/shared")
-    research_id, sales_id = uuid4(), uuid4()
+    wrong_provider = await _connection(workspace_id, "slack", account_id="ca_T0ACME")
+    elsewhere = await _connection(other)
+    with ws(workspace_id):
+        with pytest.raises(ValueError, match="to register a source against"):
+            await ctx.register_source(FOLDER_BACKEND, config, connection_id=wrong_provider)
+        with pytest.raises(ValueError, match="to register a source against"):
+            await ctx.register_source(FOLDER_BACKEND, config, connection_id=elsewhere)
+        with pytest.raises(ValueError, match="to register a source against"):
+            await ctx.register_source(FOLDER_BACKEND, config, connection_id=uuid4())
     async with workspace_tx() as connection:
-        for agent_id, name in ((research_id, "research"), (sales_id, "sales")):
+        assert (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.source))
+        ).scalar_one() == 0
+
+
+async def test_a_source_row_cannot_exist_without_a_connection(db: None) -> None:
+    """`connection_id` is NOT NULL, so there is no such thing as a source row with no authority —
+    a row nothing could say the disclosure or the reach of. The database is what holds it, since
+    the sync driver reads the connection to stamp every page it commits."""
+    workspace_id = await _workspace()
+    with pytest.raises(sa_exc.IntegrityError):
+        async with workspace_tx() as connection:
             await connection.execute(
-                sa.insert(tables.agent).values(
-                    id=agent_id,
+                sa.insert(tables.source).values(
+                    id=uuid4(),
                     workspace_id=workspace_id,
-                    name=name,
-                    prompt="p",
-                    model="m",
-                    is_main=False,
+                    backend=FOLDER_BACKEND,
+                    config={"root": "/shared"},
+                    connection_id=None,
+                    next_sync_at=sa.func.now(),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
             )
+
+
+async def test_remove_connection_takes_what_an_extension_minted_and_refuses_a_members(
+    db: None,
+) -> None:
+    """The inverse of `register_connection`: a connection an extension minted goes, with its
+    streams, when the extension no longer has a reason for it. A member's connection is theirs to
+    disconnect, never an extension's to remove, and one already gone is not one to remove twice."""
+    workspace_id = await _workspace()
+    member_id = await _member(workspace_id)
+    ctx = context_for("probe", frozenset())
     with ws(workspace_id):
-        first = await ctx.register_source(
-            FOLDER_BACKEND,
-            config,
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-            agent_id=research_id,
+        minted = await ctx.register_connection(FOLDER_BACKEND)
+        await ctx.register_source(
+            FOLDER_BACKEND, SourceConfig(root="/shared"), connection_id=minted
         )
-        second = await ctx.register_source(
-            FOLDER_BACKEND,
-            config,
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-            agent_id=sales_id,
+        owned = await ctx.register_connection(
+            FOLDER_BACKEND, account_id="member-owned", owner_member_id=member_id
         )
-        readable = {
-            agent_id: await ctx.readable_source_ids(
-                SourceReader(
-                    agent_id=agent_id,
-                    requesting_member_id=None,
-                    subjects=frozenset({SHARED_SUBJECT}),
+
+        await ctx.remove_connection(minted)
+
+        assert [record.id for record in await ctx.sources()] == []
+        with pytest.raises(ValueError, match="not one an extension minted"):
+            await ctx.remove_connection(owned)
+        with pytest.raises(ValueError, match="not one an extension minted"):
+            await ctx.remove_connection(minted)
+
+
+async def test_register_connection_is_idempotent_and_owned_by_nobody(db: None) -> None:
+    """The workspace's own connection to a provider is the authority behind a feed no member owns:
+    a BYOK key, a configured folder root, an extension's own feed. It has no account handle, so
+    there is one per provider and a repeated boot settles on the row its sources already hang off
+    rather than orphaning them under a new one. Nobody owns it, so it is shared — a connection with
+    no owner has no member to be private to, which the `connection_shared` check makes true."""
+    workspace_id = await _workspace()
+    ctx = context_for("probe", frozenset())
+    with ws(workspace_id):
+        first = await ctx.register_connection(FOLDER_BACKEND)
+        assert await ctx.register_connection(FOLDER_BACKEND) == first
+        source_id = await ctx.register_source(
+            FOLDER_BACKEND, SourceConfig(root="/shared"), connection_id=first
+        )
+        assert await ctx.register_connection(FOLDER_BACKEND) == first
+        assert [record.id for record in await ctx.sources()] == [source_id]
+    async with workspace_tx() as connection:
+        held = (
+            (
+                await connection.execute(
+                    sa.select(
+                        tables.connection.c.account_id,
+                        tables.connection.c.owner_member_id,
+                        tables.connection.c.shared,
+                        tables.connection.c.base_url,
+                    ).where(tables.connection.c.id == first)
                 )
             )
-            for agent_id in (research_id, sales_id)
-        }
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(sa.select(sa.func.count()).select_from(tables.source))
-            ).scalar_one()
-    assert second == first
-    assert rows == 1
-    assert readable == {research_id: frozenset({first}), sales_id: frozenset({first})}
-
-
-async def test_register_source_refuses_an_agent_in_another_workspace(db: None) -> None:
-    """Registering a source names the agent it grants, and that agent must live in this workspace.
-    A caller passing an agent id from another workspace is refused loudly, so a source grant can
-    never cross the workspace boundary the whole model rests on."""
-    home, other = await _workspace(), await _workspace()
-    other_agent = uuid5(NAMESPACE_URL, f"{other}/main")
-    with ws(home):
-        with pytest.raises(ValueError, match="outside this workspace"):
-            await context_for("probe", frozenset()).register_source(
-                FOLDER_BACKEND,
-                SourceConfig(root="/shared"),
-                subject=SHARED_SUBJECT,
-                owner_member_id=None,
-                agent_id=other_agent,
-            )
-
-
-async def test_register_source_without_a_target_requires_a_main_agent(db: None) -> None:
-    """With no explicit agent the source binds to the workspace's main agent; a workspace that has
-    none has nothing to grant, so registration fails loudly rather than binding to no one."""
-    workspace_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.workspace).values(
-                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
-            )
+            .mappings()
+            .one()
         )
-    with ws(workspace_id):
-        with pytest.raises(RuntimeError, match="requires a main agent"):
-            await context_for("probe", frozenset()).register_source(
-                FOLDER_BACKEND,
-                SourceConfig(root="/shared"),
-                subject=SHARED_SUBJECT,
-                owner_member_id=None,
-            )
+    assert held["account_id"] == ""
+    assert held["owner_member_id"] is None
+    assert held["shared"]
+    assert held["base_url"] is None
 
 
 def _check_brokered_source_row_id_includes_connection_generation() -> None:
     workspace_id = uuid4()
-    config = {"account": "same-account", "stream": "messages"}
+    config = {"stream": "messages"}
     first_connection, second_connection = uuid4(), uuid4()
 
     assert source_row_id(
@@ -567,24 +650,27 @@ def _check_source_body_ref_matches_the_claim_scoped_page_digest() -> None:
 
 def _check_source_row_id_ignores_the_fields_a_config_model_declares_non_identity() -> None:
     """How far back a row backfills is a parameter of the dataset it syncs, not which dataset it is:
-    the id is the one the same account and stream always hashed to, so a window neither duplicates a
-    live row nor splits one stream across two.
+    the id is the one the same connection and stream always hashed to, so a window neither
+    duplicates a live row nor splits one stream across two.
 
     The exclusion is the config model's to declare, never a name core matches across every backend.
     A backend that declares nothing keeps every field in its identity — including one that happens
     to be spelled `backfill_days` — so one backend naming a field cannot silently drop it from
     another's identity, which a core-global set of key names would do."""
-    workspace_id = uuid4()
+    workspace_id, connection_id = uuid4(), uuid4()
     windowed = ConnectorSourceConfig.non_identity_fields
-    unwindowed = {"account": "acct", "stream": "messages"}
-    expected = source_row_id(workspace_id, "gmail", unwindowed, non_identity_keys=windowed)
+    unwindowed = {"stream": "messages"}
+    expected = source_row_id(
+        workspace_id, "gmail", unwindowed, connection_id=connection_id, non_identity_keys=windowed
+    )
 
-    assert source_row_id(workspace_id, "gmail", unwindowed) == expected
+    assert source_row_id(workspace_id, "gmail", unwindowed, connection_id=connection_id) == expected
     assert (
         source_row_id(
             workspace_id,
             "gmail",
             {**unwindowed, "backfill_days": 30, "backfill_after": "2026-01-15T09:30:00+00:00"},
+            connection_id=connection_id,
             non_identity_keys=windowed,
         )
         == expected
@@ -593,55 +679,28 @@ def _check_source_row_id_ignores_the_fields_a_config_model_declares_non_identity
         source_row_id(
             workspace_id,
             "gmail",
-            {**unwindowed, "backfill_days": "all"},
+            {**unwindowed, "stream": "contacts"},
+            connection_id=connection_id,
             non_identity_keys=windowed,
-        )
-        == expected
-    )
-    assert (
-        source_row_id(
-            workspace_id, "gmail", {**unwindowed, "stream": "contacts"}, non_identity_keys=windowed
         )
         != expected
     )
     # a model that declares no non-identity fields — the default — hashes every one of them
-    assert source_row_id(workspace_id, "gmail", {**unwindowed, "backfill_days": 30}) != expected
-
-
-async def test_register_source_conflict_does_not_leak_the_owner_subject(db: None) -> None:
-    workspace_id = await _workspace()
-    ctx = context_for("probe", frozenset())
-    owner_id = uuid4()
-    config = SourceConfig(root="/private")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=owner_id,
-                workspace_id=workspace_id,
-                email="owner@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
+    assert (
+        source_row_id(
+            workspace_id,
+            "gmail",
+            {**unwindowed, "backfill_days": 30},
+            connection_id=connection_id,
         )
-    with ws(workspace_id):
-        await ctx.register_source(
-            FOLDER_BACKEND, config, subject=member_subject(owner_id), owner_member_id=owner_id
-        )
-        with pytest.raises(ValueError) as caught:
-            await ctx.register_source(
-                FOLDER_BACKEND,
-                config,
-                subject=member_subject(uuid4()),
-                owner_member_id=uuid4(),
-            )
-    message = str(caught.value)
-    assert str(owner_id) not in message
-    assert "member:" not in message
+        != expected
+    )
 
 
 async def test_register_source_refuses_a_live_row_on_a_different_window(db: None) -> None:
-    """The window is deliberately not part of the row id, so two turns registering one binding on
-    different windows race onto the same row: the first insert lands and the second conflicts. The
+    """The window is deliberately not part of the row id, so two turns registering one stream of
+    one connection on different windows race onto the same row: the first insert lands and the
+    second conflicts. The
     loser must be told, under the same `for update` lock the authority check takes — the pages that
     row syncs were selected by the window it holds, so silently keeping the first window would
     report a binding that was never created, and a binding of several streams could end up with its
@@ -649,40 +708,25 @@ async def test_register_source_refuses_a_live_row_on_a_different_window(db: None
     always been."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
-    owner_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=owner_id,
-                workspace_id=workspace_id,
-                email="owner@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    subject = member_subject(owner_id)
+    owner_id = await _member(workspace_id)
+    connection_id = await _connection(
+        workspace_id, "gmail", account_id="acct", owner_member_id=owner_id, shared=False
+    )
     seven = ConnectorSourceConfig(
-        account="acct",
         stream="messages",
         backfill_days=7,
         backfill_after=datetime(2026, 7, 30, 3, 50, 40, tzinfo=UTC),
     )
     ninety = ConnectorSourceConfig(
-        account="acct",
         stream="messages",
         backfill_days=90,
         backfill_after=datetime(2026, 5, 8, 3, 50, 40, tzinfo=UTC),
     )
     with ws(workspace_id):
-        source_id = await ctx.register_source(
-            "gmail", seven, subject=subject, owner_member_id=owner_id
-        )
+        source_id = await ctx.register_source("gmail", seven, connection_id=connection_id)
         with pytest.raises(ValueError, match="asking for a different backfill_days"):
-            await ctx.register_source("gmail", ninety, subject=subject, owner_member_id=owner_id)
-        assert (
-            await ctx.register_source("gmail", seven, subject=subject, owner_member_id=owner_id)
-            == source_id
-        )
+            await ctx.register_source("gmail", ninety, connection_id=connection_id)
+        assert await ctx.register_source("gmail", seven, connection_id=connection_id) == source_id
     async with workspace_tx() as connection:
         stored = (
             await connection.execute(
@@ -694,36 +738,27 @@ async def test_register_source_refuses_a_live_row_on_a_different_window(db: None
 
 
 async def test_a_losing_racer_on_one_stream_set_creates_no_row_at_all(db: None) -> None:
-    """What keeps two concurrent registrations of ONE binding off two windows is not a transaction
-    around the binding — each `register_source` is its own — but the order its streams are
-    registered in. The extension registers them sorted, so both racers contend for the same stream
-    first; whoever loses it is refused before it has created any other, and the binding is left
-    whole on the winner's window rather than split across both.
+    """What keeps two concurrent registrations of ONE connection's streams off two windows is not a
+    transaction around the connection — each `register_source` is its own — but the order the
+    streams are registered in. The extension registers them sorted, so both racers contend for the
+    same stream first; whoever loses it is refused before it has created any other, and the
+    connection's streams are left whole on the winner's window rather than split across both.
 
     That argument holds only for racers submitting the same stream set. A racer whose set is a
     superset creates the streams the other never asked for before it reaches the contested one, and
-    can still split a binding — the same exposure a differing stream set already carries, and the
-    reason the guarantee is stated as narrowly as it is rather than as "cannot split"."""
+    can still split a connection — the same exposure a differing stream set already carries, and
+    the reason the guarantee is stated as narrowly as it is rather than as "cannot split"."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
-    owner_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=owner_id,
-                workspace_id=workspace_id,
-                email="owner@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    subject = member_subject(owner_id)
+    owner_id = await _member(workspace_id)
+    connection_id = await _connection(
+        workspace_id, "outlook", account_id="acct", owner_member_id=owner_id, shared=False
+    )
     ordered = sorted(("messages", "conversations"))
 
-    def binding(days: int) -> list[ConnectorSourceConfig]:
+    def streams(days: int) -> list[ConnectorSourceConfig]:
         return [
             ConnectorSourceConfig(
-                account="acct",
                 stream=stream,
                 backfill_days=days,
                 backfill_after=datetime(2026, 7, 30, tzinfo=UTC) - timedelta(days=days),
@@ -732,14 +767,11 @@ async def test_a_losing_racer_on_one_stream_set_creates_no_row_at_all(db: None) 
         ]
 
     with ws(workspace_id):
-        for config in binding(7):
-            await ctx.register_source("outlook", config, subject=subject, owner_member_id=owner_id)
-        loser = binding(30)
+        for config in streams(7):
+            await ctx.register_source("outlook", config, connection_id=connection_id)
         with pytest.raises(ValueError, match="asking for a different backfill_days"):
-            for config in loser:
-                await ctx.register_source(
-                    "outlook", config, subject=subject, owner_member_id=owner_id
-                )
+            for config in streams(30):
+                await ctx.register_source("outlook", config, connection_id=connection_id)
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -769,28 +801,18 @@ async def test_rewindow_sources_breaks_the_claim_of_a_sync_already_in_flight(db:
     set after the claim was taken."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
-    owner_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=owner_id,
-                workspace_id=workspace_id,
-                email="owner@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    owner_id = await _member(workspace_id)
+    connection_id = await _connection(
+        workspace_id, "gmail", account_id="acct", owner_member_id=owner_id, shared=False
+    )
     config = ConnectorSourceConfig(
-        account="acct",
         stream="messages",
         backfill_days=7,
         backfill_after=datetime(2026, 7, 30, tzinfo=UTC),
     )
     claim = "worker-mid-flight"
     with ws(workspace_id):
-        source_id = await ctx.register_source(
-            "gmail", config, subject=member_subject(owner_id), owner_member_id=owner_id
-        )
+        source_id = await ctx.register_source("gmail", config, connection_id=connection_id)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
@@ -814,7 +836,6 @@ async def test_rewindow_sources_breaks_the_claim_of_a_sync_already_in_flight(db:
                 .where(
                     tables.source.c.id == source_id,
                     tables.source.c.claimed_by == claim,
-                    tables.source.c.removed_at.is_(None),
                 )
             )
             row = (
@@ -838,23 +859,13 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
     still go through. `refetch` clears only the cursor of the rows it names."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
-    owner_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=owner_id,
-                workspace_id=workspace_id,
-                email="owner@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    subject = member_subject(owner_id)
-    config = ConnectorSourceConfig(account="acct", stream="messages", backfill_days=7)
+    owner_id = await _member(workspace_id)
+    connection_id = await _connection(
+        workspace_id, "gmail", account_id="acct", owner_member_id=owner_id, shared=False
+    )
+    config = ConnectorSourceConfig(stream="messages", backfill_days=7)
     with ws(workspace_id):
-        source_id = await ctx.register_source(
-            "gmail", config, subject=subject, owner_member_id=owner_id
-        )
+        source_id = await ctx.register_source("gmail", config, connection_id=connection_id)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
@@ -865,8 +876,6 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
             await ctx.rewindow_sources(
                 {source_id: config.model_copy(update={"stream": "contacts"})}
             )
-        with pytest.raises(ValueError, match="would move it to"):
-            await ctx.rewindow_sources({source_id: config.model_copy(update={"account": "other"})})
         async with workspace_tx() as connection:
             untouched = (
                 await connection.execute(
@@ -902,26 +911,20 @@ async def test_register_source_settles_two_racers_that_asked_for_the_same_window
     which is the case above."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
+    connection_id = await _connection(workspace_id, "gmail")
     winner = ConnectorSourceConfig(
-        account="acct",
         stream="messages",
         backfill_days=7,
         backfill_after=datetime(2026, 7, 30, 3, 50, 40, 118_000, tzinfo=UTC),
     )
     loser = ConnectorSourceConfig(
-        account="acct",
         stream="messages",
         backfill_days=7,
         backfill_after=datetime(2026, 7, 30, 3, 50, 40, 402_931, tzinfo=UTC),
     )
     with ws(workspace_id):
-        source_id = await ctx.register_source(
-            "gmail", winner, subject=SHARED_SUBJECT, owner_member_id=None
-        )
-        assert (
-            await ctx.register_source("gmail", loser, subject=SHARED_SUBJECT, owner_member_id=None)
-            == source_id
-        )
+        source_id = await ctx.register_source("gmail", winner, connection_id=connection_id)
+        assert await ctx.register_source("gmail", loser, connection_id=connection_id) == source_id
     async with workspace_tx() as connection:
         stored = (
             await connection.execute(
@@ -931,39 +934,32 @@ async def test_register_source_settles_two_racers_that_asked_for_the_same_window
     assert stored["backfill_after"] == winner.backfill_after.isoformat().replace("+00:00", "Z")
 
 
-async def test_register_source_settles_on_a_row_that_predates_the_window(db: None) -> None:
-    """A row registered before a config could carry a window holds neither key, and re-registering
-    that binding must settle on it rather than refuse: an absent key and an unset one are the same
-    request. That is what lets an already-registered mail binding keep its row, its cursor, and its
-    pages while it keeps reaching all history."""
+async def test_register_source_settles_on_a_live_row_that_reaches_all_history(db: None) -> None:
+    """A stream whose window fields are unset reaches all history, and re-registering it settles on
+    the row already doing that rather than refusing: what the comparison holds a live row to is the
+    window a caller asked for, and `None` is a request like any other. The row keeps its cursor, so
+    the pages it already synced are not re-walked."""
     workspace_id = await _workspace()
     ctx = context_for("probe", frozenset())
-    legacy = {"account": "acct", "stream": "messages", "base_url": None}
-    source_id = source_row_id(workspace_id, "gmail", legacy)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.source).values(
-                id=source_id,
-                workspace_id=workspace_id,
-                backend="gmail",
-                config=legacy,
-                subject=SHARED_SUBJECT,
-                cursor="9001",
-                next_sync_at=sa.func.now(),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    connection_id = await _connection(workspace_id, "gmail", account_id="acct")
+    unwindowed = ConnectorSourceConfig(stream="messages")
     with ws(workspace_id):
+        source_id = await ctx.register_source("gmail", unwindowed, connection_id=connection_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(cursor="9001")
+                .where(tables.source.c.id == source_id)
+            )
         assert (
+            await ctx.register_source("gmail", unwindowed, connection_id=connection_id) == source_id
+        )
+        with pytest.raises(ValueError, match="asking for a different backfill_days"):
             await ctx.register_source(
                 "gmail",
-                ConnectorSourceConfig(account="acct", stream="messages"),
-                subject=SHARED_SUBJECT,
-                owner_member_id=None,
+                ConnectorSourceConfig(stream="messages", backfill_days=7),
+                connection_id=connection_id,
             )
-            == source_id
-        )
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -972,30 +968,103 @@ async def test_register_source_settles_on_a_row_that_predates_the_window(db: Non
                 )
             )
         ).one()
-    assert row.config == legacy
+    assert row.config["backfill_days"] is None
     assert row.cursor == "9001"
 
 
-async def test_boot_registered_folder_sources_are_shared(db: None, tmp_path: Path) -> None:
-    workspace_id = await _workspace()
-    root = tmp_path / "src"
-    root.mkdir()
-    await _register_folder(root)
-
+async def _configured_roots(workspace_id: UUID) -> list[sa.RowMapping]:
     async with workspace_tx() as connection:
-        row = (
+        return list(
             (
                 await connection.execute(
-                    sa.select(tables.source.c.subject, tables.source.c.owner_member_id).where(
-                        tables.source.c.workspace_id == workspace_id
+                    sa.select(
+                        tables.source.c.id.label("source_id"),
+                        tables.source.c.config,
+                        tables.connection.c.id.label("connection_id"),
+                        tables.connection.c.provider,
+                        tables.connection.c.account_id,
+                        tables.connection.c.owner_member_id,
+                        tables.connection.c.shared,
                     )
+                    .select_from(
+                        tables.source.join(
+                            tables.connection,
+                            tables.source.c.connection_id == tables.connection.c.id,
+                        )
+                    )
+                    .where(tables.source.c.workspace_id == workspace_id)
                 )
             )
             .mappings()
-            .one()
+            .all()
         )
-    assert row["subject"] == SHARED_SUBJECT
-    assert row["owner_member_id"] is None
+
+
+async def test_boot_registered_folder_roots_are_each_their_own_connection(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """Every `[[sources]]` root is a connection of its own, keyed by `feed_handle` of its config —
+    ownerless and shared, which is what makes the pages it syncs readable by the workspace — and a
+    second boot settles each root back onto its own connection rather than minting another. One
+    connection per root is what keeps removal contained: a `page` follows its source and a source
+    follows its connection by cascade, so disconnecting one root's connection takes that root's
+    rows and leaves the neighbouring root's source and pages standing."""
+    workspace_id = await _workspace()
+    first, second = tmp_path / "src", tmp_path / "notes"
+    first.mkdir()
+    second.mkdir()
+    (first / "a.md").write_text("first root")
+    (second / "b.md").write_text("second root")
+    configured = tuple(
+        SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=str(root)))
+        for root in (first, second)
+    )
+    await register_sources(configured)
+    await register_sources(configured)
+
+    rows = await _configured_roots(workspace_id)
+    by_root = {row["config"]["root"]: row for row in rows}
+    assert set(by_root) == {str(first), str(second)}
+    assert len({row["connection_id"] for row in rows}) == 2
+    assert all(row["provider"] == FOLDER_BACKEND for row in rows)
+    for entry in configured:
+        assert by_root[entry.config.root]["account_id"] == feed_handle(entry.config)
+    assert all(row["owner_member_id"] is None for row in rows)
+    assert all(row["shared"] for row in rows)
+
+    driver = SyncDriver(
+        backends={FOLDER_BACKEND: FolderSource()},
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    await _sync(driver)
+    assert {page["source_id"] for page in await _pages()} == {
+        by_root[str(first)]["source_id"],
+        by_root[str(second)]["source_id"],
+    }
+
+    admin = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=admin,
+                workspace_id=workspace_id,
+                email="admin@example.com",
+                is_admin=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        assert await GrantStore().disconnect(
+            by_root[str(first)]["connection_id"], actor_member_id=admin
+        )
+    remaining = await _configured_roots(workspace_id)
+    assert [row["source_id"] for row in remaining] == [by_root[str(second)]["source_id"]]
+    assert [row["connection_id"] for row in remaining] == [by_root[str(second)]["connection_id"]]
+    assert [(page["source_id"], page["title"]) for page in await _pages()] == [
+        (by_root[str(second)]["source_id"], "b.md")
+    ]
 
 
 async def test_synced_page_content_is_found_via_memory_search(
@@ -1094,11 +1163,12 @@ async def _set_archived(agent_id: UUID, archived: bool) -> None:
 async def test_a_source_no_live_agent_can_read_stops_syncing(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
-    """A private source is a feed for the agents granted it. Archive every one of them and each
-    pass still costs a fetch, a page write, and the model tokens the page's facts are extracted with
-    — for a feed no turn can reach. So the sweep leaves it alone, and takes it up again on the pass
-    after a restore returns it a reader. A shared source is different: the main agent reads it with
-    no grant, so the test beside this one keeps it syncing."""
+    """A private connection's streams are a feed for the agents granted that connection. Archive
+    every one of them and each pass still costs a fetch, a page write, and the model tokens the
+    page's facts are extracted with — for a feed no turn can reach. So the sweep leaves it alone,
+    and takes it up again on the pass after a restore returns it a reader. A shared connection is
+    different: the main agent reads it with no grant, so the test beside this one keeps it
+    syncing."""
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
@@ -1118,13 +1188,14 @@ async def test_a_source_no_live_agent_can_read_stops_syncing(
                 updated_at=sa.func.now(),
             )
         )
+    owner_id = await _member(workspace_id)
+    connection_id = await _connection(
+        workspace_id, account_id="acct", owner_member_id=owner_id, shared=False
+    )
+    await _grant(workspace_id, research_id, connection_id)
     with ws(workspace_id):
         source_id = await context_for("probe", frozenset()).register_source(
-            FOLDER_BACKEND,
-            SourceConfig(root=str(root)),
-            subject=member_subject(uuid4()),
-            owner_member_id=None,
-            agent_id=research_id,
+            FOLDER_BACKEND, SourceConfig(root=str(root)), connection_id=connection_id
         )
     await _sync(driver)
     assert len(await _pages()) == 1
@@ -1149,9 +1220,10 @@ async def test_a_source_no_live_agent_can_read_stops_syncing(
 async def test_a_shared_source_keeps_syncing_for_the_main_agent_after_its_grantee_is_archived(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
-    """The main agent reads every shared source without a grant, so a shared source always has a
-    reader while a main agent lives: archiving its only grantee changes nothing about the sweep, and
-    the main agent never answers members from pages a stopped feed left behind."""
+    """The main agent reads every shared connection's streams without a grant, so a shared
+    connection always has a reader while a main agent lives: archiving its only grantee changes
+    nothing about the sweep, and the main agent never answers members from pages a stopped feed
+    left behind."""
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
@@ -1171,13 +1243,11 @@ async def test_a_shared_source_keeps_syncing_for_the_main_agent_after_its_grante
                 updated_at=sa.func.now(),
             )
         )
+    connection_id = await _connection(workspace_id, account_id="acct")
+    await _grant(workspace_id, research_id, connection_id)
     with ws(workspace_id):
         await context_for("probe", frozenset()).register_source(
-            FOLDER_BACKEND,
-            SourceConfig(root=str(root)),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-            agent_id=research_id,
+            FOLDER_BACKEND, SourceConfig(root=str(root)), connection_id=connection_id
         )
     await _sync(driver)
     assert len(await _pages()) == 1
@@ -1193,8 +1263,10 @@ async def test_a_shared_source_keeps_syncing_for_the_main_agent_after_its_grante
 async def test_a_source_a_second_live_agent_reads_keeps_syncing(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
-    """One source serves every agent granted it, so archiving one grantee settles nothing about the
-    feed. While any live agent still reads it, the sweep treats it exactly as before."""
+    """One connection's streams serve every agent granted that connection, so archiving one grantee
+    settles nothing about the feed. While any live agent still reads it, the sweep treats it exactly
+    as before — and the connection here is private, so the answer is that second grantee rather than
+    the main agent's read of anything shared."""
     workspace_id = await _workspace()
     root = tmp_path / "src"
     root.mkdir()
@@ -1215,16 +1287,16 @@ async def test_a_source_a_second_live_agent_reads_keeps_syncing(
                     updated_at=sa.func.now(),
                 )
             )
-    ctx = context_for("probe", frozenset())
+    owner_id = await _member(workspace_id)
+    connection_id = await _connection(
+        workspace_id, account_id="acct", owner_member_id=owner_id, shared=False
+    )
+    for agent_id in (research_id, sales_id):
+        await _grant(workspace_id, agent_id, connection_id)
     with ws(workspace_id):
-        for agent_id in (research_id, sales_id):
-            await ctx.register_source(
-                FOLDER_BACKEND,
-                SourceConfig(root=str(root)),
-                subject=SHARED_SUBJECT,
-                owner_member_id=None,
-                agent_id=agent_id,
-            )
+        await context_for("probe", frozenset()).register_source(
+            FOLDER_BACKEND, SourceConfig(root=str(root)), connection_id=connection_id
+        )
     await _sync(driver)
 
     await _set_archived(research_id, True)
@@ -1375,12 +1447,15 @@ async def _seed_page(workspace_id: UUID) -> UUID:
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
+    connection_id = await _connection(workspace_id, FOLDER_BACKEND)
+    async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={},
+                connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
                 claimed_by=None,
@@ -1575,9 +1650,13 @@ async def test_member_scoped_page_is_invisible_to_another_member(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
     workspace_id = await _workspace()
-    alice, bob = uuid4(), uuid4()
+    alice = await _member(workspace_id, "alice@example.com")
+    bob = await _member(workspace_id, "bob@example.com")
     probe = vec((13, 1.0))
     page_id = uuid4()
+    connection_id = await _connection(
+        workspace_id, account_id="alice", owner_member_id=alice, shared=False
+    )
     async with workspace_tx() as connection:
         source_id = uuid4()
         await connection.execute(
@@ -1586,6 +1665,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": "/seed"},
+                connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
                 claimed_by=None,
@@ -1603,15 +1683,6 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 body_ref="sources/seed",
                 subject=member_subject(alice),
                 tombstone=False,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.source_grant).values(
-                workspace_id=workspace_id,
-                source_id=source_id,
-                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1679,15 +1750,17 @@ class _Authority:
     main_agent_id: UUID
     granted_agent_id: UUID
     ungranted_agent_id: UUID
+    owned_connection_id: UUID
+    shared_connection_id: UUID
     owned_source_id: UUID
     unowned_source_id: UUID
 
 
 async def _authority() -> _Authority:
-    """A member's private source another agent registered — so that agent holds the only grant and
-    main's exact-owner exception is the sole other way in — beside an unowned shared source nobody
-    holds a grant for at all."""
-    state = _Authority(*(uuid4() for _ in range(8)))
+    """A member's private connection one specialist holds the only grant on — so main's exact-owner
+    exception is the sole other way in — beside the workspace's own shared connection nobody holds a
+    grant for at all. Each carries one stream."""
+    state = _Authority(*(uuid4() for _ in range(10)))
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -1727,31 +1800,54 @@ async def _authority() -> _Authority:
                 )
             ],
         )
-        for source_id, subject, owner_member_id in (
-            (state.owned_source_id, member_subject(state.owner_id), state.owner_id),
-            (state.unowned_source_id, SHARED_SUBJECT, None),
-        ):
-            await connection.execute(
-                sa.insert(tables.source).values(
-                    id=source_id,
-                    workspace_id=state.workspace_id,
-                    backend=FOLDER_BACKEND,
-                    config={"root": f"/{source_id.hex}"},
-                    subject=subject,
-                    owner_member_id=owner_member_id,
-                    cursor=None,
-                    next_sync_at=sa.func.now(),
-                    claimed_by=None,
-                    claim_expires_at=None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.connection),
+            [
+                {
+                    "id": connection_id,
+                    "workspace_id": state.workspace_id,
+                    "provider": FOLDER_BACKEND,
+                    "account_id": account_id,
+                    "host": "",
+                    "owner_member_id": owner_member_id,
+                    "shared": shared,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+                for connection_id, account_id, owner_member_id, shared in (
+                    (state.owned_connection_id, "owned", state.owner_id, False),
+                    (state.shared_connection_id, "", None, True),
+                )
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.source),
+            [
+                {
+                    "id": source_id,
+                    "workspace_id": state.workspace_id,
+                    "backend": FOLDER_BACKEND,
+                    "config": {"root": f"/{source_id.hex}"},
+                    "connection_id": connection_id,
+                    "cursor": None,
+                    "next_sync_at": datetime.now(UTC),
+                    "claimed_by": None,
+                    "claim_expires_at": None,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+                for source_id, connection_id in (
+                    (state.owned_source_id, state.owned_connection_id),
+                    (state.unowned_source_id, state.shared_connection_id),
+                )
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
                 workspace_id=state.workspace_id,
-                source_id=state.owned_source_id,
                 agent_id=state.granted_agent_id,
+                connection_id=state.owned_connection_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1774,12 +1870,13 @@ def _authority_reader(
     )
 
 
-async def test_main_reads_an_owned_source_only_while_its_exact_owner_is_speaking(db: None) -> None:
-    """The exact shape of main's exception on a private source: it needs all three of the main
-    agent, a live requesting member, and that member owning the row. Drop any one and only a
-    `source_grant` opens the source — which is what carries the registering agent, speaker or not.
-    The shared source rides along in every main-agent read, because main reads every shared source
-    without an edge."""
+async def test_main_reads_an_owned_connection_only_while_its_exact_owner_is_speaking(
+    db: None,
+) -> None:
+    """The exact shape of main's exception on a private connection: it needs all three of the main
+    agent, a live requesting member, and that member owning the connection. Drop any one and only a
+    `connector_grant` opens its streams. The shared connection's stream rides along in every
+    main-agent read, because main reads every shared connection without an edge."""
     state = await _authority()
 
     assert await _reachable(
@@ -1801,13 +1898,14 @@ async def test_main_reads_an_owned_source_only_while_its_exact_owner_is_speaking
     }
 
 
-async def test_main_reads_every_shared_source_and_a_specialist_only_what_it_is_granted(
+async def test_main_reads_every_shared_connection_and_a_specialist_only_what_it_is_granted(
     db: None,
 ) -> None:
-    """Sharing a source opens it to the workspace's main agent with no edge and no speaker: the
-    main agent is the one every member talks to and expects to know what the workspace shares. A
-    specialist agent reads only the sources granted to it, shared or not, so its feed set stays the
-    narrow one it was given."""
+    """Sharing a connection opens its streams to the workspace's main agent with no edge and no
+    speaker: the main agent is the one every member talks to and expects to know what the workspace
+    shares. A specialist agent reads only the connections granted to it, shared or not, so its feed
+    set stays the narrow one it was given — the shared connection here is granted to nobody, so the
+    specialist that holds the private grant does not pick it up."""
     state = await _authority()
 
     assert await _reachable(state, _authority_reader(state, state.main_agent_id, None)) == {
@@ -1823,6 +1921,66 @@ async def test_main_reads_every_shared_source_and_a_specialist_only_what_it_is_g
     )
     assert await _reachable(state, _authority_reader(state, state.granted_agent_id, None)) == {
         state.owned_source_id
+    }
+
+
+async def test_a_specialist_granted_a_shared_connection_reads_its_streams(db: None) -> None:
+    """The grant is the whole of a specialist's reach, so granting it the shared connection adds
+    that connection's streams and nothing else. It is the other direction of the rule beside this
+    one: a specialist reads what it is granted whether the connection is shared or private, and
+    sharing alone never reaches it."""
+    state = await _authority()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=state.workspace_id,
+                agent_id=state.ungranted_agent_id,
+                connection_id=state.shared_connection_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    assert await _reachable(state, _authority_reader(state, state.ungranted_agent_id, None)) == {
+        state.unowned_source_id
+    }
+    assert await _reachable(state, _authority_reader(state, state.granted_agent_id, None)) == {
+        state.owned_source_id
+    }
+
+
+async def test_making_a_connection_private_takes_its_streams_off_the_main_agent(db: None) -> None:
+    """Disclosure is the connection's, never the source row's, so flipping `shared` moves every
+    stream under it at once. The main agent read the shared connection with no grant; once it is
+    private and owned by a member nobody is speaking for, main reads nothing of it, while the
+    specialist granted it reads it exactly as before — the grant is reach, not disclosure."""
+    state = await _authority()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=state.workspace_id,
+                agent_id=state.ungranted_agent_id,
+                connection_id=state.shared_connection_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.connection)
+            .values(shared=False, owner_member_id=state.owner_id, updated_at=sa.func.now())
+            .where(tables.connection.c.id == state.shared_connection_id)
+        )
+
+    assert (
+        await _reachable(state, _authority_reader(state, state.main_agent_id, None)) == frozenset()
+    )
+    assert await _reachable(
+        state, _authority_reader(state, state.main_agent_id, state.owner_id)
+    ) == {state.owned_source_id, state.unowned_source_id}
+    assert await _reachable(state, _authority_reader(state, state.ungranted_agent_id, None)) == {
+        state.unowned_source_id
     }
 
 
@@ -1950,10 +2108,10 @@ class _ScriptedSource:
 
 @dataclass
 class _ResyncingSource:
-    """A backend that requests a resync of its own source from inside `fetch` — the live shape of
-    a member clicking Resync while that source's sync already holds the claim. The request goes
-    through the sanctioned API, so what the driver's completing writer must not clobber is exactly
-    what production writes."""
+    """A backend that pulls its own source due from inside `fetch` — the live shape of a reconnect
+    releasing the row while that source's sync already holds the claim. The request goes through
+    the sanctioned API, so what the driver's completing writer must not clobber is exactly what
+    production writes."""
 
     source_id: UUID
     workspace_id: UUID
@@ -2019,6 +2177,7 @@ def _scripted_driver(
 
 async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
     source_id = uuid4()
+    connection_id = await _connection(workspace_id, SCRIPTED_BACKEND)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
@@ -2026,6 +2185,7 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
                 workspace_id=workspace_id,
                 backend=SCRIPTED_BACKEND,
                 config={"root": "/unused"},
+                connection_id=connection_id,
                 cursor=cursor,
                 next_sync_at=sa.func.now(),
                 claimed_by=None,
@@ -2100,11 +2260,15 @@ async def test_source_claims_renew_while_an_earlier_fetch_is_running(
     )
 
 
-async def test_sync_uses_source_subject_current_after_fetch(
+async def test_sync_stamps_the_disclosure_its_connection_holds_after_the_fetch(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
+    """The commit reads the connection's `shared` under the claim it still holds, not the value the
+    claim was taken with, so a member sharing the account while its first sync is in flight has
+    every page that sync lands disclosed to the workspace. Reading it before the fetch would commit
+    a batch under a disclosure the member had already changed."""
     workspace_id = await _workspace()
-    member_id, source_id = uuid4(), uuid4()
+    source_id = uuid4()
     backend = _BlockingSource(
         SyncResult(
             pages=(
@@ -2122,25 +2286,19 @@ async def test_sync_uses_source_subject_current_after_fetch(
         blob=FilesystemBlobStore(root=tmp_path / "blobs"),
         postgres=database_url.startswith("postgresql"),
     )
+    member_id = await _member(workspace_id, "member@example.com")
+    connection_id = await _connection(
+        workspace_id, SCRIPTED_BACKEND, account_id="acct", owner_member_id=member_id, shared=False
+    )
     with ws(workspace_id):
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=member_id,
-                    workspace_id=workspace_id,
-                    email="member@example.com",
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
             await connection.execute(
                 sa.insert(tables.source).values(
                     id=source_id,
                     workspace_id=workspace_id,
                     backend=SCRIPTED_BACKEND,
                     config={"root": "/unused"},
-                    subject=member_subject(member_id),
-                    owner_member_id=member_id,
+                    connection_id=connection_id,
                     cursor=None,
                     next_sync_at=sa.func.now(),
                     claimed_by=None,
@@ -2152,7 +2310,12 @@ async def test_sync_uses_source_subject_current_after_fetch(
         running = asyncio.create_task(driver.run())
         try:
             await backend.entered.wait()
-            await context_for("probe", frozenset()).set_source_subject((source_id,), SHARED_SUBJECT)
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.connection)
+                    .values(shared=True, updated_at=sa.func.now())
+                    .where(tables.connection.c.id == connection_id)
+                )
         finally:
             backend.release.set()
             await running
@@ -2165,11 +2328,14 @@ async def test_sync_uses_source_subject_current_after_fetch(
     assert page_subject == SHARED_SUBJECT
 
 
-async def test_stale_sync_cannot_overwrite_a_re_registered_source(
+async def test_a_sync_in_flight_when_its_connection_goes_writes_nothing_back(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
+    """Disconnecting deletes the connection, and its source rows and their pages follow by cascade.
+    A sync already fetching finishes into a row that is gone: the commit's write matches nothing, so
+    it takes the claim-lost path and deletes the bodies it had already staged. Nothing outlives the
+    authority that fetched it — not a row, not a page, not a blob."""
     workspace_id = await _workspace()
-    alice, bob = uuid4(), uuid4()
     blob = _BlockingWriteBlob(root=tmp_path / "blobs")
     driver = SyncDriver(
         backends={
@@ -2192,54 +2358,29 @@ async def test_stale_sync_cannot_overwrite_a_re_registered_source(
         blob=blob,
         postgres=database_url.startswith("postgresql"),
     )
-    config = SourceConfig(root="/unused")
-    context = context_for("probe", frozenset())
+    alice = await _member(workspace_id, "alice@example.com")
+    connection_id = await _connection(
+        workspace_id, SCRIPTED_BACKEND, account_id="acct", owner_member_id=alice, shared=False
+    )
     with ws(workspace_id):
-        async with workspace_tx() as connection:
-            for member_id, email in ((alice, "alice@example.com"), (bob, "bob@example.com")):
-                await connection.execute(
-                    sa.insert(tables.member).values(
-                        id=member_id,
-                        workspace_id=workspace_id,
-                        email=email,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-        source_id = await context.register_source(
-            SCRIPTED_BACKEND,
-            config,
-            subject=member_subject(alice),
-            owner_member_id=alice,
+        source_id = await context_for("probe", frozenset()).register_source(
+            SCRIPTED_BACKEND, SourceConfig(root="/unused"), connection_id=connection_id
         )
         running = asyncio.create_task(driver.run())
         try:
             await blob.entered.wait()
-            await context.remove_source(source_id)
-            assert (
-                await context.register_source(
-                    SCRIPTED_BACKEND,
-                    config,
-                    subject=member_subject(bob),
-                    owner_member_id=bob,
-                )
-                == source_id
-            )
+            assert await GrantStore().disconnect(connection_id, actor_member_id=alice)
         finally:
             blob.release.set()
             await running
         async with workspace_tx() as connection:
-            source = (
+            sources = (
                 await connection.execute(
-                    sa.select(
-                        tables.source.c.owner_member_id,
-                        tables.source.c.cursor,
-                        tables.source.c.consecutive_errors,
-                        tables.source.c.claimed_by,
-                        tables.source.c.removed_at,
-                    ).where(tables.source.c.id == source_id)
+                    sa.select(sa.func.count())
+                    .select_from(tables.source)
+                    .where(tables.source.c.id == source_id)
                 )
-            ).one()
+            ).scalar_one()
             pages = (
                 await connection.execute(
                     sa.select(sa.func.count())
@@ -2247,7 +2388,7 @@ async def test_stale_sync_cannot_overwrite_a_re_registered_source(
                     .where(tables.page.c.source_id == source_id)
                 )
             ).scalar_one()
-    assert source == (bob, None, 0, None, None)
+    assert sources == 0
     assert pages == 0
     assert await blob.list("sources/") == ()
 
@@ -2945,7 +3086,16 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     assert (skip_state["parked_at"], skip_state["parked_reason"]) == (None, None)
     assert await _tombstone(kept_id) is False
 
-    failed_id = source_row_id(workspace_id, FOLDER_BACKEND, {"root": str(missing)})
+    failed_id = source_row_id(
+        workspace_id,
+        FOLDER_BACKEND,
+        {"root": str(missing)},
+        connection_id=await _connection(
+            workspace_id,
+            FOLDER_BACKEND,
+            account_id=feed_handle(SourceConfig(root=str(missing))),
+        ),
+    )
     assert (await _source_state(failed_id))["consecutive_errors"] == 1
 
     active = [page for page in await _pages() if page["tombstone"] in (False, 0)]
@@ -3010,7 +3160,6 @@ async def _seed_connected_source(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
                 account_id=CONNECTOR_ACCOUNT,
                 host=CONNECTOR_HOST,
                 owner_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=False,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -3021,9 +3170,7 @@ async def _seed_connected_source(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
-                config={"account": CONNECTOR_ACCOUNT, "stream": CONNECTOR_STREAM},
-                subject=member_subject(member_id),
-                owner_member_id=member_id,
+                config={"stream": CONNECTOR_STREAM},
                 connection_id=connection_id,
                 cursor="held-cursor",
                 next_sync_at=sa.func.now(),
@@ -3213,7 +3360,7 @@ async def test_a_reconnect_of_the_same_account_unparks_the_sources_it_carries(
     nothing about this reconnect says its own refusal was dealt with."""
     workspace_id = await _workspace()
     main_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
-    member_id, conversation_id, source_id = await _seed_connected_source(workspace_id)
+    member_id, _, source_id = await _seed_connected_source(workspace_id)
     unrelated_id = await _seed_scripted_source(workspace_id, None)
     driver, _ = _scripted_driver([], database_url, tmp_path / "blobs")
     for row_id in (source_id, unrelated_id):
@@ -3225,7 +3372,6 @@ async def test_a_reconnect_of_the_same_account_unparks_the_sources_it_carries(
             account_id=CONNECTOR_ACCOUNT,
             host=CONNECTOR_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         assert await _claims(driver) == (source_id,)  # unparked and due, through the driver's read
@@ -3274,7 +3420,6 @@ async def _seed_peer_source(workspace_id: UUID) -> UUID:
                 account_id=account,
                 host=CONNECTOR_HOST,
                 owner_member_id=peer_id,
-                conversation_id=conversation_id,
                 shared=False,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -3285,9 +3430,7 @@ async def _seed_peer_source(workspace_id: UUID) -> UUID:
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
-                config={"account": account, "stream": CONNECTOR_STREAM},
-                subject=member_subject(peer_id),
-                owner_member_id=peer_id,
+                config={"stream": CONNECTOR_STREAM},
                 connection_id=connection_id,
                 cursor="peer-cursor",
                 next_sync_at=sa.func.now(),
@@ -3309,17 +3452,17 @@ async def test_a_reconnect_under_a_new_account_id_still_releases_the_parked_feed
     feed parked while its member believed they had just fixed it — and a feed parked on a grant
     event is never polled, so nothing else would ever find it.
 
-    This grantor's own parked feeds of the provider are released instead, whichever account they
-    name. Nothing is rebound: the older account usually still authenticates, and the feed proves
-    that or parks again within three runs.
+    Every parked stream of this grantor's own connections to the provider is released instead,
+    whichever account each names. Nothing is rebound: the older account usually still
+    authenticates, and the feed proves that or parks again within three runs.
 
-    Two rows are left alone, and each says a different thing. A feed on another provider is not this
-    repair. A feed another member registered on this same provider is not this grantor's to touch —
-    the resync verb refuses one member acting on another's source, and a reconnect must not reach
-    past that gate."""
+    Two rows are left alone, and each says a different thing. A stream on another provider is not
+    this repair. A stream under another member's connection to this same provider is not this
+    grantor's to touch — a member never acts on another's connection, and a reconnect must not
+    reach past that gate."""
     workspace_id = await _workspace()
     main_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
-    member_id, conversation_id, source_id = await _seed_connected_source(workspace_id)
+    member_id, _, source_id = await _seed_connected_source(workspace_id)
     other_provider_id = await _seed_scripted_source(workspace_id, None)
     peer_source_id = await _seed_peer_source(workspace_id)
     driver, _ = _scripted_driver([], database_url, tmp_path / "blobs")
@@ -3332,7 +3475,6 @@ async def test_a_reconnect_under_a_new_account_id_still_releases_the_parked_feed
             account_id=f"{CONNECTOR_ACCOUNT}_reconnected",  # a second account, not the parked one
             host=CONNECTOR_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         assert await _claims(driver) == (source_id,)  # released and due, through the driver's read
@@ -3341,7 +3483,6 @@ async def test_a_reconnect_under_a_new_account_id_still_releases_the_parked_feed
     assert (released["parked_at"], released["parked_reason"]) == (None, None)
     assert released["consecutive_refusals"] == 0
     assert released["cursor"] == "held-cursor"  # released, never rebound or reset
-    assert released["config"]["account"] == CONNECTOR_ACCOUNT
     held = await _source_state(other_provider_id)
     assert held["parked_reason"] == PARK_REASON  # another provider is not this repair
     peer_held = await _source_state(peer_source_id)
@@ -3513,13 +3654,17 @@ class _ConnectionDies:
 
 async def _seed_connector_source(workspace_id: UUID, *, consecutive_errors: int = 0) -> UUID:
     source_id = uuid4()
+    connection_id = await _connection(
+        workspace_id, CONNECTOR_PROVIDER, account_id=CONNECTOR_ACCOUNT
+    )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
-                config={"account": CONNECTOR_ACCOUNT, "stream": CONNECTOR_STREAM},
+                config={"stream": CONNECTOR_STREAM},
+                connection_id=connection_id,
                 cursor=None,
                 consecutive_errors=consecutive_errors,
                 next_sync_at=sa.func.now(),
@@ -4291,34 +4436,6 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
     }
 
 
-async def test_removed_source_ids_answers_only_with_positive_evidence(db: None) -> None:
-    """An extension keyed on a source learns of its removal here, and the answer is a row that
-    exists and is removed — never an id the read failed to return. A caller deleting what this
-    names must delete too little when something is wrong rather than everything, so an id this
-    workspace never held is not reported gone."""
-    workspace_id = await _workspace()
-    ctx = context_for("probe", frozenset())
-    with ws(workspace_id):
-        live = await ctx.register_source(
-            FOLDER_BACKEND,
-            SourceConfig(root="/live"),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-        )
-        gone = await ctx.register_source(
-            FOLDER_BACKEND,
-            SourceConfig(root="/gone"),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-        )
-        await ctx.remove_source(gone)
-        stranger = uuid4()
-        answered = await ctx.removed_source_ids((live, gone, stranger))
-        none_asked = await ctx.removed_source_ids(())
-    assert answered == frozenset({gone})
-    assert none_asked == frozenset()
-
-
 def test_sources_pure_sync_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
     assert len(checks) == 8
@@ -4351,13 +4468,10 @@ async def test_a_workspace_under_its_balance_line_syncs_nothing_until_credited(
     root.mkdir()
     (root / "first.md").write_text("the first note")
     driver, _index, _service = _wire(database_url, vec((21, 1.0)), tmp_path / "blobs", workspace_id)
+    connection_id = await _connection(workspace_id, FOLDER_BACKEND)
     with ws(workspace_id):
         await context_for("probe", frozenset()).register_source(
-            FOLDER_BACKEND,
-            SourceConfig(root=str(root)),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-            agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+            FOLDER_BACKEND, SourceConfig(root=str(root)), connection_id=connection_id
         )
     await _sync(driver)
     assert len(await _pages()) == 1
@@ -4423,13 +4537,10 @@ async def test_a_workspace_serving_the_consumers_model_on_its_own_key_is_never_h
     root.mkdir()
     (root / "first.md").write_text("the first note")
     driver, _index, _service = _wire(database_url, vec((21, 1.0)), tmp_path / "blobs", workspace_id)
+    connection_id = await _connection(workspace_id, FOLDER_BACKEND)
     with ws(workspace_id):
         await context_for("probe", frozenset()).register_source(
-            FOLDER_BACKEND,
-            SourceConfig(root=str(root)),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-            agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+            FOLDER_BACKEND, SourceConfig(root=str(root)), connection_id=connection_id
         )
     await _hold_under_the_line(workspace_id)
     await _store_own_key(workspace_id)
@@ -4454,3 +4565,98 @@ async def test_page_change_candidates_keep_a_workspace_on_its_own_key(
 
     own_key = replace(runner, own_key_slots=("anthropic_api_key",))
     assert await own_key.workspaces_with_changes(consumer) == (held_id,)
+
+
+def _utc(when: datetime) -> datetime:
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+async def test_a_stream_this_account_does_not_use_falls_back_to_a_daily_look(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+) -> None:
+    """`canonical` is a connector constant, so a stream that is content for the accounts using it
+    and empty for the rest cannot be flagged per account. Registering it anyway is only affordable
+    if a row that never lands anything stops costing a request a minute."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=[], snapshot=False) for _ in range(SOURCE_EMPTY_IDLE_THRESHOLD)],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    async def _state() -> sa.RowMapping:
+        async with workspace_tx() as connection:
+            return (
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.source.c.consecutive_empty,
+                            tables.source.c.next_sync_at,
+                        ).where(tables.source.c.id == source_id)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+    with ws(workspace_id):
+        for run in range(SOURCE_EMPTY_IDLE_THRESHOLD):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.source).values(next_sync_at=sa.func.now())
+                )
+            await driver.run()
+            state = await _state()
+            assert state["consecutive_empty"] == run + 1
+
+        due = _utc(state["next_sync_at"]) - datetime.now(UTC)
+        assert due > timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS * 10)
+
+
+async def test_a_quiet_stream_that_has_landed_a_page_keeps_the_interval(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+) -> None:
+    """Being quiet is not being unused. A row that has ever landed a page keeps the fast cadence
+    however many empty runs follow, so a populated stream between changes is never slowed."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    landed = SyncResult(
+        pages=[Page(source_ref="only", title="one", body="body", stream="scripted")],
+        snapshot=False,
+    )
+    driver, _ = _scripted_driver(
+        [
+            landed,
+            *(SyncResult(pages=[], snapshot=False) for _ in range(SOURCE_EMPTY_IDLE_THRESHOLD)),
+        ],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    with ws(workspace_id):
+        for _ in range(SOURCE_EMPTY_IDLE_THRESHOLD + 1):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.source).values(next_sync_at=sa.func.now())
+                )
+            await driver.run()
+
+        async with workspace_tx() as connection:
+            state = (
+                (
+                    await connection.execute(
+                        sa.select(tables.source.c.next_sync_at).where(
+                            tables.source.c.id == source_id
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+    due = _utc(state["next_sync_at"]) - datetime.now(UTC)
+    assert due < timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS * 5)

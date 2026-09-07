@@ -2,7 +2,7 @@
 walk with `flatten` lifting the per-record envelope (so `id`/`updated_at` sit at the top level and
 the watermark advances), the `<field>[after]` incremental param, the HTTP Basic auth built from a
 direct key (empty password), and a refusal surfacing as `StreamSkipped`. The class base URL is empty
-(per-tenant), so the tenant host is bound through `ConnectorSourceConfig.base_url`. Offline — a
+(per-tenant), so the tenant host is bound through `SourceAuth.base_url`. Offline — a
 canned transport, no token."""
 
 import base64
@@ -17,7 +17,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 BASE_URL = "https://acme.chargebee.com/api/v2"
 
 
@@ -25,16 +24,16 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
 async def _fetch(
     stream: str, handler: Callable[[httpx.Request], httpx.Response], *, cursor: str | None = None
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=BASE_URL)
     return await ConnectorBackend(connector=ChargebeeConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), cursor, auth
+        ConnectorSourceConfig(stream=stream), cursor, auth
     )
 
 

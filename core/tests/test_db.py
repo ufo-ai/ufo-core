@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import hashlib
 import json
 import os
 import shutil
@@ -7,13 +8,13 @@ import socket
 import sqlite3
 import threading
 import warnings
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from weakref import ref
 
 import aiosqlite
@@ -25,10 +26,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from pydantic import BaseModel
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from ufo_testsupport import migrations
 from ufo_testsupport.migrations import TEMPLATE_CACHE_OFF_ENV, apply_cached_migrations
+from ufo_testsupport.plugin import drop_postgres_database, reset_postgres_database
 from ufo_testsupport.tables import POSTGRES_TABLES, reset_workspace_data
 
 import ufo.db
@@ -49,9 +52,9 @@ from ufo.db import (
 )
 from ufo.harness import o11y
 from ufo.host.ext.loader import migration_locations
+from ufo.runtime.sources.sync import feed_handle, source_row_id
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.sdk.sources import binding_name
 
 
 class _UndefinedColumn(Exception):
@@ -531,10 +534,10 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         _core_migration_head(),
         "index_default_0002",
         "objectives_0002",
-        "memory_0016",
+        "memory_0017",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
-        "sources_0003",
+        "sources_0004",
         "monitors_0001",
         "skill_create_0004",
         "coding_0004",
@@ -709,7 +712,14 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
     restore it, so a conversation being woken before the upgrade is still woken after it. A
     conversation that has since gone takes its entry with it rather than stranding a row no foreign
     key would accept, and a member's own conversation names that member so the trigger stays
-    visible to the one person who could have subscribed it."""
+    visible to the one person who could have subscribed it.
+
+    Carried across means across the whole chain, so this runs to the sources head rather than to the
+    revision that writes the rows. `sources_0004` deletes a trigger whose binding names no
+    connection, which is the one thing that can lose a subscription this migration promised to keep,
+    and a run stopping short of it would assert the safe half and stay silent on that. The binding
+    is derived from the connection the subscription authenticated as rather than written as a
+    literal, because a literal names no connection and would be deleted for the right reason."""
     database_path = tmp_path / "source-trigger.db"
     url = f"sqlite+aiosqlite:///{database_path}"
     config = Config()
@@ -724,6 +734,13 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
     workspace_id, member_id = uuid4(), uuid4()
     agent_id, other_agent_id = uuid4(), uuid4()
     shared_conversation, private_conversation, gone = uuid4(), uuid4(), uuid4()
+    connection_id, account_id = uuid4(), "acct-7"
+    digest = hashlib.sha256(
+        json.dumps(
+            {"account": account_id, "base_url": None, "provider": "asana"}, sort_keys=True
+        ).encode()
+    ).hexdigest()[:8]
+    binding = f"asana-{digest}"
     now = datetime(2026, 8, 14, tzinfo=UTC).isoformat()
     with sqlite3.connect(database_path) as connection:
         connection.execute("delete from source_trigger")
@@ -760,9 +777,15 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
                 now,
             ),
         )
+        connection.execute(
+            "insert into connection (id, workspace_id, provider, account_id, host, "
+            "owner_member_id, shared, created_at, updated_at) "
+            "values (?, ?, 'asana', ?, '', ?, 0, ?, ?)",
+            (connection_id.hex, workspace_id.hex, account_id, member_id.hex, now, now),
+        )
         for key, value in (
             (
-                "subscribers:asana-1a2b3c4d",
+                f"subscribers:{binding}",
                 json.dumps(
                     {
                         shared_conversation.hex: agent_id.hex,
@@ -771,7 +794,7 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
                     }
                 ),
             ),
-            ("cursor:asana-1a2b3c4d", json.dumps({"seq": 7})),
+            (f"cursor:{binding}", json.dumps({"seq": 7})),
         ):
             connection.execute(
                 "insert into ext_store (workspace_id, extension, key, value, created_at, "
@@ -782,35 +805,170 @@ def test_source_trigger_migration_carries_every_live_subscription(tmp_path: Path
     command.upgrade(config, "sources@head")
     with sqlite3.connect(database_path) as connection:
         carried = connection.execute(
-            "select conversation_id, agent_id, binding, delivery, created_by_member_id "
-            "from source_trigger"
+            "select conversation_id, agent_id, connection_id, resource, delivery, "
+            "created_by_member_id from source_trigger"
         ).fetchall()
         left = connection.execute(
             "select key from ext_store where extension = 'sources'"
         ).fetchall()
     assert sorted(carried) == sorted(
         [
-            (shared_conversation.hex, agent_id.hex, "asana-1a2b3c4d", "current", None),
+            (shared_conversation.hex, agent_id.hex, connection_id.hex, "", "current", None),
             (
                 private_conversation.hex,
                 other_agent_id.hex,
-                "asana-1a2b3c4d",
+                connection_id.hex,
+                "",
                 "current",
                 member_id.hex,
             ),
         ]
     )
-    assert [key for (key,) in left] == ["cursor:asana-1a2b3c4d"]
+    assert [key for (key,) in left] == [f"cursor:{binding}"]
 
 
-def test_the_resource_watch_revision_keeps_the_key_the_outgoing_image_infers(
-    tmp_path: Path,
-) -> None:
-    """A watch on one resource of a source is a row of its own table, so `source_trigger` keeps the
-    unique key the release being replaced names in `ON CONFLICT (workspace_id, conversation_id,
-    binding)`. The migrate Job completes before the fleet rolls: a widened key would leave every
-    trigger those pods write with no unique index to infer, and each one would fail."""
-    database_path = tmp_path / "resource-watch.db"
+def test_a_feed_naming_no_account_takes_the_handle_core_derives(tmp_path: Path) -> None:
+    """A feed that authenticates as no broker account — a repository, a folder root — takes its
+    config's identity JSON as its connection's `account_id`, and the revision that mints that
+    connection spells the handle inline while `register_sources` and an extension's object kind
+    spell it through `feed_handle`. Two copies of one rule drift without a word of warning: they
+    would simply mint different handles, the boot path would look for a connection it never finds,
+    and it would create a second one beside every feed this migration moved. So the handles are
+    compared here byte for byte.
+
+    Each feed also has to land on a connection of its own. One handle shared across two roots would
+    make deleting either cascade the other's sources and pages away, which is the loss the identity
+    handle exists to prevent."""
+
+    class GitOrigin(BaseModel):
+        repo: str
+        branch: str | None = None
+
+    class FolderOrigin(BaseModel):
+        root: str
+
+    origins = {
+        "gbrain_git": GitOrigin(repo="octo/wiki"),
+        "gbrain_folder": FolderOrigin(root="/srv/notes"),
+    }
+    database_path = tmp_path / "feed-handle.db"
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option(
+        "version_locations",
+        os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+    )
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "20260906225812")
+    command.upgrade(config, "sources_0003")
+    workspace_id, member_id = uuid4(), uuid4()
+    now = datetime(2026, 9, 7, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into member (id, workspace_id, email, created_at, updated_at) "
+            "values (?, ?, 'who@example.com', ?, ?)",
+            (member_id.hex, workspace_id.hex, now, now),
+        )
+        for backend, origin in origins.items():
+            payload = origin.model_dump(mode="json")
+            connection.execute(
+                "insert into source (id, workspace_id, backend, config, subject, owner_member_id, "
+                "next_sync_at, created_at, updated_at) "
+                "values (?, ?, ?, ?, 'shared', ?, ?, ?, ?)",
+                (
+                    uuid4().hex,
+                    workspace_id.hex,
+                    backend,
+                    json.dumps(payload),
+                    member_id.hex,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+    command.upgrade(config, "heads")
+    with sqlite3.connect(database_path) as connection:
+        minted = dict(
+            connection.execute(
+                "select s.backend, c.account_id from source s "
+                "join connection c on c.id = s.connection_id"
+            ).fetchall()
+        )
+    assert minted == {backend: feed_handle(origin) for backend, origin in origins.items()}
+    assert len(set(minted.values())) == len(origins)
+
+
+def test_a_stream_row_naming_no_account_refuses_the_upgrade(tmp_path: Path) -> None:
+    """A row whose config names a stream is connector-backed, so it authenticates as an account and
+    a row storing none is dead data — the image being replaced cannot load it either, since
+    `ConnectorSourceConfig` requires the account. Minting it a connection would invent an authority
+    for it: the identity-JSON handle a repository or folder root takes, ownerless and shared under a
+    connector provider, which the broker would then be handed as an account id. The upgrade refuses
+    instead, naming the row so it can be repaired or removed.
+
+    The pair is the point. The same row with an account migrates, so the refusal is the missing
+    account and not the presence of a stream."""
+    for account, expected in (
+        ({}, pytest.raises(RuntimeError, match="names a stream and no account")),
+        ({"account": "acct-3"}, nullcontext()),
+    ):
+        database_path = tmp_path / f"stream-no-account-{len(account)}.db"
+        config = Config()
+        config.set_main_option("script_location", str(MIGRATIONS_DIR))
+        config.set_main_option(
+            "version_locations",
+            os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
+        )
+        config.set_main_option("path_separator", "os")
+        config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+        command.upgrade(config, "20260906225812")
+        command.upgrade(config, "sources_0003")
+        workspace_id, member_id = uuid4(), uuid4()
+        now = datetime(2026, 9, 7, tzinfo=UTC).isoformat()
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+                (workspace_id.hex, now, now),
+            )
+            connection.execute(
+                "insert into member (id, workspace_id, email, created_at, updated_at) "
+                "values (?, ?, 'who@example.com', ?, ?)",
+                (member_id.hex, workspace_id.hex, now, now),
+            )
+            connection.execute(
+                "insert into source (id, workspace_id, backend, config, subject, owner_member_id, "
+                "connection_id, next_sync_at, created_at, updated_at) "
+                "values (?, ?, 'github', ?, 'shared', ?, null, ?, ?, ?)",
+                (
+                    uuid4().hex,
+                    workspace_id.hex,
+                    json.dumps({"stream": "issues", **account}),
+                    member_id.hex,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+        with expected:
+            command.upgrade(config, "heads")
+
+
+def test_the_trigger_tables_merge_onto_one_keyed_by_resource(tmp_path: Path) -> None:
+    """A trigger narrowed to one resource of a source is a `source_trigger` row carrying that
+    resource, so the resource is part of the table's unique key and `source_resource_watch` is
+    gone. The wide key is deliberate: it is what lets one conversation hold the whole binding and
+    each resource of it as rows of one table, and narrowing it back to (workspace_id,
+    conversation_id, binding) would make the second of those rows unwritable.
+
+    Every narrowed row crosses over keeping its own id — the generation an object edit checks
+    itself against, and the key its per-page conversation is queued under. Both rows seeded here
+    land under one conversation and one binding, which the narrow key could not hold."""
+    database_path = tmp_path / "trigger-resource.db"
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option(
@@ -820,6 +978,70 @@ def test_the_resource_watch_revision_keeps_the_key_the_outgoing_image_infers(
     config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
     command.upgrade(config, "heads")
+    command.downgrade(config, "sources_0003")
+    workspace_id, member_id, agent_id, conversation_id = (uuid4() for _ in range(4))
+    whole_id, narrowed_id, connection_id = uuid4(), uuid4(), uuid4()
+    binding = "github-82cba16e"  # what sources_0004 maps onto this connection
+    resource = "https://github.com/metalcraftai/ufo/pull/1684"
+    now = datetime(2026, 9, 7, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
+            (workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into member (id, workspace_id, email, created_at, updated_at) "
+            "values (?, ?, 'who@example.com', ?, ?)",
+            (member_id.hex, workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into agent (id, workspace_id, name, prompt, model, is_main, created_at, "
+            "updated_at) values (?, ?, 'assistant', 'p', 'auto', 1, ?, ?)",
+            (agent_id.hex, workspace_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into conversation (id, workspace_id, agent_id, surface, queue_key, audience, "
+            "created_at, updated_at) values (?, ?, ?, 'cli', 'a/b', 'shared', ?, ?)",
+            (conversation_id.hex, workspace_id.hex, agent_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into connection (id, workspace_id, provider, account_id, host, "
+            "owner_member_id, shared, created_at, updated_at) "
+            "values (?, ?, 'github', 'metalcraftai', 'github.com', ?, 1, ?, ?)",
+            (connection_id.hex, workspace_id.hex, member_id.hex, now, now),
+        )
+        connection.execute(
+            "insert into source_trigger (id, workspace_id, conversation_id, agent_id, binding, "
+            "delivery, created_by_member_id, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 'current', ?, ?, ?)",
+            (
+                whole_id.hex,
+                workspace_id.hex,
+                conversation_id.hex,
+                agent_id.hex,
+                binding,
+                member_id.hex,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "insert into source_resource_watch (id, workspace_id, conversation_id, agent_id, "
+            "binding, resource, delivery, created_by_member_id, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, 'per_page', ?, ?, ?)",
+            (
+                narrowed_id.hex,
+                workspace_id.hex,
+                conversation_id.hex,
+                agent_id.hex,
+                binding,
+                resource,
+                member_id.hex,
+                now,
+                now,
+            ),
+        )
+    command.upgrade(config, "sources_0004")
     engine = sa.create_engine("sqlite:///" + str(database_path))
     try:
         with engine.connect() as connection:
@@ -828,18 +1050,84 @@ def test_the_resource_watch_revision_keeps_the_key_the_outgoing_image_infers(
                 tuple(unique["column_names"])
                 for unique in inspector.get_unique_constraints("source_trigger")
             }
-            watch_keys = {
-                tuple(unique["column_names"])
-                for unique in inspector.get_unique_constraints("source_resource_watch")
-            }
+            table_names = set(inspector.get_table_names())
     finally:
         engine.dispose()
-    assert trigger_keys == {("workspace_id", "conversation_id", "binding")}
-    assert watch_keys == {("workspace_id", "conversation_id", "binding", "resource")}
+    with sqlite3.connect(database_path) as connection:
+        carried = connection.execute(
+            "select id, conversation_id, connection_id, resource, delivery, created_by_member_id "
+            "from source_trigger order by resource"
+        ).fetchall()
+    assert trigger_keys == {("workspace_id", "conversation_id", "connection_id", "resource")}
+    assert "source_resource_watch" not in table_names
+    assert carried == [
+        (whole_id.hex, conversation_id.hex, connection_id.hex, "", "current", member_id.hex),
+        (
+            narrowed_id.hex,
+            conversation_id.hex,
+            connection_id.hex,
+            resource,
+            "per_page",
+            member_id.hex,
+        ),
+    ]
 
 
-def test_coding_migration_carries_review_inboxes_to_per_page_triggers(tmp_path: Path) -> None:
-    database_path = tmp_path / "coding-tools.db"
+SOURCE_AUTHORITY_REVISION = "20260907150257"
+SOURCE_AUTHORITY_DOWN_REVISION = "20260906225812"
+CONNECTOR_NON_IDENTITY_KEYS = frozenset({"backfill_days", "backfill_after"})
+
+SOURCE_WITH_ITS_OWN_AUTHORITY = sa.table(
+    "source",
+    sa.column("id", sa.Uuid()),
+    sa.column("workspace_id", sa.Uuid()),
+    sa.column("backend", sa.Text()),
+    sa.column("config", sa.JSON()),
+    sa.column("subject", sa.Text()),
+    sa.column("owner_member_id", sa.Uuid()),
+    sa.column("connection_id", sa.Uuid()),
+    sa.column("next_sync_at", sa.DateTime(timezone=True)),
+    sa.column("created_at", sa.DateTime(timezone=True)),
+    sa.column("updated_at", sa.DateTime(timezone=True)),
+)
+
+CONNECTION_WITH_CONVERSATION = sa.table(
+    "connection",
+    sa.column("id", sa.Uuid()),
+    sa.column("workspace_id", sa.Uuid()),
+    sa.column("provider", sa.Text()),
+    sa.column("account_id", sa.Text()),
+    sa.column("host", sa.Text()),
+    sa.column("owner_member_id", sa.Uuid()),
+    sa.column("conversation_id", sa.Uuid()),
+    sa.column("shared", sa.Boolean()),
+    sa.column("created_at", sa.DateTime(timezone=True)),
+    sa.column("updated_at", sa.DateTime(timezone=True)),
+)
+
+
+@contextmanager
+def _own_database(database_url: str, tmp_path: Path) -> Iterator[str]:
+    """A migrated database of the fixture's dialect that one test may downgrade and reseed without
+    touching the session's: sqlite a file of its own, postgres a database of its own, dropped on the
+    way out."""
+    if database_url.startswith("sqlite"):
+        url = f"sqlite+aiosqlite:///{tmp_path / 'own.db'}"
+        apply_migrations(url)
+        yield url
+        return
+    base = make_url(database_url)
+    name = f"{base.database}_{uuid4().hex[:8]}"
+    asyncio.run(reset_postgres_database(name))
+    url = base.set(database=name).render_as_string(hide_password=False)
+    try:
+        apply_migrations(url)
+        yield url
+    finally:
+        asyncio.run(drop_postgres_database(name))
+
+
+def _alembic(url: str) -> Config:
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option(
@@ -847,88 +1135,343 @@ def test_coding_migration_carries_review_inboxes_to_per_page_triggers(tmp_path: 
         os.pathsep.join((str(MIGRATIONS_DIR / "versions"), *migration_locations())),
     )
     config.set_main_option("path_separator", "os")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "heads")
-    command.downgrade(config, "coding_0003")
-    now = datetime(2026, 8, 14, tzinfo=UTC).isoformat()
-    workspace_id, agent_id, source_id, conversation_id = (uuid4() for _ in range(4))
-    source_config = {
-        "account": "installation-123",
-        "stream": "pull_requests",
-        "base_url": None,
+    config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    return config
+
+
+def _execute(url: str, *statements: sa.Executable) -> list[sa.RowMapping]:
+    """Run the statements in one transaction on the engine `serve` would build for the url — foreign
+    keys enforced by its connect hook — answering the rows of the last one where it returns any."""
+
+    async def run() -> list[sa.RowMapping]:
+        engine = _build_engine(url, ufo.db._APP)
+        try:
+            async with engine.connect() as connection:
+                result = None
+                for statement in statements:
+                    result = await connection.execute(statement)
+                rows = (
+                    []
+                    if result is None or not result.returns_rows
+                    else list(result.mappings().all())
+                )
+                await connection.commit()
+                return rows
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def _workspace_rows(
+    workspace_id: UUID, member_id: UUID, agent_id: UUID, conversation_id: UUID, now: datetime
+) -> tuple[sa.Executable, ...]:
+    return (
+        sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now),
+        sa.insert(tables.member).values(
+            id=member_id,
+            workspace_id=workspace_id,
+            email="who@example.com",
+            created_at=now,
+            updated_at=now,
+        ),
+        sa.insert(tables.agent).values(
+            id=agent_id,
+            workspace_id=workspace_id,
+            name="assistant",
+            prompt="p",
+            model="auto",
+            is_main=True,
+            created_at=now,
+            updated_at=now,
+        ),
+        sa.insert(tables.conversation).values(
+            id=conversation_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            surface="cli",
+            queue_key="a/b",
+            audience="shared",
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+
+
+def _page_row(
+    page_id: UUID, workspace_id: UUID, source_id: UUID, subject: str, now: datetime
+) -> sa.Executable:
+    return sa.insert(tables.page).values(
+        id=page_id,
+        workspace_id=workspace_id,
+        source_id=source_id,
+        digest="sha256:0",
+        body_ref=f"source/{source_id}/{page_id}/0",
+        stream="issues",
+        title="t",
+        subject=subject,
+        tombstone=False,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_source_authority_unshares_a_connection_carrying_private_streams(
+    database_url: str, tmp_path: Path
+) -> None:
+    """A connection's streams read what it discloses once `source.subject` is gone, so a connection
+    a member shared while its streams stayed private — every connected account, since the registrar
+    stamped each stream `member:<owner>` and sharing never restamped — would disclose those streams
+    to the workspace on the first sync after the roll. The revision unshares it instead, leaves a
+    connection with no private stream alone, and keeps every page's subject. The downgrade returns
+    every subject and id exactly and, unable to tell this connection from one never shared, leaves
+    it unshared."""
+    workspace_id, member_id, agent_id, conversation_id = (uuid4() for _ in range(4))
+    narrowed, idle, open_, page_id = (uuid4() for _ in range(4))
+    private = f"member:{member_id}"
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+    stored = {
+        stream: {
+            "account": account,
+            "stream": stream,
+            "base_url": None,
+            "backfill_days": 30,
+            "backfill_after": "2026-08-08T00:00:00+00:00",
+        }
+        for stream, account in (
+            ("issues", "metalcraftai"),
+            ("pulls", "metalcraftai"),
+            ("notes", "open-org"),
+        )
     }
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "insert into workspace (id, created_at, updated_at) values (?, ?, ?)",
-            (workspace_id.hex, now, now),
+    before = {
+        stream: source_row_id(
+            workspace_id,
+            "github",
+            stored[stream],
+            connection_id=connection_id,
+            non_identity_keys=CONNECTOR_NON_IDENTITY_KEYS,
         )
-        connection.execute(
-            "insert into agent (id, workspace_id, name, prompt, model, created_at, updated_at) "
-            "values (?, ?, 'reviewer', 'Review pull requests.', 'auto', ?, ?)",
-            (agent_id.hex, workspace_id.hex, now, now),
+        for stream, connection_id in (("issues", narrowed), ("pulls", narrowed), ("notes", open_))
+    }
+    after = {
+        stream: source_row_id(
+            workspace_id,
+            "github",
+            {
+                key: value
+                for key, value in stored[stream].items()
+                if key not in ("account", "base_url")
+            },
+            connection_id=connection_id,
+            non_identity_keys=CONNECTOR_NON_IDENTITY_KEYS,
         )
-        connection.execute(
-            "insert into source "
-            "(id, workspace_id, backend, config, subject, next_sync_at, created_at, updated_at) "
-            "values (?, ?, 'github', ?, 'shared', ?, ?, ?)",
-            (source_id.hex, workspace_id.hex, json.dumps(source_config), now, now, now),
+        for stream, connection_id in (("issues", narrowed), ("pulls", narrowed), ("notes", open_))
+    }
+    with _own_database(database_url, tmp_path) as url:
+        config = _alembic(url)
+        command.downgrade(config, SOURCE_AUTHORITY_DOWN_REVISION)
+        _execute(
+            url,
+            *_workspace_rows(workspace_id, member_id, agent_id, conversation_id, now),
+            *(
+                sa.insert(CONNECTION_WITH_CONVERSATION).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider="github",
+                    account_id=account,
+                    host="github.com",
+                    owner_member_id=member_id,
+                    conversation_id=conversation_id,
+                    shared=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                for connection_id, account in (
+                    (narrowed, "metalcraftai"),
+                    (idle, "idle-org"),
+                    (open_, "open-org"),
+                )
+            ),
+            *(
+                sa.insert(SOURCE_WITH_ITS_OWN_AUTHORITY).values(
+                    id=before[stream],
+                    workspace_id=workspace_id,
+                    backend="github",
+                    config=stored[stream],
+                    subject=subject,
+                    owner_member_id=member_id,
+                    connection_id=connection_id,
+                    next_sync_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                for stream, subject, connection_id in (
+                    ("issues", private, narrowed),
+                    ("pulls", private, narrowed),
+                    ("notes", "shared", open_),
+                )
+            ),
+            _page_row(page_id, workspace_id, before["issues"], private, now),
         )
-        connection.execute(
-            "insert into source_grant "
-            "(workspace_id, source_id, agent_id, created_at, updated_at) values (?, ?, ?, ?, ?)",
-            (workspace_id.hex, source_id.hex, agent_id.hex, now, now),
+        command.upgrade(config, SOURCE_AUTHORITY_REVISION)
+        connections = {
+            row["id"]: (row["shared"], row["owner_member_id"])
+            for row in _execute(
+                url,
+                sa.select(
+                    tables.connection.c.id,
+                    tables.connection.c.shared,
+                    tables.connection.c.owner_member_id,
+                ),
+            )
+        }
+        streams = {
+            row["id"]: row["connection_id"]
+            for row in _execute(url, sa.select(tables.source.c.id, tables.source.c.connection_id))
+        }
+        pages = [
+            (row["source_id"], row["subject"])
+            for row in _execute(url, sa.select(tables.page.c.source_id, tables.page.c.subject))
+        ]
+        command.downgrade(config, SOURCE_AUTHORITY_DOWN_REVISION)
+        restored = {
+            row["id"]: (row["subject"], row["connection_id"])
+            for row in _execute(
+                url,
+                sa.select(
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.id,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.subject,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.connection_id,
+                ),
+            )
+        }
+        sharing = {
+            row["id"]: row["shared"]
+            for row in _execute(
+                url,
+                sa.select(CONNECTION_WITH_CONVERSATION.c.id, CONNECTION_WITH_CONVERSATION.c.shared),
+            )
+        }
+    assert connections == {
+        narrowed: (False, member_id),
+        idle: (True, member_id),
+        open_: (True, member_id),
+    }
+    assert streams == {after["issues"]: narrowed, after["pulls"]: narrowed, after["notes"]: open_}
+    assert pages == [(after["issues"], private)]
+    assert restored == {
+        before["issues"]: (private, narrowed),
+        before["pulls"]: (private, narrowed),
+        before["notes"]: ("shared", open_),
+    }
+    assert sharing == {narrowed: False, idle: True, open_: True}
+
+
+def test_source_authority_mints_one_connection_per_repository(
+    database_url: str, tmp_path: Path
+) -> None:
+    """A feed naming no account and no member takes its config's identity JSON as its connection's
+    account handle, so two repositories of one backend are two connections: deleting one cascades
+    to its own stream and pages and leaves the other's standing. The downgrade returns the stream
+    that remains to the direct path under its old id and deletes the connection minted for it."""
+    workspace_id, member_id, agent_id, conversation_id = (uuid4() for _ in range(4))
+    ufo_page, docs_page = uuid4(), uuid4()
+    now = datetime(2026, 9, 7, tzinfo=UTC)
+    repos = {
+        "ufo": {"repo": "metalcraftai/ufo", "branch": None},
+        "docs": {"repo": "metalcraftai/docs", "branch": "main"},
+    }
+    before = {
+        name: uuid5(
+            NAMESPACE_URL,
+            f"{workspace_id}/source/gbrain_git/{json.dumps(config, sort_keys=True)}",
         )
-        connection.execute(
-            "insert into conversation "
-            "(id, workspace_id, agent_id, surface, queue_key, audience, created_at, updated_at) "
-            "values (?, ?, ?, 'coding', 'review-run', 'shared', ?, ?)",
-            (conversation_id.hex, workspace_id.hex, agent_id.hex, now, now),
+        for name, config in repos.items()
+    }
+    with _own_database(database_url, tmp_path) as url:
+        config = _alembic(url)
+        command.downgrade(config, SOURCE_AUTHORITY_DOWN_REVISION)
+        _execute(
+            url,
+            *_workspace_rows(workspace_id, member_id, agent_id, conversation_id, now),
+            *(
+                sa.insert(SOURCE_WITH_ITS_OWN_AUTHORITY).values(
+                    id=before[name],
+                    workspace_id=workspace_id,
+                    backend="gbrain_git",
+                    config=repos[name],
+                    subject="shared",
+                    owner_member_id=None,
+                    connection_id=None,
+                    next_sync_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                for name in repos
+            ),
+            _page_row(ufo_page, workspace_id, before["ufo"], "shared", now),
+            _page_row(docs_page, workspace_id, before["docs"], "shared", now),
         )
-        connection.execute(
-            "insert into coding_review_inbox "
-            "(workspace_id, source_id, agent_id, baseline_revision, created_at, updated_at) "
-            "values (?, ?, ?, 1, ?, ?)",
-            (workspace_id.hex, source_id.hex, agent_id.hex, now, now),
+        command.upgrade(config, SOURCE_AUTHORITY_REVISION)
+        minted = {
+            row["account_id"]: (row["id"], row["owner_member_id"], row["shared"])
+            for row in _execute(
+                url,
+                sa.select(
+                    tables.connection.c.account_id,
+                    tables.connection.c.id,
+                    tables.connection.c.owner_member_id,
+                    tables.connection.c.shared,
+                ).where(tables.connection.c.provider == "gbrain_git"),
+            )
+        }
+        handles = {name: json.dumps(repos[name], sort_keys=True) for name in repos}
+        assert set(minted) == set(handles.values())
+        connection_of = {name: minted[handles[name]][0] for name in repos}
+        after = {
+            name: source_row_id(
+                workspace_id, "gbrain_git", repos[name], connection_id=connection_of[name]
+            )
+            for name in repos
+        }
+        streams = {
+            row["id"]: row["connection_id"]
+            for row in _execute(url, sa.select(tables.source.c.id, tables.source.c.connection_id))
+        }
+        _execute(
+            url,
+            sa.delete(tables.connection).where(tables.connection.c.id == connection_of["ufo"]),
         )
-        connection.execute(
-            "insert into coding_review_run "
-            "(workspace_id, source_id, repository, pull_request_number, base_sha, head_sha, "
-            "run_id, conversation_id, agent_id, created_at, updated_at) "
-            "values (?, ?, 'metalcraftai/ufo', 1, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                workspace_id.hex,
-                source_id.hex,
-                "b" * 40,
-                "a" * 40,
-                uuid4().hex,
-                conversation_id.hex,
-                agent_id.hex,
-                now,
-                now,
+        left_sources = [row["id"] for row in _execute(url, sa.select(tables.source.c.id))]
+        left_pages = [row["id"] for row in _execute(url, sa.select(tables.page.c.id))]
+        command.downgrade(config, SOURCE_AUTHORITY_DOWN_REVISION)
+        restored = {
+            row["id"]: (row["subject"], row["connection_id"], row["owner_member_id"])
+            for row in _execute(
+                url,
+                sa.select(
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.id,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.subject,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.connection_id,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.owner_member_id,
+                ),
+            )
+        }
+        left_connections = _execute(
+            url,
+            sa.select(CONNECTION_WITH_CONVERSATION.c.id).where(
+                CONNECTION_WITH_CONVERSATION.c.provider == "gbrain_git"
             ),
         )
-    command.upgrade(config, "coding@head")
-    with sqlite3.connect(database_path) as connection:
-        names = {row[0] for row in connection.execute("select name from sqlite_master")}
-        carried = connection.execute(
-            "select source_trigger.binding, source_trigger.delivery, source_trigger.agent_id, "
-            "conversation.surface, conversation.queue_key, conversation.audience, "
-            "conversation.member_id from source_trigger join conversation "
-            "on conversation.id = source_trigger.conversation_id"
-        ).fetchall()
-    assert "coding_review_inbox" not in names
-    assert "coding_review_run" not in names
-    assert carried == [
-        (
-            binding_name("github", "installation-123", None),
-            "per_page",
-            agent_id.hex,
-            "sources",
-            f"code-review:{source_id.hex}",
-            "shared",
-            None,
-        )
-    ]
+    assert {handle: held[1:] for handle, held in minted.items()} == {
+        handle: (None, True) for handle in handles.values()
+    }
+    assert streams == {after["ufo"]: connection_of["ufo"], after["docs"]: connection_of["docs"]}
+    assert left_sources == [after["docs"]]
+    assert left_pages == [docs_page]
+    assert restored == {before["docs"]: ("shared", None, None)}
+    assert left_connections == []
 
 
 def test_memory_as_of_migration_repairs_page_derived_rows(tmp_path: Path) -> None:

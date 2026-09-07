@@ -11,6 +11,11 @@ from pathlib import Path
 from sys import stdlib_module_names
 from typing import TYPE_CHECKING
 
+from ufo_ext_sources.registry import CONNECTORS
+
+from ufo.runtime.access.grants import TENANT_URL_RULES
+from ufo.runtime.sources.rest import RestConnector
+
 if TYPE_CHECKING:
     from ufo.runtime.ext.manifest import Manifest, Pack
 
@@ -1155,6 +1160,70 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
+def _canonical_stream_failures() -> list[str]:
+    """A connector's canonical streams are the whole set that syncs when a member connects the
+    account, so a connector marking none syncs nothing and the account is connected for nothing.
+    `StreamSpec.canonical` defaults to False — a stream is content only where it says so — which
+    makes "nobody marked one" a silent empty feed rather than a loud one. This is the loud half.
+
+    It also refuses a stream a connector declares but `streams` filters out. Such a spec can never
+    produce a source row, so a flag on it is unreachable and a reader counting declarations counts
+    streams that do not exist — a declaration with no producer, which is the same silence in the
+    other direction.
+
+    It reads the constructed specs out of the registry, the same import `connected.py` makes to
+    decide what to register, so the gate cannot disagree with what ships. Reading the source text
+    instead cannot answer it: a provider may mark a stream canonical at the call site, or through
+    the default of a helper it defines itself, and a text scan sees only the first — it would fail
+    the providers that use the second and pass one whose streams are all built through a helper it
+    does not recognise, which is the exact silence this gate exists to break."""
+    failures = []
+    for name, connector_type in sorted(CONNECTORS.items()):
+        connector = connector_type()
+        streams = connector.streams()
+        declared = connector.streams_list if isinstance(connector, RestConnector) else streams
+        undriveable = {spec.name for spec in declared} - {spec.name for spec in streams}
+        if undriveable:
+            failures.append(
+                f"connector {name!r} declares streams it cannot drive "
+                f"({', '.join(sorted(undriveable))}) — a spec `streams` filters out can never "
+                "produce a source row"
+            )
+        if not streams:
+            failures.append(f"connector {name!r} declares no streams")
+        elif not any(stream.canonical for stream in streams):
+            failures.append(
+                f"connector {name!r} marks none of its {len(streams)} streams canonical — "
+                "connecting this provider would sync nothing"
+            )
+    return failures
+
+
+def _tenant_rule_failures() -> list[str]:
+    """A connector with no fixed `base_url` reads a per-tenant host off its connection, and the only
+    thing standing between an admin and a feed that sends the workspace credential to a host they
+    control is the provider's row in `TENANT_URL_RULES`. The two sets are one set: a per-tenant
+    connector with no rule can never take a URL, and a rule for a fixed-host connector admits a
+    host the connector never dials. Either is a table that has drifted from the connectors it
+    guards."""
+    per_tenant = {
+        name for name, connector_type in CONNECTORS.items() if not connector_type.base_url
+    }
+    ruled = set(TENANT_URL_RULES)
+    failures = []
+    for name in sorted(per_tenant - ruled):
+        failures.append(
+            f"connector {name!r} declares no fixed base_url and TENANT_URL_RULES names no rule for "
+            "it — its connections can never take a tenant URL"
+        )
+    for name in sorted(ruled - per_tenant):
+        failures.append(
+            f"TENANT_URL_RULES names {name!r} but that connector declares a fixed base_url — the "
+            "rule admits a host the connector never dials"
+        )
+    return failures
+
+
 def _init_code_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """__init__.py is a package marker, never a place code lives: no imports, no re-exports, no
     definitions. Code goes in a named module the reader can find by its name; a leading docstring
@@ -2264,6 +2333,8 @@ def main() -> int:
         for name, rel in aliases.items()
         if calls.count(name) == 1
     )
+    failures.extend(_canonical_stream_failures())
+    failures.extend(_tenant_rule_failures())
     failures.extend(_init_code_failures(trees))
     failures.extend(_raw_blob_failures(trees))
     failures.extend(_boundary_failures(trees))

@@ -42,9 +42,9 @@ def _stream(
 DEEL_STREAMS: list[StreamSpec] = [
     _stream("contracts", canonical=True),
     _stream("forms", cursor_field=None),
-    _stream("payslips"),
-    _stream("timesheets"),
-    _stream("tasks"),
+    _stream("payslips", canonical=True),
+    _stream("timesheets", canonical=True),
+    _stream("tasks", canonical=True),
 ]
 
 

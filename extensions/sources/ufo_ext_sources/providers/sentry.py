@@ -52,6 +52,7 @@ SENTRY_STREAMS: list[StreamSpec] = [
         cursor_field="lastSeen",
         created_at_field="firstSeen",
         updated_at_field="lastSeen",
+        canonical=True,
     ),
     StreamSpec(
         name="events",
@@ -60,7 +61,6 @@ SENTRY_STREAMS: list[StreamSpec] = [
         cursor_field="dateCreated",
         created_at_field="dateCreated",
         updated_at_field=None,
-        canonical=False,
     ),
     StreamSpec(
         name="releases",
@@ -69,7 +69,6 @@ SENTRY_STREAMS: list[StreamSpec] = [
         cursor_field="dateCreated",
         created_at_field="dateCreated",
         updated_at_field=None,
-        canonical=False,
     ),
 ]
 

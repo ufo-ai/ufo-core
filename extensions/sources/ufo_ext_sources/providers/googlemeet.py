@@ -44,6 +44,7 @@ GOOGLE_MEET_STREAMS: list[StreamSpec] = [
         cursor_field="start_time",
         created_at_field="start_time",
         updated_at_field=None,
+        canonical=True,
     ),
 ]
 

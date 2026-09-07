@@ -43,7 +43,7 @@ from pathlib import PurePosixPath
 from secrets import token_hex
 from time import monotonic
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 from zipfile import BadZipFile, ZipFile
@@ -72,7 +72,7 @@ from ufo.harness.sandbox.conversation import (
 from ufo.harness.sandbox.ingress_url import mint_ingress_view_url
 from ufo.harness.sandbox.session import shell_path, workspace_path
 from ufo.harness.sandbox.terminal import TerminalOp
-from ufo.runtime.access.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
+from ufo.runtime.access.connectors import CatalogPage, ConnectorRegistry
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CredentialRequestInvalid,
@@ -136,7 +136,7 @@ from ufo.runtime.seats import (
     workspace_domain,
 )
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
-from ufo.runtime.sources.backend import ConnectorSourceConfig, binding_name
+from ufo.runtime.sources.backend import ConnectorSourceConfig
 from ufo.runtime.turns.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
@@ -147,7 +147,6 @@ from ufo.runtime.turns.audience import (
     parse_audience,
     readable_audiences,
 )
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.turns.transcript import (
     CompactionRecord,
     Conversation,
@@ -999,10 +998,17 @@ class PortalSkill:
 
 class ConnectionView(BaseModel):
     """One connector account reaching one agent, as the portal's connections panel lists it: the
-    provider identity, the `connector_grant` object name a prepared intent mutates it by, the
-    consenting owner, whether this viewer may manage it, the edge's disclosure, and when the grant
-    landed."""
+    provider identity, the object name a prepared intent mutates it by, the consenting owner,
+    whether this viewer may manage it, the edge's disclosure, what its streams read, and when the
+    grant landed. `owner_email` is None for the workspace's own connection — a keyed or configured
+    feed no member consented to, which is therefore shared and cannot be made private.
 
+    `base_url` and `backfill_days` are what every stream under the connection syncs against: the
+    tenant API host its rows dial, and how far back their first sync reaches. Both are the
+    connection's because both are the account's, and a member sets either through the `connection`
+    kind."""
+
+    id: UUID
     provider: str
     account_id: str
     account_label: str | None
@@ -1010,6 +1016,8 @@ class ConnectionView(BaseModel):
     owner_email: str | None
     own: bool
     shared: bool
+    base_url: str | None
+    backfill_days: int | None
     connected_at: datetime
 
     @field_validator("connected_at")
@@ -1025,10 +1033,13 @@ class AttachedAgentView(BaseModel):
 
 class ConnectionPoolView(BaseModel):
     """One connected account as the workspace's connector library lists it, with every agent
-    holding an edge to it. `own` is whether this viewer may manage the account itself — its owner
-    or a workspace admin, the same rule the disconnect gate re-checks — so the library draws a
-    remove control exactly where the act would be admitted."""
+    holding an edge to it and what its streams read. `own` is whether this viewer may manage the
+    account itself — its owner or a workspace admin, the same rule the disconnect and feed gates
+    re-check — so the library draws a control exactly where the act would be admitted. A workspace
+    connection has no owner, so only an admin manages one; the library reads its `owner_email` as
+    None and draws no make-private control, which the shared check would refuse."""
 
+    id: UUID
     provider: str
     account_id: str
     grant: str
@@ -1036,6 +1047,8 @@ class ConnectionPoolView(BaseModel):
     owner_email: str | None
     own: bool
     shared: bool
+    base_url: str | None
+    backfill_days: int | None
     connected_at: datetime
     agents: tuple[AttachedAgentView, ...]
 
@@ -1064,75 +1077,34 @@ class CredentialSlotView(BaseModel):
     filled: bool
 
 
-class _BindingFields(TypedDict):
-    """The projection `_binding_fields` returns, typed so its `**` expansion into `SourceView`
-    is checked field by field rather than collapsed to one union — which is what lets the
-    projection carry a non-string identity field at all."""
-
-    name: str | None
-    stream: str | None
-    account_id: str | None
-    base_url: str | None
-    backfill_days: int | Literal["all"] | None
-
-
-def _binding_fields(backend: str, config: dict[str, JsonValue]) -> _BindingFields:
-    """The `source` kind's identity for one row, from the stored connector config — the binding
-    name plus the spec fields a panel act echoes back. A row whose config is not a connector's
-    (a config-registered folder, a feed) is not kind-managed and carries None throughout.
-
-    Every field the object's own identity is built from has to be here, not just the ones a column
-    displays: a panel act submits `{...row.apply, <the one thing it changes>}`, so a field missing
-    from this projection arrives at the verb as its default and reads as an edit nobody made. That
-    is what refuses the act — a resync whose submitted spec must equal the binding's, a share-flip
-    that reaches the identity check first. `backfill_days` is carried for exactly that reason and
-    for no display purpose; `test_the_portals_binding_projection_carries_every_identity_field`
-    holds the set complete as `SourceSpec` grows."""
+def _stream_name(config: dict[str, JsonValue]) -> str | None:
+    """The stream one connector source row syncs, and None for a row no connector registered — a
+    configured folder root, an extension's own feed. `stream` is the whole of a connector row's
+    identity within the connection it hangs off, so it is the whole of what a panel names it by."""
     try:
-        parsed = ConnectorSourceConfig.model_validate(config)
+        return ConnectorSourceConfig.model_validate(config).stream
     except ValidationError:
-        return {
-            "name": None,
-            "stream": None,
-            "account_id": None,
-            "base_url": None,
-            "backfill_days": None,
-        }
-    return {
-        "name": binding_name(backend, parsed.account, parsed.base_url),
-        "stream": parsed.stream,
-        "account_id": "" if parsed.account == DIRECT_ACCOUNT else parsed.account,
-        "base_url": parsed.base_url or "",
-        "backfill_days": parsed.backfill_days,
-    }
+        return None
 
 
 class SourceView(BaseModel):
-    """One live source stream as the portal lists it: the backend, its disclosure subject
-    (member-private pages stay gated to their member; `shared` means the agent's audience), the
-    registering owner, whether this viewer may manage it, sync health, and — for a
-    connector-registered row — the `source` kind's binding name plus the spec fields that
-    reconstruct the binding, so the panel's per-binding acts (resync, share, remove) submit the
-    same object the chat verbs mutate. A config- or feed-registered row is not kind-managed and
-    carries None.
+    """One stream of one connection as the portal draws it under that connection: the connection it
+    hangs off, the backend driving it, the stream it syncs, and its sync health. A stream carries no
+    act and no disclosure of its own — every act a member has belongs to the connection, and the
+    connection's `shared` is the disclosure its pages take.
 
     `parked_reason` is what a refused stream reads as, and carries the park: it is set exactly on a
     row the driver slowed to an hour. Without it the panel shows a row the provider has stopped
     answering as healthy — no errors, next sync a minute out — while it syncs nothing. The text is
     the backend's own, and names the scope to re-grant to have it back inside the minute."""
 
+    id: UUID
+    connection_id: UUID
     backend: str
-    shared: bool
-    owner_email: str | None
-    own: bool
+    stream: str | None
     consecutive_errors: int
     next_sync_at: datetime
-    parked_reason: str | None = None
-    name: str | None = None
-    stream: str | None = None
-    account_id: str | None = None
-    base_url: str | None = None
-    backfill_days: int | Literal["all"] | None = None
+    parked_reason: str | None
 
     @field_validator("next_sync_at")
     @classmethod
@@ -3490,19 +3462,24 @@ class SurfaceContext:
         names its owner only to the owner or an admin."""
         query = (
             sa.select(
+                tables.connection.c.id,
                 tables.connection.c.provider,
                 tables.connection.c.account_id,
                 tables.connection.c.account_label,
                 tables.member.c.email,
                 tables.connection.c.owner_member_id,
                 tables.connection.c.shared,
+                tables.connection.c.base_url,
+                tables.connection.c.backfill_days,
                 tables.connector_grant.c.created_at,
             )
             .select_from(
                 tables.connector_grant.join(
                     tables.connection,
                     tables.connector_grant.c.connection_id == tables.connection.c.id,
-                ).join(tables.member, tables.connection.c.owner_member_id == tables.member.c.id)
+                ).outerjoin(
+                    tables.member, tables.connection.c.owner_member_id == tables.member.c.id
+                )
             )
             .where(
                 tables.connector_grant.c.workspace_id == self.workspace_id,
@@ -3521,6 +3498,7 @@ class SurfaceContext:
             rows = (await connection.execute(query)).all()
         return tuple(
             ConnectionView(
+                id=row.id,
                 provider=row.provider,
                 account_id=row.account_id,
                 grant=account_object_name(row.provider, row.account_id),
@@ -3528,6 +3506,8 @@ class SurfaceContext:
                 owner_email=row.email,
                 own=admin or row.owner_member_id == member_id,
                 shared=row.shared,
+                base_url=row.base_url,
+                backfill_days=row.backfill_days,
                 connected_at=row.created_at,
             )
             for row in rows
@@ -3542,22 +3522,30 @@ class SurfaceContext:
         never the sight of one. An archived holder is not a live app: the panel's Revoke posts a
         detach on every holder it lists, and an archived app refuses the turn that would carry it,
         which stops the revoke before the live holders after it. The filter rides the join, so a
-        connection whose only holder is archived still lists — held by nobody until a restore."""
+        connection whose only holder is archived still lists — held by nobody until a restore.
+
+        The workspace's own connections list beside the members' — a keyed provider, a configured
+        folder, an extension's feed. Each is shared by construction and owned by nobody, so the
+        owner join is outer: an inner one would drop exactly the connections whose streams every
+        member reads."""
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         query = (
             sa.select(
+                tables.connection.c.id,
                 tables.connection.c.provider,
                 tables.connection.c.account_id,
                 tables.connection.c.account_label,
                 tables.member.c.email,
                 tables.connection.c.owner_member_id,
                 tables.connection.c.shared,
+                tables.connection.c.base_url,
+                tables.connection.c.backfill_days,
                 tables.connection.c.created_at,
                 tables.agent.c.id.label("agent_id"),
                 member_name.label("agent_name"),
             )
             .select_from(
-                tables.connection.join(
+                tables.connection.outerjoin(
                     tables.member, tables.connection.c.owner_member_id == tables.member.c.id
                 )
                 .outerjoin(
@@ -3587,13 +3575,13 @@ class SurfaceContext:
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
-        grouped: dict[tuple[str, str], list[AttachedAgentView]] = {}
-        records: dict[tuple[str, str], ConnectionPoolView] = {}
+        grouped: dict[UUID, list[AttachedAgentView]] = {}
+        records: dict[UUID, ConnectionPoolView] = {}
         for row in rows:
-            key = (row.provider, row.account_id)
             records.setdefault(
-                key,
+                row.id,
                 ConnectionPoolView(
+                    id=row.id,
                     provider=row.provider,
                     account_id=row.account_id,
                     grant=account_object_name(row.provider, row.account_id),
@@ -3601,12 +3589,14 @@ class SurfaceContext:
                     owner_email=row.email,
                     own=admin or row.owner_member_id == member_id,
                     shared=row.shared,
+                    base_url=row.base_url,
+                    backfill_days=row.backfill_days,
                     connected_at=row.created_at,
                     agents=(),
                 ),
             )
             if row.agent_id is not None:
-                grouped.setdefault(key, []).append(
+                grouped.setdefault(row.id, []).append(
                     AttachedAgentView(id=row.agent_id, name=row.agent_name)
                 )
         return tuple(
@@ -3614,22 +3604,15 @@ class SurfaceContext:
             for key in records
         )
 
-    async def github_coverage(self, member_id: UUID, *, admin: bool) -> GithubCoverageView:
-        connection_visibility = (
-            sa.true()
-            if admin
-            else sa.or_(
-                tables.connection.c.shared,
-                tables.connection.c.owner_member_id == member_id,
-            )
-        )
-        source_visibility = (
-            sa.true()
-            if admin
-            else sa.or_(
-                tables.source.c.subject == SHARED_SUBJECT,
-                tables.source.c.owner_member_id == member_id,
-            )
+    async def github_coverage(self, member_id: UUID) -> GithubCoverageView:
+        """Whether this member reaches GitHub, on each of its two legs: an API connection, and a
+        stream syncing its content. Both read the connections this member may see — their own plus
+        the shared ones — which is the set `list_connections` and `list_sources` answer with, so the
+        card cannot state a coverage the screen under it does not list. Admin authority governs acts
+        on a connection, never the sight of one (#327), so it does not widen this read either."""
+        visibility = sa.or_(
+            tables.connection.c.shared,
+            tables.connection.c.owner_member_id == member_id,
         )
         async with workspace_tx() as connection:
             api = await connection.scalar(
@@ -3637,18 +3620,25 @@ class SurfaceContext:
                     sa.exists().where(
                         tables.connection.c.workspace_id == self.workspace_id,
                         tables.connection.c.provider == "github",
-                        connection_visibility,
+                        visibility,
                     )
                 )
             )
             sources = await connection.scalar(
                 sa.select(
-                    sa.exists().where(
+                    sa.select(tables.source.c.id)
+                    .select_from(
+                        tables.source.join(
+                            tables.connection,
+                            tables.source.c.connection_id == tables.connection.c.id,
+                        )
+                    )
+                    .where(
                         tables.source.c.workspace_id == self.workspace_id,
                         tables.source.c.backend == "github",
-                        tables.source.c.removed_at.is_(None),
-                        source_visibility,
+                        visibility,
                     )
+                    .exists()
                 )
             )
         return GithubCoverageView(api=bool(api), sources=bool(sources))
@@ -4071,51 +4061,52 @@ class SurfaceContext:
             snapshot = await Seats(self.workspace_id).snapshot(connection)
         return tuple(sorted(snapshot.members, key=lambda entry: entry.email))
 
-    async def list_sources(self, member_id: UUID, *, admin: bool) -> tuple[SourceView, ...]:
-        """The live source bindings this member may see — an admin all of them, everyone else
-        their own registrations plus shared ones. Removed sources stay gone; a member-subject
-        source's pages remain gated to that member wherever they land."""
+    async def list_sources(self, member_id: UUID) -> tuple[SourceView, ...]:
+        """Every stream of every connection this member may see, ordered under its connection. The
+        set is the connection listing's exactly — their own connections plus the shared ones, and no
+        admin authority widens either (#327): a stream is visible where the account it syncs is, and
+        a stream discloses nothing its account does not."""
         query = (
             sa.select(
+                tables.source.c.id,
+                tables.source.c.connection_id,
                 tables.source.c.backend,
-                tables.source.c.subject,
-                tables.member.c.email,
-                tables.source.c.owner_member_id,
                 tables.source.c.consecutive_errors,
                 tables.source.c.next_sync_at,
                 tables.source.c.parked_reason,
                 tables.source.c.config,
             )
             .select_from(
-                tables.source.outerjoin(
-                    tables.member, tables.source.c.owner_member_id == tables.member.c.id
+                tables.source.join(
+                    tables.connection,
+                    tables.source.c.connection_id == tables.connection.c.id,
                 )
             )
             .where(
                 tables.source.c.workspace_id == self.workspace_id,
-                tables.source.c.removed_at.is_(None),
-            )
-            .order_by(tables.source.c.backend, tables.source.c.created_at)
-        )
-        if not admin:
-            query = query.where(
                 sa.or_(
-                    tables.source.c.subject == SHARED_SUBJECT,
-                    tables.source.c.owner_member_id == member_id,
-                )
+                    tables.connection.c.shared,
+                    tables.connection.c.owner_member_id == member_id,
+                ),
             )
+            .order_by(
+                tables.connection.c.provider,
+                tables.connection.c.account_id,
+                tables.source.c.backend,
+                tables.source.c.created_at,
+            )
+        )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return tuple(
             SourceView(
+                id=row.id,
+                connection_id=row.connection_id,
                 backend=row.backend,
-                shared=row.subject == SHARED_SUBJECT,
-                owner_email=row.email,
-                own=admin or row.owner_member_id == member_id,
+                stream=_stream_name(row.config),
                 consecutive_errors=row.consecutive_errors,
                 next_sync_at=row.next_sync_at,
                 parked_reason=row.parked_reason,
-                **_binding_fields(row.backend, row.config),
             )
             for row in rows
         )

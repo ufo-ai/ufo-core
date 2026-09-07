@@ -1,6 +1,6 @@
 """The Recruitee connector over a mock transport: the page-number loop, the stream-named envelope
 (`{"candidates": [...]}`), and a refusal surfacing as `StreamSkipped`. The class base URL is empty
-(per-tenant), so the test binds the tenant URL through `ConnectorSourceConfig.base_url` — the real
+(per-tenant), so the test binds the tenant URL through `SourceAuth.base_url` — the real
 per-tenant path. Offline — a canned transport, no token."""
 
 from collections.abc import Callable
@@ -14,7 +14,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 BASE_URL = "https://api.recruitee.com/c/acme"
 
 
@@ -22,14 +21,14 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
 async def _fetch(stream: str, handler: Callable[[httpx.Request], httpx.Response]) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=BASE_URL)
     return await ConnectorBackend(connector=RecruiteeConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), None, auth
+        ConnectorSourceConfig(stream=stream), None, auth
     )
 
 

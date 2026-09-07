@@ -14,6 +14,7 @@ from ufo_ext_connectors.objects import (
     CONNECTION_KIND,
     CONNECTOR_GRANT_KIND,
     ConnectionObjects,
+    ConnectionSpec,
     ConnectorGrantObjects,
     ConnectorGrantSpec,
 )
@@ -151,7 +152,6 @@ async def _grant(
             account_id=account_id,
             host=f"api.{provider}.test",
             grantor_member_id=grantor_id,
-            conversation_id=conversation_id,
             shared=False,
         )
 
@@ -229,11 +229,7 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
                 ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
             )
         )
-        assert fetched["spec"] == {
-            "provider": "gmail",
-            "account_id": "alice@example.com",
-            "shared": False,
-        }
+        assert fetched["spec"] == {"provider": "gmail", "account_id": "alice@example.com"}
         assert fetched["status"]["owner_member_id"] == str(grantor_id)
         assert fetched["status"]["host"] == "api.gmail.test"
         assert fetched["status"]["agent"] == "assistant"
@@ -274,7 +270,13 @@ async def test_a_grant_links_to_its_agent_and_the_connection_it_opens(db: None) 
                 ref=link["target"],
             )
         )
-        assert opened["spec"] == {"provider": "gmail", "account_id": "alice@example.com"}
+        assert opened["spec"] == {
+            "provider": "gmail",
+            "account_id": "alice@example.com",
+            "shared": False,
+            "base_url": "",
+            "backfill_days": None,
+        }
         assert opened["links"] == []
 
 
@@ -304,17 +306,7 @@ async def test_a_shared_grant_drops_the_link_to_its_owner_only_connection(db: No
         await _text(
             _object_tool("object_apply"),
             owner,
-            manifest=yaml.safe_dump(
-                {
-                    "kind": CONNECTOR_GRANT_KIND,
-                    "name": GMAIL_ALICE_NAME,
-                    "spec": {
-                        "provider": "gmail",
-                        "account_id": "alice@example.com",
-                        "shared": True,
-                    },
-                }
-            ),
+            manifest=_share_manifest("alice@example.com", True),
         )
         assert await relations(owner) == ["scoped_to"]
         assert await relations(_tool_context(workspace_id, agent_id, other_id)) == ["scoped_to"]
@@ -322,17 +314,7 @@ async def test_a_shared_grant_drops_the_link_to_its_owner_only_connection(db: No
         await _text(
             _object_tool("object_apply"),
             owner,
-            manifest=yaml.safe_dump(
-                {
-                    "kind": CONNECTOR_GRANT_KIND,
-                    "name": GMAIL_ALICE_NAME,
-                    "spec": {
-                        "provider": "gmail",
-                        "account_id": "alice@example.com",
-                        "shared": False,
-                    },
-                }
-            ),
+            manifest=_share_manifest("alice@example.com", False),
         )
         assert await relations(owner) == ["scoped_to", "access_to"]
 
@@ -397,7 +379,7 @@ async def test_colliding_account_slugs_never_rename_objects(db: None) -> None:
         ),
         (
             CONNECTOR_GRANT_KIND,
-            {"provider": "gmail", "account_id": "alice", "shared": False},
+            {"provider": "gmail", "account_id": "alice"},
             ValueError,
             "not available",
         ),
@@ -433,7 +415,10 @@ async def test_connect_stays_the_only_create_path(
         await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), args)
 
 
-async def test_explain_limits_admins_to_narrowing_or_revoking(db: None) -> None:
+async def test_explain_states_where_sharing_lives_and_what_an_admin_may_do(db: None) -> None:
+    """Sharing is the connection's, so its guidance is where the one-way admin rule is stated and
+    the grant kind's says to go there — a model that read only one of the two would otherwise think
+    an edge could be shared."""
     workspace_id, agent_id, *_ = await _seed()
     with ws(workspace_id), agent(agent_id):
         connection = json.loads(
@@ -450,9 +435,11 @@ async def test_explain_limits_admins_to_narrowing_or_revoking(db: None) -> None:
                 kind=CONNECTOR_GRANT_KIND,
             )
         )
-    assert "owner or a workspace admin may delete" in connection["guidance"]
-    assert "owner may share or make it private" in grant["guidance"]
-    assert "admin may only make it private" in grant["guidance"]
+    assert "only its owner may set it" in connection["guidance"]
+    assert "workspace admin may unset it" in connection["guidance"]
+    assert "Delete is the owner's or an admin's" in connection["guidance"]
+    assert "the `connection` kind's own `shared` field, not this one" in grant["guidance"]
+    assert "shared" not in {field for field in ConnectorGrantSpec.model_fields}
     assert connection["agent_target_verbs"] == []
     assert grant["agent_target_verbs"] == ["create", "update"]
 
@@ -492,17 +479,7 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
                 ctx,
                 apply_tool.input_model.model_validate(
                     {
-                        "manifest": yaml.safe_dump(
-                            {
-                                "kind": CONNECTOR_GRANT_KIND,
-                                "name": GMAIL_ALICE_NAME,
-                                "spec": {
-                                    "provider": "gmail",
-                                    "account_id": "alice@example.com",
-                                    "shared": True,
-                                },
-                            }
-                        ),
+                        "manifest": _share_manifest("alice@example.com", True),
                     }
                 ),
             )
@@ -565,7 +542,7 @@ async def test_main_agent_attaches_an_existing_connection_to_another_agent(db: N
             await _text(
                 _object_tool("object_apply"),
                 _tool_context(workspace_id, agent_id, grantor_id, conversation_id),
-                manifest=_share_manifest("alice@example.com", False),
+                manifest=_attach_manifest("alice@example.com"),
                 agent="pr-babysitter",
             )
         )
@@ -590,7 +567,7 @@ async def test_cross_agent_attach_admits_the_owner_or_a_shared_connection_only(d
         )
         args = apply_tool.input_model.model_validate(
             {
-                "manifest": _share_manifest("alice@example.com", False),
+                "manifest": _attach_manifest("alice@example.com"),
                 "agent": "pr-babysitter",
             }
         )
@@ -614,7 +591,7 @@ async def test_cross_agent_reattach_updates_the_one_existing_edge(db: None) -> N
                 await _text(
                     _object_tool("object_apply"),
                     ctx,
-                    manifest=_share_manifest("alice@example.com", False),
+                    manifest=_attach_manifest("alice@example.com"),
                     agent="pr-babysitter",
                 )
             )
@@ -633,7 +610,7 @@ async def test_only_the_main_agent_attaches_for_another_agent(db: None) -> None:
         )
         args = apply_tool.input_model.model_validate(
             {
-                "manifest": _share_manifest("alice@example.com", False),
+                "manifest": _attach_manifest("alice@example.com"),
                 "agent": "pr-babysitter",
             }
         )
@@ -641,51 +618,50 @@ async def test_only_the_main_agent_attaches_for_another_agent(db: None) -> None:
             await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), args)
 
 
-async def test_apply_compares_with_the_current_grant_generation(
+async def test_apply_compares_with_the_current_connection_generation(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The read that produced `old` saw one connection; by the time the write lands the name holds
+    another. Sharing is that connection's own flag, so applying the read's intent to the row that
+    replaced it would share an account nobody asked about."""
     workspace_id, agent_id, conversation_id, _admin_id, grantor_id, _other_id = await _seed()
-    original_get = ConnectorGrantObjects.get
+    original_get = ConnectionObjects.get
     replacement: UUID | None = None
 
-    async def get_then_regrant(
-        self: ConnectorGrantObjects,
+    async def get_then_reconnect(
+        self: ConnectionObjects,
         ctx: ToolContext,
         name: str,
-    ) -> ObjectDetail[ConnectorGrantSpec] | None:
+    ) -> ObjectDetail[ConnectionSpec] | None:
         nonlocal replacement
         detail = await original_get(self, ctx, name)
         if replacement is None:
             if ctx.grants is None:
                 raise RuntimeError("grants unavailable")
-            (stale,) = await ctx.grants.active_grants()
-            assert await ctx.grants.revoke(stale.id, actor_member_id=grantor_id) is True
-            await ctx.grants.record(
+            (stale,) = await connection_summaries()
+            assert await ctx.grants.disconnect(stale.id, actor_member_id=grantor_id) is True
+            replacement = await ctx.grants.record(
                 provider="gmail",
                 account_id="alice@example.com",
                 host="api.gmail.test",
                 grantor_member_id=grantor_id,
-                conversation_id=conversation_id,
                 shared=True,
             )
-            (current,) = await ctx.grants.active_grants()
-            replacement = current.id
         return detail
 
-    monkeypatch.setattr(ConnectorGrantObjects, "get", get_then_regrant)
+    monkeypatch.setattr(ConnectionObjects, "get", get_then_reconnect)
     with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
-        before = (await grant_summaries())[0].id
+        before = (await connection_summaries())[0].id
         with pytest.raises(ValueError, match="changed while editing"):
             await _text(
                 _object_tool("object_apply"),
                 _tool_context(workspace_id, agent_id, grantor_id),
                 manifest=_share_manifest("alice@example.com", False),
             )
-        current = (await grant_summaries())[0]
-    assert current.id == replacement
+        current = (await connection_summaries())[0]
     assert current.id != before
     assert current.shared is True
 
@@ -701,8 +677,9 @@ async def test_get_refuses_a_grant_made_private_after_its_detail_snapshot(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
         grant_id = (await grant_summaries())[0].id
+        connection_id = (await connection_summaries())[0].id
         grants = GrantStore()
-        assert await grants.set_shared(grant_id, True, actor_member_id=grantor_id) is True
+        assert await grants.set_shared(connection_id, True, actor_member_id=grantor_id) is True
 
         async def privatize_before_status(
             store: ConnectorGrantObjects,
@@ -711,7 +688,7 @@ async def test_get_refuses_a_grant_made_private_after_its_detail_snapshot(
             *,
             expected_generation: UUID | None,
         ):
-            assert await grants.set_shared(grant_id, False, actor_member_id=grantor_id) is True
+            assert await grants.set_shared(connection_id, False, actor_member_id=grantor_id) is True
             return await real_status(store, ctx, name, expected_generation=expected_generation)
 
         monkeypatch.setattr(ConnectorGrantObjects, "status", privatize_before_status)
@@ -756,7 +733,6 @@ async def test_connection_get_and_status_refuse_same_named_replacement(
             account_id="alice@example.com",
             host="api.gmail.test",
             grantor_member_id=replacement_owner,
-            conversation_id=conversation_id,
             shared=False,
         )
         return owner
@@ -781,95 +757,92 @@ async def test_connection_get_and_status_refuse_same_named_replacement(
         assert (await grant_summaries())[0].owner_member_id == grantor_id
 
 
-async def test_grant_apply_fails_if_its_generation_is_replaced(
+async def test_connection_apply_fails_if_its_generation_is_replaced(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The connection is replaced inside the write itself: `set_shared` finds no row under the id
+    the read handed it, and the apply says so rather than reporting a flip that never landed."""
     workspace_id, agent_id, conversation_id, _admin_id, grantor_id, _other_id = await _seed()
     original_set_shared = GrantStore.set_shared
 
-    async def regrant_then_set_shared(
+    async def reconnect_then_set_shared(
         self: GrantStore,
-        grant_id: UUID,
+        connection_id: UUID,
         shared: bool,
         *,
         actor_member_id: UUID,
     ) -> bool:
-        assert await self.revoke(grant_id, actor_member_id=actor_member_id) is True
+        assert await self.disconnect(connection_id, actor_member_id=actor_member_id) is True
         await self.record(
             provider="gmail",
             account_id="alice@example.com",
             host="api.gmail.test",
             grantor_member_id=grantor_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         return await original_set_shared(
             self,
-            grant_id,
+            connection_id,
             shared,
             actor_member_id=actor_member_id,
         )
 
-    monkeypatch.setattr(GrantStore, "set_shared", regrant_then_set_shared)
+    monkeypatch.setattr(GrantStore, "set_shared", reconnect_then_set_shared)
     with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
-        stale = (await grant_summaries())[0].id
+        stale = (await connection_summaries())[0].id
         with pytest.raises(ValueError, match="changed while editing"):
             await _text(
                 _object_tool("object_apply"),
                 _tool_context(workspace_id, agent_id, grantor_id),
                 manifest=_share_manifest("alice@example.com", True),
             )
-        (current,) = await grant_summaries()
+        (current,) = await connection_summaries()
     assert current.id != stale
     assert current.shared is False
 
 
-async def test_grant_apply_fails_if_replaced_before_current_lookup(
+async def test_connection_apply_fails_if_replaced_before_current_lookup(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The generation the verb was handed still matches what `_owner` answers, and the row is gone
+    by the time the write reads it back — so the apply refuses at that read rather than writing
+    against a connection that no longer exists."""
     workspace_id, agent_id, conversation_id, _admin_id, grantor_id, _other_id = await _seed()
-    original_owner = ConnectorGrantObjects._owner
+    original_owner = ConnectionObjects._owner
     replacement: UUID | None = None
 
-    async def regrant_after_snapshot(
-        self: ConnectorGrantObjects,
+    async def reconnect_after_snapshot(
+        self: ConnectionObjects,
         ctx: ToolContext,
         name: str,
     ) -> GeneratedObjectOwner | None:
         nonlocal replacement
         owner = await original_owner(self, ctx, name)
         if owner is None:
-            raise AssertionError("connector grant owner and generation required")
+            raise AssertionError("connection owner and generation required")
         if ctx.grants is None:
             raise AssertionError("grants required")
-        assert await ctx.grants.revoke(owner.generation, actor_member_id=grantor_id) is True
-        await ctx.grants.record(
+        assert await ctx.grants.disconnect(owner.generation, actor_member_id=grantor_id) is True
+        replacement = await ctx.grants.record(
             provider="gmail",
             account_id="alice@example.com",
             host="api.gmail.test",
             grantor_member_id=grantor_id,
-            conversation_id=conversation_id,
             shared=False,
         )
-        (current,) = await ctx.grants.active_grants()
-        replacement = current.id
         return owner
 
-    monkeypatch.setattr(ConnectorGrantObjects, "_owner", regrant_after_snapshot)
-    store = ConnectorGrantObjects()
+    monkeypatch.setattr(ConnectionObjects, "_owner", reconnect_after_snapshot)
+    store = ConnectionObjects()
     with ws(workspace_id), agent(agent_id):
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
-        stale = (await grant_summaries())[0].id
-        current_spec = ConnectorGrantSpec(
-            provider="gmail",
-            account_id="alice@example.com",
-            shared=False,
-        )
+        stale = (await connection_summaries())[0].id
+        current_spec = ConnectionSpec(provider="gmail", account_id="alice@example.com")
         with pytest.raises(ValueError, match="changed while editing"):
             await store.apply(
                 _tool_context(workspace_id, agent_id, grantor_id),
@@ -878,7 +851,7 @@ async def test_grant_apply_fails_if_replaced_before_current_lookup(
                 current_spec,
                 expected_generation=stale,
             )
-        (current,) = await grant_summaries()
+        (current,) = await connection_summaries()
     assert current.id == replacement
     assert current.id != stale
     assert current.shared is False
@@ -909,7 +882,6 @@ async def test_connection_delete_fails_if_its_generation_is_replaced(
             account_id="alice@example.com",
             host="api.gmail.test",
             grantor_member_id=grantor_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         return await original_disconnect(
@@ -968,7 +940,6 @@ async def test_grant_delete_fails_if_its_generation_is_replaced(
             account_id="alice@example.com",
             host="api.gmail.test",
             grantor_member_id=grantor_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         return await original_revoke(
@@ -1041,6 +1012,9 @@ async def test_connection_is_one_member_owned_object_and_disconnects_every_agent
             assert fetched["spec"] == {
                 "provider": "gmail",
                 "account_id": "alice@example.com",
+                "shared": False,
+                "base_url": "",
+                "backfill_days": None,
             }
             assert fetched["status"]["agents"] == ["assistant", "exec"]
             await _text(
@@ -1111,10 +1085,203 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
         assert await grant_summaries() == ()
 
 
-def _share_manifest(account_id: str, shared: bool, name: str = GMAIL_ALICE_NAME) -> str:
+def _feed_manifest(
+    account_id: str = "alice@example.com",
+    *,
+    provider: str = "gmail",
+    base_url: str = "",
+    backfill_days: int | None = None,
+    name: str = GMAIL_ALICE_NAME,
+) -> str:
+    spec: dict[str, object] = {"provider": provider, "account_id": account_id}
+    if base_url:
+        spec["base_url"] = base_url
+    if backfill_days is not None:
+        spec["backfill_days"] = backfill_days
+    return yaml.safe_dump({"kind": CONNECTION_KIND, "name": name, "spec": spec})
+
+
+async def _workspace_connection(workspace_id: UUID, provider: str) -> UUID:
+    """The workspace's own connection to a provider — a keyed or configured feed no member owns and
+    the workspace shares, which `register_connection` lands and no connect flow ever does."""
+    connection_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                account_id="",
+                host="",
+                owner_member_id=None,
+                shared=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return connection_id
+
+
+async def test_the_owner_sets_what_a_connections_streams_read(db: None) -> None:
+    """Apply writes the tenant URL and the backfill window through the grant store and reads them
+    back off the connection — the two fields that decide what a connected account's feeds fetch."""
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "zendesk", "alice@example.com"
+        )
+        name = account_object_name("zendesk", "alice@example.com")
+        ctx = _tool_context(workspace_id, agent_id, grantor_id)
+        applied = json.loads(
+            await _text(
+                _object_tool("object_apply"),
+                ctx,
+                manifest=_feed_manifest(
+                    provider="zendesk",
+                    name=name,
+                    base_url="https://acme.zendesk.com/",
+                    backfill_days=30,
+                ),
+            )
+        )
+        assert applied["result"] == "updated"
+        fetched = yaml.safe_load(
+            await _text(_object_tool("object_get"), ctx, ref=f"{CONNECTION_KIND}/{name}")
+        )
+        (summary,) = await connection_summaries()
+    assert summary.base_url == "https://acme.zendesk.com"
+    assert summary.backfill_days == 30
+    assert fetched["spec"] == {
+        "provider": "zendesk",
+        "account_id": "alice@example.com",
+        "shared": False,
+        "base_url": "https://acme.zendesk.com",
+        "backfill_days": 30,
+    }
+
+
+async def test_a_connection_apply_that_moves_the_account_is_refused(db: None) -> None:
+    """Provider and account are the connection's identity: only connect_account creates one, so an
+    apply that names another account is refused rather than silently retargeting the feed."""
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        args = apply_tool.input_model.model_validate(
+            {"manifest": _feed_manifest("bob@example.com")}
+        )
+        with pytest.raises(VerbNotSupported, match="connect_account"):
+            await apply_tool.handler(_tool_context(workspace_id, agent_id, grantor_id), args)
+        (summary,) = await connection_summaries()
+    assert summary.account_id == "alice@example.com"
+    assert summary.base_url is None
+
+
+async def test_an_admin_sets_the_feed_and_a_third_member_may_not(db: None) -> None:
+    """An admin may change what a member's connection reads. A third member cannot: the connection
+    is not theirs and not shown to them at all, so they are refused by absence rather than told an
+    account exists."""
+    workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        args = apply_tool.input_model.model_validate({"manifest": _feed_manifest(backfill_days=7)})
+        with pytest.raises(UnknownObject):
+            await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
+        assert (await connection_summaries())[0].backfill_days is None
+        await _text(
+            apply_tool,
+            _tool_context(workspace_id, agent_id, admin_id),
+            manifest=_feed_manifest(backfill_days=7),
+        )
+        assert (await connection_summaries())[0].backfill_days == 7
+
+
+async def test_a_backfill_window_outside_the_bounds_is_refused(db: None) -> None:
+    """A century of days is all the history there is; zero days is no window at all. Both are
+    refused at the spec, before a row is touched."""
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    apply_tool = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        ctx = _tool_context(workspace_id, agent_id, grantor_id)
+        for days in (0, tables.MAX_BACKFILL_DAYS + 1):
+            args = apply_tool.input_model.model_validate(
+                {"manifest": _feed_manifest(backfill_days=days)}
+            )
+            with pytest.raises(ValueError, match="backfill_days"):
+                await apply_tool.handler(ctx, args)
+        assert (await connection_summaries())[0].backfill_days is None
+
+
+async def test_a_connection_nobody_owns_reads_as_the_workspaces(db: None) -> None:
+    """A keyed or configured feed has no member behind it, so the listing names no owner, status
+    answers None rather than the string 'None', and only an admin sees it at all."""
+    workspace_id, agent_id, _conversation_id, admin_id, _grantor, _other = await _seed()
+    connection_id = await _workspace_connection(workspace_id, "folder")
+    name = account_object_name("folder", "")
+    with ws(workspace_id), agent(agent_id):
+        ctx = _tool_context(workspace_id, agent_id, admin_id)
+        listing = json.loads(await _text(_object_tool("object_list"), ctx, kind=CONNECTION_KIND))
+        fetched = yaml.safe_load(
+            await _text(_object_tool("object_get"), ctx, ref=f"{CONNECTION_KIND}/{name}")
+        )
+        (summary,) = await connection_summaries()
+    assert summary.id == connection_id
+    assert [row["name"] for row in listing["objects"]] == [name]
+    assert listing["objects"][0]["summary"] == "folder workspace connection (no owner, shared)"
+    assert fetched["status"]["owner_member_id"] is None
+    assert fetched["status"]["owner"] is None
+    assert fetched["status"]["shared"] is True
+
+
+async def test_a_connection_nobody_owns_cannot_be_made_private(db: None) -> None:
+    """The schema's own `connection_shared` check refuses it, and it should: private means private
+    to a member, and there is no member here to keep it from."""
+    workspace_id, agent_id, _conversation_id, admin_id, _grantor, _other = await _seed()
+    await _workspace_connection(workspace_id, "folder")
+    name = account_object_name("folder", "")
+    apply_tool = _object_tool("object_apply")
+    args = apply_tool.input_model.model_validate(
+        {
+            "manifest": yaml.safe_dump(
+                {
+                    "kind": CONNECTION_KIND,
+                    "name": name,
+                    "spec": {"provider": "folder", "account_id": "", "shared": False},
+                }
+            )
+        }
+    )
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(VerbNotSupported, match="belongs to the workspace"):
+            await apply_tool.handler(_tool_context(workspace_id, agent_id, admin_id), args)
+        assert (await connection_summaries())[0].shared is True
+
+
+def _attach_manifest(account_id: str, name: str = GMAIL_ALICE_NAME) -> str:
+    """Attaching is the grant kind's, and a grant edge carries nothing but which account it
+    opens."""
     return yaml.safe_dump(
         {
             "kind": CONNECTOR_GRANT_KIND,
+            "name": name,
+            "spec": {"provider": "gmail", "account_id": account_id},
+        }
+    )
+
+
+def _share_manifest(account_id: str, shared: bool, name: str = GMAIL_ALICE_NAME) -> str:
+    """Sharing is the connection's, so the manifest that flips it names the connection kind."""
+    return yaml.safe_dump(
+        {
+            "kind": CONNECTION_KIND,
             "name": name,
             "spec": {"provider": "gmail", "account_id": account_id, "shared": shared},
         }
@@ -1140,8 +1307,8 @@ async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) ->
         fetched = yaml.safe_load(
             await _text(
                 _object_tool("object_get"),
-                _tool_context(workspace_id, agent_id),
-                ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
+                _tool_context(workspace_id, agent_id, grantor_id),
+                ref=f"{CONNECTION_KIND}/{GMAIL_ALICE_NAME}",
             )
         )
         assert fetched["spec"]["shared"] is True
@@ -1172,7 +1339,7 @@ async def test_only_the_grantor_may_widen_and_an_admin_may_narrow(db: None) -> N
                 "manifest": _share_manifest("alice@example.com", False),
             }
         )
-        with pytest.raises(AdminRequired, match="owner or a workspace admin"):
+        with pytest.raises(UnknownObject):
             await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
 
         await _text(
@@ -1183,7 +1350,10 @@ async def test_only_the_grantor_may_widen_and_an_admin_may_narrow(db: None) -> N
         assert (await grant_summaries())[0].shared is False
 
 
-async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> None:
+async def test_apply_refuses_a_connection_it_did_not_name(db: None) -> None:
+    """Provider and account identify a connection, so a spec under this name that carries another
+    account is refused rather than retargeted, and a name the workspace holds no connection for
+    cannot be conjured into one by applying it."""
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
     with ws(workspace_id), agent(agent_id):
@@ -1202,7 +1372,7 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
 
         create = apply_tool.input_model.model_validate(
             {
-                "manifest": _share_manifest("bob@example.com", False, name=GMAIL_BOB_NAME),
+                "manifest": _attach_manifest("bob@example.com", name=GMAIL_BOB_NAME),
             }
         )
         with pytest.raises(ValueError, match="not available"):
@@ -1251,7 +1421,7 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
             _tool_context(workspace_id, agent_id, grantor_id),
             manifest=yaml.safe_dump(
                 {
-                    "kind": CONNECTOR_GRANT_KIND,
+                    "kind": CONNECTION_KIND,
                     "name": ASANA_BOB_NAME,
                     "spec": {"provider": "asana", "account_id": "bob@example.com", "shared": True},
                 }
@@ -1305,7 +1475,7 @@ async def test_portal_reads_hide_other_members_private_connectors(db: None) -> N
             _tool_context(workspace_id, agent_id, grantor_id),
             manifest=yaml.safe_dump(
                 {
-                    "kind": CONNECTOR_GRANT_KIND,
+                    "kind": CONNECTION_KIND,
                     "name": ASANA_BOB_NAME,
                     "spec": {"provider": "asana", "account_id": "bob@example.com", "shared": True},
                 }
@@ -1386,3 +1556,22 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
         summaries = await grant_summaries()
     assert len(summaries) == 1
     assert summaries[0].shared is False
+
+
+async def test_the_workspaces_own_connection_is_not_deleted_here(db: None) -> None:
+    """The workspace's own connection is minted by the registrar from a filled credential slot or a
+    configured entry, so deleting it would be undone on the next tick. The kind says what actually
+    stops that feed instead, and the row stays."""
+    workspace_id, agent_id, _conversation_id, admin_id, _grantor, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _workspace_connection(workspace_id, "gmail")
+        with pytest.raises(VerbNotSupported, match="credential slot"):
+            await _text(
+                _object_tool("object_delete"),
+                _tool_context(workspace_id, agent_id, admin_id),
+                kind=CONNECTION_KIND,
+                name=account_object_name("gmail", ""),
+            )
+        (current,) = await connection_summaries()
+    assert current.owner_member_id is None
+    assert current.provider == "gmail"

@@ -883,24 +883,37 @@ async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
     assert fetched_own is not None
 
 
-async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
+async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
     db: None, tmp_path: Path
 ) -> None:
-    """`object_list`/`object_get` with a memory ref recheck a page-derived row's source grant: an
-    agent without a grant for the source sees nothing, while the granted agent reads it in full —
-    the object surface holds the same source fence recall does, so a fact never leaks via a
-    listing."""
+    """`object_list`/`object_get` with a memory ref recheck a page-derived row's reach: an agent
+    holding no grant on the connection behind the source sees nothing, while the granted agent
+    reads it in full — the object surface holds the same source fence recall does, so a fact never
+    leaks via a listing."""
     workspace_id = await _workspace()
-    source_id, page_id, item_id = uuid4(), uuid4(), uuid4()
+    connection_id, source_id, page_id, item_id = uuid4(), uuid4(), uuid4(), uuid4()
     now = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider="folder",
+                account_id="",
+                host="",
+                owner_member_id=None,
+                shared=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
-                subject="shared",
+                connection_id=connection_id,
                 next_sync_at=now,
                 created_at=now,
                 updated_at=now,
@@ -960,10 +973,11 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
             )
         )
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=source_id,
                 agent_id=granted.turn.agent_id,
+                connection_id=connection_id,
                 created_at=now,
                 updated_at=now,
             )

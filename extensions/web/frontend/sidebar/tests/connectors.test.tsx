@@ -147,15 +147,37 @@ async function returning() {
 
 function grant(provider: string, shared: boolean, name: string) {
   return {
+    id: "c-" + name,
     provider,
     account_id: "acct",
     account_label: null,
     owner_email: "member@example.com",
     own: true,
     shared,
+    base_url: null,
+    backfill_days: null,
     connected_at: "2026-07-01T00:00:00",
     grant: name,
     agents: [],
+  };
+}
+
+/** One stream of one connection, as the sources read serves it. */
+function stream(
+  connection: string,
+  backend: string,
+  named: string,
+  errors = 0,
+  parked: string | null = null,
+) {
+  return {
+    id: backend + "-" + named,
+    connection_id: connection,
+    backend,
+    stream: named,
+    consecutive_errors: errors,
+    next_sync_at: "2026-07-01T00:01:00",
+    parked_reason: parked,
   };
 }
 
@@ -485,18 +507,9 @@ test("the pool's record states what the row gave up, and attaches to the agent n
   expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
 });
 
-test("the pool's record states every stream and the errors for its account once sources load", async () => {
+test("the pool's record hangs its connection's streams under it, and no other connection's", async () => {
   location.hash = sectionHash("connectors");
   let answer: (response: Response) => void = () => {};
-  const names = [
-    "commits",
-    "deployments",
-    "discussions",
-    "issues",
-    "pulls",
-    "releases",
-    "workflows",
-  ];
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
     "/workspace/sources": () =>
@@ -512,51 +525,134 @@ test("the pool's record states every stream and the errors for its account once 
   await pressItem("github");
 
   expect(await screen.findByText("You")).toBeTruthy();
-  expect(screen.queryByText("Streams")).toBeNull();
-  expect(screen.queryByText("Errors")).toBeNull();
+  expect(screen.queryByText("issues")).toBeNull();
 
   await act(async () =>
     answer(
       json({
-        sources: names
-          .map((stream) => ({
-            backend: "github",
-            account_id: "acct",
-            stream,
-            consecutive_errors: stream === "issues" ? 2 : 0,
-            parked_reason: stream === "workflows" ? "Reconnect GitHub." : null,
-          }))
-          .concat({
-            backend: "slack",
-            account_id: "other",
-            stream: "messages",
-            consecutive_errors: 9,
-            parked_reason: null,
-          }),
+        sources: [
+          stream("c-g1", "github", "issues", 2),
+          stream("c-g1", "github", "workflows", 0, "Reconnect GitHub."),
+          stream("c-g2", "slack", "messages", 9),
+        ],
       }),
     ),
   );
-  const said = names.join(", ");
-  const value = await screen.findByText(said);
-  expect(fact("Streams")).toBe(said);
-  expect(fact("Errors")).toBe("2 · 1 parked");
-  expect(screen.getByTitle("Reconnect GitHub.")).toBeTruthy();
-  expect(value.className).toContain("whitespace-pre-wrap");
-  expect(value.className).not.toContain("truncate");
+
+  expect(await screen.findByText("issues")).toBeTruthy();
+  expect(screen.getByText("2 errors")).toBeTruthy();
+  expect(screen.getByText("Reconnect GitHub.")).toBeTruthy();
+  // The slack stream hangs off another connection, so this record never draws it.
+  expect(screen.queryByText("messages")).toBeNull();
+  expect(screen.queryByText("9 errors")).toBeNull();
 });
 
-test("the pool's record shares and revokes into the lane of the agent already holding the grant", async () => {
-  const posted: string[] = [];
+test("a connection with no stream says so rather than standing blank", async () => {
+  location.hash = sectionHash("connectors");
+  wire({
+    "/connections": () => json({ connections: [grant("github", false, "g1")] }),
+    "/workspace/sources": () => json({ sources: [stream("c-other", "slack", "messages")] }),
+    "/github/coverage": () => json({ api: true, sources: true }),
+    "/workspace/first-run": () => json(BARE),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("github");
+
+  expect(await screen.findByText("No stream syncs this account yet.")).toBeTruthy();
+});
+
+test("the record's sync settings land on the connection kind, and read back to a member who cannot set them", async () => {
+  const posted: { url: string; body: string }[] = [];
+  location.hash = sectionHash("connectors");
+  wire({
+    "/connections": () =>
+      json({
+        connections: [
+          { ...grant("github", false, "g1"), base_url: "https://acme.example.com", backfill_days: 30 },
+        ],
+      }),
+    "/workspace/sources": () => json({ sources: [] }),
+    "/github/coverage": () => json({ api: true, sources: true }),
+    "/workspace/first-run": () => json(BARE),
+    "/intents": (url, init) => {
+      posted.push({ url, body: String(init?.body ?? "") });
+      return json({ applied: true, message: "Applied." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("github");
+
+  const url = await screen.findByLabelText("Tenant URL");
+  expect((url as HTMLInputElement).value).toBe("https://acme.example.com");
+  expect((screen.getByLabelText("Backfill days") as HTMLInputElement).value).toBe("30");
+
+  await userEvent.clear(screen.getByLabelText("Backfill days"));
+  await userEvent.type(screen.getByLabelText("Backfill days"), "90");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
+  expect(JSON.parse(posted[0].body)).toMatchObject({
+    verb: "apply",
+    kind: "connection",
+    name: "g1",
+    spec: {
+      provider: "github",
+      account_id: "acct",
+      base_url: "https://acme.example.com",
+      backfill_days: 90,
+    },
+  });
+});
+
+test("a workspace connection states its access and draws neither owner nor make-private", async () => {
+  location.hash = sectionHash("connectors");
+  wire({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            ...grant("folder", true, "g1"),
+            account_id: "",
+            owner_email: null,
+            own: true,
+            agents: [{ id: SECOND_ID, name: "second" }],
+          },
+        ],
+      }),
+    "/workspace/sources": () => json({ sources: [] }),
+    "/github/coverage": () => json({ api: true, sources: true }),
+    "/workspace/first-run": () => json(BARE),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("folder");
+
+  expect(await screen.findByRole("dialog", { name: "folder" })).toBeTruthy();
+  expect(fact("Access")).toBe("Workspace");
+  expect(fact("Owner")).toBe("Workspace");
+  expect(screen.queryByRole("button", { name: "Make private" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Share with app" })).toBeNull();
+});
+
+test("the record shares on the connection and revokes on the holder's own edge", async () => {
+  const posted: { url: string; body: string }[] = [];
   location.hash = sectionHash("connectors");
   wire({
     "/connections": () =>
       json({
         connections: [{ ...grant("github", true, "g1"), agents: [{ id: SECOND_ID, name: "second" }] }],
       }),
+    "/workspace/sources": () => json({ sources: [] }),
     "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
-    "/intents": (url) => {
-      posted.push(url);
+    "/intents": (url, init) => {
+      posted.push({ url, body: String(init?.body ?? "") });
       return json({ applied: true, message: "Applied." });
     },
     "/transcript": () => json({ messages: [] }),
@@ -566,14 +662,30 @@ test("the pool's record shares and revokes into the lane of the agent already ho
   await pressItem("github");
   await userEvent.click(screen.getByRole("button", { name: "Make private" }));
 
+  // Sharing is a column on the connection, so it rides the connection kind in the record's own
+  // lane — and the spec carries the whole record, or the apply would also forget the tenant.
   await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
+  expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
+  expect(JSON.parse(posted[0].body)).toMatchObject({
+    verb: "apply",
+    kind: "connection",
+    name: "g1",
+    spec: {
+      provider: "github",
+      account_id: "acct",
+      shared: false,
+      base_url: "",
+      backfill_days: null,
+    },
+  });
 
+  // Revoking is one agent's own edge, so it lands in that agent's lane.
   await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
 
   await waitFor(() => expect(posted.length).toBe(2));
-  expect(posted[1]).toContain("/agents/" + SECOND_ID + "/intents");
+  expect(posted[1].url).toContain("/agents/" + SECOND_ID + "/intents");
+  expect(JSON.parse(posted[1].body)).toMatchObject({ verb: "detach", kind: "connector_grant" });
 });
 
 test("a grant change is admitted into the lane of the agent whose settings hold it", async () => {
@@ -643,18 +755,18 @@ test("a revoked connection stays shut when the grant comes back on a later read"
   await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
-  expect(await screen.findByRole("dialog", { name: "acct" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "member@example.com" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: "acct" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "member@example.com" })).toBeNull());
 
   await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
   await userEvent.click(await screen.findByRole("option", { name: /github/ }));
   await userEvent.click(screen.getByRole("button", { name: "Attach" }));
 
   expect(await screen.findByRole("cell", { name: "github" })).toBeTruthy();
-  expect(screen.queryByRole("dialog", { name: "acct" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "member@example.com" })).toBeNull();
 });
 
 test("the attach picker names the provider and the account, not the broker id", async () => {
@@ -783,12 +895,12 @@ test("the settings dialog replaces a grant sheet with the add sheet", async () =
   const dialog = await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
-  expect(await screen.findByRole("dialog", { name: "acct" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "member@example.com" })).toBeTruthy();
 
   await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
 
   expect(await screen.findByRole("dialog", { name: "Add connector" })).toBeTruthy();
-  expect(screen.queryByRole("dialog", { name: "acct" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "member@example.com" })).toBeNull();
 });
 
 test("a connector's consent opens in a window this page owns, so its return page closes itself", async () => {

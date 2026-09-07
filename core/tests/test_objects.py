@@ -31,7 +31,7 @@ from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.objects import SITE_OBJECT
 from ufo_ext_skill_create.manifest import SKILL_OBJECT
 from ufo_ext_sources.pages import PAGE_OBJECT
-from ufo_ext_sources.tools import SOURCE_OBJECT
+from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
 
 import ufo.host.kinds.artifacts as artifacts
 import ufo.host.kinds.conversations as conversations
@@ -697,12 +697,12 @@ def _check_object_page_search_skips_link_fields() -> None:
 
 def _check_member_owned_kinds_gate_through_the_shared_base() -> None:
     """A member-owned kind cannot hand-roll its own visibility/ownership gate — it subclasses the
-    core base that owns it. The connector and source kinds are the reference members; a future
-    member-owned kind that reimplements the gate instead of subclassing fails here."""
+    core base that owns it. The connection and source-trigger kinds are the reference members; a
+    future member-owned kind that reimplements the gate instead of subclassing fails here."""
     assert isinstance(CONNECTION_OBJECT.store, MemberOwnedObjects)
     assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberOwnedObjects)
     assert isinstance(AGENT_OBJECT.store, MemberOwnedObjects)
-    assert isinstance(SOURCE_OBJECT.store, MemberOwnedObjects)
+    assert isinstance(SOURCE_TRIGGER_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberOwnedObjects)
 
 
@@ -713,7 +713,7 @@ def _check_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> N
     from inside it."""
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberListable)
     assert isinstance(SITE_OBJECT.store, MemberListable)
-    assert isinstance(SOURCE_OBJECT.store, MemberListable)
+    assert isinstance(SOURCE_TRIGGER_OBJECT.store, MemberListable)
     assert isinstance(CONNECTION_OBJECT.store, MemberListable)
     assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberListable)
     assert isinstance(CredentialObjects(slots=()), MemberListable)

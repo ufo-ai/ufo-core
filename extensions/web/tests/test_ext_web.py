@@ -1937,8 +1937,16 @@ async def test_agents_status_answers_only_the_member_audience(
 
 
 async def _seed_connection(
-    workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str, *, shared: bool
-) -> None:
+    workspace_id: UUID,
+    agent_id: UUID,
+    owner_member_id: UUID | None,
+    provider: str,
+    *,
+    shared: bool,
+) -> UUID:
+    """One connection with the grant edge that reaches it. A workspace connection passes no owner:
+    nobody consented to it, so it is shared by construction and the shared check is what makes it
+    readable. The id comes back because a source row hangs off it."""
     conversation_id, connection_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1960,7 +1968,6 @@ async def _seed_connection(
                 account_id=f"{provider}-account",
                 host="api.example.test",
                 owner_member_id=owner_member_id,
-                conversation_id=conversation_id,
                 shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -1972,7 +1979,23 @@ async def _seed_connection(
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 connection_id=connection_id,
-                conversation_id=conversation_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return connection_id
+
+
+async def _seed_stream(workspace_id: UUID, connection_id: UUID, stream: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                backend="github",
+                config={"stream": stream},
+                connection_id=connection_id,
+                next_sync_at=sa.func.now(),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2100,6 +2123,38 @@ async def test_connection_pool_hides_another_members_private_connection_from_an_
         ("github", True),
         ("slack", True),
     ]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_workspace_streams_take_the_visibility_of_the_connection_they_hang_off(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A stream is read where the account it syncs is read, and nowhere else. A workspace admin
+    reads the streams of every shared account and of their own, and never those of another
+    member's private account: sharing is what discloses an account, and a stream discloses nothing
+    the account does not. Each row names the connection it hangs off, which is how the connectors
+    screen draws it under that account rather than beside it."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    private = await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
+    shared = await _seed_connection(workspace_id, agent_id, member_m, "slack", shared=True)
+    await _seed_stream(workspace_id, private, "issues")
+    await _seed_stream(workspace_id, shared, "messages")
+
+    owner = await client.get(
+        "/surface/web/workspace/sources", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert [(s["connection_id"], s["stream"]) for s in owner.json()["sources"]] == [
+        (str(private), "issues"),
+        (str(shared), "messages"),
+    ]
+    admin_view = await client.get(
+        "/surface/web/workspace/sources", headers={"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    )
+    assert [s["stream"] for s in admin_view.json()["sources"]] == ["messages"]
+    assert (await client.get("/surface/web/workspace/sources")).status_code == 401
 
 
 @pytest.mark.usefixtures("database_url")
@@ -7156,10 +7211,11 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """The connections panel's two mutations ride the intent lane against the `connector_grant`
-    kind, named by the grant's stable object name: a non-owner member's flip surfaces the kind's
-    own refusal and changes nothing, the owner's flip lands exactly, and the owner's delete
-    revokes the grant row — each outcome synchronous and audited as a turn."""
+    """The connections panel's two mutations ride the intent lane, each against the kind that holds
+    what it changes: the share flag is a column on the connection, and the grant edge is one agent's
+    access to it. A non-owner member's flip surfaces the connection kind's own refusal and changes
+    nothing, the owner's flip lands exactly, and the owner's delete revokes the grant row — each
+    outcome synchronous and audited as a turn."""
     client, workspace_id, agent_id = web
     owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
     _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
@@ -7167,9 +7223,15 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     name = account_object_name("github", "github-account")
     flip = {
         "verb": "apply",
-        "kind": "connector_grant",
+        "kind": "connection",
         "name": name,
-        "spec": {"provider": "github", "account_id": "github-account", "shared": False},
+        "spec": {
+            "provider": "github",
+            "account_id": "github-account",
+            "shared": False,
+            "base_url": "",
+            "backfill_days": None,
+        },
     }
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -7178,7 +7240,9 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
-    assert "owner" in refused.json()["message"]
+    # The kind holds a connection private to its owner however the connection itself is shared, so
+    # another member cannot even name the account, let alone unshare it.
+    assert "no connection object named" in refused.json()["message"]
     async with workspace_tx() as connection:
         still_shared = (
             await connection.execute(sa.select(tables.connection.c.shared))
@@ -7254,6 +7318,50 @@ async def test_a_connection_intent_disconnects_one_account_under_the_owner_gate(
         ).scalar_one()
     assert list(left) == ["notion"]
     assert grants_left == 1
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_connection_apply_sets_what_its_streams_read_and_who_may_use_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The connectors record's sync settings and its share ride one intent against the `connection`
+    kind, named by the account's stable object name. The spec carries the whole record because the
+    kind takes every field at its declared default: an apply naming only the tenant would also
+    unshare the account, which is why the panel never submits a partial one."""
+    client, workspace_id, agent_id = web
+    owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
+    await _seed_connection(workspace_id, agent_id, owner_id, "zendesk", shared=True)
+    apply = {
+        "verb": "apply",
+        "kind": "connection",
+        "name": account_object_name("zendesk", "zendesk-account"),
+        "spec": {
+            "provider": "zendesk",
+            "account_id": "zendesk-account",
+            "shared": True,
+            "base_url": "https://acme.zendesk.com",
+            "backfill_days": 30,
+        },
+    }
+    applied = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json=apply,
+        headers={"cookie": f"{SESSION_COOKIE}={owner_token}"},
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is True, applied.text
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.connection.c.base_url,
+                    tables.connection.c.backfill_days,
+                    tables.connection.c.shared,
+                )
+            )
+        ).one()
+    assert (row.base_url, row.backfill_days, row.shared) == ("https://acme.zendesk.com", 30, True)
 
 
 @pytest.mark.usefixtures("database_url")
@@ -7366,7 +7474,7 @@ async def test_an_intent_naming_another_kind_is_refused_at_validation(
     other kind must die at validation, before a turn exists."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    for kind in ("connection", "conversation", "artifact"):
+    for kind in ("conversation", "artifact"):
         refused = await client.post(
             f"/surface/web/agents/{agent_id}/intents",
             json={"verb": "apply", "kind": kind, "name": "x", "spec": {"admin": True}},
@@ -7974,7 +8082,6 @@ async def _seed_account(
                 account_id=f"{provider}-{connection_id.hex[:8]}",
                 host="api.example.test",
                 owner_member_id=owner_member_id,
-                conversation_id=conversation_id,
                 shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -7985,20 +8092,12 @@ async def _seed_account(
 
 async def _grant_account(workspace_id: UUID, agent_id: UUID, connection_id: UUID) -> None:
     async with workspace_tx() as connection:
-        conversation_id = (
-            await connection.execute(
-                sa.select(tables.connection.c.conversation_id).where(
-                    tables.connection.c.id == connection_id
-                )
-            )
-        ).scalar_one()
         await connection.execute(
             sa.insert(tables.connector_grant).values(
                 id=uuid4(),
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 connection_id=connection_id,
-                conversation_id=conversation_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

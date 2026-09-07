@@ -49,7 +49,7 @@ def _stream(
 
 
 QUICKBOOKS_STREAMS: list[StreamSpec] = [
-    _stream("accounts", source_object="Account", canonical=True),
+    _stream("accounts", source_object="Account"),
     _stream("customers", source_object="Customer", canonical=True),
     _stream("vendors", source_object="Vendor", canonical=True),
     _stream("invoices", source_object="Invoice", canonical=True),
@@ -60,23 +60,23 @@ QUICKBOOKS_STREAMS: list[StreamSpec] = [
     _stream("purchases", source_object="Purchase", canonical=True),
     _stream("budgets", source_object="Budget"),
     _stream("classes", source_object="Class"),
-    _stream("credit_memos", source_object="CreditMemo"),
+    _stream("credit_memos", source_object="CreditMemo", canonical=True),
     _stream("departments", source_object="Department"),
-    _stream("deposits", source_object="Deposit"),
+    _stream("deposits", source_object="Deposit", canonical=True),
     _stream("employees", source_object="Employee"),
-    _stream("estimates", source_object="Estimate"),
+    _stream("estimates", source_object="Estimate", canonical=True),
     _stream("items", source_object="Item"),
     _stream("payment_methods", source_object="PaymentMethod", cursor_field=None),
-    _stream("purchase_orders", source_object="PurchaseOrder"),
-    _stream("refund_receipts", source_object="RefundReceipt"),
-    _stream("sales_receipts", source_object="SalesReceipt"),
+    _stream("purchase_orders", source_object="PurchaseOrder", canonical=True),
+    _stream("refund_receipts", source_object="RefundReceipt", canonical=True),
+    _stream("sales_receipts", source_object="SalesReceipt", canonical=True),
     _stream("tax_agencies", source_object="TaxAgency", cursor_field=None),
     _stream("tax_codes", source_object="TaxCode"),
     _stream("tax_rates", source_object="TaxRate"),
     _stream("terms", source_object="Term"),
-    _stream("time_activities", source_object="TimeActivity"),
-    _stream("transfers", source_object="Transfer"),
-    _stream("vendor_credits", source_object="VendorCredit"),
+    _stream("time_activities", source_object="TimeActivity", canonical=True),
+    _stream("transfers", source_object="Transfer", canonical=True),
+    _stream("vendor_credits", source_object="VendorCredit", canonical=True),
 ]
 
 

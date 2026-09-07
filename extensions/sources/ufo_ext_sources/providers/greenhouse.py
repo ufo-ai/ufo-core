@@ -96,7 +96,7 @@ INTERVIEWS = _stream(
     "interviews", source_object="scheduled_interviews", cursor_field="updated_at", canonical=True
 )
 OFFERS = _stream("offers", cursor_field="updated_at", canonical=True)
-USERS = _stream("users", cursor_field="updated_at", canonical=True)
+USERS = _stream("users", cursor_field="updated_at")
 
 APPLICATIONS_DEMOGRAPHICS_ANSWERS = _stream(
     "applications_demographics_answers",
@@ -143,13 +143,13 @@ DEPARTMENTS = _stream("departments")
 DISCIPLINES = _stream("disciplines")
 EEOC = _stream("eeoc", cursor_field="submitted_at", created_at_field="submitted_at")
 EMAIL_TEMPLATES = _stream("email_templates", cursor_field="updated_at")
-JOB_POSTS = _stream("job_posts", cursor_field="updated_at")
+JOB_POSTS = _stream("job_posts", cursor_field="updated_at", canonical=True)
 JOB_STAGES = _stream("job_stages", cursor_field="updated_at")
 OFFICES = _stream("offices")
 PROSPECT_POOLS = _stream("prospect_pools")
 REJECTION_REASONS = _stream("rejection_reasons")
 SCHOOLS = _stream("schools")
-SCORECARDS = _stream("scorecards", cursor_field="updated_at")
+SCORECARDS = _stream("scorecards", cursor_field="updated_at", canonical=True)
 SOURCES = _stream("sources")
 TAGS = _stream("tags", source_object="tags/candidate")
 USER_ROLES = _stream("user_roles")

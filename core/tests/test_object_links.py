@@ -2,9 +2,9 @@
 
 The headline chain is the real pipeline end to end — a synced page is distilled into a memory item,
 `memory_search` returns the memory's ref, `object_get(memory)` exposes `created_from → page/<id>`,
-and the page opens with its bounded body and its `synced_by → source/<name>` link. Around it: the
-`conversation` kind resolves artifact and scheduled-task destinations under its disclosure gate, a
-superseded memory leaves search and links to its replacement, links stay visibility-congruent (a
+and the page opens with its bounded body and its `synced_by → connection/<name>` link. Around it:
+the `conversation` kind resolves artifact and scheduled-task destinations under its disclosure gate,
+a superseded memory leaves search and links to its replacement, links stay visibility-congruent (a
 hidden object is not-found regardless of who links to it), and malformed relations, kinds, and
 target names fail at the boundary."""
 
@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from pydantic import ValidationError
+from ufo_ext_connectors.objects import CONNECTION_KIND, CONNECTION_OBJECT
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import FACT_EXTRACT_TOOL, FactDeriver
@@ -25,8 +26,6 @@ from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT
 from ufo_ext_memory.store import memory_item, store_for
 from ufo_ext_sources.pages import PAGE_KIND, PAGE_OBJECT
-from ufo_ext_sources.registry import SOURCE_KIND
-from ufo_ext_sources.tools import SOURCE_OBJECT
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -53,7 +52,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.sources import binding_name
+from ufo.sdk.grants import account_object_name
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest().tools}
 SEARCH_REF = re.compile(r"\(((?:memory|page)/[0-9a-f-]{36})")
@@ -185,26 +184,46 @@ async def _conversation(
     return conversation_id
 
 
-async def _seed_source(workspace_id: UUID, account: str = "acct-one") -> UUID:
-    source_id = uuid4()
+async def _seed_source(
+    workspace_id: UUID, owner_member_id: UUID, account: str = "acct-one"
+) -> UUID:
+    """One shared Asana connection a member owns, carrying one stream. The owner is what makes the
+    `connection` object readable: an ownerless connection is the workspace's own and only an admin
+    may open it, so a walk naming no member would stop at the link rather than follow it."""
+    source_id, connection_id = uuid4(), uuid4()
+    when = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider="asana",
+                account_id=account,
+                host="",
+                owner_member_id=owner_member_id,
+                shared=True,
+                created_at=when,
+                updated_at=when,
+            )
+        )
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="asana",
-                config={"account": account, "stream": "issues", "base_url": None},
-                subject=SHARED_SUBJECT,
-                next_sync_at=datetime(2026, 7, 9, tzinfo=UTC),
-                created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                updated_at=datetime(2026, 7, 9, tzinfo=UTC),
+                config={"stream": "issues"},
+                connection_id=connection_id,
+                next_sync_at=when,
+                created_at=when,
+                updated_at=when,
             )
         )
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=source_id,
                 agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                connection_id=connection_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -246,7 +265,11 @@ def _verbs() -> dict[str, ToolDef]:
         (
             BoundKind(kind=MEMORY_OBJECT, extension="memory", context=memory_ctx),
             BoundKind(kind=PAGE_OBJECT, extension="sources", context=sources_ctx),
-            BoundKind(kind=SOURCE_OBJECT, extension="sources", context=sources_ctx),
+            BoundKind(
+                kind=CONNECTION_OBJECT,
+                extension="connectors",
+                context=context_for("connectors", frozenset()),
+            ),
             BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
             BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
         )
@@ -301,7 +324,8 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
     blob = FilesystemBlobStore(root=tmp_path)
     tools = _verbs()
     with ws(workspace_id):
-        source_id = await _seed_source(workspace_id)
+        owner_id = await _member(workspace_id)
+        source_id = await _seed_source(workspace_id, owner_id)
         page_id = await _seed_page(workspace_id, source_id, blob)
 
         memory_ext = context_for(
@@ -335,7 +359,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
         ref = SEARCH_REF.search(hit)
         assert ref is not None and ref.group(1).startswith(f"{MEMORY_KIND}/")
 
-        ctx = _tool_ctx(workspace_id, blob)
+        ctx = _tool_ctx(workspace_id, blob, member_id=owner_id)
         memory = await _get(tools, ctx, ref.group(1))
         assert memory["spec"]["body"] == DERIVED_FACT
         assert memory["created_at"] is not None
@@ -347,13 +371,14 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
         page = await _get(tools, ctx, memory["links"][0]["target"])
         assert page["spec"]["body"] == PAGE_BODY
         assert page["spec"]["body_truncated"] is False
-        source_name = binding_name("asana", "acct-one", None)
+        connection_name = account_object_name("asana", "acct-one")
         assert page["links"] == [
-            {"relation": "synced_by", "target": f"{SOURCE_KIND}/{source_name}"}
+            {"relation": "synced_by", "target": f"{CONNECTION_KIND}/{connection_name}"}
         ]
 
-        source = await _get(tools, ctx, page["links"][0]["target"])
-        assert source["spec"]["provider"] == "asana"
+        held = await _get(tools, ctx, page["links"][0]["target"])
+        assert held["spec"]["provider"] == "asana"
+        assert held["spec"]["account_id"] == "acct-one"
 
 
 async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None) -> None:
@@ -599,7 +624,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
     with ws(workspace_id):
         member_id = await _member(workspace_id)
         other_id = await _member(workspace_id)
-        source_id = await _seed_source(workspace_id)
+        source_id = await _seed_source(workspace_id, member_id)
         page_id = await _seed_page(workspace_id, source_id, blob, subject=member_subject(member_id))
 
         memory_ext = context_for("memory", frozenset())

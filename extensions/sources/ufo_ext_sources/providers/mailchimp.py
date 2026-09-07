@@ -87,7 +87,6 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
         cursor_field="date_created",
         created_at_field="date_created",
         updated_at_field=None,
-        canonical=True,
     ),
     _stream(
         "list_members",
@@ -96,7 +95,7 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
         updated_at_field="last_changed",
         canonical=True,
     ),
-    _stream("segments", cursor_field="updated_at", canonical=True),
+    _stream("segments", cursor_field="updated_at"),
     _stream(
         "campaigns",
         cursor_field="create_time",
@@ -109,7 +108,6 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
         cursor_field="create_time",
         created_at_field="create_time",
         updated_at_field=None,
-        canonical=True,
     ),
     _stream(
         "email_activity",
@@ -117,7 +115,6 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
         cursor_field="timestamp",
         created_at_field="timestamp",
         updated_at_field=None,
-        canonical=True,
     ),
     _stream(
         "reports", cursor_field="send_time", created_at_field="send_time", updated_at_field=None

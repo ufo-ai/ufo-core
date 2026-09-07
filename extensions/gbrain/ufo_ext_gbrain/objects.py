@@ -2,17 +2,21 @@
 verbs.
 
 A gbrain source is one synced origin — a GitHub repository (optionally pinned to a branch) or a
-serve-local directory — carried as one core `source` row the sync driver polls. Identity IS the
-origin, so names derive from it (`gbrain-<8-hex digest>`): apply with the wrong name refuses and
-hands back the exact one, changing repo, branch, or root is a different source under its own name,
-and re-applying the identical spec is a no-op that grants the calling agent the settled row.
+serve-local directory — carried as one core `source` row the sync driver polls under a connection of
+its own. Identity IS the origin, so names derive from it (`gbrain-<8-hex digest>`) and the
+connection's `account_id` is the origin config's `feed_handle` — the handle a root registered at
+boot carries too, so both registrars settle on one connection: apply with the wrong name refuses
+and hands back the exact one, changing repo, branch, or root is a different source under its own
+name, and re-applying the identical spec is a no-op.
 
 A source is private to its registering member by default; the model decides `shared` at
 registration, and only the registrar may later flip a private source to shared — the reverse is
-delete-and-recreate. Delete is registrar-or-admin and its pages follow through the page-tombstone
-pipeline. A directory root reads the serving host's own filesystem, so it is operator authority:
-rows arrive from the deploy's `[[sources]]` config at boot, the kind lists them, and an apply
-naming `root` is refused."""
+delete-and-recreate. Both facts live on the connection: it belongs to the registrar and its `shared`
+flag is the one disclosure every page it syncs carries. Delete is registrar-or-admin and disconnects
+that origin's connection, which takes its source row and pages with it and touches no other origin.
+A directory root reads the serving host's own filesystem, so it is operator authority: rows arrive
+from the deploy's `[[sources]]` config at boot, the kind lists them, and an apply naming `root` is
+refused."""
 
 import hashlib
 import json
@@ -25,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.grants import feed_connections
 from ufo.sdk.objects import (
     AdminRequired,
     MemberReadableObjects,
@@ -35,7 +40,7 @@ from ufo.sdk.objects import (
     UnknownObject,
     VerbNotSupported,
 )
-from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
+from ufo.sdk.sources import feed_handle
 from ufo.sdk.tools import SpeakerRequired, ToolContext
 from ufo_ext_gbrain.folder import FOLDER_BACKEND, GbrainFolderConfig
 from ufo_ext_gbrain.git import GIT_BACKEND, GbrainGitConfig
@@ -53,6 +58,7 @@ ROOT_REFUSAL = (
     "a directory root is operator config — a [[sources]] entry with backend "
     f"{FOLDER_BACKEND!r} in the deploy's ufo.toml registers it at boot"
 )
+UNSHARE_REFUSAL = "a shared gbrain source stays shared — delete it and recreate it privately"
 
 
 def gbrain_source_name(repo: str | None, branch: str | None, root: str | None) -> str:
@@ -134,10 +140,11 @@ def _identity(spec: GbrainSpec) -> tuple[str | None, str | None, str | None, boo
 @dataclass(frozen=True)
 class _Registered:
     source_id: UUID
+    connection_id: UUID
     repo: str | None
     branch: str | None
     root: str | None
-    subject: str
+    shared: bool
     owner_member_id: UUID | None
     next_sync_at: datetime
     consecutive_errors: int
@@ -153,7 +160,7 @@ class _Registered:
             repo=self.repo,
             branch=self.branch,
             root=self.root,
-            shared=subject_shared(self.subject),
+            shared=self.shared,
         )
 
     def summary(self) -> str:
@@ -170,6 +177,10 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
 
 
 async def _registered_from_ext(ext: ExtensionContext) -> tuple[_Registered, ...]:
+    """The workspace's gbrain rows joined to the connection each hangs off — one connection per
+    origin, so its owner and its `shared` flag are this source's own and not another repository's.
+    """
+    authorities = {connection.id: connection for connection in await feed_connections()}
     registered: list[_Registered] = []
     for record in await ext.sources():
         if record.backend == GIT_BACKEND:
@@ -180,14 +191,16 @@ async def _registered_from_ext(ext: ExtensionContext) -> tuple[_Registered, ...]
             repo, branch, root = None, None, folder.root
         else:
             continue
+        authority = authorities[record.connection_id]
         registered.append(
             _Registered(
                 source_id=record.id,
+                connection_id=record.connection_id,
                 repo=repo,
                 branch=branch,
                 root=root,
-                subject=record.subject,
-                owner_member_id=record.owner_member_id,
+                shared=authority.shared,
+                owner_member_id=authority.owner_member_id,
                 next_sync_at=record.next_sync_at,
                 consecutive_errors=record.consecutive_errors,
                 created_at=record.created_at,
@@ -208,11 +221,12 @@ async def _registered_named(ext: ExtensionContext | None, name: str) -> _Registe
 class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
     """The kind's handlers over the workspace's gbrain source rows: get/list read the rows
     registered under the two gbrain backends; apply validates the origin, then registers it as one
-    row (the first sync is scheduled immediately) — private to the registering member unless the
-    model asks for `shared`; delete removes the row and its synced pages follow through the
-    page-tombstone pipeline. The per-member visibility and registrar-or-admin gate is the base's,
-    in a turn and in the portal alike. A directory root is operator authority: its rows arrive
-    from the deploy's `[[sources]]` config at boot, and an apply naming `root` is refused."""
+    connection and one row under it (the first sync is scheduled immediately) — private to the
+    registering member unless the model asks for `shared`; delete disconnects that origin's
+    connection and its row and pages follow by cascade. The per-member visibility and
+    registrar-or-admin gate is the base's, in a turn and in the portal alike. A directory root is
+    operator authority: its rows arrive from the deploy's `[[sources]]` config at boot, and an apply
+    naming `root` is refused."""
 
     kind_name: ClassVar[str] = GBRAIN_KIND
     mutate_gate: ClassVar[str] = SHARE_GATE
@@ -229,20 +243,18 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
         expected_generation: UUID | None,
     ) -> None:
         """A resync is the registering member's or an admin's and changes nothing else. Re-applying
-        the identical spec of a source the caller can already see (`old` is non-None only for a
-        visible source, since the base `get` hides the rest) registers nothing and stays outside
-        the base's gate: all it does is grant the calling agent the source it names. Every other
-        apply — register, share-flip — goes through the base's member/admin gate."""
+        the identical spec of a source the caller can already see registers nothing and changes
+        nothing, so it settles on the row it names. Every other apply — register, share-flip — goes
+        through the base's member/admin gate."""
         if spec.resync:
             await self._resync(ctx, name, spec, old)
             return
         if old is not None and _identity(spec) == _identity(old):
-            await self._grant_settled(ctx, name)
             return
         if old is None:
             taken = await _registered_named(ctx.ext, _origin(spec).name)
             if taken is not None and not (
-                subject_shared(taken.subject)
+                taken.shared
                 or taken.owner_member_id == authority_member_id(ctx.authority)
                 or await ctx.speaker_is_admin()
             ):
@@ -251,23 +263,6 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
                     "its registrar or a workspace admin can share it"
                 )
         await super().apply(ctx, name, spec, old, expected_generation=expected_generation)
-
-    async def _grant_settled(self, ctx: ToolContext, name: str) -> None:
-        """Grant the calling agent the source its identical submit settles on: registration is
-        what grants an agent a feed, and a submit that names what the workspace already holds
-        registers nothing, so without the grant the agent reads back `updated`, holds no feed, and
-        sees no error. The grant is the registering member's own or a shared source's, and a
-        speakerless turn grants nothing — a granting act takes a live member."""
-        speaker = ctx.speaker_member_id
-        owner = await self._owner(ctx, name)
-        if speaker is None or owner is None or not (owner.shared or self._owned(owner, speaker)):
-            return
-        registered = await _registered_named(ctx.ext, name)
-        if registered is None:
-            return
-        await _require_ext(ctx.ext).grant_source(
-            registered.source_id, agent_id=ctx.turn.agent_id, actor_member_id=speaker
-        )
 
     async def _resync(
         self, ctx: ToolContext, name: str, spec: GbrainSpec, old: GbrainSpec | None
@@ -301,7 +296,7 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
                 summary=registered.summary(),
                 owner=ObjectOwner(
                     member_id=registered.owner_member_id,
-                    shared=subject_shared(registered.subject),
+                    shared=registered.shared,
                 ),
             )
             for registered in await _registered_from_ext(_require_ext(ext))
@@ -330,13 +325,12 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
         registered = await _registered_named(ctx.ext, name)
         if registered is None:
             return None
-        shared = subject_shared(registered.subject)
         status: dict[str, JsonValue] = {
-            "shared": shared,
+            "shared": registered.shared,
             "next_sync_at": registered.next_sync_at.isoformat(),
             "consecutive_errors": registered.consecutive_errors,
         }
-        if not shared and registered.owner_member_id is not None:
+        if not registered.shared and registered.owner_member_id is not None:
             status["owner_member_id"] = str(registered.owner_member_id)
         return status
 
@@ -348,7 +342,13 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
         old: GbrainSpec | None,
         owner: ObjectOwner | None,
     ) -> None:
+        """Register the origin as its own connection and one source row under it. The connection's
+        `account_id` is the origin config's `feed_handle`, so one origin is one connection whoever
+        registers it: it carries the registrar and the disclosure, and disconnecting it later takes
+        this origin's pages and nothing else."""
         ext = _require_ext(ctx.ext)
+        if ctx.grants is None:
+            raise RuntimeError("grants unavailable: no credential key configured")
         speaker = ctx.speaker_member_id
         if speaker is None:
             raise SpeakerRequired("registering a gbrain source requires a speaking member")
@@ -362,29 +362,34 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
             )
         registered = await _registered_named(ctx.ext, name)
         if registered is None:
-            await ext.register_source(
+            connection_id = await ext.register_connection(
                 origin.backend,
-                origin.config,
-                subject=SHARED_SUBJECT if spec.shared else member_subject(speaker),
+                account_id=feed_handle(origin.config),
                 owner_member_id=speaker,
-                agent_id=ctx.turn.agent_id,
             )
+            if spec.shared:
+                await ctx.grants.set_shared(connection_id, True, actor_member_id=speaker)
+            await ext.register_source(origin.backend, origin.config, connection_id=connection_id)
             return
-        if subject_shared(registered.subject) and not spec.shared:
-            raise VerbNotSupported(
-                "a shared gbrain source stays shared — delete it and recreate it privately"
-            )
-        if spec.shared and not subject_shared(registered.subject):
-            await ext.set_source_subject((registered.source_id,), SHARED_SUBJECT)
-        await ext.grant_source(
-            registered.source_id, agent_id=ctx.turn.agent_id, actor_member_id=speaker
-        )
+        if registered.shared and not spec.shared:
+            raise VerbNotSupported(UNSHARE_REFUSAL)
+        if spec.shared and not registered.shared:
+            await ctx.grants.set_shared(registered.connection_id, True, actor_member_id=speaker)
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: ObjectOwner) -> None:
+        if ctx.grants is None:
+            raise RuntimeError("grants unavailable: no credential key configured")
+        if ctx.speaker_member_id is None:
+            raise SpeakerRequired("removing a gbrain source requires a speaking member")
         registered = await _registered_named(ctx.ext, name)
         if registered is None:
             raise UnknownObject(f"no {GBRAIN_KIND} object named {name!r}")
-        await _require_ext(ctx.ext).remove_source(registered.source_id)
+        disconnected = await ctx.grants.disconnect(
+            registered.connection_id,
+            actor_member_id=ctx.speaker_member_id,
+        )
+        if not disconnected:
+            raise ValueError(f"{GBRAIN_KIND} {name!r} changed while removing")
 
 
 GBRAIN_OBJECT = ObjectKind(
@@ -399,7 +404,7 @@ GBRAIN_OBJECT = ObjectKind(
         "a wrong name is refused with the exact derived name to re-apply, and changing repo or "
         "branch is a different source under its own name. Synced markdown lands in memory_search "
         "within about a minute of each sync; a file deleted from the repository or directory "
-        "tombstones its page, and deleting the source tombstones them all. A private repository "
+        "tombstones its page, and deleting the source removes them all. A private repository "
         "needs the workspace `github_token` credential; public repositories sync without it. A "
         "directory `root` is read-only here: it arrives from the deploy's [[sources]] config at "
         "boot, and an apply naming one is refused. An origin already registered privately by "

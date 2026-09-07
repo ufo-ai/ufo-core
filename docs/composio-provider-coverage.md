@@ -326,12 +326,12 @@ need, then deleting its `BANNED` line — no other code change. That path exists
 It does **not** exist for the missing-tool bans, which need Composio to ship a tool, nor for
 `googlephotos`, where Google itself restricts the API to app-created media.
 
-## BYOK sync: routed on the account handle
+## BYOK sync: routed on the connection's account handle
 
 The thirteen above have no Composio grant to sync through, so their only path is a member-added key
-through the `direct` auth proxy. `ConnectorRegistry.credential` picks the backend from the source's
-**account handle**: `DIRECT_ACCOUNT` — what registration stores when the member set the provider's
-credential instead of connecting an account — resolves through the deploy's fallback backend, and a
+through the `direct` auth proxy. The bound connection picks the backend: an **empty account
+handle** — the workspace's own connection, minted when the member set the provider's credential
+instead of connecting an account — resolves through the deploy's fallback backend, and a
 connected-account id resolves through its provider's broker. The provider name cannot carry that
 decision, because `ComposioResolver.entry` claims every slug; routing on the name alone sent every
 keyed source to Composio, which holds no account for it, and failed every run.

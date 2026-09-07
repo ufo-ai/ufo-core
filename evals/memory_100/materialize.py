@@ -41,6 +41,7 @@ from ufo.runtime.sources.sync import (
     CorePageFeed,
     FolderSource,
     SyncDriver,
+    feed_handle,
     register_sources,
     source_row_id,
 )
@@ -103,10 +104,16 @@ class Memory100Materializer:
             backend="folder",
             config=SourceConfig(root=str(self.pages_root)),
         )
-        source_id = source_row_id(
-            workspace_id, FOLDER_BACKEND, entry.config.model_dump(mode="json")
-        )
         with ws(workspace_id):
+            connection_id = await context_for("memory", frozenset()).register_connection(
+                FOLDER_BACKEND, account_id=feed_handle(entry.config)
+            )
+            source_id = source_row_id(
+                workspace_id,
+                FOLDER_BACKEND,
+                entry.config.model_dump(mode="json"),
+                connection_id=connection_id,
+            )
             await register_sources((entry,))
             await SyncDriver(
                 backends={FOLDER_BACKEND: FolderSource()},

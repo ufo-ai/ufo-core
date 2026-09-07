@@ -52,6 +52,7 @@ GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
         cursor_field="modifiedTime",
         created_at_field="createdTime",
         updated_at_field="modifiedTime",
+        canonical=True,
     ),
     StreamSpec(
         name="shared_drives",
@@ -59,7 +60,7 @@ GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         created_at_field="createdTime",
     ),
-    StreamSpec(name="permissions", source_object="permissions", primary_key="id", canonical=False),
+    StreamSpec(name="permissions", source_object="permissions", primary_key="id"),
     StreamSpec(
         name="comments",
         source_object="comments",
@@ -67,7 +68,6 @@ GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
         cursor_field="modifiedTime",
         created_at_field="createdTime",
         updated_at_field="modifiedTime",
-        canonical=False,
     ),
     StreamSpec(
         name="revisions",
@@ -75,7 +75,6 @@ GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="modifiedTime",
         updated_at_field="modifiedTime",
-        canonical=False,
     ),
 ]
 

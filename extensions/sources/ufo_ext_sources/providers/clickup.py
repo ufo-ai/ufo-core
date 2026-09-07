@@ -30,15 +30,16 @@ _REFUSAL_STATUS = frozenset({401, 403})
 CLICKUP_STREAMS: list[StreamSpec] = [
     StreamSpec(name="teams", source_object="team", primary_key="id"),
     StreamSpec(name="users", source_object="users", primary_key="id"),
-    StreamSpec(name="spaces", source_object="space", primary_key="id"),
-    StreamSpec(name="folders", source_object="folder", primary_key="id"),
-    StreamSpec(name="lists", source_object="list", primary_key="id"),
+    StreamSpec(name="spaces", source_object="space", primary_key="id", canonical=True),
+    StreamSpec(name="folders", source_object="folder", primary_key="id", canonical=True),
+    StreamSpec(name="lists", source_object="list", primary_key="id", canonical=True),
     StreamSpec(
         name="tasks",
         source_object="task",
         primary_key="id",
         cursor_field="date_updated",
         updated_at_field="date_updated",
+        canonical=True,
     ),
     StreamSpec(
         name="list_comments",
@@ -47,10 +48,9 @@ CLICKUP_STREAMS: list[StreamSpec] = [
         cursor_field="date",
         created_at_field="date",
         updated_at_field=None,
-        canonical=False,
     ),
-    StreamSpec(name="list_custom_fields", source_object="field", primary_key="id", canonical=False),
-    StreamSpec(name="goals", source_object="goal", primary_key="id", canonical=False),
+    StreamSpec(name="list_custom_fields", source_object="field", primary_key="id"),
+    StreamSpec(name="goals", source_object="goal", primary_key="id"),
 ]
 
 

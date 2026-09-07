@@ -262,11 +262,11 @@ async def test_git_repo_syncs_then_idles_on_304(
         postgres=database_url.startswith("postgresql"),
     )
     with ws(workspace_id):
-        await context_for("gbrain", frozenset({GITHUB_TOKEN_SLOT})).register_source(
+        ext = context_for("gbrain", frozenset({GITHUB_TOKEN_SLOT}))
+        await ext.register_source(
             GIT_BACKEND,
             GbrainGitConfig(repo="acme/brain"),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
+            connection_id=await ext.register_connection(GIT_BACKEND),
         )
     await _sync(driver)
 

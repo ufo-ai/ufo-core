@@ -648,7 +648,6 @@ class _ConnectedAppSeed:
                     account_id=ACCOUNT_ID,
                     host=PROVIDER_HOSTS[provider],
                     grantor_member_id=member_id,
-                    conversation_id=conversation_id,
                     shared=True,
                 )
 

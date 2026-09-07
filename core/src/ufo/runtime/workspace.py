@@ -290,6 +290,13 @@ class WorkspaceScope:
             connected.append(provider)
         return tuple(connected)
 
+    async def stored_credential_slots(self) -> frozenset[str]:
+        """Every slot this workspace holds its own value for, in one read — `credential_is_stored`
+        asked of all of them at once, for a caller that walks a catalogue rather than one slot."""
+        if _store is None:
+            return frozenset()
+        return await _store.stored_slots(self.workspace_id)
+
     async def credential_is_stored(self, slot: str, model: str | None = None) -> bool:
         """Whether this workspace holds its own value for `slot` rather than running on the platform
         default — what `credential` resolved, asked as a question, so `model` names the call the

@@ -726,21 +726,20 @@ async def _seed_agent(workspace_id: UUID, name: str) -> UUID:
 
 
 async def _seed_connection(
-    workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str, *, shared: bool
-) -> None:
-    conversation_id, connection_id = uuid4(), uuid4()
+    workspace_id: UUID,
+    agent_id: UUID | None,
+    owner_member_id: UUID | None,
+    provider: str,
+    *,
+    shared: bool,
+    base_url: str | None = None,
+    backfill_days: int | None = None,
+) -> UUID:
+    """One connection, and the grant edge that reaches it where an agent holds one. A workspace
+    connection passes no owner: nobody consented to it, and the shared check is what keeps it
+    readable. The id comes back because a source row hangs off it."""
+    connection_id = uuid4()
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface=SURFACE,
-                queue_key=conversation_id.hex,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
         await connection.execute(
             sa.insert(tables.connection).values(
                 id=connection_id,
@@ -749,24 +748,46 @@ async def _seed_connection(
                 account_id=f"{provider}-account",
                 account_label=f"{provider} label",
                 host="api.example.test",
+                base_url=base_url,
+                backfill_days=backfill_days,
                 owner_member_id=owner_member_id,
-                conversation_id=conversation_id,
                 shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
+        if agent_id is not None:
+            await connection.execute(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    connection_id=connection_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return connection_id
+
+
+async def _seed_source(
+    workspace_id: UUID, connection_id: UUID, backend: str, config: dict[str, str]
+) -> UUID:
+    source_id = uuid4()
+    async with workspace_tx() as connection:
         await connection.execute(
-            sa.insert(tables.connector_grant).values(
-                id=uuid4(),
+            sa.insert(tables.source).values(
+                id=source_id,
                 workspace_id=workspace_id,
-                agent_id=agent_id,
+                backend=backend,
+                config=config,
                 connection_id=connection_id,
-                conversation_id=conversation_id,
+                next_sync_at=sa.func.now(),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
+    return source_id
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -811,6 +832,37 @@ async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_pool_lists_the_workspace_connection_and_what_its_streams_read(
+    db: None, tmp_path
+) -> None:
+    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
+    assert owner is not None
+    held = await _seed_connection(
+        workspace_id,
+        agent_id,
+        owner,
+        "github",
+        shared=False,
+        base_url="https://acme.example.test",
+        backfill_days=30,
+    )
+    workspace = await _seed_connection(workspace_id, None, None, "folder", shared=True)
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_connections(owner, admin=False)
+    # The workspace's own connection is owned by nobody, so an inner owner join would drop exactly
+    # the account whose streams every member reads.
+    assert [(view.id, view.owner_email) for view in listed] == [
+        (workspace, None),
+        (held, "owner@example.com"),
+    ]
+    assert (listed[1].base_url, listed[1].backfill_days) == ("https://acme.example.test", 30)
+    assert (listed[0].base_url, listed[0].backfill_days) == (None, None)
+    assert [view.name for view in listed[1].agents] == ["assistant"]
+    assert listed[0].agents == ()
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     async with workspace_tx() as connection:
@@ -839,8 +891,11 @@ async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_pat
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> None:
-    workspace_id, _agent_id, owner = await _seed(member_email="owner@example.com")
+async def test_streams_hang_off_their_connection_and_take_its_visibility(
+    db: None, tmp_path
+) -> None:
+    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
+    assert owner is not None
     peer = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -852,39 +907,58 @@ async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> N
                 updated_at=sa.func.now(),
             )
         )
-        for backend, subject, owner_id, removed in (
-            ("folder", "shared", None, False),
-            ("github", f"member:{owner}", owner, False),
-            ("asana", "shared", None, True),
-        ):
-            await connection.execute(
-                sa.insert(tables.source).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    backend=backend,
-                    config={},
-                    subject=subject,
-                    owner_member_id=owner_id,
-                    next_sync_at=sa.func.now(),
-                    removed_at=sa.func.now() if removed else None,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
+    private = await _seed_connection(workspace_id, agent_id, owner, "github", shared=False)
+    workspace = await _seed_connection(workspace_id, None, None, "folder", shared=True)
+    issues = await _seed_source(workspace_id, private, "github", {"stream": "issues"})
+    root = await _seed_source(workspace_id, workspace, "folder", {"root": "/notes"})
+
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    owner_view = await context.list_sources(owner, admin=False)
-    assert [(view.backend, view.shared) for view in owner_view] == [
-        ("folder", True),
-        ("github", False),
+    owner_view = await context.list_sources(owner)
+    assert [(view.id, view.connection_id, view.stream) for view in owner_view] == [
+        (root, workspace, None),
+        (issues, private, "issues"),
     ]
-    assert owner_view[1].owner_email == "owner@example.com"
-    assert owner_view[1].own
-    peer_view = await context.list_sources(peer, admin=False)
-    assert [view.backend for view in peer_view] == ["folder"]
-    assert peer_view[0].owner_email is None
-    assert not peer_view[0].own
-    admin_view = await context.list_sources(peer, admin=True)
-    assert [view.backend for view in admin_view] == ["folder", "github"]
+    assert owner_view[0].backend == "folder"
+    # The stream of a private connection is as private as the account it syncs, and no admin
+    # authority widens either — the read takes no `admin` at all.
+    assert [view.id for view in await context.list_sources(peer)] == [root]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_github_coverage_reads_only_what_the_member_may_see(db: None, tmp_path) -> None:
+    """Both legs of the GitHub card answer over the connections this member may see, which is the
+    set the connections and streams beside it list. A workspace admin is not widened: admin
+    authority governs acts on a connection, never the sight of one (#327), and a card that read a
+    private account's stream would state a coverage nothing else on the screen accounts for."""
+    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
+    assert owner is not None
+    admin = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=admin,
+                workspace_id=workspace_id,
+                email="admin@example.com",
+                is_admin=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    held = await _seed_connection(workspace_id, agent_id, owner, "github", shared=False)
+    await _seed_source(workspace_id, held, "github", {"stream": "issues"})
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    mine = await context.github_coverage(owner)
+    assert (mine.api, mine.sources) == (True, True)
+    theirs = await context.github_coverage(admin)
+    assert (theirs.api, theirs.sources) == (False, False)
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.connection).values(shared=True).where(tables.connection.c.id == held)
+        )
+    shared = await context.github_coverage(admin)
+    assert (shared.api, shared.sources) == (True, True)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

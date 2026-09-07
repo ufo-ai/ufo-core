@@ -497,7 +497,7 @@ class ConnectorConnection:
     grant_id: UUID
     provider: str
     account_id: str
-    owner_member_id: UUID
+    owner_member_id: UUID | None
 
 
 def _speaker_required(
@@ -1016,6 +1016,15 @@ class ToolContext:
         """The provider's grants this call may use, private then shared, and third the private
         grants this call cannot use — the ones a member ref would have unlocked.
 
+        A non-main agent acting with no member in the turn reads its own attachments first: the
+        member who attached a connector to a shipped agent attached it for the work that agent does
+        on its own initiative, and there is no speaker whose ladder could name it. The main agent is
+        not that case — it holds every member's connections at once, so it must spend the speaker's.
+
+        The moment a member IS acting, that member's own ladder below decides whichever agent it is.
+        An agent several members reach therefore never spends one member's private account on
+        another member's request.
+
         The third tier is what a miss is answered with, so it is decided by whether another member
         can still be named, never by whether one is bound already: a shared-audience conversation
         carries every member speaking there, so another member's private account is a miss
@@ -1027,6 +1036,18 @@ class ToolContext:
         granted = [
             grant for grant in await self.grants.active_grants() if grant.provider == provider
         ]
+        if granted and acting is None and not self.agent.is_main:
+            return (
+                sorted(
+                    (grant for grant in granted if not grant.connection_shared),
+                    key=lambda grant: grant.account_id,
+                ),
+                sorted(
+                    (grant for grant in granted if grant.connection_shared),
+                    key=lambda grant: grant.account_id,
+                ),
+                [],
+            )
         private = sorted(
             (
                 grant

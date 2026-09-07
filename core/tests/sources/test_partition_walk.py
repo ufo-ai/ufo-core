@@ -407,14 +407,14 @@ class _WalkConnector(Connector):
 
 
 class _NoAuthProxy:
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(bearer="unused")
 
 
 async def _fetch(connector: _WalkConnector, cursor: str | None) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy())
     return await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(account="a", stream="feed"), cursor, auth
+        ConnectorSourceConfig(stream="feed"), cursor, auth
     )
 
 

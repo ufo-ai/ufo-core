@@ -39,7 +39,6 @@ RIPPLING_STREAMS: list[StreamSpec] = [
         cursor_field="updatedAt",
         created_at_field="createdAt",
         updated_at_field="updatedAt",
-        canonical=True,
     ),
 ]
 

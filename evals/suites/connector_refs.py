@@ -302,7 +302,6 @@ def _seeding(query: str) -> CapabilitySeed:
                 account_id=ACCOUNT_ID,
                 host=CODE_HOST,
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=True,
             )
 

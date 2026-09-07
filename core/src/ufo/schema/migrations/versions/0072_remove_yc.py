@@ -2,9 +2,9 @@
 
 The extension owns no tables of its own, so its rows are all it leaves: the pending device
 authorization in `ext_store`, the shared YC identity in `credential`, and the guidance and directory
-sources it registered. Retiring a source mirrors `remove_source` — the row stays as its pages'
-referent, its grants go, and its live pages are tombstoned so the page-change consumers reap the
-derived index state.
+sources it registered. Retiring a source stamps `removed_at` and leaves the row as its pages'
+referent, deletes its grants, and tombstones its live pages so the page-change consumers reap the
+derived index state — the shape the source table carried at this revision.
 """
 
 from datetime import UTC, datetime

@@ -39,12 +39,6 @@ def deploy_env(name: str) -> str | None:
     return os.environ.get(f"UFO_{name}") or os.environ.get(name) or None
 
 
-def credential_object_name(slot: str) -> str:
-    """The `credential` object name one declared slot renders as, so a kind whose row authenticates
-    through a slot names the instance the credential kind serves."""
-    return re.sub(r"[^a-z0-9]+", "-", slot.lower()).strip("-")
-
-
 MEMBER_SLOT_INFIX = ":member:"
 
 
@@ -61,7 +55,9 @@ def named_slots(slots: "tuple[DeclaredSlot, ...]") -> "dict[str, DeclaredSlot]":
     collision across extensions gains a stable digest qualifier."""
     grouped: dict[str, list[DeclaredSlot]] = {}
     for slot in slots:
-        grouped.setdefault(credential_object_name(slot.name), []).append(slot)
+        grouped.setdefault(re.sub(r"[^a-z0-9]+", "-", slot.name.lower()).strip("-"), []).append(
+            slot
+        )
     named: dict[str, DeclaredSlot] = {}
     for plain, group in grouped.items():
         if len(group) == 1:
@@ -352,6 +348,18 @@ class CredentialStore:
                         tables.credential.c.slot == slot,
                     )
                 )
+
+    async def stored_slots(self, workspace_id: UUID) -> frozenset[str]:
+        """Every slot this workspace holds its own secret for, in one read. A caller asking the
+        same question of many slots — a feed registrar walking a connector catalogue every tick —
+        would otherwise pay a query per slot for an answer that is almost always no."""
+        async with workspace_tx() as connection:
+            rows = await connection.execute(
+                sa.select(tables.credential.c.slot).where(
+                    tables.credential.c.workspace_id == workspace_id
+                )
+            )
+        return frozenset(rows.scalars())
 
     async def get(self, workspace_id: UUID, slot: str) -> str:
         async with workspace_tx() as connection:

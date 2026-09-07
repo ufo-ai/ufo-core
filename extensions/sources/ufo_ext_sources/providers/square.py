@@ -32,6 +32,7 @@ SQUARE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="updated_at",
         updated_at_field="updated_at",
+        canonical=True,
     ),
     StreamSpec(name="locations", source_object="locations", primary_key="id"),
     StreamSpec(
@@ -39,13 +40,14 @@ SQUARE_STREAMS: list[StreamSpec] = [
         source_object="payments",
         primary_key="id",
         cursor_field="created_at",
+        canonical=True,
     ),
     StreamSpec(
         name="refunds",
         source_object="refunds",
         primary_key="id",
         cursor_field="created_at",
-        canonical=False,
+        canonical=True,
     ),
     StreamSpec(
         name="catalog_items",
@@ -53,7 +55,6 @@ SQUARE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="updated_at",
         updated_at_field="updated_at",
-        canonical=False,
     ),
     StreamSpec(
         name="catalog_categories",
@@ -61,20 +62,18 @@ SQUARE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="updated_at",
         updated_at_field="updated_at",
-        canonical=False,
     ),
     StreamSpec(
         name="orders",
         source_object="orders",
         primary_key="id",
         cursor_field="created_at",
-        canonical=False,
+        canonical=True,
     ),
     StreamSpec(
         name="inventory_counts",
         source_object="inventory_counts",
         primary_key="catalog_object_id",
-        canonical=False,
     ),
 ]
 

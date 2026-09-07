@@ -86,7 +86,7 @@ class _UntitledRecordConnector(_FeedConnector):
 
 
 class _NoAuthProxy:
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(bearer="unused")
 
 
@@ -102,7 +102,7 @@ class _UnusableGrantProxy:
 
     awaits_grant = False
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         raise GrantUnusable(self.reason, awaits_grant=self.awaits_grant)
 
 
@@ -120,7 +120,7 @@ async def _check_an_unusable_grant_skips_the_stream_instead_of_failing_the_run()
 
     with pytest.raises(StreamSkipped) as raised:
         await ConnectorBackend(connector=_FeedConnector(stream, [])).fetch(
-            ConnectorSourceConfig(account=ACCOUNT, stream=stream.name), None, auth
+            ConnectorSourceConfig(stream=stream.name), None, auth
         )
 
     assert raised.value.reason == f"probe: 'tickets' {_UnusableGrantProxy.reason}"
@@ -143,7 +143,7 @@ async def _check_only_the_raiser_decides_that_a_grant_event_is_the_one_repair() 
     for proxy, expected in ((_UnusableGrantProxy(), False), (_Unhealthy(), True)):
         with pytest.raises(StreamSkipped) as raised:
             await ConnectorBackend(connector=_FeedConnector(stream, [])).fetch(
-                ConnectorSourceConfig(account=ACCOUNT, stream=stream.name),
+                ConnectorSourceConfig(stream=stream.name),
                 None,
                 SourceAuth(workspace_id=uuid4(), auth_proxy=proxy),
             )
@@ -159,7 +159,7 @@ async def _run(
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy())
     return await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream.name, backfill_after=backfill_after),
+        ConnectorSourceConfig(stream=stream.name, backfill_after=backfill_after),
         cursor,
         auth,
     )
@@ -638,7 +638,7 @@ async def test_capped_run_closes_a_rest_connectors_paginate(
     connector = _RestFeedConnector()
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy())
     result = await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="items"), None, auth
+        ConnectorSourceConfig(stream="items"), None, auth
     )
     assert result.next_cursor == "2"
     assert connector.paginate_closed is True
@@ -662,15 +662,13 @@ async def _check_a_connectors_fixed_host_drives_the_run() -> None:
 
 async def _check_a_row_that_pins_the_address_drives_the_run() -> None:
     connector = _PerTenantConnector(ADDRESS_STREAM, [_records(1)])
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy())
+    auth = SourceAuth(
+        workspace_id=uuid4(),
+        auth_proxy=_NoAuthProxy(),
+        base_url="https://tenant-1.probe.example",
+    )
     await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(
-            account=ACCOUNT,
-            stream=ADDRESS_STREAM.name,
-            base_url="https://tenant-1.probe.example",
-        ),
-        None,
-        auth,
+        ConnectorSourceConfig(stream=ADDRESS_STREAM.name), None, auth
     )
     assert connector.received_base_urls == ["https://tenant-1.probe.example"]
 

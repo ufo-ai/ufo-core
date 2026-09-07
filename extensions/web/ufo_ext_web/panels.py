@@ -65,9 +65,10 @@ class ApplyIntent(BaseModel):
     kind gates: it names the provider and opens the same private OAuth handoff chat's
     `connect_account` leaves — the URL rides the turn's terminal and is minted per speaking member
     at stream time, never in a transcript or an intent response — so it pairs with the `connection`
-    kind exactly. That kind's other verb is `delete`, the disconnect the connect screen's
-    per-account remove submits: an account is connected or disconnected and never edited, and the
-    kind's own gate holds the disconnect to the connection's owner or a workspace admin. The
+    kind exactly. The connection itself is never created here and never renamed: its other verbs
+    are `apply`, which sets who may use the account and what its streams read, and `delete`, the
+    disconnect the connect screen's per-account remove submits. The kind's own gate holds both to
+    the connection's owner or a workspace admin. The
     `credential` kind pairs the other way: a slot's value is a secret a private prompt collects, so
     only `delete` (clear) names it here. The `source_trigger` kind pairs that way too: a trigger IS
     the conversation it wakes, and the lane runs on the member's intent conversation, so the portal
@@ -100,7 +101,7 @@ class ApplyIntent(BaseModel):
     @classmethod
     def applying_kinds(cls) -> frozenset[str]:
         """The kinds the lane takes an `apply` for."""
-        return cls.kinds().difference(DELETE_ONLY_KINDS | CONNECT_KINDS)
+        return cls.kinds().difference(DELETE_ONLY_KINDS)
 
     @classmethod
     def deleting_kinds(cls) -> frozenset[str]:
@@ -115,8 +116,8 @@ class ApplyIntent(BaseModel):
     def _verb_pairs_with_its_kind(self) -> "ApplyIntent":
         if self.verb == "connect" and self.kind not in CONNECT_KINDS:
             raise ValueError("connect pairs with the connection kind exactly")
-        if self.kind in CONNECT_KINDS and self.verb not in {"connect", "delete"}:
-            raise ValueError("a connection is connected or disconnected, never edited")
+        if self.kind in CONNECT_KINDS and self.verb not in {"connect", "apply", "delete"}:
+            raise ValueError("a connection is connected, edited or disconnected, never attached")
         if self.kind == "credential" and self.verb != "delete":
             raise ValueError(
                 "a credential slot's value is set through its private prompt, never a spec"

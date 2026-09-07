@@ -20,7 +20,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import CursorExpired, SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 PINNED_CUTOFF = datetime(2026, 1, 15, 9, 30, tzinfo=UTC)
 
 
@@ -28,7 +27,7 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self.handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -42,7 +41,7 @@ async def _fetch(
     backfill_after: datetime | None = None,
 ):
     return await ConnectorBackend(connector=GmailConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="messages", backfill_after=backfill_after),
+        ConnectorSourceConfig(stream="messages", backfill_after=backfill_after),
         cursor,
         _auth(handler),
     )

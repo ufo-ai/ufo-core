@@ -168,10 +168,13 @@ class CorpusAttestor:
 
     def _settled_source(self, source_row: sa.Row | None) -> None:
         config = {"root": str(self.pages_root)}
-        if self.source_id != source_row_id(self.workspace_id, FOLDER_BACKEND, config):
-            raise RuntimeError("issue_recall folder source id is not canonical")
         if source_row is None:
             raise RuntimeError("issue_recall folder source is missing")
+        landed = source_row_id(
+            self.workspace_id, FOLDER_BACKEND, config, connection_id=source_row.connection_id
+        )
+        if self.source_id != landed:
+            raise RuntimeError("issue_recall folder source id is not canonical")
         if (
             source_row.workspace_id != self.workspace_id
             or source_row.backend != FOLDER_BACKEND

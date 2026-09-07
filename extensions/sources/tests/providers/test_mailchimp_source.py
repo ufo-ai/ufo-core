@@ -1,7 +1,7 @@
 """The Mailchimp connector over a mock transport: the top-level `?count&offset` walk hitting the
 per-tenant data-center host (with the watermark advancing over `date_created`), the per-list fan-out
 that stamps `list_id` on each member, and a refusal surfacing as `StreamSkipped`. The class base URL
-is empty (per-tenant data center), so the host is bound through `ConnectorSourceConfig.base_url`.
+is empty (per-tenant data center), so the host is bound through `SourceAuth.base_url`.
 Offline — a canned transport, no token."""
 
 from collections.abc import Callable
@@ -15,7 +15,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 BASE_URL = "https://us21.api.mailchimp.com"
 
 
@@ -23,14 +22,14 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
 async def _fetch(stream: str, handler: Callable[[httpx.Request], httpx.Response]) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=BASE_URL)
     return await ConnectorBackend(connector=MailchimpConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), None, auth
+        ConnectorSourceConfig(stream=stream), None, auth
     )
 
 

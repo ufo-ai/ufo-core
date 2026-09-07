@@ -16,6 +16,7 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.store as memory_store
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
@@ -168,15 +169,31 @@ async def _workspace() -> UUID:
 
 
 async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str) -> None:
+    """One page under its own source, under its own workspace-shared connection — the authority a
+    reader is granted, so one source is one grantable feed in these tests."""
     now = datetime(2025, 1, 1, tzinfo=UTC)
+    connection_id = uuid4()
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider="test",
+                account_id=connection_id.hex,
+                host="",
+                owner_member_id=None,
+                shared=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
-                subject=subject,
+                connection_id=connection_id,
                 next_sync_at=now,
                 created_at=now,
                 updated_at=now,
@@ -212,7 +229,6 @@ def _store(embed: object, workspace_id: UUID) -> MemoryStore:
                     await connection.execute(
                         sa.select(tables.source.c.id).where(
                             tables.source.c.workspace_id == workspace_id,
-                            tables.source.c.removed_at.is_(None),
                         )
                     )
                 ).scalars()
@@ -234,8 +250,8 @@ def _reader(subjects: frozenset[str]) -> SourceReader:
 
 
 async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -> SourceReader:
-    """An agent holding the grant for each named source: a page-derived fact reaches recall only
-    through a reader granted the feed it came from."""
+    """An agent holding a connector grant on the connection behind each named source: a
+    page-derived fact reaches recall only through a reader that may read the feed it came from."""
     agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -251,15 +267,24 @@ async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -
         )
         for source_id in source_ids:
             await connection.execute(
-                sa.insert(tables.source_grant).values(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
                     workspace_id=workspace_id,
-                    source_id=source_id,
                     agent_id=agent_id,
+                    connection_id=await _connection_of(connection, source_id),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
             )
     return SourceReader(agent_id=agent_id, requesting_member_id=None, subjects=frozenset({subject}))
+
+
+async def _connection_of(connection: AsyncConnection, source_id: UUID) -> UUID:
+    return (
+        await connection.execute(
+            sa.select(tables.source.c.connection_id).where(tables.source.c.id == source_id)
+        )
+    ).scalar_one()
 
 
 async def _seed_item(
@@ -921,7 +946,7 @@ async def test_recall_degrades_to_lexical_when_embed_fails(db: None) -> None:
     assert "zoltar" in hits[0].body
 
 
-async def test_source_grants_filter_before_recall_ranking(db: None) -> None:
+async def test_connector_grants_filter_before_recall_ranking(db: None) -> None:
     workspace_id = await _workspace()
     agent_id = uuid4()
     strong = vec((4, 1.0))
@@ -970,10 +995,11 @@ async def test_source_grants_filter_before_recall_ranking(db: None) -> None:
             )
         ).scalar_one()
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=granted_source,
                 agent_id=agent_id,
+                connection_id=await _connection_of(connection, granted_source),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

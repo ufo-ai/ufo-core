@@ -54,7 +54,7 @@ def _stream(
 
 PANDADOC_STREAMS: list[StreamSpec] = [
     _stream("documents", cursor_field="date_modified", canonical=True),
-    _stream("templates", canonical=True),
+    _stream("templates"),
     _stream("contacts", canonical=True),
 ]
 

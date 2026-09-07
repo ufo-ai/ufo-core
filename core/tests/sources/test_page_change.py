@@ -98,12 +98,37 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
     when = datetime.now(UTC)
     await blob.put(f"pages/{page_id}", body.encode())
     async with workspace_tx() as connection:
+        connection_id = (
+            await connection.execute(
+                sa.select(tables.connection.c.id).where(
+                    tables.connection.c.workspace_id == workspace_id,
+                    tables.connection.c.provider == "folder",
+                    tables.connection.c.account_id == "",
+                )
+            )
+        ).scalar_one_or_none()
+        if connection_id is None:
+            connection_id = uuid4()
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider="folder",
+                    account_id="",
+                    host="",
+                    owner_member_id=None,
+                    shared=True,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
+                connection_id=connection_id,
                 cursor=None,
                 next_sync_at=when,
                 created_at=sa.func.now(),

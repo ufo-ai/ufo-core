@@ -36,9 +36,11 @@ _RESPONSE_MAP = {
 }
 
 GOOGLE_CALENDAR_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="calendar_events", source_object="events", primary_key="id"),
+    StreamSpec(name="calendar_events", source_object="events", primary_key="id", canonical=True),
     StreamSpec(
-        name="event_attendees", source_object="event_attendees", primary_key="id", canonical=False
+        name="event_attendees",
+        source_object="event_attendees",
+        primary_key="id",
     ),
 ]
 

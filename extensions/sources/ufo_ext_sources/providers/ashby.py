@@ -56,7 +56,7 @@ ASHBY_STREAMS: list[StreamSpec] = [
     _stream("applications", path="/application.list", cursor_field="updatedAt", canonical=True),
     _stream("interviews", path="/interview.list", cursor_field="updatedAt", canonical=True),
     _stream("offers", path="/offer.list", cursor_field="updatedAt", canonical=True),
-    _stream("users", path="/user.list", cursor_field="updatedAt", canonical=True),
+    _stream("users", path="/user.list", cursor_field="updatedAt"),
     _stream(
         "application_criteria_evaluations",
         path="/application.listCriteriaEvaluations",
@@ -70,7 +70,7 @@ ASHBY_STREAMS: list[StreamSpec] = [
     _stream("feedback_form_definitions", path="/feedbackFormDefinition.list"),
     _stream("interview_schedules", path="/interviewSchedule.list", cursor_field="updatedAt"),
     _stream("interview_stages", path="/interviewStage.list"),
-    _stream("jobs", path="/job.list", cursor_field="updatedAt"),
+    _stream("jobs", path="/job.list", cursor_field="updatedAt", canonical=True),
     _stream("locations", path="/location.list"),
     _stream("sources", path="/source.list"),
 ]

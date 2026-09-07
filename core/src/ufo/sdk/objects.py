@@ -29,6 +29,9 @@ from ufo.runtime.kinds.agents import (
     AgentSpec as AgentSpec,
 )
 from ufo.runtime.object_name import (
+    OBJECT_NAME_MAX_LENGTH as OBJECT_NAME_MAX_LENGTH,
+)
+from ufo.runtime.object_name import (
     ObjectRef as ObjectRef,
 )
 from ufo.runtime.object_scope import (

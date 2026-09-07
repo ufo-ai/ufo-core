@@ -67,7 +67,6 @@ DOCUSIGN_STREAMS: list[StreamSpec] = [
         cursor_field=None,
         created_at_field="created",
         updated_at_field="lastModified",
-        canonical=False,
     ),
 ]
 

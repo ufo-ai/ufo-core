@@ -3311,11 +3311,14 @@ async def connection_pool(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def github_coverage(ctx: SurfaceContext, request: Request) -> Response:
+    """Whether this member reaches GitHub on each of its two legs, read over the connections they
+    may see — the same set the connections and streams beside it list, so the card cannot state a
+    coverage the screen under it does not show."""
     gated = await _audience_for(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, _email, audience = gated
-    coverage = await ctx.github_coverage(member_id, admin=audience.admin)
+    member_id, _email, _audience = gated
+    coverage = await ctx.github_coverage(member_id)
     return JSONResponse(coverage.model_dump(mode="json"))
 
 
@@ -3863,16 +3866,14 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response:
-    """The live source bindings this member may see — their own registrations plus shared ones,
-    all of them for a workspace admin. Workspace-scoped: the rows never carried an agent. A
-    member-subject source's indexed pages stay gated to that member; the view shows the subject
-    so that stays legible, and the read names a shared source's owner only to an admin or the
-    owner."""
+    """Every stream of every connection this member may see, each naming the connection it hangs
+    off so the connectors screen draws it under that account. Workspace-scoped: a stream never
+    carried an agent, and the connection it hangs off is what decides who sees it."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    member_id, _email, audience = resolved
-    listed = await ctx.list_sources(member_id, admin=audience.admin)
+    member_id, _email, _audience = resolved
+    listed = await ctx.list_sources(member_id)
     return JSONResponse({"sources": [entry.model_dump(mode="json") for entry in listed]})
 
 

@@ -505,22 +505,35 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
     only the main agent alike, and keeps answering both once no grant is left; the hit's timestamp
     rides the wire aware."""
     client, workspace_id, _agent_a, agent_b = portal
-    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
     await _grant(workspace_id, agent_b, CREATOR_EMAIL)
     page_id, source_id = uuid4(), uuid4()
     minted_at = datetime(2026, 7, 1, 8, 30, tzinfo=UTC)
     vector = [0.0] * EMBED_DIM
     vector[0] = 1.0
+    connection_id = uuid4()
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider="test",
+                account_id="",
+                host="",
+                owner_member_id=None,
+                shared=True,
+                created_at=minted_at,
+                updated_at=minted_at,
+            )
+        )
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
-                subject="shared",
-                owner_member_id=member_id,
+                connection_id=connection_id,
                 next_sync_at=minted_at,
                 created_at=minted_at,
                 updated_at=minted_at,
@@ -556,10 +569,11 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
             )
         )
         await connection.execute(
-            sa.insert(tables.source_grant).values(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=source_id,
                 agent_id=agent_b,
+                connection_id=connection_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -591,7 +605,9 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
     assert len(page_refs(through_main)) == 1
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.delete(tables.source_grant).where(tables.source_grant.c.source_id == source_id)
+            sa.delete(tables.connector_grant).where(
+                tables.connector_grant.c.connection_id == connection_id
+            )
         )
     owner_ungranted = (await client.get(path, headers=headers)).json()
     assert len(page_refs(owner_ungranted)) == 1

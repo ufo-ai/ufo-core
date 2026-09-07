@@ -26,9 +26,10 @@ def test_registry_rejects_duplicate_connector_names() -> None:
 def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> None:
     """A run's pinned floor arrives as `fetch_page`'s `backfill_after`, and `paginate_source` drops
     it by default so the connectors that read no window keep the `paginate` they have. That default
-    is a trap for the next connector to declare `backfill_window_days`: the knob would be accepted,
-    pinned on the row, and reported in `status`, while its walk quietly reached back forever —
-    honoured by nothing, which is the exact state `backfill_days` is refused elsewhere to avoid.
+    is a trap for the next connector to declare `backfill_window_days`: the connection's window
+    would be resolved onto the row and pinned, while its walk quietly reached back forever —
+    honoured by nothing, which is the exact state a stream declaring no window avoids by taking no
+    cutoff at all.
 
     So declaring a window on a stream obliges the connector to take delivery of one. Overriding
     `paginate_source` is how a connector does that (gmail and outlook do; slack overrides it for the

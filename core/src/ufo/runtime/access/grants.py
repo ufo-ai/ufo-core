@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -29,6 +30,7 @@ from ufo.db import workspace_tx
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.runtime.object_scope import object_agent_id
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, connection_subject
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
@@ -170,17 +172,18 @@ class OAuthProviderResolver(Protocol):
 
 @dataclass(frozen=True)
 class Grant:
-    """One agent's usable view of a connection. `account_label` is the broker's own name for the
-    connected account, empty for an account the broker named nothing; `commit` is the identity its
-    commits carry, None for a connection that signs none."""
+    """One agent's usable view of a connection. `owner_member_id` and `owner_email` are None for
+    the workspace's own connection — a keyed or configured feed nobody owns; `account_label` is the
+    broker's own name for the connected account, empty for an account the broker named nothing;
+    `commit` is the identity its commits carry, None for a connection that signs none."""
 
     id: UUID
     connection_id: UUID
     provider: str
     account_id: str
     host: str
-    owner_member_id: UUID
-    owner_email: str
+    owner_member_id: UUID | None
+    owner_email: str | None
     connection_shared: bool
     account_label: str = ""
     commit: CommitIdentity | None = None
@@ -195,9 +198,8 @@ class GrantSummary:
     provider: str
     account_id: str
     host: str
-    owner_member_id: UUID
-    owner_email: str
-    conversation_id: UUID
+    owner_member_id: UUID | None
+    owner_email: str | None
     granted_at: datetime
     updated_at: datetime
     shared: bool
@@ -205,30 +207,37 @@ class GrantSummary:
 
 @dataclass(frozen=True)
 class ConnectionSummary:
-    """One member-owned broker connection and the agents currently granted it."""
+    """One connection and the agents currently granted it. `owner_member_id` and `owner_email` are
+    None for the workspace's own connection — a keyed or configured feed nobody owns."""
 
     id: UUID
     provider: str
     account_id: str
     host: str
-    owner_member_id: UUID
-    owner_email: str
+    base_url: str | None
+    backfill_days: int | None
+    owner_member_id: UUID | None
+    owner_email: str | None
     shared: bool
-    conversation_id: UUID
     connected_at: datetime
     updated_at: datetime
     agents: tuple[str, ...]
 
 
 @dataclass(frozen=True)
-class MainAgentConnection:
-    """One member-owned connection the workspace's main agent is granted: the account a feed would
-    sync and the member whose connection pays for it."""
+class FeedConnection:
+    """One connection as a feed registrar reads it: the account its streams authenticate as, the
+    tenant URL they dial, how far back their first sync reaches, and the disclosure their pages
+    carry. Every connection the workspace holds is one — which agents may read what it syncs is the
+    grant's answer, not the registrar's."""
 
     id: UUID
     provider: str
     account_id: str
-    owner_member_id: UUID
+    base_url: str | None
+    backfill_days: int | None
+    owner_member_id: UUID | None
+    shared: bool
 
 
 @dataclass(frozen=True)
@@ -330,9 +339,8 @@ class ConnectState(BaseModel):
     shared: bool = False
     turn_id: UUID | None = None
     """The turn whose request this state was minted for, stamped when the grant lands so the reply
-    that asked reads as answered. A state minted before this field existed carries none, and the
-    grant it lands still records — the stamp is what a surface draws, never what makes the
-    connection."""
+    that asked reads as answered. None where the connect began outside a turn; the grant lands
+    either way, since the stamp is what a surface draws and never what makes the connection."""
 
 
 @dataclass(frozen=True)
@@ -355,7 +363,6 @@ class GrantStore:
         account_id: str,
         host: str,
         grantor_member_id: UUID,
-        conversation_id: UUID,
         shared: bool,
         account_label: str | None = None,
         commit: CommitIdentity | None = None,
@@ -391,14 +398,12 @@ class GrantStore:
         parks again within about five minutes, so the cost of releasing a row that was beyond repair
         is three requests.
 
-        `owner_member_id` bounds that second arm, because a source is its registering member's to
-        act on: `SourceObjects` refuses another member's resync, and the workspace's own rule is
-        that a member-owner controls expansion. One member reconnecting a provider says nothing
-        about a feed another member registered on it, and clearing that feed's marks would both act
-        outside the grantor's reach and take the park state from the member who reads it. The
-        connection arm needs no such bound — `source` keys its connection on
-        `(workspace_id, connection_id, owner_member_id)`, so those rows already belong to that
-        connection's owner.
+        The connection's owner bounds that second arm, because a feed is its connection's to act
+        on. One member reconnecting a provider says nothing about a feed hanging off another
+        member's connection to it, and clearing that feed's marks would both act outside the
+        grantor's reach and take the park state from the member who reads it. The first arm needs no
+        such bound: a source names one connection, so matching on it already reaches only that
+        connection's own streams.
 
         Reusing the connection row is also what releases the feeds bound to it. A source the
         provider refused into a park, and one that backed off to the hour cap, are both an hour from
@@ -449,7 +454,6 @@ class GrantStore:
                     account_id=account_id,
                     host=host,
                     owner_member_id=grantor_member_id,
-                    conversation_id=conversation_id,
                     shared=shared,
                     account_label=account_label,
                     commit_name=None if commit is None else commit.name,
@@ -495,6 +499,8 @@ class GrantStore:
                 )
                 .where(tables.connection.c.id == existing.id)
             )
+            if shared:
+                await self._restamp(connection, existing.id, SHARED_SUBJECT, datetime.now(UTC))
             await connection.execute(
                 insert(tables.connector_grant)
                 .values(
@@ -502,7 +508,6 @@ class GrantStore:
                     workspace_id=self.workspace_id,
                     agent_id=self.agent_id,
                     connection_id=existing.id,
-                    conversation_id=conversation_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -512,10 +517,7 @@ class GrantStore:
                         tables.connector_grant.c.agent_id,
                         tables.connector_grant.c.connection_id,
                     ],
-                    set_={
-                        "conversation_id": conversation_id,
-                        "updated_at": sa.func.now(),
-                    },
+                    set_={"updated_at": sa.func.now()},
                 )
             )
             if landed_turn_id is not None:
@@ -533,6 +535,7 @@ class GrantStore:
                     parked_at=None,
                     parked_reason=None,
                     consecutive_refusals=0,
+                    consecutive_empty=0,
                     consecutive_errors=0,
                     next_sync_at=datetime.now(UTC),
                     updated_at=sa.func.now(),
@@ -542,12 +545,16 @@ class GrantStore:
                     sa.or_(
                         tables.source.c.connection_id == existing.id,
                         sa.and_(
-                            tables.source.c.backend == provider,
                             tables.source.c.parked_at.is_not(None),
-                            tables.source.c.owner_member_id == grantor_member_id,
+                            tables.source.c.connection_id.in_(
+                                sa.select(tables.connection.c.id).where(
+                                    tables.connection.c.workspace_id == self.workspace_id,
+                                    tables.connection.c.provider == provider,
+                                    tables.connection.c.owner_member_id == grantor_member_id,
+                                )
+                            ),
                         ),
                     ),
-                    tables.source.c.removed_at.is_(None),
                 )
             )
         return existing.id
@@ -574,7 +581,7 @@ class GrantStore:
                         tables.connector_grant.join(
                             tables.connection,
                             tables.connector_grant.c.connection_id == tables.connection.c.id,
-                        ).join(
+                        ).outerjoin(
                             tables.member,
                             sa.and_(
                                 tables.connection.c.workspace_id == tables.member.c.workspace_id,
@@ -627,14 +634,18 @@ class GrantStore:
         *,
         provider: str,
         account_id: str,
-        conversation_id: UUID,
         actor_member_id: UUID,
         shared: bool,
     ) -> bool:
         """Attach an existing connection to this agent. The actor must own the connection or the
         connection must be workspace-shared — an admin holds no escape, since attaching a private
         connection widens the owner's access. Attach never changes sharing: a `shared` claim that
-        would widen the connection is refused."""
+        would widen the connection is refused.
+
+        It does wake the connection's streams: a stream every partition of which the provider
+        refused lands nothing run after run and idles to a daily look, and the grant that finally
+        admits it should not wait a day to be noticed — so the idle counter clears and the rows come
+        due now, exactly as a reconnect releases them."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -667,7 +678,6 @@ class GrantStore:
                     workspace_id=self.workspace_id,
                     agent_id=self.agent_id,
                     connection_id=row.id,
-                    conversation_id=conversation_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -679,88 +689,99 @@ class GrantStore:
                     ]
                 )
             )
+            await connection.execute(
+                sa.update(tables.source)
+                .values(
+                    consecutive_empty=0,
+                    next_sync_at=datetime.now(UTC),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.source.c.workspace_id == self.workspace_id,
+                    tables.source.c.connection_id == row.id,
+                )
+            )
         return True
 
     async def set_shared(
         self,
-        grant_id: UUID,
+        connection_id: UUID,
         shared: bool,
         *,
         actor_member_id: UUID,
     ) -> bool:
-        """Flip the connection's sharing flag after rechecking owner and one-way admin authority."""
+        """Flip a connection's sharing flag after rechecking owner and one-way admin authority, and
+        restamp the pages its streams already synced.
+
+        Keyed by the connection, because that is what the flag is: one column on one row, deciding
+        what every agent holding it may use and what disclosure every page it syncs carries. Keying
+        it by a per-agent grant would make one agent's edge look like the thing being shared.
+
+        The flag IS the disclosure, so leaving the pages behind would keep the workspace reading
+        what a member just made private. Each page takes a fresh `updated_at` so the page-change
+        replay re-indexes it under the new subject, exactly as an edit does. A connection nobody
+        owns cannot be made private — the schema's `connection_shared` check refuses it, and this
+        refuses it first rather than raising."""
+        now = datetime.now(UTC)
         async with workspace_tx() as connection:
-            selected = await self._grant_for_actor(
+            selected = await self._connection_for_actor(
                 connection,
-                grant_id,
+                connection_id,
                 actor_member_id,
                 admin_allowed=not shared,
             )
             if selected is None:
                 return False
-            updated = await connection.execute(
+            owner = (
+                await connection.execute(
+                    sa.select(tables.connection.c.owner_member_id).where(
+                        tables.connection.c.workspace_id == self.workspace_id,
+                        tables.connection.c.id == selected,
+                    )
+                )
+            ).scalar_one()
+            if owner is None and not shared:
+                return False
+            await connection.execute(
                 sa.update(tables.connection)
                 .values(shared=shared, updated_at=sa.func.now())
                 .where(
                     tables.connection.c.workspace_id == self.workspace_id,
-                    tables.connection.c.id
-                    == sa.select(tables.connector_grant.c.connection_id)
-                    .where(tables.connector_grant.c.id == selected)
-                    .scalar_subquery(),
+                    tables.connection.c.id == selected,
                 )
             )
-        return updated.rowcount > 0
+            await self._restamp(connection, selected, connection_subject(shared, owner), now)
+        return True
+
+    async def _restamp(
+        self, connection: AsyncConnection, connection_id: UUID, subject: str, now: datetime
+    ) -> None:
+        """Every live page the connection's streams synced takes the connection's disclosure, with
+        a fresh `updated_at` so the page-change replay re-indexes it under the new subject. The flag
+        IS the disclosure, so no path that moves the flag may leave the pages where they were."""
+        await connection.execute(
+            sa.update(tables.page)
+            .values(subject=subject, updated_at=now)
+            .where(
+                tables.page.c.workspace_id == self.workspace_id,
+                tables.page.c.source_id.in_(
+                    sa.select(tables.source.c.id).where(
+                        tables.source.c.workspace_id == self.workspace_id,
+                        tables.source.c.connection_id == connection_id,
+                    )
+                ),
+                tables.page.c.tombstone.is_(False),
+            )
+        )
 
     async def disconnect(self, connection_id: UUID, *, actor_member_id: UUID) -> bool:
-        """Stop every source bound to a connection, tombstone its pages, and remove the connection.
-        Connector-grant edges follow by cascade."""
+        """Remove a connection. Its source rows, their synced pages, and every connector-grant edge
+        follow by cascade, so the account stops syncing and stops being recallable in one statement
+        — nothing outlives the authority that fetched it."""
         async with workspace_tx() as connection:
             selected = await self._connection_for_actor(connection, connection_id, actor_member_id)
             if selected is None:
                 return False
-            source_ids = (
-                (
-                    await connection.execute(
-                        sa.select(tables.source.c.id).where(
-                            tables.source.c.workspace_id == self.workspace_id,
-                            tables.source.c.connection_id == selected,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            now = datetime.now(UTC)
-            if source_ids:
-                await connection.execute(
-                    sa.delete(tables.source_grant).where(
-                        tables.source_grant.c.workspace_id == self.workspace_id,
-                        tables.source_grant.c.source_id.in_(source_ids),
-                    )
-                )
-                await connection.execute(
-                    sa.update(tables.source)
-                    .values(
-                        connection_id=None,
-                        removed_at=now,
-                        claimed_by=None,
-                        claim_expires_at=None,
-                        updated_at=sa.func.now(),
-                    )
-                    .where(
-                        tables.source.c.workspace_id == self.workspace_id,
-                        tables.source.c.id.in_(source_ids),
-                    )
-                )
-                await connection.execute(
-                    sa.update(tables.page)
-                    .values(tombstone=True, updated_at=now)
-                    .where(
-                        tables.page.c.workspace_id == self.workspace_id,
-                        tables.page.c.source_id.in_(source_ids),
-                        tables.page.c.tombstone.is_(False),
-                    )
-                )
             await connection.execute(
                 sa.delete(tables.connection).where(
                     tables.connection.c.workspace_id == self.workspace_id,
@@ -768,6 +789,48 @@ class GrantStore:
                 )
             )
         return True
+
+    async def set_feed(
+        self,
+        connection_id: UUID,
+        *,
+        base_url: str | None,
+        backfill_days: int | None,
+        actor_member_id: UUID,
+    ) -> bool:
+        """Set what this connection's streams read: the tenant API URL they dial, and how far back
+        their first sync reaches. Owner-or-admin, the rule every connection edit holds to.
+
+        `base_url` is admitted under the connection's provider rule, read in the same transaction.
+        The streams send the workspace's credential to whatever host this column names, so which
+        hosts a provider may be dialled at is a security boundary the store holds — not a shape the
+        provider settles on the first request, because a request to a host the caller controls
+        succeeds."""
+        async with workspace_tx() as connection:
+            selected = await self._connection_for_actor(connection, connection_id, actor_member_id)
+            if selected is None:
+                return False
+            provider = (
+                await connection.execute(
+                    sa.select(tables.connection.c.provider).where(
+                        tables.connection.c.workspace_id == self.workspace_id,
+                        tables.connection.c.id == selected,
+                    )
+                )
+            ).scalar_one()
+            updated = await connection.execute(
+                sa.update(tables.connection)
+                .values(
+                    base_url=_tenant_url(provider, base_url),
+                    backfill_days=backfill_days,
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.connection.c.workspace_id == self.workspace_id,
+                    tables.connection.c.id == selected,
+                )
+            )
+        return updated.rowcount > 0
 
     async def _connection_for_actor(
         self,
@@ -937,7 +1000,6 @@ class ConnectFlow:
                 account_id=account.account_id,
                 host=descriptor.host,
                 grantor_member_id=claims.grantor_member_id,
-                conversation_id=claims.conversation_id,
                 shared=claims.shared,
                 account_label=account.account_label,
                 commit=account.commit,
@@ -1158,6 +1220,99 @@ ACCOUNT_NAME_DIGEST_LENGTH = 8
 ACCOUNT_NAME_HEAD_MAX = OBJECT_NAME_MAX_LENGTH - ACCOUNT_NAME_DIGEST_LENGTH - 1
 
 
+DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
+    "active_campaign": (
+        re.compile(rf"{DOMAIN_LABEL}\.api-us1\.com"),
+        re.compile(r"/?"),
+        "https://<account>.api-us1.com",
+    ),
+    "bamboohr": (
+        re.compile(r"api\.bamboohr\.com"),
+        re.compile(rf"/api/gateway\.php/{DOMAIN_LABEL}/?"),
+        "https://api.bamboohr.com/api/gateway.php/<subdomain>",
+    ),
+    "chargebee": (
+        re.compile(rf"{DOMAIN_LABEL}\.chargebee\.com"),
+        re.compile(r"/api/v2/?"),
+        "https://<site>.chargebee.com/api/v2",
+    ),
+    "freshdesk": (
+        re.compile(rf"{DOMAIN_LABEL}\.freshdesk\.com"),
+        re.compile(r"/?"),
+        "https://<domain>.freshdesk.com",
+    ),
+    "mailchimp": (
+        re.compile(rf"{DOMAIN_LABEL}\.api\.mailchimp\.com"),
+        re.compile(r"/?"),
+        "https://<dc>.api.mailchimp.com",
+    ),
+    "quickbooks": (
+        re.compile(r"quickbooks\.api\.intuit\.com"),
+        re.compile(r"/v3/company/[0-9]{1,32}/?"),
+        "https://quickbooks.api.intuit.com/v3/company/<realmId>",
+    ),
+    "recruitee": (
+        re.compile(r"api\.recruitee\.com"),
+        re.compile(rf"/c/{DOMAIN_LABEL}/?"),
+        "https://api.recruitee.com/c/<company_id>",
+    ),
+    "salesforce": (
+        re.compile(rf"(?:{DOMAIN_LABEL}\.)+salesforce\.com"),
+        re.compile(r"/?"),
+        "https://<instance>.salesforce.com",
+    ),
+    "zendesk": (
+        re.compile(rf"{DOMAIN_LABEL}\.zendesk\.com"),
+        re.compile(r"/?"),
+        "https://<subdomain>.zendesk.com",
+    ),
+}
+"""The hosts and paths a per-tenant provider may be dialled at: host pattern, path pattern, and the
+example a refusal names. A provider absent here has one fixed host and takes no `base_url` at all.
+
+This table is a security boundary. A connection's streams send the workspace's provider credential
+to whatever host `base_url` names, and a workspace admin who may apply the `connection` kind has no
+read path to that credential — so a URL that only had to be a well-formed https origin would let an
+admin export the key by pointing a keyed feed at a host they control. The provider never refuses
+that URL: the request to it succeeds."""
+
+
+def _tenant_url(provider: str, base_url: str | None) -> str | None:
+    """The tenant API URL a connection stores, or None where it dials its connector's own host. A
+    provider outside `TENANT_URL_RULES` refuses every `base_url`; one inside it takes only an https
+    origin with no credentials, port, query or fragment whose host and path match its rule. A
+    trailing slash is dropped so one tenant is one string."""
+    value = (base_url or "").strip()
+    if not value:
+        return None
+    rule = TENANT_URL_RULES.get(provider)
+    if rule is None:
+        raise ValueError(f"{provider!r} has a fixed API host; base_url cannot override it")
+    host_pattern, path_pattern, example = rule
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"{provider!r} base_url has an invalid port") from error
+    hostname = parsed.hostname or ""
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"{provider!r} base_url must be an https origin with no credentials, port or query"
+        )
+    if host_pattern.fullmatch(hostname) is None or path_pattern.fullmatch(parsed.path) is None:
+        raise ValueError(f"{provider!r} base_url must match {example}")
+    return f"https://{hostname}{parsed.path.rstrip('/')}"
+
+
 def account_object_name(provider: str, account_id: str) -> str:
     """The stable object name a provider account renders as — for both the `connection` and
     `connector_grant` kinds and the portal's prepared intents, so every surface names one edge
@@ -1204,7 +1359,6 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
                     tables.connection.c.host,
                     tables.connection.c.owner_member_id,
                     tables.member.c.email.label("owner_email"),
-                    tables.connector_grant.c.conversation_id,
                     tables.connector_grant.c.created_at,
                     tables.connector_grant.c.updated_at,
                     tables.connection.c.shared,
@@ -1215,7 +1369,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
                         tables.connector_grant.c.connection_id == tables.connection.c.id,
                     )
                     .join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
-                    .join(
+                    .outerjoin(
                         tables.member,
                         sa.and_(
                             tables.connection.c.workspace_id == tables.member.c.workspace_id,
@@ -1236,7 +1390,6 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
             host=row.host,
             owner_member_id=row.owner_member_id,
             owner_email=row.owner_email,
-            conversation_id=row.conversation_id,
             granted_at=row.created_at,
             updated_at=row.updated_at,
             shared=row.shared,
@@ -1246,7 +1399,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
 
 
 async def connection_summaries() -> tuple[ConnectionSummary, ...]:
-    """This workspace's member-owned connections, independent of the bound agent."""
+    """This workspace's connections, independent of the bound agent."""
     member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
     async with workspace_tx() as connection:
         rows = (
@@ -1256,16 +1409,17 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
                     tables.connection.c.provider,
                     tables.connection.c.account_id,
                     tables.connection.c.host,
+                    tables.connection.c.base_url,
+                    tables.connection.c.backfill_days,
                     tables.connection.c.owner_member_id,
                     tables.member.c.email.label("owner_email"),
                     tables.connection.c.shared,
-                    tables.connection.c.conversation_id,
                     tables.connection.c.created_at,
                     tables.connection.c.updated_at,
                     member_name.label("name"),
                 )
                 .select_from(
-                    tables.connection.join(
+                    tables.connection.outerjoin(
                         tables.member,
                         sa.and_(
                             tables.connection.c.workspace_id == tables.member.c.workspace_id,
@@ -1296,10 +1450,11 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
                 provider=row.provider,
                 account_id=row.account_id,
                 host=row.host,
+                base_url=row.base_url,
+                backfill_days=row.backfill_days,
                 owner_member_id=row.owner_member_id,
                 owner_email=row.owner_email,
                 shared=row.shared,
-                conversation_id=row.conversation_id,
                 connected_at=row.created_at,
                 updated_at=row.updated_at,
                 agents=(),
@@ -1313,10 +1468,11 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
             provider=summary.provider,
             account_id=summary.account_id,
             host=summary.host,
+            base_url=summary.base_url,
+            backfill_days=summary.backfill_days,
             owner_member_id=summary.owner_member_id,
             owner_email=summary.owner_email,
             shared=summary.shared,
-            conversation_id=summary.conversation_id,
             connected_at=summary.connected_at,
             updated_at=summary.updated_at,
             agents=tuple(sorted(agent_names.get(key, ()))),
@@ -1325,11 +1481,10 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
     )
 
 
-async def main_agent_connections() -> tuple[MainAgentConnection, ...]:
-    """This workspace's connections the main agent holds a grant for, provider-ordered — what a feed
-    registrar may sync without being told. A feed registered off one of these grants the main agent,
-    so a connection held only by a shipped agent is absent: the account a member connected for that
-    agent stays with it."""
+async def feed_connections() -> tuple[FeedConnection, ...]:
+    """Every connection this workspace holds, provider-ordered — what a feed registrar gives its
+    streams. It asks nothing about grants: a connection is content the workspace is authorized to
+    read, and which agents may reach it is the grant's answer, checked wherever a reader asks."""
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -1337,27 +1492,24 @@ async def main_agent_connections() -> tuple[MainAgentConnection, ...]:
                     tables.connection.c.id,
                     tables.connection.c.provider,
                     tables.connection.c.account_id,
+                    tables.connection.c.base_url,
+                    tables.connection.c.backfill_days,
                     tables.connection.c.owner_member_id,
+                    tables.connection.c.shared,
                 )
-                .select_from(
-                    tables.connection.join(
-                        tables.connector_grant,
-                        tables.connector_grant.c.connection_id == tables.connection.c.id,
-                    ).join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
-                )
-                .where(
-                    tables.connection.c.workspace_id == ws_current().workspace_id,
-                    tables.agent.c.is_main.is_(True),
-                )
+                .where(tables.connection.c.workspace_id == ws_current().workspace_id)
                 .order_by(tables.connection.c.provider, tables.connection.c.account_id)
             )
         ).all()
     return tuple(
-        MainAgentConnection(
+        FeedConnection(
             id=row.id,
             provider=row.provider,
             account_id=row.account_id,
+            base_url=row.base_url,
+            backfill_days=row.backfill_days,
             owner_member_id=row.owner_member_id,
+            shared=row.shared,
         )
         for row in rows
     )

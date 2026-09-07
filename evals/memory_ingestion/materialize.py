@@ -47,6 +47,7 @@ from ufo.runtime.sources.sync import (
     CorePageFeed,
     FolderSource,
     SyncDriver,
+    feed_handle,
     page_id_for,
     register_sources,
     source_body_ref_matches,
@@ -198,13 +199,16 @@ class IngestionAttestor:
     async def attest(self) -> IngestionMaterialization:
         """Attest source ingestion, Luna-derived provenance, and memory-only indexing."""
         page_rows, memory_rows, chunk_rows, source_row, cursors = await self._rows()
+        if source_row is None:
+            raise RuntimeError("memory_ingestion folder source is missing")
         expected_source_id = source_row_id(
-            self.workspace_id, FOLDER_BACKEND, {"root": str(self.pages_root)}
+            self.workspace_id,
+            FOLDER_BACKEND,
+            {"root": str(self.pages_root)},
+            connection_id=source_row.connection_id,
         )
         if self.source_id != expected_source_id:
             raise RuntimeError("memory_ingestion folder source id is not canonical")
-        if source_row is None:
-            raise RuntimeError("memory_ingestion folder source is missing")
         if (
             source_row.workspace_id != self.workspace_id
             or source_row.backend != FOLDER_BACKEND
@@ -462,10 +466,17 @@ class MemoryIngestionMaterializer:
             backend="folder",
             config=SourceConfig(root=str(self.pages_root)),
         )
-        source_id = source_row_id(
-            workspace_id, FOLDER_BACKEND, entry.config.model_dump(mode="json")
-        )
         with ws(workspace_id):
+            ext = context_for(memory_manifest.NAME, frozenset())
+            connection_id = await ext.register_connection(
+                FOLDER_BACKEND, account_id=feed_handle(entry.config)
+            )
+            source_id = source_row_id(
+                workspace_id,
+                FOLDER_BACKEND,
+                entry.config.model_dump(mode="json"),
+                connection_id=connection_id,
+            )
             await register_sources((entry,))
             await SyncDriver(
                 backends={FOLDER_BACKEND: FolderSource()},

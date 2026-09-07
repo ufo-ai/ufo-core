@@ -26,7 +26,6 @@ from ufo.runtime.sources import backend as backend_module
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 ORG = {"login": "acme", "id": 1}
 REPO = {
     "id": 100,
@@ -43,7 +42,7 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
@@ -56,7 +55,7 @@ async def _fetch(
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
     return await ConnectorBackend(connector=GitHubConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, backfill_after=backfill_after),
+        ConnectorSourceConfig(stream=stream, backfill_after=backfill_after),
         cursor,
         auth,
     )

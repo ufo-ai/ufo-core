@@ -168,8 +168,14 @@ mem_page = sa.Table(
     sa.Column("page_id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("subject", sa.Text, nullable=False),
-    sa.Column("revision", sa.BigInteger, nullable=True),
+    sa.Column("revision", sa.BigInteger, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["page_id"],
+        ["page.id"],
+        ondelete="CASCADE",
+        name="mem_page_page_id_fkey",
+    ),
 )
 
 
@@ -189,10 +195,12 @@ def clip_to_word(text: str, limit: int) -> str:
     return (kept if cut < 0 else kept[:cut]).rstrip(" ,;:—-") + "…"
 
 
-def _granted_link(source_ids: frozenset[UUID]) -> ColumnElement[bool]:
-    """The grant fence over the source link set: a page-derived row is readable when the reader
-    holds a grant for any one of the sources that derived it, not only the source of its current
-    primary binding — a fact learned from two feeds is reached through either. Correlates to
+def _readable_link(source_ids: frozenset[UUID]) -> ColumnElement[bool]:
+    """The reach fence over the source link set: a page-derived row is readable when the reader may
+    read any one of the sources that derived it, not only the source of its current primary binding
+    — a fact learned from two feeds is reached through either. Which sources a reader may read is
+    core's one answer, read through `readable_source_ids`: a connector grant on the source's
+    connection, or a connection the workspace shares read by its main agent. Correlates to
     `memory_item.c.id`, so it composes into a read as an `EXISTS` predicate."""
     return sa.exists().where(
         memory_source.c.memory_item_id == memory_item.c.id,
@@ -215,7 +223,7 @@ class MemoryInventoryItem(BaseModel):
     non-NULL means consolidation replaced it; `subject` is its exact audience. `source_id` is the
     source of the derivation it currently binds to (the last to write it); `source_ids` is the full
     set of sources that derived this one fact — the same fact learned from two feeds is one row
-    granted by either, so the operator sees every feed it came from, not only the last."""
+    reachable through either, so the operator sees every feed it came from, not only the last."""
 
     subject: str
     body: str
@@ -867,9 +875,9 @@ class MemoryStore:
         its chunks. An optional
         half-open `[start, end)` bound on `created_at` restricts recall to a window; the index never
         sees the bound, so the filter lands in the row read-back alongside the superseded drop and
-        the source-grant fence — a page-derived row survives only for a reader holding one of its
-        source links. The index legs fetch a bounded candidate pool rather than just `limit`, so the
-        fence has higher-ranked-but-ungranted rows to discard without starving the `limit` granted
+        the source-reach fence — a page-derived row survives only for a reader who may read one of
+        its source links. The index legs fetch a bounded candidate pool rather than just `limit`, so
+        the fence has higher-ranked-but-unreachable rows to discard without starving the `limit`
         rows a reader may see; it is a row filter, not an index partition.
 
         Ranking that pool down to the slots is `_shortlist`, in a worker thread: this runs from the
@@ -981,7 +989,7 @@ class MemoryStore:
         source_reader: SourceReader,
     ) -> frozenset[UUID]:
         if self.readable_source_ids is None:
-            raise RuntimeError("source-derived memory reads require source grant authority")
+            raise RuntimeError("source-derived memory reads require core's source-reach authority")
         return await self.readable_source_ids(source_reader)
 
     async def _legs(
@@ -1016,7 +1024,7 @@ class MemoryStore:
             return ()
         authority: ColumnElement[bool] = memory_item.c.source_id.is_(None)
         if source_ids:
-            authority = sa.or_(authority, _granted_link(source_ids))
+            authority = sa.or_(authority, _readable_link(source_ids))
         async with self.transaction() as connection:
             rows = (
                 (
@@ -1074,8 +1082,8 @@ class MemoryStore:
         start: datetime | None,
         end: datetime | None,
     ) -> tuple[Recalled, ...]:
-        """Read the surviving (non-superseded) items back in fused order, fenced on the source
-        grant: a page-derived row survives only when the reader holds one of its source links, a
+        """Read the surviving (non-superseded) items back in fused order, fenced on source reach: a
+        page-derived row survives only when the reader may read one of its source links, a
         member-written row (no source) always. A superseded item — or one outside the
         `[start, end)` `created_at` window, or one whose page has moved off its bound revision, or
         one the page pass retired — drops out here rather than being served."""
@@ -1088,7 +1096,7 @@ class MemoryStore:
             memory_item.c.subject.in_(subjects),
             memory_item.c.superseded_by.is_(None),
             memory_item.c.retired_at.is_(None),
-            sa.or_(memory_item.c.source_id.is_(None), _granted_link(source_ids)),
+            sa.or_(memory_item.c.source_id.is_(None), _readable_link(source_ids)),
         ]
         if start is not None:
             conditions.append(memory_item.c.created_at >= start)
@@ -1154,7 +1162,7 @@ class MemoryStore:
         if not page_ids:
             return {}
         if self.readable_page_states is None:
-            raise RuntimeError("source-derived memory reads require source grant authority")
+            raise RuntimeError("source-derived memory reads require core's source-reach authority")
         return await self.readable_page_states(page_ids, source_reader)
 
 

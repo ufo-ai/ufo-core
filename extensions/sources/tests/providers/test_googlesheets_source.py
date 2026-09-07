@@ -36,14 +36,12 @@ from ufo.runtime.sources.backend import BACKFILL_KEY
 from ufo.runtime.sources.sync import SourceAuth, StreamFault, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
 
-ACCOUNT = "acct-1"
-
 
 class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self.handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -55,7 +53,7 @@ async def _fetch(
     stream: str, handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
 ):
     return await ConnectorBackend(connector=GoogleSheetsConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, _auth(handler)
+        ConnectorSourceConfig(stream=stream), cursor, _auth(handler)
     )
 
 

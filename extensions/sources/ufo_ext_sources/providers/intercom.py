@@ -54,7 +54,7 @@ def _stream(
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = "updated_at",
-    canonical: bool = True,
+    canonical: bool = False,
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -66,29 +66,27 @@ def _stream(
 
 
 INTERCOM_STREAMS: list[StreamSpec] = [
-    _stream("conversations"),
-    _stream("conversation_parts"),
-    _stream("contacts", source_object="contact"),
-    _stream("companies", source_object="company"),
+    _stream("conversations", canonical=True),
+    _stream("conversation_parts", canonical=True),
+    _stream("contacts", source_object="contact", canonical=True),
+    _stream("companies", source_object="company", canonical=True),
     _stream("admins", cursor_field=None),
-    _stream("activity_logs", cursor_field="created_at", canonical=False),
-    _stream("tags", cursor_field=None, canonical=False),
-    _stream("teams", cursor_field=None, canonical=False),
-    _stream("segments", canonical=False),
+    _stream("activity_logs", cursor_field="created_at"),
+    _stream("tags", cursor_field=None),
+    _stream("teams", cursor_field=None),
+    _stream("segments"),
     _stream(
         "company_attributes",
         source_object="company",
         cursor_field=None,
-        canonical=False,
     ),
     _stream(
         "contact_attributes",
         source_object="contact",
         cursor_field=None,
-        canonical=False,
     ),
-    _stream("company_segments", canonical=False),
-    _stream("tickets", canonical=False),
+    _stream("company_segments"),
+    _stream("tickets", canonical=True),
 ]
 
 

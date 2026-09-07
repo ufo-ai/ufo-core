@@ -58,7 +58,7 @@ transaction. Core names the billing extension's tool: `BILLING_ACTION` at `schem
 and a migration allowlist entry. The signup grant is two constants in `onboard_control.py:387-394`.
 
 **Sources are a core framework nothing in core consumes.** `runtime/sources/` (2,923 lines), the
-`source`, `source_grant`, and `page` tables, the `source_sync` job, and the `page_change` runner
+`source` and `page` tables, the `source_sync` job, and the `page_change` runner
 exist for `extensions/sources` (55 providers) and `extensions/gbrain`. Memory imports one name from
 the sources extension: `ufo_ext_sources.pages.PAGE_KIND` (`extensions/memory/ufo_ext_memory/manifest.py:32`).
 

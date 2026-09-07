@@ -27,7 +27,7 @@ from ufo.runtime.ext.context import (
     agent_is_live as agent_is_live,
 )
 from ufo.runtime.ext.context import (
-    connection_workspaces as connection_workspaces,
+    feed_workspaces as feed_workspaces,
 )
 from ufo.runtime.ext.context import (
     seated_member_workspaces as seated_member_workspaces,

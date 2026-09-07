@@ -657,7 +657,6 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
             account_id=PIPEDREAM_ACCOUNT,
             host=PROVIDER_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
     owner = f"{pipedream.EXTERNAL_USER_PREFIX}{workspace_id}"
@@ -730,7 +729,6 @@ async def test_call_external_tool_answers_an_unknown_key_with_the_closest_action
             account_id=PIPEDREAM_ACCOUNT,
             host=PROVIDER_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
     _install_transport(
@@ -778,7 +776,6 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
             account_id="ca_composio_era",
             host=PROVIDER_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
     base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "stale"))
@@ -823,7 +820,6 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
             account_id=PIPEDREAM_ACCOUNT,
             host=PROVIDER_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
     base = _pipedream_handler(pipedream.connection_user_id(workspace_id, "in-band"))

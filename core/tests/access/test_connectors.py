@@ -22,7 +22,7 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from httpx import AsyncBaseTransport, AsyncClient, Request, Response
 
-from ufo.config import Config
+from ufo.config import Config, SourceConfig
 from ufo.db import workspace_tx
 from ufo.runtime.access.connectors import (
     CatalogEntry,
@@ -31,12 +31,15 @@ from ufo.runtime.access.connectors import (
     ConnectorRegistry,
     Credential,
     SourceCredentialResolver,
+    brokered_account,
 )
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantStore, install_connect_flow
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.sources.sync import feed_handle
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
@@ -201,7 +204,6 @@ async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: Non
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=False,
             )
     ctx_a = _turn_context(workspace_id, agent_a, conversation_id, member_id, grants=store)
@@ -223,7 +225,6 @@ async def test_connector_account_selects_the_named_account(db: None) -> None:
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=False,
             )
         ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
@@ -249,7 +250,6 @@ async def test_connector_selection_does_not_survive_a_regrant_of_the_same_connec
             account_id="acct-1",
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
@@ -260,7 +260,6 @@ async def test_connector_selection_does_not_survive_a_regrant_of_the_same_connec
             account_id="acct-1",
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
-            conversation_id=conversation_id,
             shared=False,
         )
         replacement = await ctx.connector_connection(sample.CONNECTOR_PROVIDER)
@@ -288,7 +287,6 @@ async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(d
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=False,
             )
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
@@ -296,11 +294,18 @@ async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(d
         assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
 
 
+def test_a_handle_naming_no_broker_account_routes_to_the_workspace_key() -> None:
+    assert brokered_account("") is None
+    assert brokered_account(member_subject(uuid4())) is None
+    assert brokered_account(feed_handle(SourceConfig(root="/srv/notes"))) is None
+    assert brokered_account("acct-1") == "acct-1"
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_source_credential_stays_bound_to_its_connection_generation(db: None) -> None:
     workspace_id = await _workspace()
     alice, agent_id = await _member_agent(workspace_id)
-    alice_conversation = await _conversation(workspace_id, alice)
+    await _conversation(workspace_id, alice)
     store = GrantStore()
     with ws(workspace_id), agent(agent_id):
         await store.record(
@@ -308,7 +313,6 @@ async def test_source_credential_stays_bound_to_its_connection_generation(db: No
             account_id="same-account",
             host="api.stub.test",
             grantor_member_id=alice,
-            conversation_id=alice_conversation,
             shared=False,
         )
         (grant,) = await store.active_grants()
@@ -325,11 +329,8 @@ async def test_source_credential_stays_bound_to_its_connection_generation(db: No
     )
     credential = (
         await SourceCredentialResolver(registry)
-        .bind(
-            grant.connection_id,
-            alice,
-        )
-        .credential(workspace_id, "stub", "same-account")
+        .bind(grant.connection_id)
+        .credential(workspace_id, "stub")
     )
     assert credential.transport is not None
 
@@ -360,21 +361,20 @@ async def test_source_credential_stays_bound_to_its_connection_generation(db: No
                         updated_at=sa.func.now(),
                     )
                 )
-        bob_conversation = await _conversation(workspace_id, bob)
+        await _conversation(workspace_id, bob)
         with ws(workspace_id), agent(agent_id):
             await store.record(
                 provider="stub",
                 account_id="same-account",
                 host="api.stub.test",
                 grantor_member_id=bob,
-                conversation_id=bob_conversation,
                 shared=False,
             )
         with pytest.raises(ValueError, match="no longer active for this source"):
             await (
                 SourceCredentialResolver(registry)
-                .bind(grant.connection_id, alice)
-                .credential(workspace_id, "stub", "same-account")
+                .bind(grant.connection_id)
+                .credential(workspace_id, "stub")
             )
         with pytest.raises(ValueError, match="no longer active for this source"):
             await client.get("https://api.stub.test/items")
@@ -410,7 +410,6 @@ async def test_connector_account_prefers_the_acting_members_private_account(db: 
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
                 grantor_member_id=member_m,
-                conversation_id=conversation_id,
                 shared=shared,
             )
         ctx_m = _turn_context(workspace_id, agent_id, conversation_id, member_m, grants=store)

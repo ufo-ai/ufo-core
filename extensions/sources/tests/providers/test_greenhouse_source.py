@@ -15,7 +15,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 NEXT_JOBS_PAGE = "https://harvest.greenhouse.io/v1/jobs?per_page=500&page=2"
 
 
@@ -23,7 +22,7 @@ NEXT_JOBS_PAGE = "https://harvest.greenhouse.io/v1/jobs?per_page=500&page=2"
 class _MockProxy:
     handler: Callable[[httpx.Request], httpx.Response]
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -35,7 +34,7 @@ async def _fetch(
     stream: str, handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
 ):
     return await ConnectorBackend(connector=GreenhouseConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, _auth(handler)
+        ConnectorSourceConfig(stream=stream), cursor, _auth(handler)
     )
 
 

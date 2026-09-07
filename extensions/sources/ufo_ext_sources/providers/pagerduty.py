@@ -24,7 +24,7 @@ _REFUSAL_STATUS = frozenset({401, 403})
 _PAGERDUTY_ACCEPT = "application/vnd.pagerduty+json;version=2"
 
 USERS = StreamSpec(name="users", source_object="users", primary_key="id")
-TEAMS = StreamSpec(name="teams", source_object="teams", primary_key="id", canonical=False)
+TEAMS = StreamSpec(name="teams", source_object="teams", primary_key="id")
 SERVICES = StreamSpec(name="services", source_object="services", primary_key="id")
 INCIDENTS = StreamSpec(
     name="incidents",
@@ -32,6 +32,7 @@ INCIDENTS = StreamSpec(
     primary_key="id",
     cursor_field="updated_at",
     updated_at_field="updated_at",
+    canonical=True,
 )
 INCIDENT_NOTES = StreamSpec(
     name="incident_notes",
@@ -39,21 +40,18 @@ INCIDENT_NOTES = StreamSpec(
     primary_key="id",
     cursor_field="created_at",
     updated_at_field=None,
-    canonical=False,
 )
 ESCALATION_POLICIES = StreamSpec(
     name="escalation_policies",
     source_object="escalation_policies",
     primary_key="id",
-    canonical=False,
 )
 SCHEDULES = StreamSpec(
     name="schedules",
     source_object="schedules",
     primary_key="id",
-    canonical=False,
 )
-ONCALLS = StreamSpec(name="oncalls", source_object="oncalls", primary_key="id", canonical=False)
+ONCALLS = StreamSpec(name="oncalls", source_object="oncalls", primary_key="id")
 
 ALL_STREAMS = [
     USERS,

@@ -52,7 +52,7 @@ ASANA_STREAMS: list[StreamSpec] = [
     ),
     _stream("tasks", cursor_field="modified_at", updated_at_field="modified_at", canonical=True),
     _stream("stories", cursor_field="created_at", canonical=True),
-    _stream("users", canonical=True),
+    _stream("users"),
     _stream("attachments"),
     _stream("attachments_compact"),
     _stream("organization_exports"),

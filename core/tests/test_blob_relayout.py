@@ -28,6 +28,7 @@ def _relayout_module():
 async def _seed_rows(artifact_key: str, body_ref: str):
     workspace_id, agent_id = uuid4(), uuid4()
     conversation_id, turn_id, source_id, page_id = uuid4(), uuid4(), uuid4(), uuid4()
+    connection_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -86,11 +87,25 @@ async def _seed_rows(artifact_key: str, body_ref: str):
             )
         )
         await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=FOLDER_BACKEND,
+                account_id="",
+                host="",
+                owner_member_id=None,
+                shared=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": "/seed"},
+                connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
                 claimed_by=None,

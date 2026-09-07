@@ -136,7 +136,6 @@ from ufo.sdk.search import (
     SearchResults,
 )
 from ufo.sdk.sources import Page, SourceAuth, SyncResult
-from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.surfaces import (
     AskQuestion,
     AskUserInput,
@@ -892,8 +891,7 @@ async def _setup(ctx: ExtensionContext) -> None:
     await ctx.register_source(
         SOURCE_BACKEND,
         SampleSourceConfig(topic=SOURCE_TOPIC),
-        subject=SHARED_SUBJECT,
-        owner_member_id=None,
+        connection_id=await ctx.register_connection(SOURCE_BACKEND),
     )
 
 
@@ -1273,7 +1271,7 @@ class SampleAuthProxy:
     object consumed through the protocol, so a test drives it exactly as core does; the Composio and
     direct backends keep their own proofs."""
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(bearer=AUTH_PROXY_BEARER)
 
 

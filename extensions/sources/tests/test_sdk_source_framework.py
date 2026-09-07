@@ -57,7 +57,7 @@ class WidgetConnector(RestConnector):
 class _MockProxy:
     handler: Callable[[httpx.Request], httpx.Response]
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -71,7 +71,7 @@ async def test_sdk_framework_builds_a_source_and_paginates_to_a_snapshot() -> No
     backend = ConnectorBackend(connector=WidgetConnector())
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=_handler))
 
-    config = ConnectorSourceConfig(account="acct", stream="widgets")
+    config = ConnectorSourceConfig(stream="widgets")
     result = await backend.fetch(config, None, auth)
 
     assert result.snapshot is True

@@ -58,7 +58,7 @@ BAMBOOHR_STREAMS: list[StreamSpec] = [
         canonical=True,
     ),
     _stream("employees"),
-    _stream("timesheet_entries", cursor_field="start", created_at_field="start"),
+    _stream("timesheet_entries", cursor_field="start", created_at_field="start", canonical=True),
     _stream("meta_fields"),
     _stream("custom_reports"),
 ]

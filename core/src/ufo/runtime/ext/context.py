@@ -87,7 +87,7 @@ from ufo.runtime.turns.audience import (
     parse_audience,
     readable_audiences,
 )
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX, SHARED_SUBJECT
 from ufo.runtime.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.runtime.workspace import PLATFORM_FUNDED, ResolvedModelClient, ws_current
 from ufo.schema import tables
@@ -295,6 +295,13 @@ class CredentialAccess:
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().credential_is_stored(slot)
+
+    async def stored_slots(self) -> frozenset[str]:
+        """Which of this handler's declared slots the bound workspace holds its own secret for, in
+        one read. `stored` asked of every declared slot at once, for a handler that walks a
+        catalogue each tick rather than asking about one slot it already has in hand. Undeclared
+        slots never appear, so this discloses no more than `stored` would."""
+        return await ws_current().stored_credential_slots() & self.declared
 
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
@@ -600,20 +607,38 @@ def seated_member_workspaces() -> WorkspaceCandidates:
     return owner_candidates(with_a_seated_member)
 
 
-def connection_workspaces() -> WorkspaceCandidates:
-    """The candidate seam a connection-driven job declares: the workspaces where the main agent
-    holds a connector grant. Core owns the `connector_grant`/`agent` tables, so it owns this query —
-    a workspace whose main agent has no connected account never fires the handler."""
+def feed_workspaces(slots: frozenset[str]) -> WorkspaceCandidates:
+    """The candidate seam a feed registrar declares: every workspace holding a connection, plus
+    every workspace holding a credential in one of `slots` — the provider slots the registrar can
+    turn into a feed.
 
-    def with_a_main_agent_connection() -> sa.Select[tuple[UUID]]:
-        return (
-            sa.select(tables.connector_grant.c.workspace_id)
-            .join(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
-            .where(tables.agent.c.is_main.is_(True))
-            .distinct()
+    A registrar needs the second half because a feed on a member-added provider key starts from a
+    filled credential slot and nothing else: there is no connection yet, and the registrar is what
+    mints one. It needs the slot filter because `credential` holds every BYOK slot a deploy declares
+    — model keys included — and a workspace whose only credential is a model key would otherwise be
+    a candidate every tick forever, for a registrar that can do nothing with it."""
+
+    def with_a_feed() -> sa.Select[tuple[UUID]]:
+        holds_a_feed_credential = sa.exists(
+            sa.select(1)
+            .select_from(tables.credential)
+            .where(
+                tables.credential.c.workspace_id == tables.workspace.c.id,
+                tables.credential.c.slot.in_(sorted(slots)),
+            )
+            .correlate(tables.workspace)
+        )
+        holds_a_connection = sa.exists(
+            sa.select(1)
+            .select_from(tables.connection)
+            .where(tables.connection.c.workspace_id == tables.workspace.c.id)
+            .correlate(tables.workspace)
+        )
+        return sa.select(tables.workspace.c.id).where(
+            sa.or_(holds_a_connection, holds_a_feed_credential)
         )
 
-    return owner_candidates(with_a_main_agent_connection)
+    return owner_candidates(with_a_feed)
 
 
 def agent_is_live(
@@ -938,19 +963,15 @@ class ModelAccess:
 @dataclass(frozen=True)
 class SourceRecord:
     """One live content-sync source as `ExtensionContext.sources` reads it: the row's identity,
-    the backend's typed per-source parameters as stored, and the timing marks a caller renders as
-    status; `subject` is the disclosure every synced page is stamped with, `owner_member_id` the
-    registering member (None for a deploy- or extension-registered feed). `parked_at` and
-    `parked_reason` are set on a row the provider refused often enough to slow it to an hour: it is
-    not failing, so nothing else in the status says it is barely reading. A value object — never
-    leaves the process."""
+    the connection that authorizes it, the backend's typed per-source parameters as stored, and the
+    timing marks a caller renders as status. `parked_at` and `parked_reason` are set on a row the
+    provider refused often enough to slow it to an hour: it is not failing, so nothing else in the
+    status says it is barely reading. A value object — never leaves the process."""
 
     id: UUID
     backend: str
     config: dict[str, JsonValue]
-    subject: str
-    owner_member_id: UUID | None
-    connection_id: UUID | None
+    connection_id: UUID
     next_sync_at: datetime
     consecutive_errors: int
     parked_at: datetime | None
@@ -997,40 +1018,70 @@ class PageState:
 
 
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
-    """Which live sources this reader may read, as a predicate over `source` rows: a source granted
-    to the agent; every shared source when the agent is the workspace's main agent, since the main
-    agent is the one every member talks to and expects to know what the workspace shares; and a
-    member's own private source while that member is the live speaker and the agent is main. A
-    specialist agent reads only what it is granted, shared or not, so its feed set stays the narrow
-    one it was given. The reader's subjects bound every branch."""
+    """Which sources this reader may read, as a predicate over `source` rows. A source is one
+    stream of one connection, so the connection answers both halves: `disclosed` is whether this
+    reader's audience admits the connection's content at all, and `reachable` is whether this agent
+    is one that may read it — an agent holding a grant on the connection, or the workspace's main
+    agent, which every member talks to and expects to know what the workspace shares and what the
+    live speaker holds privately. A specialist agent reads only what it is granted, shared or not,
+    so its feed set stays the narrow one it was given."""
     granted = sa.exists(
-        sa.select(1).where(
-            tables.source_grant.c.workspace_id == workspace_id,
-            tables.source_grant.c.source_id == tables.source.c.id,
-            tables.source_grant.c.agent_id == reader.agent_id,
+        sa.select(1)
+        .select_from(tables.connector_grant)
+        .where(
+            tables.connector_grant.c.workspace_id == workspace_id,
+            tables.connector_grant.c.connection_id == tables.connection.c.id,
+            tables.connector_grant.c.agent_id == reader.agent_id,
         )
+        .correlate(tables.connection)
     )
     reader_is_main = sa.exists(
-        sa.select(1).where(
+        sa.select(1)
+        .select_from(tables.agent)
+        .where(
             tables.agent.c.workspace_id == workspace_id,
             tables.agent.c.id == reader.agent_id,
             tables.agent.c.is_main.is_(True),
         )
+        .correlate()
     )
-    main_reads_shared = sa.and_(tables.source.c.subject == SHARED_SUBJECT, reader_is_main)
-    main_for_member = (
+    admitted = frozenset(
+        UUID(subject.removeprefix(MEMBER_SUBJECT_PREFIX))
+        for subject in reader.subjects
+        if subject.startswith(MEMBER_SUBJECT_PREFIX)
+    )
+    disclosed = sa.or_(
+        sa.and_(
+            tables.connection.c.shared,
+            sa.true() if SHARED_SUBJECT in reader.subjects else sa.false(),
+        ),
+        sa.and_(
+            tables.connection.c.shared.is_(False),
+            tables.connection.c.owner_member_id.in_(admitted) if admitted else sa.false(),
+        ),
+    )
+    speaker_owns = (
         sa.false()
         if reader.requesting_member_id is None
-        else sa.and_(
-            tables.source.c.owner_member_id == reader.requesting_member_id,
-            reader_is_main,
-        )
+        else tables.connection.c.owner_member_id == reader.requesting_member_id
+    )
+    reachable = sa.or_(
+        granted,
+        sa.and_(reader_is_main, sa.or_(tables.connection.c.shared, speaker_owns)),
     )
     return sa.and_(
         tables.source.c.workspace_id == workspace_id,
-        tables.source.c.removed_at.is_(None),
-        tables.source.c.subject.in_(reader.subjects),
-        sa.or_(granted, main_reads_shared, main_for_member),
+        sa.exists(
+            sa.select(1)
+            .select_from(tables.connection)
+            .where(
+                tables.connection.c.workspace_id == workspace_id,
+                tables.connection.c.id == tables.source.c.connection_id,
+                disclosed,
+                reachable,
+            )
+            .correlate(tables.source)
+        ),
     )
 
 
@@ -1434,23 +1485,11 @@ class ExtensionContext:
                         tables.page.c.body_ref,
                         tables.page.c.updated_at,
                     )
-                    .select_from(
-                        tables.page.join(
-                            tables.source, tables.page.c.source_id == tables.source.c.id
-                        )
-                    )
                     .where(
                         tables.page.c.workspace_id == self.workspace_id,
                         tables.page.c.updated_at >= since,
                         tables.page.c.subject.in_(("shared", f"member:{member_id}")),
                         tables.page.c.tombstone.is_(False),
-                        tables.source.c.removed_at.is_(None),
-                        sa.exists(
-                            sa.select(1).where(
-                                tables.source_grant.c.workspace_id == self.workspace_id,
-                                tables.source_grant.c.source_id == tables.source.c.id,
-                            )
-                        ),
                     )
                     .order_by(tables.page.c.updated_at.desc())
                     .limit(limit)
@@ -2169,89 +2208,114 @@ class ExtensionContext:
         async with workspace_tx() as connection:
             return frozenset((await connection.execute(query)).scalars())
 
-    async def register_source(
+    async def register_connection(
         self,
-        backend: str,
-        config: BaseModel,
+        provider: str,
         *,
-        subject: str,
-        owner_member_id: UUID | None,
-        connection_id: UUID | None = None,
-        agent_id: UUID | None = None,
+        account_id: str = "",
+        owner_member_id: UUID | None = None,
+    ) -> UUID:
+        """The connection a feed this extension registers hangs off — the authority its streams read
+        under. `account_id` is what distinguishes one feed of a provider from another (a repository,
+        a folder root); empty where the provider itself is the whole identity, as it is for a BYOK
+        key held in the credential store. `owner_member_id` names the member it belongs to, and a
+        connection nobody owns is shared, because it is nobody's to keep private; a member's starts
+        private and `set_shared` is the one act that widens it. What its streams read — the tenant
+        URL, the backfill window — is `set_feed`'s, on the connection, never registration's.
+
+        Settles on the existing row rather than replacing it, so a repeated boot registers the same
+        connection its sources already hang off. Deleting it is `GrantStore.disconnect`, which takes
+        its streams and their pages with it — the one removal path in the system."""
+        async with workspace_tx() as connection:
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.connection)
+                .values(
+                    id=uuid4(),
+                    workspace_id=self.store.workspace_id,
+                    provider=provider,
+                    account_id=account_id,
+                    host="",
+                    owner_member_id=owner_member_id,
+                    shared=owner_member_id is None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.connection.c.workspace_id,
+                        tables.connection.c.provider,
+                        tables.connection.c.account_id,
+                    ]
+                )
+            )
+            return (
+                await connection.execute(
+                    sa.select(tables.connection.c.id).where(
+                        tables.connection.c.workspace_id == self.store.workspace_id,
+                        tables.connection.c.provider == provider,
+                        tables.connection.c.account_id == account_id,
+                    )
+                )
+            ).scalar_one()
+
+    async def remove_connection(self, connection_id: UUID) -> None:
+        """The inverse of `register_connection`: drop a connection this extension minted and no
+        longer has a reason for, and with it — by cascade — its streams, their pages and every grant
+        on it. A connection a member owns is not an extension's to remove; `GrantStore.disconnect`
+        is the member's act, so one is refused."""
+        async with workspace_tx() as connection:
+            removed = (
+                await connection.execute(
+                    sa.delete(tables.connection).where(
+                        tables.connection.c.workspace_id == self.store.workspace_id,
+                        tables.connection.c.id == connection_id,
+                        tables.connection.c.owner_member_id.is_(None),
+                    )
+                )
+            ).rowcount
+        if removed != 1:
+            raise ValueError(f"connection {connection_id} is not one an extension minted")
+
+    async def register_source(
+        self, backend: str, config: BaseModel, *, connection_id: UUID
     ) -> UUID:
         """Register a content-sync source for this workspace under `backend` — a `SourceBackend` an
         extension declared through its Manifest `sources` point — with `config` the backend's typed
-        per-source parameters (the connected account, a folder root), `subject` the disclosure every
-        page it syncs is stamped with, `owner_member_id` the registering member, and `connection_id`
-        the exact member-owned connection generation behind a broker source (None for direct or
-        extension-owned feeds). Brokered row identity includes that connection generation; direct
-        row identity is (workspace, backend, config) minus the config model's
-        `SourceRowConfig.non_identity_fields` (a backfill window). Re-registering the same authority
-        settles on one row and leaves its stored config alone, while changing its owner, disclosure,
-        or `requested_fields()` fails loud under the same `for update` lock — so a caller is never
-        told a window was applied that the row does not hold. What is compared is the request, not
-        the instant it resolved to, since each caller resolves the same day count against its own
-        `now`; the loser settles on the winner's row and reads the winner's pin back.
+        per-source parameters (which stream, how far back it reaches) and `connection_id` the
+        connection that authorizes it. Row identity is (workspace, backend, connection, config)
+        minus the config model's `SourceRowConfig.non_identity_fields`, so one stream of one
+        connection is one row however many callers register it. Re-registering settles on that row
+        and leaves its stored config alone, while asking for a different `requested_fields()` fails
+        loud under the same `for update` lock — so a caller is never told a window was applied that
+        the row does not hold. What is compared is the request, not the instant it resolved to,
+        since each caller resolves the same day count against its own `now`; the loser settles on
+        the winner's row and reads the winner's pin back.
 
-        That keeps one binding's streams on one window while the racing callers submit the same
-        stream set — both register in sorted order, so the loser is refused before creating any
-        other. Differing stream sets can still split a binding, as they already could: each
-        `register_source` is its own transaction.
-
-        Reviving a removed row instead takes the re-registering config, its identity keys being the
-        id's own inputs. `agent_id` — the main agent when unnamed — is granted the source, so a feed
-        a member adds for a second agent grants that agent while still syncing once under one row.
-        The core sync driver polls the row and lands its pages in memory; embedding stays a job."""
+        The connection carries both the disclosure of every page the row syncs and the reach of it:
+        an agent granted the connection reads its streams, and deleting the connection deletes
+        them. The core sync driver polls the row and lands its pages in memory; embedding stays a
+        job."""
         payload = config.model_dump(mode="json")
         source_id = self.source_id(backend, config, connection_id=connection_id)
         registered_at = datetime.now(UTC)
         async with workspace_tx() as connection:
-            target_agent_id = agent_id
-            if target_agent_id is None:
-                target_agent_id = (
-                    await connection.execute(
-                        sa.select(tables.agent.c.id).where(
-                            tables.agent.c.workspace_id == self.store.workspace_id,
-                            tables.agent.c.is_main.is_(True),
-                        )
-                    )
-                ).scalar_one_or_none()
-                if target_agent_id is None:
-                    raise RuntimeError("registering a source requires a main agent")
-            target = (
+            authority = (
                 await connection.execute(
-                    sa.select(tables.agent.c.id).where(
-                        tables.agent.c.workspace_id == self.store.workspace_id,
-                        tables.agent.c.id == target_agent_id,
+                    sa.select(tables.connection.c.id)
+                    .where(
+                        tables.connection.c.id == connection_id,
+                        tables.connection.c.workspace_id == self.store.workspace_id,
+                        tables.connection.c.provider == backend,
                     )
+                    .with_for_update(read=True)
                 )
             ).scalar_one_or_none()
-            if target is None:
-                raise ValueError("the source target agent is outside this workspace")
-            if connection_id is not None:
-                account = payload.get("account")
-                if owner_member_id is None or not isinstance(account, str):
-                    raise ValueError(
-                        "a connection-bound source requires its member owner and account"
-                    )
-                authorized = (
-                    await connection.execute(
-                        sa.select(tables.connection.c.id)
-                        .where(
-                            tables.connection.c.id == connection_id,
-                            tables.connection.c.workspace_id == self.store.workspace_id,
-                            tables.connection.c.owner_member_id == owner_member_id,
-                            tables.connection.c.provider == backend,
-                            tables.connection.c.account_id == account,
-                        )
-                        .with_for_update(read=True)
-                    )
-                ).scalar_one_or_none()
-                if authorized is None:
-                    raise ValueError(
-                        "the source connection is not active for its workspace, provider, "
-                        "account, and member owner"
-                    )
+            if authority is None:
+                raise ValueError(
+                    f"no {backend!r} connection {connection_id} in this workspace to register a "
+                    "source against"
+                )
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
                 insert(tables.source)
@@ -2260,8 +2324,6 @@ class ExtensionContext:
                     workspace_id=self.store.workspace_id,
                     backend=backend,
                     config=payload,
-                    subject=subject,
-                    owner_member_id=owner_member_id,
                     connection_id=connection_id,
                     cursor=None,
                     next_sync_at=registered_at,
@@ -2274,154 +2336,31 @@ class ExtensionContext:
             )
             present = (
                 await connection.execute(
-                    sa.select(
-                        tables.source.c.id,
-                        tables.source.c.removed_at,
-                        tables.source.c.config,
-                        tables.source.c.subject,
-                        tables.source.c.owner_member_id,
-                        tables.source.c.connection_id,
-                    )
+                    sa.select(tables.source.c.config)
                     .where(tables.source.c.id == source_id)
                     .with_for_update()
                 )
             ).one()
-            revived = present.removed_at is not None
-            if not revived:
-                if (
-                    present.subject,
-                    present.owner_member_id,
-                    present.connection_id,
-                ) != (
-                    subject,
-                    owner_member_id,
-                    connection_id,
-                ):
-                    raise ValueError(
-                        "a source with this configuration is already registered under a different "
-                        "owner, connection, or disclosure; delete it before changing its authority"
-                    )
-                requested = (
-                    type(config).requested_fields()
-                    if isinstance(config, SourceRowConfig)
-                    else frozenset[str]()
-                )
-                differing = sorted(
-                    field for field in requested if present.config.get(field) != payload.get(field)
-                )
-                if differing:
-                    raise ValueError(
-                        "a source with this configuration is already registered asking for a "
-                        f"different {', '.join(differing)}; delete it before changing what it "
-                        "reaches"
-                    )
-            else:
-                await connection.execute(
-                    sa.update(tables.source)
-                    .values(
-                        removed_at=None,
-                        config=payload,
-                        subject=subject,
-                        owner_member_id=owner_member_id,
-                        connection_id=connection_id,
-                        cursor=None,
-                        next_sync_at=registered_at,
-                        consecutive_errors=0,
-                        consecutive_refusals=0,
-                        parked_at=None,
-                        parked_reason=None,
-                        claimed_by=None,
-                        claim_expires_at=None,
-                        created_at=registered_at,
-                        updated_at=registered_at,
-                    )
-                    .where(tables.source.c.id == source_id)
-                )
-            await connection.execute(
-                insert(tables.source_grant)
-                .values(
-                    workspace_id=self.store.workspace_id,
-                    source_id=source_id,
-                    agent_id=target_agent_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        tables.source_grant.c.workspace_id,
-                        tables.source_grant.c.source_id,
-                        tables.source_grant.c.agent_id,
-                    ]
-                )
+            requested = (
+                type(config).requested_fields()
+                if isinstance(config, SourceRowConfig)
+                else frozenset[str]()
             )
+            differing = sorted(
+                field for field in requested if present.config.get(field) != payload.get(field)
+            )
+            if differing:
+                raise ValueError(
+                    "a source with this configuration is already registered asking for a "
+                    f"different {', '.join(differing)}; delete it before changing what it reaches"
+                )
         return source_id
 
-    async def grant_source(self, source_id: UUID, *, agent_id: UUID, actor_member_id: UUID) -> None:
-        """Grant an agent a source this workspace already holds, so a second agent reads a feed
-        without a second row syncing the same account twice.
-
-        `register_source` grants as it registers, and it is the only path that did. A source the
-        workspace already holds is settled there — same authority, same window — so registering it
-        again grants nothing new and the asking agent is left with no feed and no error.
-
-        The actor must own the source or the source must be workspace-shared, the rule
-        `GrantStore.attach` holds for connections. What a grant decides is which agent may reach a
-        source; whether its pages may be read at all stays with the subject each page carries, so
-        this widens no disclosure on its own — the refusal is about the authority behind the feed,
-        which belongs to the member whose connection serves it."""
-        async with workspace_tx() as connection:
-            row = (
-                await connection.execute(
-                    sa.select(tables.source.c.owner_member_id, tables.source.c.subject)
-                    .where(
-                        tables.source.c.workspace_id == self.store.workspace_id,
-                        tables.source.c.id == source_id,
-                        tables.source.c.removed_at.is_(None),
-                    )
-                    .with_for_update(read=True)
-                )
-            ).one_or_none()
-            if row is None:
-                raise ValueError("no such source in this workspace")
-            if row.owner_member_id != actor_member_id and row.subject != SHARED_SUBJECT:
-                raise ValueError("member cannot grant a source another member holds privately")
-            target = (
-                await connection.execute(
-                    sa.select(tables.agent.c.id).where(
-                        tables.agent.c.workspace_id == self.store.workspace_id,
-                        tables.agent.c.id == agent_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if target is None:
-                raise ValueError("the source target agent is outside this workspace")
-            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
-            await connection.execute(
-                insert(tables.source_grant)
-                .values(
-                    workspace_id=self.store.workspace_id,
-                    source_id=source_id,
-                    agent_id=agent_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        tables.source_grant.c.workspace_id,
-                        tables.source_grant.c.source_id,
-                        tables.source_grant.c.agent_id,
-                    ]
-                )
-            )
-
-    def source_id(
-        self, backend: str, config: BaseModel, *, connection_id: UUID | None = None
-    ) -> UUID:
+    def source_id(self, backend: str, config: BaseModel, *, connection_id: UUID) -> UUID:
         """The row `register_source` settles this authority on. It is derived, never read, so a
         caller may name a row that does not exist and be naming the exact row registering would
-        create. Paired with `removed_source_ids` it is how a caller that registers on its own
-        initiative tells a feed nobody has yet from one the member deleted — which `register_source`
-        would otherwise revive."""
+        create — which is how a caller registering on its own initiative tells a stream the
+        workspace already syncs from one nobody has yet."""
         return source_row_id(
             self.store.workspace_id,
             backend,
@@ -2434,41 +2373,14 @@ class ExtensionContext:
             ),
         )
 
-    async def removed_source_ids(self, source_ids: tuple[UUID, ...]) -> frozenset[UUID]:
-        """Which of these sources this workspace has removed. Deleting a source stamps
-        `removed_at` rather than dropping the row, so nothing an extension keyed on a source ever
-        hears about it: the row it holds outlives the feed it names, invisible to every listing and
-        armed if that source is registered again.
-
-        The answer is positive evidence — a row that exists and is removed — never an id this read
-        failed to return. An extension asking "is this gone?" cannot be told yes by a query that
-        narrowed, went stale, or lost a row, so a caller deleting what this names deletes too
-        little when something is wrong rather than everything. Absence is not removal here, and a
-        caller that wants live sources reads `sources`."""
-        if not source_ids:
-            return frozenset()
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(tables.source.c.id).where(
-                        tables.source.c.workspace_id == self.store.workspace_id,
-                        tables.source.c.id.in_(source_ids),
-                        tables.source.c.removed_at.is_not(None),
-                    )
-                )
-            ).scalars()
-        return frozenset(rows)
-
     async def sources(self, backend: str | None = None) -> tuple[SourceRecord, ...]:
-        """This workspace's live registered sources, optionally narrowed to one backend — the read
-        half of `register_source`, scoped exactly as it is. Removed sources never appear."""
+        """This workspace's registered sources, optionally narrowed to one backend — the read half
+        of `register_source`, scoped exactly as it is."""
         query = (
             sa.select(
                 tables.source.c.id,
                 tables.source.c.backend,
                 tables.source.c.config,
-                tables.source.c.subject,
-                tables.source.c.owner_member_id,
                 tables.source.c.connection_id,
                 tables.source.c.next_sync_at,
                 tables.source.c.consecutive_errors,
@@ -2477,10 +2389,7 @@ class ExtensionContext:
                 tables.source.c.created_at,
                 tables.source.c.updated_at,
             )
-            .where(
-                tables.source.c.workspace_id == self.store.workspace_id,
-                tables.source.c.removed_at.is_(None),
-            )
+            .where(tables.source.c.workspace_id == self.store.workspace_id)
             .order_by(tables.source.c.backend, tables.source.c.id)
         )
         if backend is not None:
@@ -2492,8 +2401,6 @@ class ExtensionContext:
                 id=row["id"],
                 backend=row["backend"],
                 config=row["config"],
-                subject=row["subject"],
-                owner_member_id=row["owner_member_id"],
                 connection_id=row["connection_id"],
                 next_sync_at=row["next_sync_at"],
                 consecutive_errors=row["consecutive_errors"],
@@ -2573,73 +2480,6 @@ class ExtensionContext:
         if forgotten.rowcount == 0:
             raise ValueError(f"no live page {page_id} in this workspace")
 
-    async def remove_source(self, source_id: UUID) -> None:
-        """Remove one registered source: mark the row removed so the sync driver never claims it
-        again, and tombstone its live pages in the same transaction — the existing page-change
-        delivery then clears derived index state, exactly as a snapshot shrink does. The row
-        persists as the pages' referent (they carry its foreign key); re-registering the identical
-        config revives it fresh. Fails loud on an unknown or already-removed id."""
-        now = datetime.now(UTC)
-        async with workspace_tx() as connection:
-            removed = await connection.execute(
-                sa.update(tables.source)
-                .values(
-                    removed_at=now,
-                    claimed_by=None,
-                    claim_expires_at=None,
-                    updated_at=sa.func.now(),
-                )
-                .where(
-                    tables.source.c.id == source_id,
-                    tables.source.c.workspace_id == self.store.workspace_id,
-                    tables.source.c.removed_at.is_(None),
-                )
-            )
-            if removed.rowcount == 0:
-                raise ValueError(f"no live source {source_id} in this workspace")
-            await connection.execute(
-                sa.delete(tables.source_grant).where(
-                    tables.source_grant.c.workspace_id == self.store.workspace_id,
-                    tables.source_grant.c.source_id == source_id,
-                )
-            )
-            await connection.execute(
-                sa.update(tables.page)
-                .values(tombstone=True, updated_at=now)
-                .where(
-                    tables.page.c.source_id == source_id,
-                    tables.page.c.tombstone.is_(False),
-                )
-            )
-
-    async def set_source_subject(self, source_ids: tuple[UUID, ...], subject: str) -> None:
-        """Flip live sources' disclosure and restamp their live pages in one transaction, each page
-        with a fresh microsecond `updated_at` so the page-change replay re-indexes every one under
-        the new subject — exactly as an edit does. Passing a binding's several stream rows settles
-        their new subject atomically, never in torn per-stream commits. Tombstoned pages stay put;
-        their chunks are already gone. Fails loud when no live source matched."""
-        now = datetime.now(UTC)
-        async with workspace_tx() as connection:
-            updated = await connection.execute(
-                sa.update(tables.source)
-                .values(subject=subject, updated_at=sa.func.now())
-                .where(
-                    tables.source.c.id.in_(source_ids),
-                    tables.source.c.workspace_id == self.store.workspace_id,
-                    tables.source.c.removed_at.is_(None),
-                )
-            )
-            if updated.rowcount == 0:
-                raise ValueError(f"no live sources {source_ids} in this workspace")
-            await connection.execute(
-                sa.update(tables.page)
-                .values(subject=subject, updated_at=now)
-                .where(
-                    tables.page.c.source_id.in_(source_ids),
-                    tables.page.c.tombstone.is_(False),
-                )
-            )
-
     async def rewindow_sources(
         self, configs: Mapping[UUID, BaseModel], *, refetch: frozenset[UUID] = frozenset()
     ) -> None:
@@ -2673,16 +2513,13 @@ class ExtensionContext:
                     .where(
                         tables.source.c.id.in_(tuple(configs)),
                         tables.source.c.workspace_id == self.store.workspace_id,
-                        tables.source.c.removed_at.is_(None),
                     )
                     .with_for_update()
                 )
             ).all()
             if len(rows) != len(configs):
                 found = {row.id for row in rows}
-                raise ValueError(
-                    f"no live sources {sorted(set(configs) - found)} in this workspace"
-                )
+                raise ValueError(f"no sources {sorted(set(configs) - found)} in this workspace")
             for row in rows:
                 config = configs[row.id]
                 payload = config.model_dump(mode="json")
@@ -2735,16 +2572,16 @@ class ExtensionContext:
                     parked_at=None,
                     parked_reason=None,
                     consecutive_refusals=0,
+                    consecutive_empty=0,
                     updated_at=sa.func.now(),
                 )
                 .where(
                     tables.source.c.id.in_(source_ids),
                     tables.source.c.workspace_id == self.store.workspace_id,
-                    tables.source.c.removed_at.is_(None),
                 )
             )
             if updated.rowcount == 0:
-                raise ValueError(f"no live sources {source_ids} in this workspace")
+                raise ValueError(f"no sources {source_ids} in this workspace")
 
     async def propose_change(self, change: AgentChange) -> ProposalRef:
         """Open a governed proposal against an agent's prompt, stamped with this extension as the

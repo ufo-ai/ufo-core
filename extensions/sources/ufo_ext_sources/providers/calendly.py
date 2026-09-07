@@ -38,25 +38,24 @@ CALENDLY_STREAMS: list[StreamSpec] = [
         cursor_field="updated_at",
         updated_at_field="updated_at",
     ),
-    StreamSpec(name="groups", source_object="groups", primary_key="uri", canonical=False),
+    StreamSpec(name="groups", source_object="groups", primary_key="uri"),
     StreamSpec(
         name="organization_memberships",
         source_object="organization_memberships",
         primary_key="uri",
-        canonical=False,
     ),
     StreamSpec(
         name="scheduled_events",
         source_object="scheduled_events",
         primary_key="uri",
         cursor_field="start_time",
+        canonical=True,
     ),
     StreamSpec(
         name="event_invitees",
         source_object="event_invitees",
         primary_key="uri",
         cursor_field="created_at",
-        canonical=False,
     ),
 ]
 

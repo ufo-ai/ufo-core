@@ -82,6 +82,7 @@ GMAIL_STREAMS: list[StreamSpec] = [
         created_at_field="internal_date",
         updated_at_field=None,
         backfill_window_days=MAIL_BACKFILL_WINDOW_DAYS,
+        canonical=True,
     ),
 ]
 

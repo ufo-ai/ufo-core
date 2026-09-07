@@ -3,9 +3,7 @@
 Explicit, not scanned — a new provider adds a line rather than paying for import-time discovery. The
 slug is the connector's `name` and doubles as the source `backend` name a `source` row carries and
 the credential slot the direct backend reads its key from; the manifest wraps each in a
-`ConnectorBackend` and registers it as a source the sync driver drives. A binding's object name
-derives from `ufo.sdk.sources.binding_name` — the `source` object kind, the `page` kind, and the
-portal's per-row actions all name a binding through that one rule."""
+`ConnectorBackend` and registers it as a source the sync driver drives."""
 
 from ufo.sdk.sources import Connector
 from ufo_ext_sources.providers.active_campaign import ActiveCampaignConnector
@@ -73,8 +71,6 @@ def _connector_registry(
         connectors[connector_type.name] = connector_type
     return connectors
 
-
-SOURCE_KIND = "source"
 
 CONNECTORS = _connector_registry(
     (

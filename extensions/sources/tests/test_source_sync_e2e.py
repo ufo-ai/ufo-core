@@ -1,6 +1,7 @@
-"""Source registration through durable pages and the memory tool, on both auth paths: a broker grant
-resolving through its broker, and a member-added key resolving through the `direct` backend — plus
-the pinned backfill window holding across a real `CursorExpired` reset, registration to wire."""
+"""A connection's feed through durable pages and the memory tool, on both auth paths: a broker
+connection resolving through its broker, and the workspace's own connection resolving a member-added
+key through the `direct` backend — plus the pinned backfill window holding across a real
+`CursorExpired` reset, registration to wire."""
 
 import asyncio
 import base64
@@ -8,7 +9,6 @@ import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs
 from uuid import UUID, uuid4
@@ -22,20 +22,17 @@ import ufo_ext_memory.manifest as memory_manifest
 import ufo_ext_pipedream.client as pipedream
 import ufo_ext_pipedream.manifest as pipedream_manifest
 import ufo_ext_sources.manifest as sources_manifest
-import ufo_ext_sources.tools as sources_tools
 from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.providers.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
-from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.runtime.access.connectors import (
-    DIRECT_ACCOUNT,
     AuthProxy,
     ConnectorEntry,
     ConnectorRegistry,
@@ -53,7 +50,7 @@ from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.sdk.sources import binding_name
+from ufo.sdk.sources import ConnectorSourceConfig
 from ufo.serve import _select_auth_proxy, _source_backends
 
 TOOL_NARRATION = "syncing their pages"
@@ -61,6 +58,7 @@ TOOL_NARRATION = "syncing their pages"
 ASANA_ACCOUNT = "ca_asana_e2e"
 GMAIL_ACCOUNT = "apn_gmail_e2e"
 KLAVIYO_KEY = "pk_live_byok_e2e"
+MEMBER_WINDOW_DAYS = 7
 DUE_AGAIN_AT = datetime(2000, 1, 1, tzinfo=UTC)
 KLAVIYO_PROFILE = {
     "type": "profile",
@@ -117,6 +115,7 @@ async def _state() -> State:
                 name="assistant",
                 prompt="p",
                 model="claude-opus-4-8",
+                is_main=True,
                 created_at=now,
                 updated_at=now,
             )
@@ -203,14 +202,13 @@ async def _register_grant(
     *,
     member_id: UUID | None = None,
     conversation_id: UUID | None = None,
-) -> None:
+) -> UUID:
     with ws(state.workspace_id), agent(state.agent_id):
-        await grants.record(
+        return await grants.record(
             provider=provider,
             account_id=account,
             host=host,
             grantor_member_id=member_id or state.member_id,
-            conversation_id=conversation_id or state.conversation_id,
             shared=False,
         )
 
@@ -219,19 +217,15 @@ async def _sync_and_search(
     state: State,
     context: ToolContext,
     provider: str,
-    account: str,
+    connection_id: UUID,
     stream: str,
     query: str,
     database_url: str,
     tmp_path: Path,
 ) -> tuple[str, SyncDriver]:
     with ws(state.workspace_id), agent(state.agent_id):
-        await SourceObjects().apply(
-            context,
-            binding_name(provider, account, None),
-            SourceSpec(provider=provider, streams=(stream,)),
-            None,
-            expected_generation=None,
+        await context.ext.register_source(
+            provider, ConnectorSourceConfig(stream=stream), connection_id=connection_id
         )
         driver = SyncDriver(
             blob=FilesystemBlobStore(root=tmp_path / "blobs"),
@@ -443,9 +437,11 @@ async def test_brokered_source_reaches_memory_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A granted source syncs through its broker with the `direct` fallback installed alongside —
-    the deploy shape the account-handle routing has to keep. The fallback's store holds no key for
-    either provider, so a source that took it would fail its run and recall nothing."""
+    """A connected account's source syncs through its broker with the `direct` fallback installed
+    alongside — the deploy shape the connection routing has to keep. The fallback's store holds no
+    key for either provider, so a source that took it would fail its run and recall nothing.
+    Disconnecting then takes the source row and every page it landed by cascade, and a second
+    member connecting the same account gets a connection, a row and a feed of their own."""
     state = await _state()
     grants = GrantStore()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
@@ -482,25 +478,21 @@ async def test_brokered_source_reaches_memory_search(
             "messages",
             "zephyr launch review",
         )
-    await _register_grant(state, grants, provider, account, host)
+    connection_id = await _register_grant(state, grants, provider, account, host)
     context = _context(state, grants, connectors)
 
     with ws(state.workspace_id), agent(state.agent_id):
-        connection = await context.connector_connection(provider, account)
         (grant,) = await grants.active_grants()
     resolved = (
         await SourceCredentialResolver(connectors)
-        .bind(
-            connection.id,
-            connection.owner_member_id,
-        )
-        .credential(state.workspace_id, provider, account)
+        .bind(connection_id)
+        .credential(state.workspace_id, provider)
     )
     assert resolved.transport is not None
     assert resolved.bearer is None
 
     recalled, driver = await _sync_and_search(
-        state, context, provider, account, stream, query, database_url, tmp_path / provider
+        state, context, provider, connection_id, stream, query, database_url, tmp_path / provider
     )
 
     assert query.lower() in recalled.lower()
@@ -516,39 +508,30 @@ async def test_brokered_source_reaches_memory_search(
     with ws(state.workspace_id), agent(state.agent_id):
         assert (
             await grants.disconnect(
-                connection.id,
+                connection_id,
                 actor_member_id=state.member_id,
             )
             is True
         )
-    assert await _run_due(state, driver) == 0
     assert state.workspace_id not in await driver.candidate_workspaces()
     async with workspace_tx() as connection:
-        stopped = (
+        assert (
             await connection.execute(
-                sa.select(
-                    tables.source.c.id,
-                    tables.source.c.removed_at,
-                    tables.source.c.connection_id,
-                ).where(tables.source.c.workspace_id == state.workspace_id)
+                sa.select(sa.func.count())
+                .select_from(tables.source)
+                .where(tables.source.c.workspace_id == state.workspace_id)
             )
-        ).one()
-        assert stopped.removed_at is not None
-        assert stopped.connection_id is None
-        removed_source_id = stopped.id
+        ).scalar_one() == 0
         assert (
             await connection.execute(
                 sa.select(sa.func.count())
                 .select_from(tables.page)
-                .where(
-                    tables.page.c.workspace_id == state.workspace_id,
-                    tables.page.c.tombstone.is_(False),
-                )
+                .where(tables.page.c.workspace_id == state.workspace_id)
             )
         ).scalar_one() == 0
 
     other_member, other_conversation = await _add_member(state)
-    await _register_grant(
+    rebound_id = await _register_grant(
         state,
         grants,
         provider,
@@ -568,7 +551,7 @@ async def test_brokered_source_reaches_memory_search(
         bob,
         bob_context,
         provider,
-        account,
+        rebound_id,
         stream,
         query,
         database_url,
@@ -576,18 +559,9 @@ async def test_brokered_source_reaches_memory_search(
     )
     assert query.lower() in recalled.lower()
     async with workspace_tx() as connection:
-        sources = (
-            await connection.execute(
-                sa.select(
-                    tables.source.c.id,
-                    tables.source.c.owner_member_id,
-                    tables.source.c.connection_id,
-                    tables.source.c.removed_at,
-                )
-            )
+        (rebound,) = (
+            await connection.execute(sa.select(tables.source.c.id, tables.source.c.connection_id))
         ).all()
-        removed = next(source for source in sources if source.removed_at is not None)
-        rebound = next(source for source in sources if source.removed_at is None)
         connection_owner = (
             await connection.execute(
                 sa.select(tables.connection.c.owner_member_id).where(
@@ -595,17 +569,7 @@ async def test_brokered_source_reaches_memory_search(
                 )
             )
         ).scalar_one()
-        removed_live_pages = (
-            await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(tables.page)
-                .where(
-                    tables.page.c.source_id == removed.id,
-                    tables.page.c.tombstone.is_(False),
-                )
-            )
-        ).scalar_one()
-        rebound_live_pages = (
+        live_pages = (
             await connection.execute(
                 sa.select(sa.func.count())
                 .select_from(tables.page)
@@ -615,14 +579,10 @@ async def test_brokered_source_reaches_memory_search(
                 )
             )
         ).scalar_one()
-    assert removed.id == removed_source_id
-    assert removed.removed_at is not None
-    assert removed.connection_id is None
-    assert rebound.id != removed.id
-    assert rebound.removed_at is None
-    assert (rebound.owner_member_id, connection_owner) == (other_member, other_member)
-    assert removed_live_pages == 0
-    assert rebound_live_pages > 0
+    assert rebound.connection_id == rebound_id
+    assert rebound_id != connection_id
+    assert connection_owner == other_member
+    assert live_pages > 0
 
 
 async def _klaviyo_listener(seen: list[tuple[str, dict[str, str]]]) -> asyncio.Server:
@@ -671,14 +631,14 @@ async def test_a_brokered_run_survives_the_broker_failing_to_reach_the_provider(
     monkeypatch.setattr(composio, "composio_client", lambda: client)
     broker_manifest = composio_manifest.manifest()
     connectors = _registry(broker_manifest, "asana", _selected_fallback(store, broker_manifest))
-    await _register_grant(state, grants, "asana", ASANA_ACCOUNT, "app.asana.com")
+    connection_id = await _register_grant(state, grants, "asana", ASANA_ACCOUNT, "app.asana.com")
     context = _context(state, grants, connectors)
 
     recalled, _ = await _sync_and_search(
         state,
         context,
         "asana",
-        ASANA_ACCOUNT,
+        connection_id,
         "workspaces",
         "orbital launch workspace",
         database_url,
@@ -704,8 +664,9 @@ async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_inst
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The BYOK path in the deploy shape that broke it: composio's open namespace is installed and
-    claims every slug, including klaviyo — which composio cannot broker at all. The source carries
-    `DIRECT_ACCOUNT`, so its run must resolve through the `direct` backend instead.
+    claims every slug, including klaviyo — which composio cannot broker at all. The source hangs off
+    the workspace's own connection, which holds no account handle, so its run must resolve through
+    the `direct` backend instead.
 
     Nothing between the member's key and the provider wire is stood in for: the key is stored
     encrypted and read back through the workspace credential store, the fallback is the one core's
@@ -737,11 +698,12 @@ async def test_keyed_source_reaches_memory_search_with_the_broker_namespace_inst
     try:
         with ws(state.workspace_id), agent(state.agent_id):
             await ws_current().put_credential("klaviyo", KLAVIYO_KEY)
+            connection_id = await context.ext.register_connection("klaviyo")
         recalled, _driver = await _sync_and_search(
             state,
             context,
             "klaviyo",
-            DIRECT_ACCOUNT,
+            connection_id,
             "profiles",
             "windward summit logistics",
             database_url,
@@ -766,16 +728,16 @@ async def test_a_pinned_window_survives_a_cursor_reset_through_the_whole_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The constraint the design calls the one that matters most, end to end: a member registers a
-    7-day mail window, the row syncs, its `historyId` ages out, and the driver clears the cursor —
-    and the second backfill has to ask the provider for the same instant the registration pinned. A
-    window recomputed per run (`now` minus the declared 30 days, or minus the request's 7) sends a
-    different floor here, and every message between the two floors is then dropped for good: mail is
-    not `delete_missing`, so nothing tombstones or revisits it. The floor is read off the wire, the
-    pin off the row the driver left behind. The one thing handed in is the instant registration
+    """The constraint the design calls the one that matters most, end to end: a row is pinned to a
+    7-day mail window, it syncs, its `historyId` ages out, and the driver clears the cursor — and
+    the second backfill has to ask the provider for the same instant the registration pinned. A
+    window recomputed per run (`now` minus the declared 30 days, or minus the connection's 7) sends
+    a different floor here, and every message between the two floors is then dropped for good: mail
+    is not `delete_missing`, so nothing tombstones or revisits it. The floor is read off the wire,
+    the pin off the row the driver left behind. The one thing handed in is the instant registration
     reads as `now`, six hours back, because Gmail's floor crosses the wire in whole seconds: a floor
-    recomputed from the member's own 7 days would otherwise be caught only when the two runs fall
-    in different seconds, which is a coin flip over a run this short."""
+    recomputed from the connection's own 7 days would otherwise be caught only when the two runs
+    fall in different seconds, which is a coin flip over a run this short."""
     state = await _state()
     grants = GrantStore()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
@@ -831,18 +793,21 @@ async def test_a_pinned_window_survives_a_cursor_reset_through_the_whole_path(
     monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
     broker_manifest = pipedream_manifest.manifest()
     connectors = _registry(broker_manifest, "gmail", _selected_fallback(store, broker_manifest))
-    await _register_grant(state, grants, "gmail", GMAIL_ACCOUNT, "gmail.googleapis.com")
+    connection_id = await _register_grant(
+        state, grants, "gmail", GMAIL_ACCOUNT, "gmail.googleapis.com"
+    )
     context = _context(state, grants, connectors)
     registered_at = datetime.now(UTC) - timedelta(hours=6)
-    monkeypatch.setattr(sources_tools, "datetime", SimpleNamespace(now=lambda _tz: registered_at))
 
     with ws(state.workspace_id), agent(state.agent_id):
-        await SourceObjects().apply(
-            context,
-            binding_name("gmail", GMAIL_ACCOUNT, None),
-            SourceSpec(provider="gmail", streams=("messages",), backfill_days=7),
-            None,
-            expected_generation=None,
+        await context.ext.register_source(
+            "gmail",
+            ConnectorSourceConfig(
+                stream="messages",
+                backfill_days=MEMBER_WINDOW_DAYS,
+                backfill_after=registered_at - timedelta(days=MEMBER_WINDOW_DAYS),
+            ),
+            connection_id=connection_id,
         )
         driver = SyncDriver(
             blob=FilesystemBlobStore(root=tmp_path / "blobs"),
@@ -854,7 +819,7 @@ async def test_a_pinned_window_survives_a_cursor_reset_through_the_whole_path(
     backfilled = await _source_row(state)
     pinned = datetime.fromisoformat(str(backfilled.config["backfill_after"]))
     assert backfilled.cursor == "9001"
-    assert pinned == registered_at - timedelta(days=7)
+    assert pinned == registered_at - timedelta(days=MEMBER_WINDOW_DAYS)
 
     aged_out[0] = True
     assert await _run_due(state, driver) == 1
@@ -865,6 +830,69 @@ async def test_a_pinned_window_survives_a_cursor_reset_through_the_whole_path(
     aged_out[0] = False
     assert await _run_due(state, driver) == 0
     assert queries == [f"after:{int(pinned.timestamp())}"] * 2
+
+
+async def test_a_feed_whose_only_reader_is_archived_makes_no_candidate_workspace(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A source the archive took every reader from is nobody's feed, so its workspace is not a
+    candidate — and a shared connection standing beside it, holding no source of its own, does not
+    make it one. Whether a feed has a reader is a fact of the source's OWN connection, so a
+    workspace holding one shared connection anywhere cannot make every feed in it look readable.
+    Restoring the agent is the control: the same workspace becomes a candidate again, so the
+    exclusion is the archive and not a row that was never due."""
+    state = await _state()
+    archived_id = uuid4()
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=archived_id,
+                workspace_id=state.workspace_id,
+                name="sweep",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    with ws(state.workspace_id), agent(archived_id):
+        held = await GrantStore().record(
+            provider="asana",
+            account_id=ASANA_ACCOUNT,
+            host="app.asana.com",
+            grantor_member_id=state.member_id,
+            shared=False,
+        )
+        ext = context_for(sources_manifest.NAME, frozenset())
+        await ext.register_source(
+            "asana", ConnectorSourceConfig(stream="workspaces"), connection_id=held
+        )
+        await ext.register_connection("klaviyo")
+    driver = SyncDriver(
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+        backends=_source_backends((sources_manifest.manifest(),)),
+    )
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(archived_at=now, archived_name=tables.agent.c.name)
+            .where(tables.agent.c.id == archived_id)
+        )
+    archived_candidates = await driver.candidate_workspaces()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(archived_at=None, archived_name=None)
+            .where(tables.agent.c.id == archived_id)
+        )
+    restored_candidates = await driver.candidate_workspaces()
+
+    assert state.workspace_id not in archived_candidates
+    assert state.workspace_id in restored_candidates
 
 
 async def _source_row(state: State) -> sa.Row[Any]:

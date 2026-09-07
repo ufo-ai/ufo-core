@@ -210,7 +210,6 @@ async def seed_office(workspace_id: UUID, agent_id: UUID) -> None:
                 account_id=ACCOUNT_ID,
                 host=host,
                 grantor_member_id=member_id,
-                conversation_id=conversation_id,
                 shared=True,
             )
 

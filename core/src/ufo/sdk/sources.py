@@ -4,7 +4,10 @@ framework any extension reuses to build one.
 An extension implements `SourceBackend` — its `fetch` renders a provider's records into `Page`
 documents given the backend's typed config, the resume cursor, and the workspace `auth` (from which
 it resolves its own provider token) — pairs it with a backend name in a `SourceProvider` Manifest
-point, and creates a source row in chat through `ExtensionContext.register_source`. Core polls the
+point, and creates a source row in chat through `ExtensionContext.register_source`. A feed that
+names no broker account and no member — a repository, a folder root — hangs off a connection whose
+`account_id` is `feed_handle(config)`, the same handle the `[[sources]]` boot path mints, so either
+registrar settles on one connection per feed. Core polls the
 row on the sync interval and lands its pages in memory; embedding stays a job. A backend that reads
 a complete collection each run returns `SyncResult(snapshot=True)` and core tombstones prior pages
 the fetch no longer holds; a delta/incremental backend returns `snapshot=False` and names removals
@@ -34,9 +37,6 @@ from ufo.runtime.sources.backend import (
 )
 from ufo.runtime.sources.backend import (
     ConnectorSourceConfig as ConnectorSourceConfig,
-)
-from ufo.runtime.sources.backend import (
-    binding_name as binding_name,
 )
 from ufo.runtime.sources.connector import (
     CHAT_BACKFILL_WINDOW_DAYS as CHAT_BACKFILL_WINDOW_DAYS,
@@ -124,4 +124,7 @@ from ufo.runtime.sources.sync import (
 )
 from ufo.runtime.sources.sync import (
     SyncResult as SyncResult,
+)
+from ufo.runtime.sources.sync import (
+    feed_handle as feed_handle,
 )

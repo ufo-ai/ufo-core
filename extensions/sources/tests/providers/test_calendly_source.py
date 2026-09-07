@@ -16,7 +16,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 ORG = "https://api.calendly.com/organizations/ORG1"
 
 
@@ -29,7 +28,7 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self.handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
@@ -38,7 +37,7 @@ async def _fetch(
 ) -> SyncResult:
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
     return await ConnectorBackend(connector=CalendlyConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream), cursor, auth
+        ConnectorSourceConfig(stream=stream), cursor, auth
     )
 
 

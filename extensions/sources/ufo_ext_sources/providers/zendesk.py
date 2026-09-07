@@ -82,7 +82,7 @@ ZENDESK_STREAMS: list[StreamSpec] = [
     _stream(
         "ticket_comments", source_object="ticket_events", cursor_field="created_at", canonical=True
     ),
-    _stream("users", canonical=True),
+    _stream("users"),
     _stream("organizations", canonical=True),
     _stream("groups"),
     _stream("group_memberships"),
@@ -121,11 +121,11 @@ ZENDESK_STREAMS: list[StreamSpec] = [
     _stream("users_identities", source_object="users", cursor_field="updated_at"),
     _stream("categories", source_object="help_center/categories"),
     _stream("sections", source_object="help_center/sections"),
-    _stream("articles", source_object="help_center/articles"),
+    _stream("articles", source_object="help_center/articles", canonical=True),
     _stream(
         "article_attachments", source_object="help_center/article_attachments", cursor_field=None
     ),
-    _stream("article_comments", source_object="help_center/article_comments"),
+    _stream("article_comments", source_object="help_center/article_comments", canonical=True),
     _stream(
         "article_comment_votes",
         source_object="help_center/article_comment_votes",

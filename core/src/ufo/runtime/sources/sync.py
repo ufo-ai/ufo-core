@@ -61,7 +61,7 @@ from ufo.harness.o11y import (
 from ufo.runtime.access.connectors import AuthProxy, SourceCredentialResolver
 from ufo.runtime.billing.balance import funded
 from ufo.runtime.sources.rest import list_or_empty
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.turns.subjects import connection_subject
 from ufo.schema import tables
 
 FOLDER_BACKEND = "folder"
@@ -70,6 +70,15 @@ SOURCE_SYNC_SCHEDULE = "0 * * * * *"
 SOURCE_SYNC_INTERVAL_SECONDS = 60
 SOURCE_ERROR_BACKOFF_CAP_SECONDS = 3600
 SOURCE_REFUSAL_PARK_THRESHOLD = 3
+SOURCE_EMPTY_IDLE_THRESHOLD = 5
+SOURCE_EMPTY_IDLE_SECONDS = 24 * 3600
+"""How a connection carries a stream its account does not use. `canonical` is a connector constant
+— the same for every account that ever connects the provider — so a stream that is content for the
+accounts using it and empty for the rest cannot be flagged per account, and the flag alone would
+make every one of those a request a minute forever. A run that lands nothing counts, and a row that
+has never landed a page at all falls back to a daily look after `SOURCE_EMPTY_IDLE_THRESHOLD` of
+them. The first page it ever lands clears the counter and it never idles again, so a populated
+stream that happens to be quiet keeps the interval — being quiet is not being unused."""
 SOURCE_PARK_RETRY_SECONDS = 3600
 # A park nothing but a grant event can lift still carries a date, not an infinity: every release
 # path writes `next_sync_at = now()`, and a year out is the backstop for the day they all miss one.
@@ -288,12 +297,14 @@ class SourceAuth:
     core minting or holding a token: the workspace the sync runs for, and the selected `auth_proxy`
     the deploy resolves connector credentials through. A connector backend asks `auth_proxy` for the
     `Credential` authenticating its provider (a broker's proxying transport, or a member-added key
-    read host-side). `self_user_id` is the live external speaker resolved by a same-named surface,
-    so a source can reject only records the product itself authored. The folder backend ignores
-    both. A value object, never persisted."""
+    read host-side). `base_url` is the connection's tenant API URL, for the per-tenant providers
+    whose connector class declares no host of its own. `self_user_id` is the live external speaker
+    resolved by a same-named surface, so a source can reject only records the product itself
+    authored. The folder backend ignores all three. A value object, never persisted."""
 
     workspace_id: UUID
     auth_proxy: AuthProxy | None = None
+    base_url: str | None = None
     self_user_id: str | None = None
 
 
@@ -364,22 +375,45 @@ def source_row_id(
     backend: str,
     config: Mapping[str, object],
     *,
-    connection_id: UUID | None = None,
+    connection_id: UUID,
     non_identity_keys: frozenset[str] = frozenset(),
 ) -> UUID:
-    """The deterministic source row id. Brokered rows include their connection generation.
+    """The deterministic source row id: the connection generation this row hangs off, and what of
+    its config says which dataset it is.
 
     `non_identity_keys` — the caller's `SourceRowConfig.non_identity_fields`, empty for a model that
     declares none — stay out of the hash: a backfill window is a parameter of the dataset a row
-    syncs, not part of which dataset it is, so the same (account, stream) settles on one row however
-    far back it was told to reach. The set is the config model's to declare rather than core's to
-    match by name, so one backend naming a field cannot drop it from another's identity."""
-    generation = "" if connection_id is None else f"/connection/{connection_id}"
-    identity = {key: value for key, value in config.items() if key not in non_identity_keys}
+    syncs, not part of which dataset it is, so one stream settles on one row however far back it was
+    told to reach. The set is the config model's to declare rather than core's to match by name, so
+    one backend naming a field cannot drop it from another's identity."""
     return uuid5(
         NAMESPACE_URL,
-        f"{workspace_id}/source/{backend}/{json.dumps(identity, sort_keys=True)}{generation}",
+        f"{workspace_id}/source/{backend}/{_source_identity(config, non_identity_keys)}"
+        f"/connection/{connection_id}",
     )
+
+
+def _source_identity(config: Mapping[str, object], non_identity_keys: frozenset[str]) -> str:
+    return json.dumps(
+        {key: value for key, value in config.items() if key not in non_identity_keys},
+        sort_keys=True,
+    )
+
+
+def feed_handle(config: BaseModel) -> str:
+    """The connection `account_id` of a feed that names no broker account and no member — a
+    repository, a folder root: its config's identity, the very string `source_row_id` hashes. The
+    `[[sources]]` boot path and an extension's object kind both mint the connection from it, so one
+    root registered by either settles on one connection, and two roots of one backend are two
+    connections — deleting one cascades none of the other's rows or pages. It begins `{`, which no
+    broker's account id does, so `brokered_account` reads it as no account and the feed routes to
+    the workspace's key."""
+    non_identity = (
+        type(config).non_identity_fields
+        if isinstance(config, SourceRowConfig)
+        else frozenset[str]()
+    )
+    return _source_identity(config.model_dump(mode="json"), non_identity)
 
 
 def page_id_for(source_id: UUID, source_ref: str) -> UUID:
@@ -402,71 +436,69 @@ def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, diges
 
 
 async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
-    """Ensure a source row exists for each configured `[[sources]]` entry. The row id is derived
-    from the workspace, backend, and config, so a restart re-registers the same rows without
-    duplicating them. Runs once at boot, off the sync poll."""
+    """Ensure a source row exists for each configured `[[sources]]` entry, each hanging off a
+    connection of its own keyed by `feed_handle` — the authority a feed no member owns runs under,
+    shared because nobody owns it, and one per feed so removing one root never takes another's
+    pages. The row id is derived from the workspace, backend, connection, and config, so a restart
+    re-registers the same rows without duplicating them. Runs once at boot, off the sync poll."""
     if not configured:
         return
     now = datetime.now(UTC)
     async with workspace_tx() as connection:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-        main_agent_id = (
-            await connection.execute(
-                sa.select(tables.agent.c.id).where(
-                    tables.agent.c.workspace_id == workspace_id,
-                    tables.agent.c.is_main.is_(True),
-                )
-            )
-        ).scalar_one_or_none()
-        if main_agent_id is None:
-            raise RuntimeError("registering configured sources requires a main agent")
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         for entry in configured:
-            config = entry.config.model_dump()
-            source_id = source_row_id(workspace_id, entry.backend, config)
-            present = (
+            handle = feed_handle(entry.config)
+            await connection.execute(
+                insert(tables.connection)
+                .values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    provider=entry.backend,
+                    account_id=handle,
+                    host="",
+                    owner_member_id=None,
+                    shared=True,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        tables.connection.c.workspace_id,
+                        tables.connection.c.provider,
+                        tables.connection.c.account_id,
+                    ]
+                )
+            )
+            connection_id = (
                 await connection.execute(
-                    sa.select(tables.source.c.id, tables.source.c.removed_at).where(
-                        tables.source.c.id == source_id
+                    sa.select(tables.connection.c.id).where(
+                        tables.connection.c.workspace_id == workspace_id,
+                        tables.connection.c.provider == entry.backend,
+                        tables.connection.c.account_id == handle,
                     )
                 )
-            ).one_or_none()
-            if present is not None and present.removed_at is not None:
-                continue
-            if present is None:
-                await connection.execute(
-                    sa.insert(tables.source).values(
-                        id=source_id,
-                        workspace_id=workspace_id,
-                        backend=entry.backend,
-                        config=config,
-                        subject=SHARED_SUBJECT,
-                        owner_member_id=None,
-                        cursor=None,
-                        next_sync_at=now,
-                        claimed_by=None,
-                        claim_expires_at=None,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
+            ).scalar_one()
+            config = entry.config.model_dump(mode="json")
+            await connection.execute(
+                insert(tables.source)
+                .values(
+                    id=source_row_id(
+                        workspace_id, entry.backend, config, connection_id=connection_id
+                    ),
+                    workspace_id=workspace_id,
+                    backend=entry.backend,
+                    config=config,
+                    connection_id=connection_id,
+                    cursor=None,
+                    next_sync_at=now,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
                 )
-                await connection.execute(
-                    insert(tables.source_grant)
-                    .values(
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        agent_id=main_agent_id,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                    .on_conflict_do_nothing(
-                        index_elements=[
-                            tables.source_grant.c.workspace_id,
-                            tables.source_grant.c.source_id,
-                            tables.source_grant.c.agent_id,
-                        ]
-                    )
-                )
+                .on_conflict_do_nothing(index_elements=[tables.source.c.id])
+            )
 
 
 @dataclass(frozen=True)
@@ -476,9 +508,9 @@ class ClaimedSource:
     claim: str
     backend: str
     config: Mapping[str, object]
-    subject: str
-    owner_member_id: UUID | None
-    connection_id: UUID | None
+    connection_id: UUID
+    account_id: str
+    base_url: str | None
     cursor: str | None
     consecutive_errors: int
     claimed_at: datetime
@@ -568,44 +600,84 @@ class _SourceClaimLost(RuntimeError):
     pass
 
 
+def _source_authority() -> sa.Join:
+    """A source joined to the connection that authorizes it — the reach an agent is granted and the
+    disclosure every page it syncs carries. Every source has one, so this is an inner join."""
+    return tables.source.join(
+        tables.connection,
+        sa.and_(
+            tables.connection.c.workspace_id == tables.source.c.workspace_id,
+            tables.connection.c.id == tables.source.c.connection_id,
+        ),
+    )
+
+
 def _readers_remain() -> sa.ColumnElement[bool]:
-    """A correlated predicate on `source`: the archive has not taken every agent that reads it.
-    A source whose grantees are all archived costs a fetch, a page write and the model tokens its
-    facts are extracted with, for a feed no turn can reach — so it waits for a restore. A source
-    nobody was granted is a different row with a different history, and syncs as it always did. A
-    shared source has the main agent as a reader with no grant at all, so it keeps syncing while a
-    live main agent exists — the same rule `_source_readable` reads by, so the main agent is never
-    answering members from pages a stopped feed left behind."""
-    granted = sa.select(sa.literal(1)).where(
-        tables.source_grant.c.workspace_id == tables.source.c.workspace_id,
-        tables.source_grant.c.source_id == tables.source.c.id,
+    """A correlated predicate on `source` alone, so a caller selecting from `source` and one
+    selecting from `source` joined to its connection both get the same answer: every subquery here
+    names its own FROM and correlates only `source`, rather than letting the enclosing query's
+    tables decide. Left to inference, the shared-connection arm correlates both its tables out
+    against a joined caller and none against a bare one — the first raises, and the second would
+    quietly test every source against every connection in the workspace.
+
+    What it answers: the archive has not taken every agent that reads it.
+    A source whose connection is granted only to archived agents costs a fetch, a page write and
+    the model tokens its facts are extracted with, for a feed no turn can reach — so it waits for a
+    restore. A connection nobody was granted is a different row with a different history, and syncs
+    as it always did. A shared connection has the main agent as a reader with no grant at all, so it
+    keeps syncing while a live main agent exists — the same rule `_source_readable` reads by, so the
+    main agent is never answering members from pages a stopped feed left behind."""
+    granted = (
+        sa.select(sa.literal(1))
+        .select_from(tables.connector_grant)
+        .where(
+            tables.connector_grant.c.workspace_id == tables.source.c.workspace_id,
+            tables.connector_grant.c.connection_id == tables.source.c.connection_id,
+        )
+        .correlate(tables.source)
     )
     granted_to_a_live_agent = (
         sa.select(sa.literal(1))
         .select_from(
-            tables.source_grant.join(
+            tables.connector_grant.join(
                 tables.agent,
                 sa.and_(
-                    tables.agent.c.workspace_id == tables.source_grant.c.workspace_id,
-                    tables.agent.c.id == tables.source_grant.c.agent_id,
+                    tables.agent.c.workspace_id == tables.connector_grant.c.workspace_id,
+                    tables.agent.c.id == tables.connector_grant.c.agent_id,
                 ),
             )
         )
         .where(
-            tables.source_grant.c.workspace_id == tables.source.c.workspace_id,
-            tables.source_grant.c.source_id == tables.source.c.id,
+            tables.connector_grant.c.workspace_id == tables.source.c.workspace_id,
+            tables.connector_grant.c.connection_id == tables.source.c.connection_id,
             tables.agent.c.archived_at.is_(None),
         )
+        .correlate(tables.source)
     )
-    read_by_a_live_main = sa.select(sa.literal(1)).where(
-        tables.agent.c.workspace_id == tables.source.c.workspace_id,
-        tables.agent.c.is_main.is_(True),
-        tables.agent.c.archived_at.is_(None),
+    read_by_a_live_main = (
+        sa.select(sa.literal(1))
+        .select_from(tables.agent)
+        .where(
+            tables.agent.c.workspace_id == tables.source.c.workspace_id,
+            tables.agent.c.is_main.is_(True),
+            tables.agent.c.archived_at.is_(None),
+        )
+        .correlate(tables.source)
+    )
+    shared_connection = (
+        sa.select(sa.literal(1))
+        .select_from(tables.connection)
+        .where(
+            tables.connection.c.workspace_id == tables.source.c.workspace_id,
+            tables.connection.c.id == tables.source.c.connection_id,
+            tables.connection.c.shared,
+        )
+        .correlate(tables.source)
     )
     return sa.or_(
         ~sa.exists(granted),
         sa.exists(granted_to_a_live_agent),
-        sa.and_(tables.source.c.subject == SHARED_SUBJECT, sa.exists(read_by_a_live_main)),
+        sa.and_(sa.exists(shared_connection), sa.exists(read_by_a_live_main)),
     )
 
 
@@ -643,7 +715,6 @@ class SyncDriver:
                     sa.select(tables.source.c.workspace_id)
                     .where(
                         tables.source.c.next_sync_at <= now,
-                        tables.source.c.removed_at.is_(None),
                         sa.or_(
                             tables.source.c.claimed_by.is_(None),
                             tables.source.c.claim_expires_at < now,
@@ -728,7 +799,6 @@ class SyncDriver:
                 .where(
                     tables.source.c.id == source.source_id,
                     tables.source.c.claimed_by == source.claim,
-                    tables.source.c.removed_at.is_(None),
                 )
                 .values(
                     claim_expires_at=now + timedelta(seconds=CLAIM_LEASE_SECONDS),
@@ -746,15 +816,15 @@ class SyncDriver:
                 tables.source.c.workspace_id,
                 tables.source.c.backend,
                 tables.source.c.config,
-                tables.source.c.subject,
-                tables.source.c.owner_member_id,
                 tables.source.c.connection_id,
+                tables.connection.c.account_id,
+                tables.connection.c.base_url,
                 tables.source.c.cursor,
                 tables.source.c.consecutive_errors,
             )
+            .select_from(_source_authority())
             .where(
                 tables.source.c.next_sync_at <= now,
-                tables.source.c.removed_at.is_(None),
                 sa.or_(
                     tables.source.c.claimed_by.is_(None),
                     tables.source.c.claim_expires_at < now,
@@ -765,7 +835,7 @@ class SyncDriver:
             .limit(DUE_BATCH_MAX_SOURCES)
         )
         if self.postgres:
-            due = due.with_for_update(skip_locked=True)
+            due = due.with_for_update(skip_locked=True, of=tables.source)
         expires = now + timedelta(seconds=CLAIM_LEASE_SECONDS)
         async with workspace_tx() as connection:
             rows = (await connection.execute(due)).mappings().all()
@@ -782,9 +852,9 @@ class SyncDriver:
                 claim=claim,
                 backend=row["backend"],
                 config=row["config"],
-                subject=row["subject"],
-                owner_member_id=row["owner_member_id"],
                 connection_id=row["connection_id"],
+                account_id=row["account_id"],
+                base_url=row["base_url"],
                 cursor=row["cursor"],
                 consecutive_errors=row["consecutive_errors"],
                 claimed_at=now,
@@ -804,11 +874,9 @@ class SyncDriver:
             auth_proxy=(
                 None
                 if self.source_credentials is None
-                else self.source_credentials.bind(
-                    source.connection_id,
-                    source.owner_member_id,
-                )
+                else self.source_credentials.bind(source.connection_id)
             ),
+            base_url=source.base_url,
             self_user_id=self_user_id,
         )
         return await backend.fetch(config, source.cursor, auth)
@@ -975,21 +1043,31 @@ class SyncDriver:
     ) -> int:
         """Persist one fetched batch and return how many pages it tombstoned — the delete refs that
         named a live row plus the snapshot sweep, which names no refs at all. The database orders
-        material changes for `PageFeed`."""
+        material changes for `PageFeed`.
+
+        The authority read locks the connection row as well as the source, so a `set_shared` that
+        would otherwise commit between this read and the page stamp below waits for it: with only
+        the source locked, a run could read `shared` one way, the member flip it and restamp every
+        page the other way, and this run's trailing stamp put them back — leaving shared pages on a
+        connection the member just made private."""
         now = datetime.now(UTC)
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
-            authority = sa.select(tables.source.c.subject).where(
-                tables.source.c.id == source.source_id,
-                tables.source.c.workspace_id == workspace_id,
-                tables.source.c.claimed_by == source.claim,
-                tables.source.c.removed_at.is_(None),
+            authority = (
+                sa.select(tables.connection.c.shared, tables.connection.c.owner_member_id)
+                .select_from(_source_authority())
+                .where(
+                    tables.source.c.id == source.source_id,
+                    tables.source.c.workspace_id == workspace_id,
+                    tables.source.c.claimed_by == source.claim,
+                )
             )
             if connection.dialect.name == "postgresql":
-                authority = authority.with_for_update()
-            subject = (await connection.execute(authority)).scalar_one_or_none()
-            if subject is None:
+                authority = authority.with_for_update(of=(tables.source, tables.connection))
+            held = (await connection.execute(authority)).one_or_none()
+            if held is None:
                 raise _SourceClaimLost(str(source.source_id))
+            subject = connection_subject(held.shared, held.owner_member_id)
             for changed_page in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)
@@ -1070,15 +1148,29 @@ class SyncDriver:
                     tables.page.c.subject != subject,
                 )
             )
+            landed = bool(changed) or bool(deleted) or tombstoned > 0
+            empty_runs = sa.literal(0) if landed else tables.source.c.consecutive_empty + 1
+            never_landed = ~sa.exists(
+                sa.select(sa.literal(1))
+                .select_from(tables.page)
+                .where(tables.page.c.source_id == source.source_id)
+                .correlate()
+            )
+            idles = sa.and_(empty_runs >= SOURCE_EMPTY_IDLE_THRESHOLD, never_landed)
             await connection.execute(
                 sa.update(tables.source)
                 .values(
                     cursor=next_cursor,
                     next_sync_at=_rescheduled(
-                        source, now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
+                        source,
+                        sa.case(
+                            (idles, now + timedelta(seconds=SOURCE_EMPTY_IDLE_SECONDS)),
+                            else_=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                        ),
                     ),
                     consecutive_errors=0,
                     consecutive_refusals=0,
+                    consecutive_empty=empty_runs,
                     parked_at=None,
                     parked_reason=None,
                     claimed_by=None,
@@ -1088,7 +1180,6 @@ class SyncDriver:
                 .where(
                     tables.source.c.id == source.source_id,
                     tables.source.c.claimed_by == source.claim,
-                    tables.source.c.removed_at.is_(None),
                 )
             )
         return tombstoned
@@ -1109,7 +1200,7 @@ class SyncDriver:
                 "source_sync.ok",
                 source_id=str(source.source_id),
                 **tags,
-                account_id=_config_value(source, "account"),
+                account_id=source.account_id,
                 pages_fetched=fetched,
                 pages_written=written,
                 pages_tombstoned=tombstoned,
@@ -1175,7 +1266,7 @@ class SyncDriver:
                 "source_sync.failed",
                 source_id=str(source.source_id),
                 **tags,
-                account_id=_config_value(source, "account"),
+                account_id=source.account_id,
                 error_class=error_class,
                 provider_fault=fault[:SYNC_PROVIDER_FAULT_MAX_CHARS],
                 consecutive_errors=errors,
@@ -1210,7 +1301,7 @@ class SyncDriver:
                 "source_sync.deferred",
                 source_id=str(source.source_id),
                 **_stream_tags(source),
-                account_id=_config_value(source, "account"),
+                account_id=source.account_id,
                 error_class=type(error).__name__,
                 provider_fault="",
                 consecutive_errors=source.consecutive_errors,
@@ -1244,7 +1335,6 @@ class SyncDriver:
                 .where(
                     tables.source.c.id == source.source_id,
                     tables.source.c.claimed_by == source.claim,
-                    tables.source.c.removed_at.is_(None),
                 )
             )
 
@@ -1307,7 +1397,6 @@ class SyncDriver:
                     .where(
                         tables.source.c.id == source.source_id,
                         tables.source.c.claimed_by == source.claim,
-                        tables.source.c.removed_at.is_(None),
                     )
                     .returning(tables.source.c.parked_at, tables.source.c.consecutive_refusals)
                 )

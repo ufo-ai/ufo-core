@@ -2,7 +2,7 @@
 the `nextRecordsUrl` walk, the `attributes` envelope dropped by `flatten`, the `/deleted/` window
 producing delete tombstones with the window-end cursor, and a refusal surfacing as `StreamSkipped`.
 The class base URL is empty (per-instance), so the test binds the instance URL through
-`ConnectorSourceConfig.base_url` — the real per-tenant path. Offline — a canned transport, no DB,
+`SourceAuth.base_url` — the real per-tenant path. Offline — a canned transport, no DB,
 no token."""
 
 from collections.abc import Callable
@@ -16,7 +16,6 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
-ACCOUNT = "acct-1"
 BASE_URL = "https://acme.my.salesforce.com"
 
 
@@ -24,16 +23,16 @@ class _MockProxy:
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
         self._handler = handler
 
-    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
         return Credential(transport=httpx.MockTransport(self._handler))
 
 
 async def _fetch(
     stream: str, handler: Callable[[httpx.Request], httpx.Response], *, cursor: str | None = None
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=BASE_URL)
     return await ConnectorBackend(connector=SalesforceConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream=stream, base_url=BASE_URL), cursor, auth
+        ConnectorSourceConfig(stream=stream), cursor, auth
     )
 
 

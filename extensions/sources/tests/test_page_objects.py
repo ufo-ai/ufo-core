@@ -20,7 +20,13 @@ import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
 from ufo_ext_sources.manifest import NAME, manifest
-from ufo_ext_sources.pages import PAGE_BODY_MAX_BYTES, PAGE_KIND, PageObjects, _page_timestamp
+from ufo_ext_sources.pages import (
+    CONNECTION_OBJECT_KIND,
+    PAGE_BODY_MAX_BYTES,
+    PAGE_KIND,
+    PageObjects,
+    _page_timestamp,
+)
 from ufo_ext_sources.registry import CONNECTORS
 
 from ufo.blob import BlobStore, FilesystemBlobStore
@@ -36,7 +42,8 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.sdk.connectors import ConnectorRegistry
-from ufo.sdk.objects import AdminRequired, VerbNotSupported
+from ufo.sdk.grants import account_object_name
+from ufo.sdk.objects import AdminRequired, ObjectLink, ObjectRef, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
 from ufo.sdk.tools import ToolContext
 
@@ -211,27 +218,46 @@ async def _seed_source(
     granted: bool = True,
     agent_id: UUID | None = None,
 ) -> UUID:
+    """One source row and the shared connection it hangs off — the connection discloses the pages
+    the row lands, and the connector grant is what lets one agent beyond main read them."""
     source_id = uuid4() if source_id is None else source_id
+    connection_id = uuid4()
+    seeded_at = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=state.workspace_id,
+                provider=backend,
+                account_id=f"acct-{source_id.hex[:8]}",
+                host="",
+                owner_member_id=state.owner_id,
+                shared=True,
+                created_at=seeded_at,
+                updated_at=seeded_at,
+            )
+        )
         await connection.execute(
             sa.insert(tables.source).values(
                 id=source_id,
                 workspace_id=state.workspace_id,
                 backend=backend,
-                config={"account": "acct-one", "stream": "tickets", "base_url": None},
-                next_sync_at=datetime(2026, 7, 9, tzinfo=UTC),
-                created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                updated_at=datetime(2026, 7, 9, tzinfo=UTC),
+                connection_id=connection_id,
+                config={"stream": "tickets"},
+                next_sync_at=seeded_at,
+                created_at=seeded_at,
+                updated_at=seeded_at,
             )
         )
         if granted:
             await connection.execute(
-                sa.insert(tables.source_grant).values(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
                     workspace_id=state.workspace_id,
-                    source_id=source_id,
+                    connection_id=connection_id,
                     agent_id=agent_id or state.agent_id,
-                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                    updated_at=datetime(2026, 7, 9, tzinfo=UTC),
+                    created_at=seeded_at,
+                    updated_at=seeded_at,
                 )
             )
     return source_id
@@ -349,9 +375,31 @@ async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
         assert fetched["spec"]["body"] == page.body
 
 
+async def test_a_page_links_to_the_connection_that_landed_it(db: None, tmp_path: Path) -> None:
+    """A page names the account it came from rather than the row that fetched it, so `synced_by`
+    targets the `connection` object under the one name every surface spells an account with."""
+    state = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(state.workspace_id):
+        source_id = await _seed_source(state, "asana")
+        page_id = await _seed_page(state, source_id, blob)
+        fetched = await PageObjects().get(_context(state, blob), str(page_id))
+
+    assert fetched is not None
+    assert fetched.links == (
+        ObjectLink(
+            relation="synced_by",
+            target=ObjectRef(
+                kind=CONNECTION_OBJECT_KIND,
+                name=account_object_name("asana", f"acct-{source_id.hex[:8]}"),
+            ),
+        ),
+    )
+
+
 async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_path: Path) -> None:
-    """A specialist agent reads a source through its grant alone, so a grant revoked while the body
-    streams is re-read before the page is disclosed, and the read answers nothing."""
+    """A specialist agent reads a connection's streams through its grant alone, so a grant revoked
+    while the body streams is re-read before the page is disclosed, and the read answers nothing."""
     state = await _workspace()
     stored = FilesystemBlobStore(root=tmp_path)
     specialist = state.specialist_agent_id
@@ -362,10 +410,9 @@ async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_
         async def revoke() -> None:
             async with workspace_tx() as connection:
                 await connection.execute(
-                    sa.delete(tables.source_grant).where(
-                        tables.source_grant.c.workspace_id == state.workspace_id,
-                        tables.source_grant.c.source_id == source_id,
-                        tables.source_grant.c.agent_id == specialist,
+                    sa.delete(tables.connector_grant).where(
+                        tables.connector_grant.c.workspace_id == state.workspace_id,
+                        tables.connector_grant.c.agent_id == specialist,
                     )
                 )
 

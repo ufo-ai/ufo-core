@@ -40,6 +40,7 @@ GOOGLE_DOCS_STREAMS: list[StreamSpec] = [
         primary_key="documentId",
         cursor_field="updated_at",
         updated_at_field="updated_at",
+        canonical=True,
     ),
 ]
 

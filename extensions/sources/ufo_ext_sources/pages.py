@@ -1,11 +1,11 @@
 """The `page` object kind: synced source pages projected as read-and-forget workspace objects.
 
-A page is one document the core sync driver landed from a registered `source` — its identity is the
+A page is one document the core sync driver landed from one `source` row — its identity is the
 `page` row the driver owns, so names are the row id (`<uuid>`), id-shaped exactly as the grammar
 admits. The kind is the read-and-forget surface over those rows: list and get read browse metadata
 through the sanctioned `ExtensionContext.source_pages` accessor and get reads the body through the
 turn's blob capability, scoped to the caller's visibility subjects and the reading agent's grant for
-the page's source; delete tombstones one page
+the connection behind the page's source; delete tombstones one page
 through `forget_page` so the existing page-change pipeline reaps its derived index state. Pages are
 produced by the sync driver, never authored, so create and update raise `VerbNotSupported`; delete
 is admin-gated.
@@ -19,6 +19,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import ExtensionContext, JsonValue
+from ufo.sdk.grants import account_object_name, feed_connections
 from ufo.sdk.objects import (
     AdminRequired,
     ObjectDetail,
@@ -31,13 +32,12 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     object_page,
 )
-from ufo.sdk.sources import ConnectorSourceConfig, binding_name
 from ufo.sdk.tools import ToolContext
-from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
 PAGE_KIND = "page"
+CONNECTION_OBJECT_KIND = "connection"
 PAGES_ARE_SYNCED = (
-    "pages are landed by the content-sync driver, not authored — register a source to sync them"
+    "pages are landed by the content-sync driver, not authored — connect an account to sync them"
 )
 PAGE_FORGET_GATE = "only a workspace admin can forget a synced page"
 SUMMARY_MAX = 120
@@ -46,7 +46,7 @@ PAGE_BODY_MAX_BYTES = 65_536
 
 class PageSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    source_id: str = Field(description="The stable id of the source binding that landed the page.")
+    source_id: str = Field(description="The stable id of the source row that landed the page.")
     source: str = Field(description="The content-source provider the page synced from.")
     stream: str = Field(description="The provider stream, such as issues or pull_requests.")
     title: str = Field(description="The page's human-readable title.")
@@ -93,19 +93,17 @@ class _Page:
     body_ref: str
     created_at: datetime
     updated_at: datetime
-    source_name: str | None
+    connection_name: str
 
     @property
     def name(self) -> str:
         return str(self.id)
 
     def links(self) -> tuple[ObjectLink, ...]:
-        if self.source_name is None:
-            return ()
         return (
             ObjectLink(
                 relation="synced_by",
-                target=ObjectRef(kind=SOURCE_KIND, name=self.source_name),
+                target=ObjectRef(kind=CONNECTION_OBJECT_KIND, name=self.connection_name),
             ),
         )
 
@@ -142,9 +140,9 @@ class _Page:
 class PageObjects:
     """The kind's handlers over the workspace's live (non-tombstoned) pages the caller may see:
     list and get read metadata through `source_pages`, joining each page to its source for the
-    provider name via `sources()`; delete tombstones the row through `forget_page` so the
-    page-change pipeline clears its derived index state. Only a workspace admin may forget a
-    page."""
+    provider name and to that source's connection for the account that landed it; delete tombstones
+    the row through `forget_page` so the page-change pipeline clears its derived index state. Only a
+    workspace admin may forget a page."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = tuple(
@@ -241,12 +239,11 @@ class PageObjects:
         ext = _require_ext(ctx)
         sources = await ext.sources()
         backends = {source.id: source.backend for source in sources}
-        source_names = {
-            source.id: binding_name(source.backend, config.account, config.base_url)
-            for source in sources
-            if source.backend in CONNECTORS
-            and (config := ConnectorSourceConfig.model_validate(source.config))
+        named = {
+            connection.id: account_object_name(connection.provider, connection.account_id)
+            for connection in await feed_connections()
         }
+        connections = {source.id: named[source.connection_id] for source in sources}
         return tuple(
             _Page(
                 id=record.id,
@@ -262,7 +259,7 @@ class PageObjects:
                 body_ref=record.body_ref,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
-                source_name=source_names.get(record.source_id),
+                connection_name=connections[record.source_id],
             )
             for record in await ext.source_pages(ctx.source_reader())
         )
@@ -271,9 +268,9 @@ class PageObjects:
 PAGE_OBJECT = ObjectKind(
     name=PAGE_KIND,
     description=(
-        "A synced source page: one document the content-sync driver landed from a registered "
-        "source, read-only with an admin-only forget (delete). Created and updated only by the "
-        "sync driver."
+        "A synced source page: one document the content-sync driver landed from a connected "
+        "account's feed, read-only with an admin-only forget (delete). Created and updated only by "
+        "the sync driver."
     ),
     guidance=(
         "List synced pages with exact `filters` on source_id, source, stream, title, created_at, "
@@ -281,7 +278,7 @@ PAGE_OBJECT = ObjectKind(
         "and order by created_at desc. Get by name returns those fields plus a bounded page body. "
         "Pages are landed by the content-sync driver, so create and update are "
         "refused; only a workspace admin can delete (forget) a page, which tombstones it and "
-        "clears its derived index state. A source subscription's change alert references the "
+        "clears its derived index state. A source trigger's change alert references the "
         "changed pages by canonical ref so you can pass each one unchanged to object_get here."
     ),
     spec_model=PageSpec,

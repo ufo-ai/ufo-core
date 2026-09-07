@@ -22,13 +22,14 @@ _RUNNABLE_STREAMS = frozenset(
 )
 
 WRIKE_STREAMS: list[StreamSpec] = [
-    StreamSpec(name="contacts", source_object="contacts", primary_key="id"),
+    StreamSpec(name="contacts", source_object="contacts", primary_key="id", canonical=True),
     StreamSpec(
         name="folders",
         source_object="folders",
         primary_key="id",
         cursor_field="updatedDate",
         updated_at_field="updatedDate",
+        canonical=True,
     ),
     StreamSpec(
         name="tasks",
@@ -36,6 +37,7 @@ WRIKE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="updatedDate",
         updated_at_field="updatedDate",
+        canonical=True,
     ),
     StreamSpec(
         name="comments",
@@ -43,11 +45,13 @@ WRIKE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="updatedDate",
         updated_at_field="updatedDate",
-        canonical=False,
+        canonical=True,
     ),
     StreamSpec(name="workflows", source_object="workflows", primary_key="id"),
     StreamSpec(
-        name="customfields", source_object="customfields", primary_key="id", canonical=False
+        name="customfields",
+        source_object="customfields",
+        primary_key="id",
     ),
 ]
 

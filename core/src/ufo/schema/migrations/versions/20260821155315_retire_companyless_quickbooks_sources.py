@@ -3,9 +3,9 @@
 QBO addresses one company file per request, and no broker holds that company id, so the whole
 address is the row's to carry: registration now refuses a quickbooks binding without it. A row
 written before that carries none and can never run — every sync fails on the address before it
-reaches Intuit. Retiring one mirrors `remove_source`: the row stays as its pages' referent, its
-grants go, and its live pages are tombstoned so the page-change consumers reap the derived index
-state.
+reaches Intuit. Retiring one stamps `removed_at` and leaves the row as its pages' referent, deletes
+its grants, and tombstones its live pages so the page-change consumers reap the derived index state
+— the shape the source table carried at this revision.
 """
 
 import json

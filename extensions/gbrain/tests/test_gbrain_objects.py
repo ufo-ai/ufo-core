@@ -1,11 +1,11 @@
 """The `gbrain_source` object kind end to end: registration through the object verbs.
 
 Every mutation drives the real tool dispatch (`turn_tools` over the extension's manifest), and
-assertions read back through the durable `source` rows and the verbs' own results: derived names,
-the one-origin spec refusals, private-by-default registration, the operator-config refusal on a
-directory root, the settled-source grant on an identical re-apply, resync, and delete tombstoning
-the source's pages. Reads show shared sources plus the member's own — a workspace admin sees
-all."""
+assertions read back through the durable `source` and `connection` rows and the verbs' own results:
+derived names, the one-origin spec refusals, the connection each origin gets of its own,
+private-by-default registration, the operator-config refusal on a directory root, resync, and
+delete disconnecting one origin and leaving its neighbour alone. Reads show shared sources plus the
+member's own — a workspace admin sees all."""
 
 import json
 from dataclasses import dataclass
@@ -16,17 +16,20 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
-from ufo_ext_gbrain.folder import FOLDER_BACKEND
-from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT
+from ufo_ext_gbrain.folder import FOLDER_BACKEND, GbrainFolderConfig
+from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT, GbrainGitConfig
 from ufo_ext_gbrain.manifest import NAME, manifest
 from ufo_ext_gbrain.objects import GBRAIN_KIND, gbrain_source_name
 
+from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.objects import UnknownObject
+from ufo.runtime.sources.sync import register_sources
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
@@ -34,6 +37,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.objects import VerbNotSupported
+from ufo.sdk.sources import feed_handle
 from ufo.sdk.tools import ToolContext
 
 pytestmark = [
@@ -192,6 +196,7 @@ def _context(
         audience=conversation_audience(speaker),
         artifact_token_secret="",
         ext=context_for(NAME, DECLARED),
+        grants=GrantStore(),
     )
 
 
@@ -267,18 +272,65 @@ async def _rows(state: _Workspace) -> list[sa.RowMapping]:
             )
 
 
-async def _granted_agents(state: _Workspace) -> set[UUID]:
+async def _connections(state: _Workspace) -> list[sa.RowMapping]:
     with ws(state.workspace_id), agent(state.agent_id):
         async with workspace_tx() as connection:
-            return set(
+            return list(
                 (
                     await connection.execute(
-                        sa.select(tables.source_grant.c.agent_id).where(
-                            tables.source_grant.c.workspace_id == state.workspace_id
+                        sa.select(tables.connection)
+                        .where(
+                            tables.connection.c.workspace_id == state.workspace_id,
+                            tables.connection.c.provider.in_(GBRAIN_BACKENDS),
                         )
+                        .order_by(tables.connection.c.provider)
                     )
                 )
-                .scalars()
+                .mappings()
+                .all()
+            )
+
+
+async def _seed_page(state: _Workspace, source_id: UUID, subject: str) -> UUID:
+    page_id = uuid4()
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.page).values(
+                    id=page_id,
+                    workspace_id=state.workspace_id,
+                    source_id=source_id,
+                    digest="sha256:x",
+                    body_ref=f"pages/{page_id}",
+                    subject=subject,
+                    tombstone=False,
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+    return page_id
+
+
+async def _page_ids(state: _Workspace) -> list[UUID]:
+    return [row["id"] for row in await _pages(state)]
+
+
+async def _page_subjects(state: _Workspace) -> list[str]:
+    return [row["subject"] for row in await _pages(state)]
+
+
+async def _pages(state: _Workspace) -> list[sa.RowMapping]:
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            return list(
+                (
+                    await connection.execute(
+                        sa.select(tables.page)
+                        .where(tables.page.c.workspace_id == state.workspace_id)
+                        .order_by(tables.page.c.id)
+                    )
+                )
+                .mappings()
                 .all()
             )
 
@@ -292,6 +344,9 @@ def test_manifest_declares_the_gbrain_kind() -> None:
 
 
 async def test_member_registers_a_repo_source_privately_by_default(db: None) -> None:
+    """The row the register lands and the authority behind it: a connection of this origin's own,
+    keyed by the origin config's `feed_handle`, owned by the registering member and private until
+    they say otherwise."""
     state = await _workspace()
     ctx = _context(state, speaker_id=state.member_id)
     name = gbrain_source_name(REPO, None, None)
@@ -300,11 +355,14 @@ async def test_member_registers_a_repo_source_privately_by_default(db: None) -> 
         assert applied == {"kind": GBRAIN_KIND, "name": name, "result": "created"}
         fetched = await _get(ctx, name)
     [row] = await _rows(state)
+    [held] = await _connections(state)
     assert row["backend"] == GIT_BACKEND
     assert row["config"] == {"repo": REPO, "branch": None}
-    assert row["subject"] == member_subject(state.member_id)
-    assert row["owner_member_id"] == state.member_id
-    assert await _granted_agents(state) == {state.agent_id}
+    assert row["connection_id"] == held["id"]
+    assert held["provider"] == GIT_BACKEND
+    assert held["account_id"] == feed_handle(GbrainGitConfig(repo=REPO, branch=None))
+    assert held["owner_member_id"] == state.member_id
+    assert held["shared"] is False or held["shared"] == 0
     assert fetched["spec"] == {
         "repo": REPO,
         "branch": None,
@@ -316,6 +374,56 @@ async def test_member_registers_a_repo_source_privately_by_default(db: None) -> 
     assert fetched["status"]["consecutive_errors"] == 0
     assert fetched["status"]["owner_member_id"] == str(state.member_id)
     assert fetched["status"]["next_sync_at"] is not None
+
+
+async def test_each_origin_gets_a_connection_of_its_own(db: None) -> None:
+    """One connection per origin, keyed by the origin config's `feed_handle` — which is what makes
+    deleting one repository leave the next one alone, since removal is disconnecting that
+    connection."""
+    state = await _workspace()
+    ctx = _context(state, speaker_id=state.member_id)
+    first = gbrain_source_name(REPO, None, None)
+    second = gbrain_source_name(OTHER_REPO, None, None)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _manifest_text(first, repo=REPO))
+        await _apply(ctx, _manifest_text(second, repo=OTHER_REPO))
+    rows = await _rows(state)
+    connections = await _connections(state)
+    assert {held["account_id"] for held in connections} == {
+        feed_handle(GbrainGitConfig(repo=REPO)),
+        feed_handle(GbrainGitConfig(repo=OTHER_REPO)),
+    }
+    assert len({row["connection_id"] for row in rows}) == 2
+
+
+async def test_a_boot_registered_root_and_the_kinds_apply_settle_on_one_connection(
+    db: None,
+) -> None:
+    """A root the deploy's `[[sources]]` config registers at boot and the same root named through
+    the kind are one feed: the boot path keys its connection by `feed_handle` of `SourceConfig`,
+    the kind derives the same handle from `GbrainFolderConfig`, so the kind reads the boot row as
+    its own object and a member's apply of that spec settles on it — one connection, one row, and
+    nothing minted beside them."""
+    state = await _workspace()
+    with ws(state.workspace_id):
+        await register_sources(
+            (SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=ROOT)),)
+        )
+    [held] = await _connections(state)
+    assert held["account_id"] == feed_handle(GbrainFolderConfig(root=ROOT))
+    assert held["owner_member_id"] is None
+    assert held["shared"] is True or held["shared"] == 1
+
+    name = gbrain_source_name(None, None, ROOT)
+    ctx = _context(state, speaker_id=state.member_id)
+    with ws(state.workspace_id), agent(state.agent_id):
+        applied = await _apply(ctx, _manifest_text(name, root=ROOT, shared=True))
+        fetched = await _get(ctx, name)
+    assert applied == {"kind": GBRAIN_KIND, "name": name, "result": "updated"}
+    assert fetched["spec"]["root"] == ROOT
+    [row] = await _rows(state)
+    assert row["connection_id"] == held["id"]
+    assert await _connections(state) == [held]
 
 
 async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
@@ -342,7 +450,10 @@ async def test_root_apply_is_refused_for_everyone(db: None) -> None:
     assert await _rows(state) == []
 
 
-async def test_identical_reapply_grants_the_settled_source_to_the_calling_agent(db: None) -> None:
+async def test_identical_reapply_settles_on_the_row_and_changes_nothing(db: None) -> None:
+    """The name derives from the origin, so a submit the workspace already holds names the same
+    origin: the row, its connection and its disclosure all stand exactly as they were, from a
+    second agent's turn as much as the first's."""
     state = await _workspace()
     name = gbrain_source_name(REPO, None, None)
     submitted = _manifest_text(name, repo=REPO)
@@ -350,16 +461,15 @@ async def test_identical_reapply_grants_the_settled_source_to_the_calling_agent(
         assert (await _apply(_context(state, speaker_id=state.member_id), submitted))[
             "result"
         ] == "created"
-    rows = await _rows(state)
-    assert await _granted_agents(state) == {state.agent_id}
+    before, held = await _rows(state), await _connections(state)
     shipped = await _shipped_agent(state, "code-review")
     with ws(state.workspace_id), agent(shipped):
         applied = await _apply(
             _context(state, speaker_id=state.member_id, agent_id=shipped), submitted
         )
     assert applied == {"kind": GBRAIN_KIND, "name": name, "result": "updated"}
-    assert await _granted_agents(state) == {state.agent_id, shipped}
-    assert [row["id"] for row in await _rows(state)] == [row["id"] for row in rows]
+    assert await _rows(state) == before
+    assert await _connections(state) == held
 
 
 async def test_unsharing_is_delete_and_recreate(db: None) -> None:
@@ -372,21 +482,28 @@ async def test_unsharing_is_delete_and_recreate(db: None) -> None:
         args = tool.input_model.model_validate({"manifest": _manifest_text(name, repo=REPO)})
         with pytest.raises(VerbNotSupported, match="delete"):
             await tool.handler(ctx, args)
-    [row] = await _rows(state)
-    assert row["subject"] == SHARED_SUBJECT
+    [held] = await _connections(state)
+    assert held["shared"] is True or held["shared"] == 1
 
 
-async def test_sharing_a_private_source_restamps_its_row(db: None) -> None:
+async def test_sharing_a_private_source_restamps_its_pages(db: None) -> None:
+    """The flag is the disclosure, so widening it carries what the source already synced with it:
+    the connection flips and every live page it holds is restamped to the shared subject."""
     state = await _workspace()
     ctx = _context(state, speaker_id=state.member_id)
     name = gbrain_source_name(REPO, None, None)
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(name, repo=REPO))
+        [row] = await _rows(state)
+        await _seed_page(state, row["id"], member_subject(state.member_id))
         flipped = await _apply(ctx, _manifest_text(name, repo=REPO, shared=True))
+        fetched = await _get(ctx, name)
     assert flipped == {"kind": GBRAIN_KIND, "name": name, "result": "updated"}
-    [row] = await _rows(state)
-    assert row["subject"] == SHARED_SUBJECT
-    assert row["owner_member_id"] == state.member_id
+    assert fetched["spec"]["shared"] is True
+    [held] = await _connections(state)
+    assert held["shared"] is True or held["shared"] == 1
+    assert held["owner_member_id"] == state.member_id
+    assert await _page_subjects(state) == [SHARED_SUBJECT]
 
 
 async def test_resync_pulls_the_sources_next_sync_to_now(db: None) -> None:
@@ -405,9 +522,7 @@ async def test_resync_pulls_the_sources_next_sync_to_now(db: None) -> None:
         fetched = await _get(ctx, name)
         assert fetched["spec"]["resync"] is False
         args = tool.input_model.model_validate(
-            {
-                "manifest": _manifest_text(name, repo=REPO, shared=True, resync=True),
-            }
+            {"manifest": _manifest_text(name, repo=REPO, shared=True, resync=True)}
         )
         with pytest.raises(VerbNotSupported, match="a resync changes nothing else"):
             await tool.handler(ctx, args)
@@ -418,29 +533,22 @@ async def test_resync_pulls_the_sources_next_sync_to_now(db: None) -> None:
     assert before - timedelta(seconds=5) <= scheduled <= datetime.now(UTC)
 
 
-async def test_delete_removes_the_source_and_tombstones_its_pages(db: None) -> None:
+async def test_delete_disconnects_one_origin_and_leaves_its_neighbour(db: None) -> None:
+    """Removal is disconnecting that origin's own connection: its source row and every page it
+    synced follow by cascade, and the repository registered beside it is untouched — which is the
+    whole reason each origin carries a connection rather than sharing the backend's."""
     state = await _workspace()
     ctx = _context(state, speaker_id=state.member_id)
     name = gbrain_source_name(REPO, None, None)
+    other = gbrain_source_name(OTHER_REPO, None, None)
     delete_tool = _TOOLS["object_delete"]
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(name, repo=REPO))
-        [row] = await _rows(state)
-        page_id = uuid4()
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.page).values(
-                    id=page_id,
-                    workspace_id=state.workspace_id,
-                    source_id=row["id"],
-                    digest="sha256:x",
-                    body_ref="pages/x",
-                    subject=member_subject(state.member_id),
-                    tombstone=False,
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
-            )
+        await _apply(ctx, _manifest_text(other, repo=OTHER_REPO))
+        [row] = [source for source in await _rows(state) if source["config"]["repo"] == REPO]
+        [kept] = [source for source in await _rows(state) if source["config"]["repo"] == OTHER_REPO]
+        page_id = await _seed_page(state, row["id"], member_subject(state.member_id))
+        kept_page = await _seed_page(state, kept["id"], member_subject(state.member_id))
         deleted = json.loads(
             (
                 await delete_tool.handler(
@@ -453,21 +561,29 @@ async def test_delete_removes_the_source_and_tombstones_its_pages(db: None) -> N
         )
         assert deleted["deleted"] is True
         assert deleted["spec"]["repo"] == REPO
-        assert await _list_names(ctx) == []
-        async with workspace_tx() as connection:
-            page = (
-                (
-                    await connection.execute(
-                        sa.select(tables.page.c.tombstone).where(tables.page.c.id == page_id)
-                    )
-                )
-                .mappings()
-                .one()
-            )
-    [row] = await _rows(state)
-    assert row["removed_at"] is not None
-    assert page["tombstone"] is True or page["tombstone"] == 1
-    assert await _granted_agents(state) == set()
+        assert await _list_names(ctx) == [other]
+    assert [source["config"]["repo"] for source in await _rows(state)] == [OTHER_REPO]
+    assert [held["account_id"] for held in await _connections(state)] == [
+        feed_handle(GbrainGitConfig(repo=OTHER_REPO))
+    ]
+    assert await _page_ids(state) == [kept_page]
+    assert page_id not in await _page_ids(state)
+
+
+async def test_delete_admits_the_registrar_and_an_admin_only(db: None) -> None:
+    state = await _workspace()
+    name = gbrain_source_name(REPO, None, None)
+    delete_tool = _TOOLS["object_delete"]
+    args = delete_tool.input_model.model_validate({"kind": GBRAIN_KIND, "name": name})
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, speaker_id=state.member_id), _manifest_text(name, repo=REPO))
+        stranger = _context(state, speaker_id=await _stranger(state))
+        with pytest.raises(UnknownObject):
+            await delete_tool.handler(stranger, args)
+        assert len(await _rows(state)) == 1
+        await delete_tool.handler(_context(state), args)
+    assert await _rows(state) == []
+    assert await _connections(state) == []
 
 
 async def test_object_list_shows_only_visible_sources(db: None) -> None:
@@ -506,5 +622,5 @@ async def test_private_origin_of_another_member_is_refused_with_the_share_path(d
             await _apply(stranger_ctx, _manifest_text(name, repo=REPO))
         applied = await _apply(admin_ctx, _manifest_text(name, repo=REPO))
         assert applied["result"] == "updated"
-    [row] = await _rows(state)
-    assert row["owner_member_id"] == state.member_id
+    [held] = await _connections(state)
+    assert held["owner_member_id"] == state.member_id

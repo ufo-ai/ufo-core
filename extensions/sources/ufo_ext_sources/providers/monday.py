@@ -31,7 +31,7 @@ from ufo_ext_sources.watermark import text_checkpoint
 _REFUSAL_STATUS = frozenset({401, 403})
 
 USERS = StreamSpec(name="users", source_object="users", primary_key="id")
-TEAMS = StreamSpec(name="teams", source_object="teams", primary_key="id", canonical=False)
+TEAMS = StreamSpec(name="teams", source_object="teams", primary_key="id")
 WORKSPACES = StreamSpec(name="workspaces", source_object="workspaces", primary_key="id")
 BOARDS = StreamSpec(
     name="boards",
@@ -39,6 +39,7 @@ BOARDS = StreamSpec(
     primary_key="id",
     cursor_field="updated_at",
     updated_at_field="updated_at",
+    canonical=True,
 )
 ITEMS = StreamSpec(
     name="items",
@@ -46,6 +47,7 @@ ITEMS = StreamSpec(
     primary_key="id",
     cursor_field="updated_at",
     updated_at_field="updated_at",
+    canonical=True,
 )
 UPDATES = StreamSpec(
     name="updates",
@@ -53,7 +55,7 @@ UPDATES = StreamSpec(
     primary_key="id",
     cursor_field="created_at",
     updated_at_field=None,
-    canonical=False,
+    canonical=True,
 )
 ACTIVITY_LOGS = StreamSpec(
     name="activity_logs",
@@ -61,9 +63,8 @@ ACTIVITY_LOGS = StreamSpec(
     primary_key="id",
     cursor_field="created_at",
     updated_at_field=None,
-    canonical=False,
 )
-TAGS = StreamSpec(name="tags", source_object="tags", primary_key="id", canonical=False)
+TAGS = StreamSpec(name="tags", source_object="tags", primary_key="id")
 
 ALL_STREAMS = [USERS, TEAMS, WORKSPACES, BOARDS, ITEMS, UPDATES, ACTIVITY_LOGS, TAGS]
 

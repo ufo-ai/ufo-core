@@ -15,6 +15,11 @@ def _conversation_audience(context: DefaultExecutionContext) -> str:
 
 metadata = sa.MetaData()
 
+MAX_BACKFILL_DAYS = 36500
+"""How far back a connection's first sync may reach: a century, which is every provider's whole
+history. A member who wants all of it asks for this many days, so `backfill_days` is one integer
+and never a word standing for a number."""
+
 workspace = sa.Table(
     "workspace",
     metadata,
@@ -533,8 +538,9 @@ connection = sa.Table(
     sa.Column("provider", sa.Text, nullable=False),
     sa.Column("account_id", sa.Text, nullable=False),
     sa.Column("host", sa.Text, nullable=False),
-    sa.Column("owner_member_id", sa.Uuid, nullable=False),
-    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("base_url", sa.Text, nullable=True),
+    sa.Column("backfill_days", sa.Integer, nullable=True),
+    sa.Column("owner_member_id", sa.Uuid, nullable=True),
     sa.Column("shared", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("account_label", sa.Text, nullable=True),
     sa.Column("commit_name", sa.Text, nullable=True),
@@ -543,19 +549,14 @@ connection = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "provider", "account_id", name="connection_identity"),
     sa.UniqueConstraint("workspace_id", "id", name="connection_workspace_identity"),
-    sa.UniqueConstraint(
-        "workspace_id",
-        "id",
-        "owner_member_id",
-        name="connection_owner_identity",
+    sa.CheckConstraint("owner_member_id is not null or shared", name="connection_shared"),
+    sa.CheckConstraint(
+        f"backfill_days is null or backfill_days between 1 and {MAX_BACKFILL_DAYS}",
+        name="connection_backfill_days",
     ),
     sa.ForeignKeyConstraint(
         ["workspace_id", "owner_member_id"],
         ["member.workspace_id", "member.id"],
-    ),
-    sa.ForeignKeyConstraint(
-        ["workspace_id", "conversation_id"],
-        ["conversation.workspace_id", "conversation.id"],
     ),
 )
 
@@ -566,7 +567,6 @@ connector_grant = sa.Table(
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
     sa.Column("connection_id", sa.Uuid, nullable=False),
-    sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
@@ -580,10 +580,6 @@ connector_grant = sa.Table(
     sa.ForeignKeyConstraint(
         ["workspace_id", "agent_id"],
         ["agent.workspace_id", "agent.id"],
-    ),
-    sa.ForeignKeyConstraint(
-        ["workspace_id", "conversation_id"],
-        ["conversation.workspace_id", "conversation.id"],
     ),
 )
 
@@ -740,53 +736,25 @@ source = sa.Table(
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("backend", sa.Text, nullable=False),
     sa.Column("config", sa.JSON, nullable=False),
-    sa.Column("subject", sa.Text, nullable=False, server_default="shared"),
-    sa.Column("owner_member_id", sa.Uuid, nullable=True),
-    sa.Column("connection_id", sa.Uuid, nullable=True),
+    sa.Column("connection_id", sa.Uuid, nullable=False),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("consecutive_errors", sa.Integer, nullable=False, server_default="0"),
     sa.Column("consecutive_refusals", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("consecutive_empty", sa.Integer, nullable=False, server_default="0"),
     sa.Column("parked_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("parked_reason", sa.Text, nullable=True),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
-    sa.Column("removed_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.Index("source_due", "next_sync_at"),
+    sa.Index("source_authority", "workspace_id", "connection_id"),
     sa.UniqueConstraint("workspace_id", "id", name="source_workspace_identity"),
-    sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="source_subject"),
-    sa.CheckConstraint(
-        "connection_id is null or owner_member_id is not null",
-        name="source_connection_owner",
-    ),
     sa.ForeignKeyConstraint(
-        ["workspace_id", "owner_member_id"],
-        ["member.workspace_id", "member.id"],
-    ),
-    sa.ForeignKeyConstraint(
-        ["workspace_id", "connection_id", "owner_member_id"],
-        ["connection.workspace_id", "connection.id", "connection.owner_member_id"],
-    ),
-)
-
-source_grant = sa.Table(
-    "source_grant",
-    metadata,
-    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
-    sa.Column("source_id", sa.Uuid, primary_key=True),
-    sa.Column("agent_id", sa.Uuid, primary_key=True),
-    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(
-        ["workspace_id", "source_id"],
-        ["source.workspace_id", "source.id"],
+        ["workspace_id", "connection_id"],
+        ["connection.workspace_id", "connection.id"],
         ondelete="CASCADE",
-    ),
-    sa.ForeignKeyConstraint(
-        ["workspace_id", "agent_id"],
-        ["agent.workspace_id", "agent.id"],
     ),
 )
 
@@ -819,7 +787,7 @@ page = sa.Table(
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
-    sa.Column("source_id", sa.Uuid, sa.ForeignKey("source.id"), nullable=False),
+    sa.Column("source_id", sa.Uuid, sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False),
     sa.Column("source_identity", sa.Text, nullable=True),
     sa.Column("digest", sa.Text, nullable=False),
     sa.Column("body_ref", sa.Text, nullable=False),

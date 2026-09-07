@@ -79,15 +79,15 @@ def _stream(
 CHARGEBEE_STREAMS: list[StreamSpec] = [
     _stream("customer", canonical=True),
     _stream("subscription", canonical=True),
-    _stream("item_price", canonical=True),
+    _stream("item_price"),
     _stream("invoice", canonical=True),
     _stream("transaction", canonical=True),
     _stream("addon"),
     _stream("attached_item", cursor_field=None),
-    _stream("comment", cursor_field="created_at", updated_at_field=None),
+    _stream("comment", cursor_field="created_at", updated_at_field=None, canonical=True),
     _stream("contact", cursor_field=None),
     _stream("coupon"),
-    _stream("credit_note"),
+    _stream("credit_note", canonical=True),
     _stream("differential_price"),
     _stream(
         "event",

@@ -48,6 +48,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { rowControl } from "@/kernel/row";
+import { RowLines } from "@/kernel/rows";
 import { appended, beside, closed, opened } from "@/kernel/slots";
 import { DataTable, OPEN } from "@/kernel/table";
 import { BrandMark } from "@/lib/brandMark";
@@ -64,23 +65,30 @@ import type { Agent } from "@/lib/types";
 import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
 import { CONNECT_INSTALLS } from "@/views/Surfaces";
 
-type SourcesPayload = {
-  sources: {
-    backend: string;
-    account_id: string | null;
-    stream: string;
-    consecutive_errors: number;
-    parked_reason: string | null;
-  }[];
+/** One stream of one connection, hanging off it by `connection_id`. A stream carries no act: what
+ *  a member does, they do to the connection, and the stream states what that account is syncing. */
+type Stream = {
+  id: string;
+  connection_id: string;
+  backend: string;
+  stream: string | null;
+  consecutive_errors: number;
+  next_sync_at: string;
+  parked_reason: string | null;
 };
 
+type SourcesPayload = { sources: Stream[] };
+
 type Connection = {
+  id: string;
   provider: string;
-  account_id: string | null;
+  account_id: string;
   account_label: string | null;
   owner_email: string | null;
   own: boolean;
   shared: boolean;
+  base_url: string | null;
+  backfill_days: number | null;
   connected_at: string;
   grant: string;
 };
@@ -98,46 +106,99 @@ const PROVIDER = { label: "Provider", fact: true };
 const ACCESS = { label: "Access", fact: true };
 const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
 const ATTACH_AGENT = "attach-agent";
+const TENANT_URL = "connection-base-url";
+const BACKFILL_DAYS = "connection-backfill-days";
 /** What a press that never became a request states. Both connector screens draw it, so it is said
  *  once: a member reads one sentence for one outcome wherever they pressed. */
 export const CONNECT_REFUSED =
   "No connection request was opened. Ask in chat to connect the account.";
 
+/** The account a connection stands on, or the empty string where it stands on none. A workspace
+ *  connection — a keyed provider, a configured folder — has no account and carries the empty
+ *  string as its `account_id`, which is why every fall through here is `||` and not `??`. The
+ *  broker's own id for the account is tried last: `ca_9x2QpLm4` is wiring, not a name a member
+ *  would recognise, so the address that consented reads better than it does. */
+function accountHeld(entry: Connection): string {
+  return entry.account_label || entry.owner_email || entry.account_id;
+}
+
+/** What every surface calls the account — a row, the attach picker, and the record's own title.
+ *  One connection has one name: a title that reached for the broker's id while the row beside it
+ *  named the member who consented is the same account reading as two. */
 function accountName(entry: Connection): string {
-  return entry.account_label ?? entry.owner_email ?? entry.account_id ?? "—";
+  return accountHeld(entry) || entry.provider;
 }
 
-function connectionName(entry: Connection): string {
-  return entry.account_label ?? entry.account_id ?? entry.provider;
+function dayCount(days: number): string {
+  return days === 1 ? "1 day" : days + " days";
 }
 
+/** What the sync settings read as to a member who cannot change them. An empty field is what the
+ *  provider's own defaults answer, and the row says so rather than standing blank. */
+function syncFacts(entry: Connection): Fact[] {
+  return [
+    { label: "Tenant URL", value: entry.base_url || "The provider's own host" },
+    {
+      label: "Backfill",
+      value:
+        entry.backfill_days === null ? "Each stream's own window" : dayCount(entry.backfill_days),
+    },
+  ];
+}
+
+/** What one stream states beside its next sync: the errors it has run into with no success between
+ *  them, and the reason the driver parked it. A stream the provider has stopped answering states
+ *  the park rather than reading as healthy. */
+function streamMeta(one: Stream): ReactNode[] {
+  return [
+    one.consecutive_errors === 0
+      ? null
+      : one.consecutive_errors === 1
+        ? "1 error"
+        : one.consecutive_errors + " errors",
+    one.parked_reason,
+  ];
+}
+
+/** One prepared intent against the `connection` kind, carrying the whole spec with the one field
+ *  the act changes written over it. The kind forbids an unknown field and takes every known one at
+ *  its declared default, so a spec naming less than the whole record is not a partial edit — it is
+ *  an edit that also unshares the account and forgets its tenant. Every act on a connection is
+ *  built here for that reason. `provider` and `account_id` are its identity and ride back
+ *  unchanged; the verb refuses a spec that moves either. */
+function connectionSpec(
+  entry: Connection,
+  change: { shared?: boolean; base_url?: string; backfill_days?: number | null },
+) {
+  return {
+    verb: "apply",
+    kind: "connection",
+    name: entry.grant,
+    spec: {
+      provider: entry.provider,
+      account_id: entry.account_id,
+      shared: entry.shared,
+      base_url: entry.base_url ?? "",
+      backfill_days: entry.backfill_days,
+      ...change,
+    },
+  };
+}
+
+/** What the record states about the account itself, before what it syncs and before the acts on
+ *  it: who reaches it, whose it is, when it landed, and which apps hold it. */
 function connectionFacts(
   entry: Connection,
   viewer: string | null,
-  sources: SourcesPayload | null,
+  holders: { id: string; name: string }[],
 ): Fact[] {
-  const facts = [
+  return [
+    { label: "Access", value: entry.shared ? "Workspace" : "Only you" },
     { label: "Owner", value: ownerLabel(entry.owner_email, viewer) },
     { label: "Connected", value: <Moment at={entry.connected_at} /> },
-  ];
-  if (sources === null) return facts;
-  const streams = sources.sources.filter(
-    (source) => source.backend === entry.provider && source.account_id === entry.account_id,
-  );
-  const errors = streams.reduce((total, one) => total + one.consecutive_errors, 0);
-  const parked = streams.filter((one) => one.parked_reason !== null);
-  return [
-    ...facts,
-    { label: "Streams", value: streams.map((one) => one.stream).sort().join(", ") || "\u2014", block: true },
     {
-      label: "Errors",
-      value: parked.length ? (
-        <span title={parked.map((one) => one.parked_reason).join(" ")}>
-          {errors} · {parked.length} parked
-        </span>
-      ) : (
-        String(errors)
-      ),
+      label: holders.length === 1 ? "App" : "Apps",
+      value: holders.length ? holders.map((one) => agentName(one.name)).join(", ") : "No apps",
     },
   ];
 }
@@ -146,20 +207,21 @@ function matches(entry: Connection | PoolConnection, query: string): boolean {
   const said = [
     entry.provider,
     entry.account_label ?? "",
-    entry.account_id ?? "",
+    entry.account_id,
     entry.owner_email ?? "",
   ].join(" ");
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
-/** Every connector the member holds on one agent, the agent chosen in the bar. The agent's own
- *  settings state the same records narrowed to what that agent can actually reach; both read the
- *  one grant list, so nothing here needs a second endpoint. */
 /** What a connected row says under the tool's name: the account it stands on, and who reaches it.
  *  A member holding the account alone reads a different sentence from one the whole workspace
- *  shares, and that difference is the fact worth stating on a row they scan rather than open. */
+ *  shares, and that difference is the fact worth stating on a row they scan rather than open. A
+ *  workspace connection stands on no account, so the row states the access alone — the tool's
+ *  own name is already above it and would otherwise be said twice. */
 function accountLine(entry: Connection): string {
-  return accountName(entry) + " \u00b7 " + (entry.shared ? "Workspace" : "Only you");
+  const access = entry.shared ? "Workspace" : "Only you";
+  const named = accountHeld(entry);
+  return named ? named + " \u00b7 " + access : access;
 }
 
 /** One tool already reachable: a connection this member can see, or a workspace install. An install
@@ -216,7 +278,7 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
       said: [
         entry.provider,
         entry.account_label ?? "",
-        entry.account_id ?? "",
+        entry.account_id,
         entry.owner_email ?? "",
         ...entry.agents.map((agent) => agent.name),
       ].join(" "),
@@ -249,8 +311,8 @@ function offers(catalog: FirstRunPayload, pool: PoolPayload, viewer: string | nu
 
 /** Whose a standing row is: the owner address against the viewer, never `own` — that flag is
  *  whether the viewer may manage the account, which a workspace admin may on every member's. A
- *  workspace install carries no connection row and stands with what the workspace shares, not with
- *  what the member connected. */
+ *  workspace install carries no connection row, and a workspace connection carries no owner; both
+ *  stand with what the workspace holds, not with what the member connected. */
 function ownHeld(row: Standing, viewer: string | null): boolean {
   return row.entry !== null && row.entry.owner_email !== null && row.entry.owner_email === viewer;
 }
@@ -262,7 +324,7 @@ const HELD_ZONES: [string, string, (row: Standing, viewer: string | null) => boo
   ["Your connections", "Accounts you connected, and the apps that can use them.", ownHeld],
   [
     "Shared with the workspace",
-    "Accounts another member connected, and the tools the workspace installed.",
+    "Accounts the workspace holds, and the tools it installed.",
     (row, viewer) => !ownHeld(row, viewer),
   ],
 ];
@@ -561,6 +623,7 @@ export function WorkspaceConnectors({
         key={id}
         entry={entry}
         viewer={viewer}
+        lane={agent?.id ?? null}
         attachTo={agents}
         holders={entry.agents ?? []}
         onDone={(outcome) => {
@@ -871,9 +934,19 @@ function CoverageRecord({ legs, onClose }: { legs: Fact[]; onClose: () => void }
   );
 }
 
+/** The account this connection stands on, and the streams that hang off it. The account is the
+ *  record: it is what a member shares, points at a tenant, backfills and disconnects. A stream
+ *  under it is status alone — one row per canonical stream of the connection, with the sync it is
+ *  waiting on and whatever the driver has run into — so the pane draws them inert.
+ *
+ *  Sharing rides the `connector_grant` kind and the tenant window rides the `connection` kind,
+ *  which is where each is stored. A workspace connection is owned by nobody and shared by
+ *  construction, so it draws no make-private control: the act would reach a connection with no
+ *  owner to hand it back to and be refused. */
 function ConnectionRecord({
   entry,
   viewer,
+  lane,
   attachTo,
   holders,
   onDone,
@@ -881,6 +954,7 @@ function ConnectionRecord({
 }: {
   entry: Connection;
   viewer: string | null;
+  lane: string | null;
   attachTo: Agent[];
   holders: { id: string; name: string }[];
   onDone: (notice: NoticeState) => void;
@@ -888,21 +962,44 @@ function ConnectionRecord({
 }) {
   const [targetAgent, setTargetAgent] = useState("");
   const holder = holders[0];
-  const sources = usePanelRead<SourcesPayload>("/workspace/sources");
+  const streams = usePanelRead<SourcesPayload>("/workspace/sources");
+  // Sharing an account is the owner's alone; making it private is theirs or an admin's, which is
+  // what `own` already answers. A row that offered an admin the share would be refused at the gate.
+  const mine = entry.owner_email !== null && entry.owner_email === viewer;
 
-  async function act(lane: string, envelope: unknown) {
-    onDone(outcomeNotice(await postIntent(lane, envelope)));
+  async function act(agentId: string, envelope: unknown) {
+    onDone(outcomeNotice(await postIntent(agentId, envelope)));
   }
 
   return (
-    <Sheet open title={connectionName(entry)} onClose={onClose}>
-      <Facts
-        rows={connectionFacts(
-          entry,
-          viewer,
-          sources.phase === "ready" ? sources.payload : null,
+    <Sheet open title={accountName(entry)} onClose={onClose}>
+      <Section title="Account">
+        <Facts rows={connectionFacts(entry, viewer, holders)} />
+      </Section>
+      <Section title="Sync">
+        {entry.own && lane ? (
+          <SyncForm entry={entry} lane={lane} onDone={onDone} />
+        ) : (
+          <Facts rows={syncFacts(entry)} />
         )}
-      />
+      </Section>
+      <Section title="Streams">
+        <Panel state={streams}>
+          {(payload) => {
+            const rows = payload.sources.filter((one) => one.connection_id === entry.id);
+            if (!rows.length) return <PanelBlank body="No stream syncs this account yet." />;
+            return (
+              <RowLines
+                rows={rows}
+                rowKey={(one) => one.id}
+                primary={(one) => one.stream ?? one.backend}
+                meta={streamMeta}
+                when={(one) => <Moment at={one.next_sync_at} />}
+              />
+            );
+          }}
+        </Panel>
+      </Section>
       {entry.own ? (
         <>
           {attachTo.length ? (
@@ -932,32 +1029,17 @@ function ConnectionRecord({
                     verb: "attach",
                     kind: "connector_grant",
                     name: entry.grant,
-                    spec: {
-                      provider: entry.provider,
-                      account_id: entry.account_id,
-                      shared: entry.shared,
-                    },
+                    spec: { provider: entry.provider, account_id: entry.account_id },
                   })
                 }
               >
                 Attach to app
               </Button>
             ) : null}
-            {holder ? (
+            {lane && (entry.shared ? entry.owner_email !== null : mine) ? (
               <Button
                 variant="row"
-                onClick={() =>
-                  act(holder.id, {
-                    verb: "apply",
-                    kind: "connector_grant",
-                    name: entry.grant,
-                    spec: {
-                      provider: entry.provider,
-                      account_id: entry.account_id,
-                      shared: !entry.shared,
-                    },
-                  })
-                }
+                onClick={() => act(lane, connectionSpec(entry, { shared: !entry.shared }))}
               >
                 {entry.shared ? "Make private" : "Share with app"}
               </Button>
@@ -986,6 +1068,83 @@ function ConnectionRecord({
         </>
       ) : null}
     </Sheet>
+  );
+}
+
+/** What every stream of this connection syncs against: the tenant host they dial, and how far back
+ *  their first sync reads. Both are the account's rather than any one stream's, so both are set on
+ *  the `connection` kind and land as one prepared intent — the same verb a member reaches by asking
+ *  in chat, so the turn is the record of the change either way.
+ *
+ *  A provider that is not per-tenant takes no URL, and the fields say so instead of the screen
+ *  guessing which providers those are: an account pointed at the wrong tenant parks on its first
+ *  sync carrying what the provider answered, which is a better answer than a list of hosts kept in
+ *  step by hand. `provider` and `account_id` ride the spec unchanged because they are the
+ *  connection's identity, and the verb refuses a spec that moves either. */
+function SyncForm({
+  entry,
+  lane,
+  onDone,
+}: {
+  entry: Connection;
+  lane: string;
+  onDone: (notice: NoticeState) => void;
+}) {
+  const [baseUrl, setBaseUrl] = useState(entry.base_url ?? "");
+  const [days, setDays] = useState(entry.backfill_days === null ? "" : String(entry.backfill_days));
+  const [busy, setBusy] = useState(false);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    const outcome = await postIntent(
+      lane,
+      connectionSpec(entry, {
+        base_url: baseUrl.trim(),
+        backfill_days: days.trim() === "" ? null : Number(days),
+      }),
+    );
+    setBusy(false);
+    onDone(outcomeNotice(outcome));
+  }
+
+  return (
+    <form onSubmit={save} className="flex flex-col gap-2xl">
+      <Field
+        label="Tenant URL"
+        htmlFor={TENANT_URL}
+        description="The provider's API host for this account. Empty dials the provider's own."
+      >
+        <Input
+          id={TENANT_URL}
+          type="url"
+          aria-describedby={TENANT_URL + "-description"}
+          placeholder="https://acme.example.com"
+          value={baseUrl}
+          onChange={(event) => setBaseUrl(event.target.value)}
+        />
+      </Field>
+      <Field
+        label="Backfill days"
+        htmlFor={BACKFILL_DAYS}
+        description="How far back a stream's first sync reads. Empty takes each stream's own window."
+      >
+        <Input
+          id={BACKFILL_DAYS}
+          type="number"
+          min={1}
+          aria-describedby={BACKFILL_DAYS + "-description"}
+          value={days}
+          onChange={(event) => setDays(event.target.value)}
+        />
+      </Field>
+      <div className="flex justify-end">
+        <Button type="submit" variant="send" size="bar" busy={busy}>
+          Save
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -1152,6 +1311,7 @@ function ConnectorList({
       key={record.grant}
       entry={record}
       viewer={viewer}
+      lane={agent.id}
       /* The bar over the table is where this screen attaches a connection, so the record does not
          say the same act a second time under another name. */
       attachTo={[]}
@@ -1217,7 +1377,7 @@ function ConnectorList({
                       verb: "attach",
                       kind: "connector_grant",
                       name: attachEntry.grant,
-                      spec: { provider: attachEntry.provider, account_id: attachEntry.account_id, shared: attachEntry.shared },
+                      spec: { provider: attachEntry.provider, account_id: attachEntry.account_id },
                     })
                   }
                 >
