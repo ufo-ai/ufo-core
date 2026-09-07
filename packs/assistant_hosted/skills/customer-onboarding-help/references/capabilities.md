@@ -51,7 +51,8 @@ for a key, token, or secret in a chat message.
 A customer can connect a source so its documents and records are synced and searchable, letting the
 agent answer from the customer's own material. A source registered privately by one member is
 searchable only in that member's own conversation; a source shared to the workspace is searchable by
-the workspace.
+the workspace's main agent, which every member reaches. An agent the member built themselves needs
+the source granted to it separately, shared or not.
 
 ## Memory
 

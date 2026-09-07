@@ -14,11 +14,15 @@ do not show them a link or the balance.
 
 A workspace runs on a prepaid balance. Turns spend it, and a turn is refused once the balance
 reaches the headroom a turn needs to begin — which is at or above zero, not at zero — with a line
-saying so, until more is added. A workspace whose card has already paid a refill keeps working for
+saying so, until more is added. A message a member sends is held rather than refused, whether it
+opens a new conversation or continues one: the member reads the same fact and that the message is
+answered once credit is added, and the turn resumes on its own once an admin adds credit — the
+member does not have to resend it. A scheduled task's run is refused outright instead of held, and
+fires again on its next schedule. A workspace whose card has already paid a refill keeps working for
 a fixed amount past that line, so that a refill still being charged does not stop it; a workspace
-that has never paid gets nothing past the line. There is no plan to sell and none to activate:
-never offer one or say one is pending. If a customer says they are already on a plan, do not contradict them — an
-arrangement made before this is not visible here — say you will check with the team.
+that has never paid gets nothing past the line. There is no plan to sell and none to activate: never
+offer one or say one is pending. If a customer says they are already on a plan, do not contradict
+them — an arrangement made before this is not visible here — say you will check with the team.
 
 A workspace that has set its own model provider key is the exception: its turns are served by that
 key and are admitted while its balance is above zero, because it pays that provider directly. Such

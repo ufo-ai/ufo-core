@@ -60,6 +60,7 @@ TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
 TASK_PANE = "extensions/web/frontend/src/kernel/task.tsx"
 WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
+RUNTIME_CONTEXT = "core/src/ufo/runtime/ext/context.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
 WEB_APP = "extensions/web/frontend/src/App.tsx"
 FIRST_RUN_VIEW = "extensions/web/frontend/src/views/FirstRun.tsx"
@@ -273,11 +274,27 @@ CLAIMS = (
         pattern=r"so no count of\nmembers is shipped, rated, or enforced anywhere",
     ),
     Claim(
-        claim="a spent balance refuses the turn rather than queueing it",
+        claim="a spent balance refuses a turn at the headroom line and says so",
         corpus="references/billing-and-seats.md",
         phrase="a turn is refused once the balance reaches",
         source=BALANCE,
         pattern=r"def balance_refusal_message\(billing_url: str \| None\) -> str:",
+    ),
+    Claim(
+        claim="a spent balance holds a member's message instead of refusing it, the message that"
+        " opens a conversation included, and resumes it once credit lands",
+        corpus="references/billing-and-seats.md",
+        phrase="held rather than refused, whether it opens a new conversation or continues one",
+        source=BALANCE,
+        pattern=r"def balance_park_message\(billing_url: str \| None\) -> str:",
+    ),
+    Claim(
+        claim="a member who gets no reply is told the hold resumes on its own, not that the"
+        " message was refused",
+        corpus="references/troubleshooting.md",
+        phrase="A member's message is held, not refused, once credit runs out",
+        source=BALANCE,
+        pattern=r"def balance_park_message\(billing_url: str \| None\) -> str:",
     ),
     Claim(
         claim="only an admin can reach billing",
@@ -297,6 +314,15 @@ CLAIMS = (
             r'\s+"roster": \[\n'
             r'\s+\{"email": entry\.email, "seated": entry\.seated, "admin": entry\.admin\}'
         ),
+    ),
+    Claim(
+        claim="a shared source is auto-readable by the workspace's main agent; a specialist agent"
+        " still needs it granted separately",
+        corpus="references/capabilities.md",
+        phrase="An agent the member built themselves needs\nthe source granted to it separately,"
+        " shared or not",
+        source=RUNTIME_CONTEXT,
+        pattern=r"A\s+specialist agent reads only what it is granted, shared or not",
     ),
     Claim(
         claim="an externally shared channel reads and writes only itself",

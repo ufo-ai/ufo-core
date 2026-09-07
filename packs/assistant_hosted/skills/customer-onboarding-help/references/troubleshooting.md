@@ -38,6 +38,7 @@ second-hand, from an admin asking about someone else.
 | --- | --- |
 | "It has been going a long time — stop it" | On the web portal, the stop button ends it; in the terminal, Esc does. Both cancel it for good — it will not resume, and a message already sent before the stop starts a new turn. On Slack there is no way to stop it: say what it is working on and that you will report when it lands. |
 | "You said you would do something and nothing arrived" | Do not insist it worked. Say plainly that it did not land, do it again, and pass it to the team if the second attempt fails too. |
+| "I sent a message here and got nothing back" | Check the balance. A member's message is held, not refused, once credit runs out — the message that opens a new conversation as much as a reply into one that already has turns. It answers on its own once an admin adds credit, with nothing to resend. |
 
 ## Connections and credentials
 
