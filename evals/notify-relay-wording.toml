@@ -1,0 +1,48 @@
+name = "notify-relay-wording"
+base = "HEAD"
+suites = ["notify_relay"]
+repeats = 3
+concurrency = 2
+max_stacks = 1
+budget_usd = 20.0
+est_usd_per_case = 0.10
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+flags = { backend = "open" }
+
+[[arm]]
+name = "as-shipped"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/deliver.py"
+old = '''    "voice, in one message: what happened, what it means for them, and the one thing you could do "
+    "about it if they want it. Do nothing else until they answer."'''
+new = '''    "voice, in one message, and stop; do not act on it."'''
+
+[[arm]]
+name = "no-next-step"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/deliver.py"
+old = '''    "voice, in one message: what happened, what it means for them, and the one thing you could do "
+    "about it if they want it. Do nothing else until they answer."'''
+new = '''    "voice, in one message: what happened and what it means for them. Do nothing else until they "
+    "answer."'''
+
+[[arm]]
+name = "name-what-about"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/deliver.py"
+old = '''    "about it if they want it. Do nothing else until they answer."'''
+new = '''    "about it if they want it. Name what it is about so they can go to it. Do nothing else until "
+    "they answer."'''

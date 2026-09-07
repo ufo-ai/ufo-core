@@ -43,7 +43,8 @@ RELAY_KEY = "notify-deliver:{turn}"
 RELAY_SOURCE = "notification"
 RELAY_INSTRUCTION = (
     "\nThe Notification app decided the member should hear this now. Say it to them in your own "
-    "voice, in one message, and stop; do not act on it."
+    "voice, in one message: what happened, what it means for them, and the one thing you could do "
+    "about it if they want it. Do nothing else until they answer."
 )
 DELIVER_DESCRIPTION = (
     "Tell the member the notifications named in `refs`, as one message, on the chat surface they "
