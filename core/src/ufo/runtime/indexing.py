@@ -10,6 +10,7 @@ dialect — a backend does storage, ANN/FTS, and the subject filter; these stay 
 objects reached by both core and the extensions that implement the seam.
 """
 
+import asyncio
 import hashlib
 import itertools
 import math
@@ -30,6 +31,10 @@ DELIMITER_LEVELS: tuple[tuple[str, ...], ...] = (
     (". ", "! ", "? ", ".\n", "!\n", "?\n", "。", "！", "？"),  # noqa: RUF001
     ("; ", ": ", ", ", "；", "：", "，", "、"),  # noqa: RUF001
     (),
+)
+DELIMITER_PATTERNS: tuple[re.Pattern[str] | None, ...] = tuple(
+    re.compile("|".join(re.escape(delimiter) for delimiter in sorted(level))) if level else None
+    for level in DELIMITER_LEVELS
 )
 
 OWNER_KIND_MEMORY_ITEM = "memory_item"
@@ -99,8 +104,10 @@ async def chunk_embed_upsert(
     outside this desired set — the derivation step both indexers share. Upsert is idempotent on
     chunk_digest, so a re-run over unchanged content rewrites the same rows; the prune drops the
     digests an edit no longer produces (all of them when the new body is empty), so re-chunked
-    content leaves no orphaned chunk to surface as a stale hit."""
-    chunks = chunker.chunk(body, owner_kind, owner_id, subject)
+    content leaves no orphaned chunk to surface as a stale hit. Chunking is pure-Python CPU work
+    over the whole body, so it runs in a thread: a job re-indexing thousands of pages must not hold
+    the loop that serves every turn and every request of the process."""
+    chunks = await asyncio.to_thread(chunker.chunk, body, owner_kind, owner_id, subject)
     if chunks:
         vectors = await embed.embed(tuple(chunk.text for chunk in chunks))
         await index.upsert(
@@ -167,9 +174,10 @@ class TextChunker:
         return output
 
     def _recursive_split(self, text: str, level: int) -> list[str]:
-        if level >= len(DELIMITER_LEVELS) or not DELIMITER_LEVELS[level]:
+        pattern = DELIMITER_PATTERNS[level] if level < len(DELIMITER_PATTERNS) else None
+        if pattern is None:
             return self._split_on_whitespace(text)
-        pieces = self._split_at_delimiters(text, DELIMITER_LEVELS[level])
+        pieces = self._split_at_delimiters(text, pattern)
         if len(pieces) <= 1:
             return self._recursive_split(text, level + 1)
         result: list[str] = []
@@ -181,19 +189,13 @@ class TextChunker:
         return result
 
     @staticmethod
-    def _split_at_delimiters(text: str, delimiters: tuple[str, ...]) -> list[str]:
+    def _split_at_delimiters(text: str, delimiters: re.Pattern[str]) -> list[str]:
         pieces: list[str] = []
-        remaining = text
-        while remaining:
-            cuts = [
-                (index, delim) for delim in delimiters if (index := remaining.find(delim)) != -1
-            ]
-            if not cuts:
-                pieces.append(remaining)
-                break
-            earliest, delim = min(cuts)
-            pieces.append(remaining[: earliest + len(delim)])
-            remaining = remaining[earliest + len(delim) :]
+        start = 0
+        for match in delimiters.finditer(text):
+            pieces.append(text[start : match.end()])
+            start = match.end()
+        pieces.append(text[start:])
         return [piece for piece in pieces if piece.strip()]
 
     def _split_on_whitespace(self, text: str) -> list[str]:

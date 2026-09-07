@@ -1,4 +1,14 @@
-from ufo.runtime.indexing import TextChunker
+import asyncio
+import time
+
+from ufo.runtime.indexing import (
+    DELIMITER_PATTERNS,
+    Chunk,
+    Hit,
+    IndexScope,
+    TextChunker,
+    chunk_embed_upsert,
+)
 
 
 def _check_short_text_is_one_chunk() -> None:
@@ -38,8 +48,73 @@ def _check_digest_is_deterministic_for_identical_content() -> None:
     assert a[0].chunk_digest == b[0].chunk_digest
 
 
+def _check_delimiter_split_ends_each_piece_at_its_delimiter_and_drops_blank_pieces() -> None:
+    sentences = DELIMITER_PATTERNS[2]
+    assert sentences is not None
+    assert TextChunker._split_at_delimiters("One. Two! Three?\n \n Four", sentences) == [
+        "One. ",
+        "Two! ",
+        "Three?\n",
+        " \n Four",
+    ]
+    assert TextChunker._split_at_delimiters("Only. ", sentences) == ["Only. "]
+    assert TextChunker._split_at_delimiters(". . \n ", sentences) == [". ", ". "]
+    assert TextChunker._split_at_delimiters("no delimiter here", sentences) == ["no delimiter here"]
+
+
 def test_chunk_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 5
+    assert len(checks) == 6
     for check in checks:
         check()
+
+
+class _SlowChunker(TextChunker):
+    def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]:
+        time.sleep(0.3)
+        return ()
+
+
+class _Index:
+    async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
+        raise AssertionError("no chunks to upsert")
+
+    async def delete(self, scope: IndexScope) -> None:
+        raise AssertionError("nothing to delete")
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        assert keep == frozenset()
+
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        return False
+
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return ()
+
+    async def vector(
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return ()
+
+
+class _Embed:
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        raise AssertionError("no chunks to embed")
+
+
+async def test_chunking_leaves_the_loop_free_for_the_turns_it_shares_it_with() -> None:
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticker = asyncio.create_task(tick())
+    await chunk_embed_upsert(_Index(), _Embed(), _SlowChunker(), "page", "p1", "shared", "body")
+    ticks_while_chunking = ticks
+    await ticker
+    assert ticks_while_chunking == 10
