@@ -103,6 +103,12 @@ VECTOR_PG = sa.text(
     """
 )
 DELETE_PG = sa.text("delete from chunk where owner_kind = :owner_kind and owner_id = :owner_id")
+HELD = sa.text(
+    "select chunk_digest from chunk where owner_kind = :owner_kind and owner_id = :owner_id"
+)
+RESTAMP = sa.text(
+    "update chunk set subject = :subject where owner_kind = :owner_kind and owner_id = :owner_id"
+)
 HAS_CHUNKS = sa.text(
     "select 1 from chunk where owner_kind = :owner_kind and owner_id = :owner_id limit 1"
 )
@@ -226,6 +232,15 @@ class DefaultIndex:
         params = {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
         async with self.transaction() as connection:
             return (await connection.execute(HAS_CHUNKS, params)).first() is not None
+
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
+        params = {"owner_kind": scope.owner_kind, "owner_id": scope.owner_id}
+        async with self.transaction() as connection:
+            held = frozenset((await connection.execute(HELD, params)).scalars())
+            if held != keep:
+                return False
+            await connection.execute(RESTAMP, {**params, "subject": subject})
+        return True
 
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         if not keep:

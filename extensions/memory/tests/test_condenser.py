@@ -280,6 +280,9 @@ class CountingIndex:
     async def has_chunks(self, scope: IndexScope) -> bool:
         return await self.backend.has_chunks(scope)
 
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
+        return await self.backend.restamp(scope, subject, keep)
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:

@@ -12,7 +12,7 @@ undeclared slot is refused."""
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
@@ -816,6 +816,14 @@ class SampleIndex:
 
     async def has_chunks(self, scope: IndexScope) -> bool:
         return any(_in_scope(chunk, scope) for chunk in self.chunks.values())
+
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
+        held = {digest for digest, chunk in self.chunks.items() if _in_scope(chunk, scope)}
+        if held != keep:
+            return False
+        for digest in held:
+            self.chunks[digest] = replace(self.chunks[digest], subject=subject)
+        return True
 
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         for digest in [

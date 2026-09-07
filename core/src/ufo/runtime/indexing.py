@@ -15,12 +15,15 @@ import hashlib
 import itertools
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Protocol
 
 CHUNK_TARGET_WORDS = 300
 CHUNK_OVERLAP_WORDS = 50
 CHUNK_MAX_CHARS = 6_000
+CHUNKERS_AT_ONCE = 2
+CHUNK_POOL = ThreadPoolExecutor(max_workers=CHUNKERS_AT_ONCE, thread_name_prefix="chunk")
 CJK_DENSITY_THRESHOLD = 0.30
 CJK_CHARS = re.compile(r"[一-鿿぀-ゟ゠-ヿ가-힯]")  # noqa: RUF001
 WORD_RUNS = re.compile(r"\S+\s*")
@@ -78,6 +81,8 @@ class IndexBackend(Protocol):
 
     async def has_chunks(self, scope: IndexScope) -> bool: ...
 
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool: ...
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]: ...
@@ -104,10 +109,22 @@ async def chunk_embed_upsert(
     outside this desired set — the derivation step both indexers share. Upsert is idempotent on
     chunk_digest, so a re-run over unchanged content rewrites the same rows; the prune drops the
     digests an edit no longer produces (all of them when the new body is empty), so re-chunked
-    content leaves no orphaned chunk to surface as a stale hit. Chunking is pure-Python CPU work
-    over the whole body, so it runs in a thread: a job re-indexing thousands of pages must not hold
-    the loop that serves every turn and every request of the process."""
-    chunks = await asyncio.to_thread(chunker.chunk, body, owner_kind, owner_id, subject)
+    content leaves no orphaned chunk to surface as a stale hit.
+
+    A chunk's identity is its owner, its ordinal and its text — never its subject — so a body the
+    index already holds chunk for chunk needs no embedding: the index restamps the subject on the
+    rows it has and this returns. Only a body that differs is chunked, embedded and written.
+
+    Chunking is pure-Python CPU work over the whole body, so it runs on `CHUNK_POOL`, a pool of
+    `CHUNKERS_AT_ONCE` threads shared by the process: a job re-indexing thousands of pages must not
+    hold the loop that serves every turn and every request, and eight such jobs must not hold the
+    interpreter between them."""
+    chunks = await asyncio.get_running_loop().run_in_executor(
+        CHUNK_POOL, chunker.chunk, body, owner_kind, owner_id, subject
+    )
+    scope = IndexScope(owner_kind, owner_id)
+    if await index.restamp(scope, subject, frozenset(chunk.chunk_digest for chunk in chunks)):
+        return
     if chunks:
         vectors = await embed.embed(tuple(chunk.text for chunk in chunks))
         await index.upsert(
@@ -116,9 +133,7 @@ async def chunk_embed_upsert(
                 for chunk, vector in zip(chunks, vectors, strict=True)
             )
         )
-    await index.prune(
-        IndexScope(owner_kind, owner_id), frozenset(chunk.chunk_digest for chunk in chunks)
-    )
+    await index.prune(scope, frozenset(chunk.chunk_digest for chunk in chunks))
 
 
 @dataclass(frozen=True)
@@ -130,7 +145,7 @@ class TextChunker:
     def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]:
         return tuple(
             Chunk(
-                chunk_digest=self._digest(owner_kind, owner_id, subject, ordinal, piece),
+                chunk_digest=self._digest(owner_kind, owner_id, ordinal, piece),
                 owner_kind=owner_kind,
                 owner_id=owner_id,
                 subject=subject,
@@ -253,6 +268,6 @@ class TextChunker:
         return trailing
 
     @staticmethod
-    def _digest(owner_kind: str, owner_id: str, subject: str, ordinal: int, text: str) -> str:
-        payload = "\x00".join((owner_kind, owner_id, subject, str(ordinal), text))
+    def _digest(owner_kind: str, owner_id: str, ordinal: int, text: str) -> str:
+        payload = "\x00".join((owner_kind, owner_id, str(ordinal), text))
         return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()

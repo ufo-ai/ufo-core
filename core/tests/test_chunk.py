@@ -88,6 +88,9 @@ class _Index:
     async def has_chunks(self, scope: IndexScope) -> bool:
         return False
 
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
+        return False
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:

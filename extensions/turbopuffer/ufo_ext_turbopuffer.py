@@ -203,6 +203,25 @@ class TurbopufferIndex:
             )
             response.raise_for_status()
 
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
+        headers = await self._auth()
+        chunks = await self._scope_chunks(scope, headers)
+        if frozenset(chunk.chunk_digest for chunk in chunks) != keep:
+            return False
+        if chunks:
+            response = await self._api().post(
+                self._path(),
+                json={
+                    "patch_by_filter": {
+                        "filters": scope_filters(scope, None),
+                        "patch": {"subject": subject},
+                    }
+                },
+                headers=headers,
+            )
+            response.raise_for_status()
+        return True
+
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         headers = await self._auth()
         chunks = await self._scope_chunks(scope, headers)

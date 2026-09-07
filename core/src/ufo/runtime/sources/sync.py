@@ -892,6 +892,10 @@ class SyncDriver:
             for page_id, value in prior.items()
             if (identity := value[2].source_identity) is not None
         }
+        unnamed: dict[str, list[UUID]] = {}
+        for prior_id, (digest, tombstone, browse) in prior.items():
+            if browse.source_identity is None and not tombstone:
+                unnamed.setdefault(digest, []).append(prior_id)
         fetched: list[UUID] = []
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
@@ -908,6 +912,9 @@ class SyncDriver:
                     if fallback is not None and owner is None:
                         existing = fallback
                         page_id = fallback_id
+                    elif twins := unnamed.get(page.digest):
+                        page_id = twins.pop()
+                        existing = prior[page_id]
                     elif fallback is None and owner is None:
                         page_id = fallback_id
                     else:
