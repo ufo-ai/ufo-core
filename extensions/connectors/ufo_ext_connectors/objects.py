@@ -175,12 +175,33 @@ class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwn
         )
         if row is None:
             return None
+        if ctx.ext is None:
+            raise RuntimeError(
+                "a connection's status reads its streams through the extension context"
+            )
+        streams: list[JsonValue] = [
+            {
+                "stream": str(record.config.get("stream", record.backend)),
+                "next_sync_at": record.next_sync_at.isoformat(),
+                "errors": record.consecutive_errors,
+                "parked": record.parked_reason,
+            }
+            for record in sorted(
+                (
+                    record
+                    for record in await ctx.ext.sources(row.provider)
+                    if record.connection_id == owner.generation
+                ),
+                key=lambda record: str(record.config.get("stream", record.backend)),
+            )
+        ]
         return {
             "owner_member_id": None if row.owner_member_id is None else str(row.owner_member_id),
             "owner": row.owner_email,
             "shared": row.shared,
             "host": row.host,
             "agents": list(row.agents),
+            "streams": streams,
         }
 
     async def _apply_owned(
@@ -390,8 +411,10 @@ CONNECTION_OBJECT = ObjectKind(
         "`base_url` is the tenant API URL a per-tenant provider needs, and such a provider syncs "
         "nothing until it is set. `backfill_days` is how far back the first sync of each stream "
         f"reaches, at most {MAX_BACKFILL_DAYS}, and unset reaches back as far as each stream "
-        "declares. An apply that moves `provider` or `account_id` is refused — connect_account is "
-        "the only way to create a connection. Delete is the owner's or an admin's and disconnects "
+        "declares. Status lists the streams the connection syncs, each with its next sync, its "
+        "error count and the reason the provider parked it, if it did. An apply that moves "
+        "`provider` or `account_id` is refused — connect_account is the only way to create a "
+        "connection. Delete is the owner's or an admin's and disconnects "
         "it, removing every connector_grant edge and everything its streams synced. The "
         "workspace's own connection has no owner and is not deleted here: clearing its credential "
         "slot or removing its configured entry is what stops that feed."

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import yaml
+from pydantic import BaseModel
 from ufo_ext_connectors.manifest import manifest
 from ufo_ext_connectors.objects import (
     CONNECTION_KIND,
@@ -32,6 +33,7 @@ from ufo.runtime.access.grants import (
     workspace_grant_summaries,
 )
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import context_for
 from ufo.runtime.kinds.agents import AGENT_KIND
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH, ObjectRef
 from ufo.runtime.objects import (
@@ -1575,3 +1577,50 @@ async def test_the_workspaces_own_connection_is_not_deleted_here(db: None) -> No
         (current,) = await connection_summaries()
     assert current.owner_member_id is None
     assert current.provider == "gmail"
+
+
+class _StreamConfig(BaseModel):
+    stream: str
+
+
+async def test_a_connections_status_lists_the_streams_it_syncs(db: None) -> None:
+    """A connection carries no stream list to edit — its canonical streams are the connector's, and
+    the sources registrar lands one row per canonical stream through `register_source`, the call
+    made here — but a member asking what an account syncs reads it off those rows: each stream under
+    the connection, its next sync, its error count and the reason the provider parked it, if it
+    did."""
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _grant(
+            workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
+        )
+        (summary,) = await connection_summaries()
+        ctx = _tool_context(workspace_id, agent_id, grantor_id)
+        registrar = context_for("sources", frozenset())
+        messages = await registrar.register_source(
+            "gmail", _StreamConfig(stream="messages"), connection_id=summary.id
+        )
+        labels = await registrar.register_source(
+            "gmail", _StreamConfig(stream="labels"), connection_id=summary.id
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .where(tables.source.c.id.in_((messages, labels)))
+                .values(next_sync_at=datetime(2026, 7, 12, tzinfo=UTC))
+            )
+            await connection.execute(
+                sa.update(tables.source)
+                .where(tables.source.c.id == labels)
+                .values(parked_at=datetime(2026, 7, 12, tzinfo=UTC), parked_reason="rate limited")
+            )
+        fetched = yaml.safe_load(
+            await _text(
+                _object_tool("object_get"), ctx, ref=f"{CONNECTION_KIND}/{GMAIL_ALICE_NAME}"
+            )
+        )
+    streams = fetched["status"]["streams"]
+    assert [stream["stream"] for stream in streams] == ["labels", "messages"]
+    assert [stream["parked"] for stream in streams] == ["rate limited", None]
+    assert {stream["errors"] for stream in streams} == {0}
+    assert all(stream["next_sync_at"].startswith("2026-07-12T00:00:00") for stream in streams)
