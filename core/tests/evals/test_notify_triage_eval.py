@@ -18,14 +18,19 @@ from ufo_ext_app_notification.notify_tool import NOTIFY_TOOL_NAME
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.registry import TASKS
 from evals.suites.notify_triage import (
+    BOOKKEEPER,
+    BOOKS,
     CHURN,
     DEPLOY,
     INVESTOR,
     REACH_SURFACE,
     ROUTINE,
+    SPAWN,
     _delivers_exactly,
     _give_the_member_reach,
+    _give_the_workspace_a_bookkeeper,
     _ref,
+    _spawns_the_bookkeeper,
 )
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import durable_surfaces, load_manifests
@@ -75,8 +80,17 @@ def _malformed() -> ToolInvocation:
     )
 
 
-def _output(*calls: ToolInvocation) -> CapabilityOutput:
-    return CapabilityOutput(response="Delivered the three that matter.", calls=calls)
+def _output(
+    *calls: ToolInvocation, by_the_child: tuple[ToolInvocation, ...] = ()
+) -> CapabilityOutput:
+    """What the harness builds: `own_calls` is the graded turn, and `calls` carries the descendant
+    conversations merged in after it."""
+    return CapabilityOutput(
+        response="Delivered the three that matter.",
+        calls=(*calls, *by_the_child),
+        own_calls=calls,
+        own_tools=tuple(call.call for call in calls),
+    )
 
 
 def test_notify_triage_runs_its_cases_one_at_a_time() -> None:
@@ -218,3 +232,93 @@ async def test_the_seed_gives_the_member_a_reach_the_projection_answers(db: None
         reach = await ext.member_reach(member_id)
 
     assert [(one.surface, one.agent_id) for one in reach] == [(REACH_SURFACE, agent_id)]
+
+
+def _spawn(target: str = f"agent:{BOOKKEEPER}", is_error: bool = False) -> ToolInvocation:
+    return ToolInvocation(
+        name=SPAWN,
+        input={"target": target, "payload": {"task": "reconcile August"}, "background": True},
+        result="spawned" if not is_error else "agent 'ledger' is not yours to spawn",
+        has_result=True,
+        is_error=is_error,
+    )
+
+
+async def test_work_put_on_the_agent_whose_job_it_is_passes() -> None:
+    verdict = await _spawns_the_bookkeeper(BOOKS)(_output(_spawn()))
+
+    assert verdict.passed
+    assert BOOKKEEPER in verdict.reason
+
+
+async def test_delivering_the_work_as_well_spends_the_members_attention() -> None:
+    verdict = await _spawns_the_bookkeeper(BOOKS)(_output(_spawn(), _deliver((_ref(BOOKS),))))
+
+    assert not verdict.passed
+    assert "interrupted the member" in verdict.reason
+
+
+async def test_waking_the_wrong_agent_fails() -> None:
+    verdict = await _spawns_the_bookkeeper(BOOKS)(_output(_spawn(target="agent:revenue")))
+
+    assert not verdict.passed
+    assert "revenue" in verdict.reason
+
+
+async def test_a_spawn_the_target_refused_woke_nobody() -> None:
+    verdict = await _spawns_the_bookkeeper(BOOKS)(_output(_spawn(is_error=True)))
+
+    assert not verdict.passed
+    assert "spawned 0 times" in verdict.reason
+
+
+async def test_what_the_woken_agent_does_is_not_what_the_app_did() -> None:
+    """The bookkeeper holds the member-facing set, so it can call `notify` and spawn in turn, and
+    the harness merges every descendant conversation into `calls`. The app's own turn is one spawn
+    and nothing else, and that is the trajectory this case grades."""
+    verdict = await _spawns_the_bookkeeper(BOOKS)(
+        _output(
+            _spawn(),
+            by_the_child=(
+                ToolInvocation(
+                    name=NOTIFY_TOOL_NAME,
+                    input={},
+                    result="this turn was spawned to do another turn's work",
+                    has_result=True,
+                    is_error=True,
+                ),
+                _spawn(target="agent:revenue"),
+            ),
+        )
+    )
+
+    assert verdict.passed
+    assert BOOKKEEPER in verdict.reason
+
+
+async def test_the_seed_gives_the_workspace_an_agent_to_put_work_on(db: None) -> None:
+    """Twice, because every case seeds it: the agent is opened once and kept."""
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    with ws(workspace_id):
+        await _give_the_workspace_a_bookkeeper()
+        await _give_the_workspace_a_bookkeeper()
+        async with workspace_tx() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.name, tables.agent.c.visibility).where(
+                            tables.agent.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+    assert [(row["name"], row["visibility"]) for row in rows] == [(BOOKKEEPER, "workspace")]

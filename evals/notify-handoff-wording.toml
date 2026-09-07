@@ -1,0 +1,43 @@
+name = "notify-handoff-wording"
+base = "HEAD"
+suites = ["notify_triage"]
+agent = "notification"
+repeats = 3
+concurrency = 1
+max_stacks = 1
+budget_usd = 15.0
+est_usd_per_case = 0.25
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+flags = { backend = "open" }
+
+[[arm]]
+name = "no-work-rule"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/manifest.py"
+old = '''    "Where a notification names work rather than a decision, and this workspace holds an agent "
+    "whose job that work is, `spawn` it with the work instead of spending the member's attention: "
+    "list the `agent` kind to see what they have and what each one does. Read it to them as well "
+    "only when they would act on it today. "'''
+new = ''
+
+[[arm]]
+name = "no-list-the-agents"
+
+[[arm.replacements]]
+path = "extensions/app_notification/ufo_ext_app_notification/manifest.py"
+old = '''    "whose job that work is, `spawn` it with the work instead of spending the member's attention: "
+    "list the `agent` kind to see what they have and what each one does. Read it to them as well "
+    "only when they would act on it today. "'''
+new = '''    "whose job that work is, `spawn` it with the work instead of spending the member's attention. "
+    "Read it to them as well only when they would act on it today. "'''

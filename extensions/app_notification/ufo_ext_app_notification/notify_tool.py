@@ -7,14 +7,20 @@ spoken: a tool call never enters a delivered reply, so no redaction stands betwe
 member. What the model sees back is one line, plus the reason when a fence refuses, which is what
 makes the fences steerable rather than silent.
 
-Three refusals are structural. A turn carrying workspace authority names no member, and a
+Four refusals are structural. A turn carrying workspace authority names no member, and a
 notification nobody is the recipient of is not one. The Notification agent's own turns cannot
-post: an inbox that mails itself is the loop this whole design must be unable to enter. And a relay
-turn — the one a delivery founded in the member's own conversation — cannot post either, so a
-delivery can never raise a notification about itself; the fence is the exact turn id the delivery
-recorded, never a window. The inbox is the agent this extension provisioned, found by that
-provision and never by name — a member's own agent may hold `notification`, and the shipped one then
-lands on a free variant."""
+post: an inbox that mails itself is the loop this whole design must be unable to enter. A spawned
+turn cannot post: it was started by another turn to do that turn's work, so what it finds belongs to
+the turn that spawned it, which raises what is worth raising — an agent this app woke, and anything
+that agent spawns in turn, therefore cannot fill the inbox that woke it, and the fact is the turn's
+own rather than a record this extension keeps. And a relay turn — the one a delivery founded in the
+member's own conversation — cannot post either, so a delivery can never raise a notification about
+itself; that turn is not spawned but admitted into a conversation the member already reads, so the
+fence there is the exact turn id the delivery recorded.
+
+The inbox is the agent this extension provisioned, found by that provision and never by
+name — a member's own agent may hold `notification`, and the shipped one then lands on a
+free variant."""
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,6 +55,10 @@ NOTIFY_NEEDS_A_MEMBER = (
 )
 NOTIFY_NO_INBOX = "the Notification app is not live in this workspace, so there is no inbox"
 NOTIFY_SELF = "the notification agent does not notify itself"
+NOTIFY_INSIDE_A_SPAWN = (
+    "this turn was spawned to do another turn's work; report what you found in your result, and "
+    "the turn that spawned you raises what is worth raising"
+)
 NOTIFY_INSIDE_A_DELIVERY = (
     "this turn is delivering a notification; it does not raise one about that"
 )
@@ -94,6 +104,8 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
     member_id = authority_member_id(ctx.authority)
     if member_id is None:
         return _refusal(NOTIFY_NEEDS_A_MEMBER)
+    if ctx.turn.spawned:
+        return _refusal(NOTIFY_INSIDE_A_SPAWN)
     ext = _require_ext(ctx.ext)
     store = NotificationStore(ext)
     if await store.is_delivery_turn(ctx.turn.id):

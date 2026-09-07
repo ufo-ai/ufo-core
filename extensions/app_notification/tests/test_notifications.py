@@ -439,6 +439,7 @@ def test_every_agent_holds_notify_and_the_notification_agent_does_not() -> None:
         "edit",
         "glob",
         "grep",
+        "spawn",
     }
     assert NOTIFICATION_AGENT.spec.visibility == "workspace"
     assert NOTIFICATION_AGENT.icon == "bell"

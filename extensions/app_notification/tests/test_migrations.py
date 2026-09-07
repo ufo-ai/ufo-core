@@ -27,6 +27,7 @@ RELEASED = "notification_0001"
 TRIAGE = "notification_0002"
 DELIVERY = "notification_0003"
 CARRY = "notification_0004"
+SPAWN = "notification_0005"
 EDITED_PROMPT = "only tell me about churn"
 
 
@@ -48,12 +49,16 @@ def _revision(revision: str) -> ModuleType:
 
 TRIAGE_MODULE = _revision(TRIAGE)
 DELIVERY_MODULE = _revision(DELIVERY)
+SPAWN_MODULE = _revision(SPAWN)
 RELEASED_PROMPT: str = TRIAGE_MODULE.RELEASED_PROMPT
 RELEASED_VERSION: str = TRIAGE_MODULE.RELEASED_VERSION
 TRIAGE_PROMPT: str = DELIVERY_MODULE.PREVIOUS_PROMPT
 TRIAGE_VERSION: str = DELIVERY_MODULE.PREVIOUS_VERSION
 TRIAGE_TOOLS: list[str] = list(DELIVERY_MODULE.PREVIOUS_TOOLS)
-DELIVERY_TOOLS = list(NOTIFICATION_AGENT.tools or ())
+DELIVERY_PROMPT: str = SPAWN_MODULE.PREVIOUS_PROMPT
+DELIVERY_VERSION: str = SPAWN_MODULE.PREVIOUS_VERSION
+DELIVERY_TOOLS: list[str] = list(SPAWN_MODULE.PREVIOUS_TOOLS)
+LIVE_TOOLS = list(NOTIFICATION_AGENT.tools or ())
 
 
 def _seed(database_path: Path, prompt: str, version: str, tools: list[str] | None) -> sa.Engine:
@@ -172,8 +177,8 @@ def test_the_deliver_grant_reaches_every_live_shipped_row_and_the_prompt_the_une
 
     assert "action:notification:deliver" in DELIVERY_TOOLS
     assert "action:notification:deliver" not in TRIAGE_TOOLS
-    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, DELIVERY_TOOLS)
-    assert after["edited"] == (EDITED_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
     assert after["other"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
     assert after["archived"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
     assert restored["shipped"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
@@ -216,8 +221,51 @@ def test_the_carry_reaches_a_row_the_roll_window_created_behind_the_release(
     command.upgrade(config, CARRY)
     after = _rows(engine)
 
-    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, DELIVERY_TOOLS)
-    assert after["versioned"] == (NOTIFICATION_AGENT_PROMPT, VERSION, DELIVERY_TOOLS)
-    assert after["edited"] == (EDITED_PROMPT, VERSION, DELIVERY_TOOLS)
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["versioned"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
     assert after["other"] == (RELEASED_PROMPT, RELEASED_VERSION, TRIAGE_TOOLS)
     assert after["archived"] == (RELEASED_PROMPT, RELEASED_VERSION, TRIAGE_TOOLS)
+
+
+def test_the_spawn_grant_reaches_every_live_shipped_row(tmp_path: Path) -> None:
+    """The release that lets the app put work where it belongs adds no verb and no column: it
+    grants the spawn every turn already has. Every live shipped row takes the allowlist, since no
+    member can write one, and the prompt moves where the row still reads as any earlier release
+    wrote it."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, CARRY)
+    engine = _seed(database_path, DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)
+    command.upgrade(config, SPAWN)
+    after = _rows(engine)
+    command.downgrade(config, CARRY)
+    restored = _rows(engine)
+
+    assert "spawn" in LIVE_TOOLS
+    assert "spawn" not in DELIVERY_TOOLS
+    assert not any(tool.endswith(":hand_off") for tool in LIVE_TOOLS)
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)
+    assert after["archived"] == (DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)
+    assert restored["shipped"] == (DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)
+
+
+def test_the_spawn_grant_reaches_a_row_two_releases_behind(tmp_path: Path) -> None:
+    """Each release leaves rows behind it, so the roll window that put a row at the release before
+    last is still open when this one runs: the carry that was meant to move it had already run. The
+    prompt moves off every earlier text, or the row runs the old instructions under this version."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, CARRY)
+    engine = _seed(database_path, TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+    command.upgrade(config, SPAWN)
+    after = _rows(engine)
+
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+    assert after["archived"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)

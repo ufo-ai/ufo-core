@@ -5,7 +5,7 @@ falls back to the portal for a member with no durable conversation, and is held 
 provision. The relay turn is the loop fence: `notify` inside it refuses, and the next drain tick
 founds nothing."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -14,6 +14,7 @@ import sqlalchemy as sa
 from ufo_ext_app_notification.deliver import (
     DELIVER,
     DELIVER_ACTION_ID,
+    DELIVER_ACTION_NAME,
     DELIVERED,
     DELIVERED_TO_PORTAL_ONLY,
     NOT_THE_NOTIFICATION_AGENT,
@@ -29,6 +30,7 @@ from ufo_ext_app_notification.manifest import NAME, NOTIFICATION_AGENT, manifest
 from ufo_ext_app_notification.notify_tool import (
     NOTIFICATION_AGENT_NAME,
     NOTIFY_INSIDE_A_DELIVERY,
+    NOTIFY_INSIDE_A_SPAWN,
     NOTIFY_TOOL_NAME,
     NotifyInput,
     notify,
@@ -537,3 +539,37 @@ def test_only_the_notification_agents_allowlist_reaches_deliver() -> None:
         tool.name for tool in _agent_tools(tools, NOTIFICATION_AGENT.tools, MEMBER_ADMISSION)
     }
     assert manifest().member_context_read is True
+
+
+async def test_a_spawned_turn_does_not_raise_notifications(db: None) -> None:
+    """The whole loop rule for work this app puts somewhere, and it needs nothing written down: an
+    agent it woke was spawned, and a spawned turn reports what it found to the turn that spawned it.
+    It holds for anything that agent spawns in turn, since those turns are spawned too."""
+    workspace_id, member_id, main_id, _inbox_id = await _seed()
+    ext = _ext(workspace_id, StubDbos())
+    with ws(workspace_id), agent(main_id):
+        woken = _tool_ctx(ext, workspace_id, main_id, member_id)
+        refused = await notify(
+            replace(woken, turn=woken.turn.model_copy(update={"parent_turn_id": uuid4()})),
+            NotifyInput(subject="source/crm", body="still churning"),
+        )
+        allowed = await notify(woken, NotifyInput(subject="source/crm", body="still churning"))
+        rows = await _rows(workspace_id)
+
+    assert refused.is_error is True
+    assert refused.content[0].text == NOTIFY_INSIDE_A_SPAWN
+    assert allowed.is_error is False
+    assert [row["subject"] for row in rows] == ["source/crm"]
+
+
+def test_the_app_holds_spawn_and_declares_no_verb_for_it() -> None:
+    """Work goes to the agent whose job it is through the spawn every turn already has. Core makes
+    that idempotent per parent turn and key — the same request reconnects, a different one under the
+    same key is refused — so an extension verb over it would only re-state what core decides."""
+    tools, _, verbs = turn_tools((manifest(),), None, audience=SHARED_AUDIENCE)
+    held = {tool.name for tool in _agent_tools(tools, NOTIFICATION_AGENT.tools, MEMBER_ADMISSION)}
+    actions = set(verbs.actions.get(NOTIFICATION_KIND, {}))
+
+    assert "spawn" in (NOTIFICATION_AGENT.tools or ())
+    assert actions == {DELIVER_ACTION_NAME}
+    assert NOTIFY_TOOL_NAME not in held

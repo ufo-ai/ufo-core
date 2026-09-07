@@ -1,7 +1,8 @@
 """What the Notification app declares: the `notify` tool every agent holds, the `notification`
 object kind, the `notification` agent whose inbox the rows are, the per-minute drain that folds
 each member's open rows into one turn on that agent's lane, and the `deliver` action that agent
-alone holds.
+alone holds. Work the batch names goes to the agent whose job it is through `spawn`, which core
+already makes idempotent per parent turn and key, so this app declares no verb of its own for it.
 
 The app ships as an `agents` provision on the shared apps infrastructure, the way Radar does. Its
 allowlist is the fence the whole design rests on: it omits `notify`, so the app can never raise a
@@ -24,7 +25,7 @@ from ufo_ext_app_notification.notify_tool import NOTIFICATION_AGENT_NAME, NOTIFY
 from ufo_ext_app_notification.store import EXTENSION_NAME, untriaged_workspaces
 
 NAME = EXTENSION_NAME
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-notification-home"
 DRAIN_JOB = "notification_drain"
@@ -39,6 +40,10 @@ NOTIFICATION_AGENT_PROMPT = (
     "for them. Drop the rest without comment: routine syncs, green runs, receipts, newsletters; a "
     "batch with nothing worth interrupting for delivers nothing. A member who hears from you "
     "about everything stops reading you. "
+    "Where a notification names work rather than a decision, and this workspace holds an agent "
+    "whose job that work is, `spawn` it with the work instead of spending the member's attention: "
+    "list the `agent` kind to see what they have and what each one does. Read it to them as well "
+    "only when they would act on it today. "
     "When a member asks what has been raised for them, list the kind and answer from it; when "
     "they say one is handled or unwanted, delete it. Your homepage lists the same kind; when a "
     f"member asks you to change the page, load the skill `{HOME_SKILL}` and follow it."
@@ -70,6 +75,7 @@ NOTIFICATION_AGENT = AgentProvision(
         "grep",
         "action:site:deploy_website",
         "action:agent:set_homepage",
+        "spawn",
         DELIVER_ACTION_ID,
     ),
     icon="bell",

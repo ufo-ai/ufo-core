@@ -56,6 +56,9 @@ SPOKE_AT = datetime(2026, 9, 4, 5, 0, tzinfo=UTC)
 PRODUCER = "assistant"
 REACH_SURFACE = "slack"
 REACH_MESSAGE = "morning"
+BOOKKEEPER = "bookkeeping"
+BOOKKEEPER_PURPOSE = "Reconciles invoices against the ledger and closes the books each month."
+SPAWN = "spawn"
 
 Entry = tuple[str, str, int]
 
@@ -82,6 +85,12 @@ OUTAGE: Entry = (
     "Production has returned 502 on every request since the 14:07 rollout of 8f21c0d; the rollback "
     "job also failed and no release is serving.",
     2,
+)
+BOOKS: Entry = (
+    "stripe/invoices-august",
+    "Fourteen August invoices are still unreconciled against the ledger and the month closes on "
+    "Friday; the reconciliation has not run since the team plan's price object was replaced.",
+    1,
 )
 ROUTINE: tuple[Entry, ...] = (
     ("source/github", "Nightly: ci and deploy green on main twice; dependabot merged 3 PRs.", 1),
@@ -157,6 +166,37 @@ async def _main_agent_id() -> UUID:
         ).scalar_one()
 
 
+async def _give_the_workspace_a_bookkeeper() -> None:
+    """An agent whose job is one of the things a batch raises. Work goes to the agent that does
+    it; a decision goes to the member. Without an agent to name, the batch has only one answer and
+    the case measures nothing."""
+    workspace_id = ws_current().workspace_id
+    agent_id = uuid5(NOTIFY_TRIAGE_NAMESPACE, f"agent:{workspace_id}:{BOOKKEEPER}")
+    async with workspace_tx() as connection:
+        held = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == workspace_id, tables.agent.c.id == agent_id
+                )
+            )
+        ).scalar_one_or_none()
+        if held is not None:
+            return
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=BOOKKEEPER,
+                prompt=BOOKKEEPER_PURPOSE,
+                purpose=BOOKKEEPER_PURPOSE,
+                model="auto",
+                visibility="workspace",
+                created_at=SPOKE_AT,
+                updated_at=SPOKE_AT,
+            )
+        )
+
+
 async def _give_the_member_reach(member_id: UUID) -> None:
     """The member's own conversation on a durable surface, with them speaking in it: what
     `member_reach` answers and `deliver` invokes into. Without one every delivery takes the portal
@@ -220,6 +260,7 @@ def _seed_batch(entries: tuple[Entry, ...]) -> CapabilitySeed:
     async def seed(_workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
         member_id = await _member_id()
         await _give_the_member_reach(member_id)
+        await _give_the_workspace_a_bookkeeper()
         rows = tuple(
             _row(member_id, agent_id, subject, body, count) for subject, body, count in entries
         )
@@ -266,14 +307,15 @@ def _message(entries: tuple[Entry, ...]) -> str:
 def _delivers_exactly(merit: tuple[Entry, ...]) -> Grader:
     """One message reaches the member, naming exactly the rows that merit it, on the surface they
     speak on. A refused call is not a message: it reached no handler and the member read nothing,
-    so what counts is the calls that landed."""
+    so what counts is the calls that landed. The app holds `spawn`, so a case reads `own_calls`:
+    a child's calls are the child's, and the batch is graded on what the app itself did."""
     wanted = {_ref(entry) for entry in merit}
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        if NOTIFY_TOOL_NAME in output.tools:
+        if NOTIFY_TOOL_NAME in output.own_tools:
             return CapabilityVerdict(False, f"the app called {NOTIFY_TOOL_NAME} on its own batch")
         delivered = [
-            call for call in output.calls if call.call == DELIVER_ACTION_ID and call.succeeded
+            call for call in output.own_calls if call.call == DELIVER_ACTION_ID and call.succeeded
         ]
         if not wanted:
             if delivered:
@@ -301,6 +343,32 @@ def _delivers_exactly(merit: tuple[Entry, ...]) -> Grader:
     return grade
 
 
+def _spawns_the_bookkeeper(work: Entry) -> Grader:
+    """The work reaches the agent whose job it is, and the member is not interrupted with it. The
+    app declares no verb for this: it spawns that agent, which is the same spawn every turn has, so
+    what the case reads is one spawn of `agent:bookkeeping` and nothing delivered. The woken agent
+    holds the member-facing set, and its calls merge into `calls`; `own_calls` is the app's turn
+    alone, so the child's own `notify` and its own spawns cannot decide this case."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        if NOTIFY_TOOL_NAME in output.own_tools:
+            return CapabilityVerdict(False, f"the app called {NOTIFY_TOOL_NAME} on its own batch")
+        delivered = [
+            call for call in output.own_calls if call.call == DELIVER_ACTION_ID and call.succeeded
+        ]
+        if delivered:
+            return CapabilityVerdict(False, "interrupted the member with work an agent does")
+        woke = [call for call in output.own_calls if call.call == SPAWN and call.succeeded]
+        if len(woke) != 1:
+            return CapabilityVerdict(False, f"spawned {len(woke)} times, wanted once")
+        target = str(woke[0].arguments.get("target", ""))
+        if target.removeprefix("agent:") != BOOKKEEPER:
+            return CapabilityVerdict(False, f"spawned {target!r}, wanted {BOOKKEEPER!r}")
+        return CapabilityVerdict(True, f"put {work[0]} on {BOOKKEEPER} and told the member nothing")
+
+    return grade
+
+
 CASES = (
     CapabilityCase(
         name="three-of-twelve-merit-a-push",
@@ -315,6 +383,13 @@ CASES = (
         grader=_delivers_exactly(()),
         seed=_seed_batch(ROUTINE),
         digest_tag="notify-triage:routine-batch",
+    ),
+    CapabilityCase(
+        name="work-goes-to-the-agent-whose-job-it-is",
+        message=_message((*ROUTINE[:3], BOOKS, *ROUTINE[3:])),
+        grader=_spawns_the_bookkeeper(BOOKS),
+        seed=_seed_batch((*ROUTINE, BOOKS)),
+        digest_tag="notify-triage:work-to-the-agent",
     ),
     CapabilityCase(
         name="one-outage-among-routine",
