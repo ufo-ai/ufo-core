@@ -625,6 +625,7 @@ function ChatApp({
       agent={mainAgent}
       member={member}
       conversationId={null}
+      focusComposer
       onCreated={(conversationId, title) => {
         if (mainAgent) founded(mainAgent.id, conversationId, title);
         place(conversationId);

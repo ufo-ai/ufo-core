@@ -92,6 +92,7 @@ export type ChatProps = {
    *  founds on a key of its own, so its opening send and the chat screen's new-conversation buffer
    *  can never hold each other busy. */
   foundingKey?: string;
+  focusComposer?: boolean;
   /** What the pane draws over the box while the chat is still unsaid — the chat lane's own history of
    *  conversations. The screen is no longer empty, so the words the start screen says over an empty
    *  pane would stand between the history and the box. */
@@ -106,6 +107,7 @@ export function Chat({
   member,
   conversationId,
   foundingKey,
+  focusComposer = false,
   unsaid,
   onCreated,
   onActivity,
@@ -130,6 +132,10 @@ export function Chat({
   };
   const live = useRef(target);
   live.current = target;
+
+  useEffect(() => {
+    if (focusComposer) composer.current?.focus();
+  }, [focusComposer]);
 
   useEffect(() => {
     if (conversationId !== null) {

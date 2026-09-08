@@ -3419,6 +3419,15 @@ test("a new conversation's composer offers no way to switch app", async () => {
   expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
+test("a new conversation opens with the composer focused", async () => {
+  wire({ ...transcript() });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = await screen.findByLabelText("Ask UFO");
+  expect(document.activeElement).toBe(box);
+});
+
 /** One pane stands for every start screen, so a route naming another agent renames the composer
  *  already on the screen rather than mounting one beside it: the box is the same element after the
  *  rename, and the member's place in the words is where they left it. */

@@ -1196,6 +1196,7 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={null}
+          focusComposer
           onCreated={(conversationId, title) => founded(agent, conversationId, title)}
           onActivity={railActivity}
         />

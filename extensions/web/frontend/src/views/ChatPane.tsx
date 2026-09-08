@@ -71,6 +71,7 @@ export function ChatPane({
   agent,
   member,
   conversationId,
+  focusComposer,
   onCreated,
   onActivity,
   title,
@@ -123,6 +124,7 @@ export function ChatPane({
           agent={agent}
           member={member}
           conversationId={conversationId}
+          focusComposer={focusComposer}
           onCreated={onCreated}
           onActivity={onActivity}
           onSettled={settled}
