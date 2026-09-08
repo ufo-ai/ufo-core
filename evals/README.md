@@ -158,6 +158,10 @@ Every run goes into the shared archive. Each `[[run]]` block names a label, a te
 the suite knobs, and the arguments for `python -m evals`. The run directories and the per-run
 databases stay on disk, so you can reconstruct a run later.
 
+A block pins an environment document with `environment = "arm.yaml"`, which reshapes the prompt,
+tool offer, skills, model, or sandbox files of every turn in that run. The format is
+`docs/environment-documents.md`.
+
 ## Measure a prompt change: evals.ablate
 
 The Prompts rule in `AGENTS.md` requires an ablation for each change to text that a model reads: a
