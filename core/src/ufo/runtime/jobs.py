@@ -30,6 +30,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqueueOptions
 from dbos import error as dbos_error
+from pydantic import BaseModel
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import failed_statement, owner_tx, workspace_tx
@@ -80,6 +81,7 @@ from ufo.runtime.seats import Seats
 from ufo.runtime.sources.sync import (
     SOURCE_SYNC_JOB,
     SOURCE_SYNC_SCHEDULE,
+    PageChange,
     PageFeed,
     SyncDriver,
     page_cursor,
@@ -127,6 +129,14 @@ PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 RENDER_PREVIEWS_JOB = "render_previews"
 RENDER_PREVIEWS_SCHEDULE = "0 * * * * *"
 PAGE_CHANGE_BATCH = 50
+PAGE_CHANGE_PARKED_KEY = "page_change_parked"
+PAGE_CHANGE_REFUSED_KEY = "page_change_refused"
+PAGE_CHANGE_PARK_STRIKES = 3
+PAGE_CHANGE_PARK_MAX = 20
+PAGE_CHANGE_PARK_RETRY_SECONDS = 3600
+PAGE_CHANGE_NARROWED_METRIC = "page_change_narrowed_total"
+PAGE_CHANGE_PARKED_METRIC = "page_change_parked_total"
+PAGE_CHANGE_STALLED_METRIC = "page_change_stalled_total"
 JOB_WORKER_CONCURRENCY = 8
 JOB_QUEUE = Queue(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
 QUEUED: TurnStatus = "queued"
@@ -383,6 +393,28 @@ class PageChangeConsumer:
         return f"{CORE_EXTENSION}:{self.spec_name}"
 
 
+class RefusedPage(BaseModel):
+    """The page a consumer's handler last refused on its own and how many ticks running it has. A
+    model that answers badly once, a provider that refuses for a minute — an external fault that
+    passes — is gone by the next tick and the page derives from where it stands, so a refusal holds
+    the cursor first and only a page that reaches PAGE_CHANGE_PARK_STRIKES is set aside."""
+
+    cursor: str | None
+    page_id: UUID
+    strikes: int
+
+
+class ParkedPage(BaseModel):
+    """One page a `page_change` handler refused on its own, set aside so the pages behind it keep
+    moving. `cursor` is the feed position it sits at — the page before it — and `page_id` the page a
+    one-page read from there must return for that page to still be this one: a page changed since is
+    further down the feed now, where the main line reaches it. `tried_at` paces the retry."""
+
+    cursor: str | None
+    page_id: UUID
+    tried_at: datetime
+
+
 @dataclass(frozen=True)
 class PageChangeRunner:
     """The core batched cursor-runner behind the data-plane `page_change` hook. `consumers` reads
@@ -397,9 +429,9 @@ class PageChangeRunner:
     cursors and a restart resumes each exactly where it left off; the handlers stay idempotent, so a
     replayed batch settles on the same state. Each handler runs with the extension's scoped
     ExtensionContext built the jobs way — the model wired, on `background_model` — so a consumer
-    like the fact deriver's distillation pass reaches ctx.model. A
-    handler that raises propagates out of `drive` (failing that one workflow) before its cursor
-    advances, so the tick makes no progress and the next tick retries from the same place.
+    like the fact deriver's distillation pass reaches ctx.model. A batch a
+    handler raises on is retried a page at a time, and a page it refuses alone is parked rather than
+    left in front of the cursor, so no one page holds a workspace's consumer.
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
     a handler writes.
 
@@ -528,21 +560,31 @@ class PageChangeRunner:
         rewound to an older place: losing that write means another writer owns the cursor, and this
         tick stops having only redone work a handler is idempotent under.
 
-        A handler that raises leaves the cursor where it was, so the same batch is replayed on the
-        next tick. That is right for a fault that passes and wrong for one that does not: a batch
-        the handler can never accept holds every later page in the workspace behind it, and the
-        replay is silent — one `jobs.failed` a minute reads exactly like a stream of unrelated
-        blips. So each failure states which consumer stopped and where, and counts, and the counter
-        is what a monitor reads: a fault that passes shows up once or twice, and one that does not
-        keeps the count at the tick rate until somebody looks."""
+        A handler that raises on a batch is given that batch again a page at a time from the same
+        cursor: a refusal the batch earns as a whole — a request over a provider's size cap — is
+        gone once the pages arrive singly, and one the handler makes against a single page names
+        the page. That page holds the cursor while it might be a fault that passes — a model
+        answering badly, a provider refusing for a minute — and is parked once it has refused
+        PAGE_CHANGE_PARK_STRIKES ticks running: recorded with the position it sits at, stepped over,
+        and re-delivered on its own every hour until it lands, so the pages behind it move and the
+        page itself is set aside rather than dropped — whatever refused it, fixed, indexes it on the
+        next hour without anyone rewinding a cursor. Parking is bounded: with
+        PAGE_CHANGE_PARK_MAX pages already aside the refusal is the consumer's rather than any
+        page's, so the drive stops at its cursor and says which consumer stopped and where, and
+        counts. The counter is what a monitor reads: a fault that passes shows up once or twice, and
+        one that does not keeps the count at the tick rate until somebody looks."""
         context = self._context_for(consumer)
+        parked = await self._retry_parked(consumer, context)
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         stored = await context.store.get(cursor_key)
         if stored is not None and not isinstance(stored, str):
             raise ValueError("page cursor must be a string")
         cursor = stored
+        narrowed_through: str | None = None
         while True:
-            batch = await self.pages.pages_changed_since(cursor, PAGE_CHANGE_BATCH)
+            batch = await self.pages.pages_changed_since(
+                cursor, 1 if narrowed_through is not None else PAGE_CHANGE_BATCH
+            )
             if not batch.changes:
                 return
             try:
@@ -550,26 +592,33 @@ class PageChangeRunner:
                     HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
                 )
             except Exception as error:
-                emit_metric(
-                    "page_change_stalled_total",
-                    extension=consumer.extension,
-                    discriminator=consumer.discriminator,
+                if len(batch.changes) > 1:
+                    emit_metric(
+                        PAGE_CHANGE_NARROWED_METRIC,
+                        extension=consumer.extension,
+                        discriminator=consumer.discriminator,
+                    )
+                    warn(
+                        "jobs.page_change_narrowed",
+                        workspace_id=str(ws_current().workspace_id),
+                        extension=consumer.extension,
+                        discriminator=consumer.discriminator,
+                        cursor=cursor or "",
+                        pages=len(batch.changes),
+                        error_class=type(error).__name__,
+                        stack=formatted_stack(error),
+                    )
+                    narrowed_through = batch.next_cursor
+                    continue
+                parked = await self._refuse(
+                    consumer, context, cursor, batch.changes[0], parked, error
                 )
-                log_error(
-                    "jobs.page_change_stalled",
-                    workspace_id=str(ws_current().workspace_id),
-                    extension=consumer.extension,
-                    discriminator=consumer.discriminator,
-                    cursor=cursor or "",
-                    pages=len(batch.changes),
-                    error_class=type(error).__name__,
-                    stack=formatted_stack(error),
-                )
-                raise
             if not await context.store.put_if(cursor_key, batch.next_cursor, expected=cursor):
                 return
             cursor = batch.next_cursor
-            if len(batch.changes) < PAGE_CHANGE_BATCH:
+            if cursor == narrowed_through:
+                narrowed_through = None
+            elif narrowed_through is None and len(batch.changes) < PAGE_CHANGE_BATCH:
                 return
 
     def _context_for(self, consumer: PageChangeConsumer) -> ExtensionContext:
@@ -590,6 +639,134 @@ class PageChangeRunner:
             _background_registry(self.registry, self.background_model),
             consumer.job,
             probes=self.probes,
+        )
+
+    async def _retry_parked(
+        self, consumer: PageChangeConsumer, context: ExtensionContext
+    ) -> list[ParkedPage]:
+        """Re-deliver every parked page whose hour is up, each on its own and off the main line: one
+        that lands leaves the list, one refused again keeps its place and re-counts. A parked page
+        the feed no longer returns at its position has changed since — it sits further down the feed
+        now, where the cursor reaches it — so its entry goes."""
+        key = f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}"
+        stored = await context.store.get(key)
+        if stored is None:
+            return []
+        if not isinstance(stored, list):
+            raise ValueError("parked pages must be a list")
+        parked = [ParkedPage.model_validate(entry) for entry in stored]
+        due = datetime.now(UTC) - timedelta(seconds=PAGE_CHANGE_PARK_RETRY_SECONDS)
+        kept: list[ParkedPage] = []
+        for page in parked:
+            if page.tried_at > due:
+                kept.append(page)
+                continue
+            batch = await self.pages.pages_changed_since(page.cursor, 1)
+            if not batch.changes or batch.changes[0].page_id != page.page_id:
+                continue
+            try:
+                await consumer.spec.handler(
+                    HookContext(ext=context, payload=PageChangeBatch(changes=batch.changes))
+                )
+            except Exception as error:
+                self._report_park(consumer, batch.changes[0], error, len(parked))
+                kept.append(page.model_copy(update={"tried_at": datetime.now(UTC)}))
+        if kept != parked:
+            await context.store.put(key, [page.model_dump(mode="json") for page in kept])
+        return kept
+
+    async def _refuse(
+        self,
+        consumer: PageChangeConsumer,
+        context: ExtensionContext,
+        cursor: str | None,
+        change: PageChange,
+        parked: list[ParkedPage],
+        error: Exception,
+    ) -> list[ParkedPage]:
+        """One page the handler refused on its own. The tick stops where it stands until the page
+        has refused PAGE_CHANGE_PARK_STRIKES ticks running — a fault that passes costs a page no
+        freshness — and then the page is set aside, recorded before the cursor steps over it so it
+        is never passed without a record of where it was. At PAGE_CHANGE_PARK_MAX pages already
+        aside the refusal is the consumer's rather than any page's, so the drive stops at its cursor
+        and stays there."""
+        refused_key = f"{PAGE_CHANGE_REFUSED_KEY}:{consumer.discriminator}"
+        last = await context.store.get(refused_key)
+        held = None if last is None else RefusedPage.model_validate(last)
+        strikes = (
+            held.strikes + 1
+            if held is not None and held.page_id == change.page_id and held.cursor == cursor
+            else 1
+        )
+        already_parked = any(page.page_id == change.page_id for page in parked)
+        if strikes < PAGE_CHANGE_PARK_STRIKES and not already_parked:
+            await context.store.put(
+                refused_key,
+                RefusedPage(cursor=cursor, page_id=change.page_id, strikes=strikes).model_dump(
+                    mode="json"
+                ),
+            )
+            self._report_stall(consumer, cursor, len(parked), strikes, error)
+            raise error
+        if already_parked:
+            return parked
+        if len(parked) >= PAGE_CHANGE_PARK_MAX:
+            self._report_stall(consumer, cursor, len(parked), strikes, error)
+            raise error
+        self._report_park(consumer, change, error, len(parked) + 1)
+        parked = [
+            *parked,
+            ParkedPage(cursor=cursor, page_id=change.page_id, tried_at=datetime.now(UTC)),
+        ]
+        await context.store.put(
+            f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}",
+            [page.model_dump(mode="json") for page in parked],
+        )
+        return parked
+
+    def _report_stall(
+        self,
+        consumer: PageChangeConsumer,
+        cursor: str | None,
+        parked: int,
+        strikes: int,
+        error: Exception,
+    ) -> None:
+        emit_metric(
+            PAGE_CHANGE_STALLED_METRIC,
+            extension=consumer.extension,
+            discriminator=consumer.discriminator,
+        )
+        log_error(
+            "jobs.page_change_stalled",
+            workspace_id=str(ws_current().workspace_id),
+            extension=consumer.extension,
+            discriminator=consumer.discriminator,
+            cursor=cursor or "",
+            parked=parked,
+            strikes=strikes,
+            error_class=type(error).__name__,
+            stack=formatted_stack(error),
+        )
+
+    def _report_park(
+        self, consumer: PageChangeConsumer, change: PageChange, error: Exception, parked: int
+    ) -> None:
+        emit_metric(
+            PAGE_CHANGE_PARKED_METRIC,
+            extension=consumer.extension,
+            discriminator=consumer.discriminator,
+        )
+        log_error(
+            "jobs.page_change_parked",
+            workspace_id=str(ws_current().workspace_id),
+            extension=consumer.extension,
+            discriminator=consumer.discriminator,
+            page_id=str(change.page_id),
+            revision=change.revision,
+            parked=parked,
+            error_class=type(error).__name__,
+            stack=formatted_stack(error),
         )
 
 

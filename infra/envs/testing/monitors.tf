@@ -105,13 +105,37 @@ resource "datadog_monitor" "source_stream_refused_everywhere" {
   tags = ["env:testing", "managed-by:terraform"]
 }
 
-# A consumer advances its cursor only after its handler returns, so a batch the handler cannot accept
-# is replayed every tick and holds every later page in that workspace behind it.
+# A page a consumer's handler refuses on its own is parked: stepped over, recorded, and retried on
+# its own hour, so one page never holds the pages behind it. A parked page is still a page nothing
+# indexes, and it re-counts every hour it stays refused. Ten in six hours is two pages stuck for the
+# window or one burst of them, either of which is a provider or a handler that needs a person.
+resource "datadog_monitor" "page_change_parked" {
+  name    = "ufo testing page change pages parked"
+  type    = "query alert"
+  query   = "sum(last_6h):sum:ufo.page_change_parked_total{env:testing} by {extension,discriminator}.as_count() >= 10"
+  message = "{{extension.name}} {{discriminator.name}} has set {{value}} page deliveries aside in six hours; those pages reach nothing that reads them. Search jobs.page_change_parked for the page ids, the workspace, and the error class. The pages land by themselves once the refusal is fixed. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 10
+  }
+
+  require_full_window = false
+  notify_no_data      = false
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
+
+# A consumer refusing page after page is not a page's fault, so past PAGE_CHANGE_PARK_MAX parked
+# pages the drive stops at its cursor rather than stepping a workspace's whole backlog aside — and
+# every later tick stops in the same place, holding every page behind it. The threshold is what
+# separates the two faults this counts: a provider blip fails once or twice and then passes, while a
+# consumer that cannot run keeps stopping at the tick rate. Ten in fifteen minutes is only reachable
+# by the second.
 resource "datadog_monitor" "page_change_stalled" {
   name    = "ufo testing page change consumer stalled"
   type    = "query alert"
   query   = "sum(last_15m):sum:ufo.page_change_stalled_total{env:testing} by {extension,discriminator}.as_count() >= 10"
-  message = "{{extension.name}} {{discriminator.name}} has replayed the same page batch {{value}} times in 15 minutes and advanced no cursor. Every later page in that workspace is held behind it. Search jobs.page_change_stalled for the workspace, cursor, and error class. @ops@flyingobject.ai @slack-alerts"
+  message = "{{extension.name}} {{discriminator.name}} has stopped at the same cursor {{value}} times in 15 minutes with its parked list full, so it refuses every page it is given. Every later page in that workspace is held behind it. Search jobs.page_change_stalled for the workspace, cursor, and error class. @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
     critical = 10

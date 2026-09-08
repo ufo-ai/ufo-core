@@ -6,9 +6,12 @@ core test seeds a real page, drives the runner, and reads those rows back throug
 ScopedStore: the runner delivers changed pages, advances each consumer's own cursor (a second drive
 over the same window delivers only the newly-changed page), and builds the jobs-way context with
 the model wired. `core_jobs` registers one `page_change:<ext>:<hook>` job per consumer, so a
-consumer that raises fails only its own workflow — proven by driving one consumer that raises and
-confirming its
-cursor did not advance while a second consumer still makes progress. A consumer that advances its
+consumer that raises fails only its own workflow — proven by driving one consumer that refuses the
+page and confirming it parked the page in its own key space while a second consumer still indexes
+it. A refusal a batch earns as a whole is retried a page at a time; a page refused on its own is
+parked, stepped over, and re-delivered on its own hour, so no one page holds a workspace's
+consumer — and past PAGE_CHANGE_PARK_MAX parked pages the drive stops at its cursor instead,
+because a consumer refusing everything is not a page's fault. A consumer that advances its
 own cursor from inside its handler stands in for the writer that overlaps a slow tick: the runner
 compare-and-sets through `ScopedStore.put_if`, so the newer value survives and the drive stops
 instead of rewinding the cursor and replaying the batch. No mock call-log — a real consumer records
@@ -16,9 +19,9 @@ through its capability APIs."""
 
 import hashlib
 import logging
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +29,7 @@ import sqlalchemy as sa
 import ufo_ext_sample as sample
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from pydantic import JsonValue
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -49,6 +53,10 @@ from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_BATCH,
     PAGE_CHANGE_JOB,
+    PAGE_CHANGE_PARK_MAX,
+    PAGE_CHANGE_PARK_RETRY_SECONDS,
+    PAGE_CHANGE_PARK_STRIKES,
+    PAGE_CHANGE_PARKED_KEY,
     PageChangeRunner,
     TurnDispatcher,
     bindings_from,
@@ -352,7 +360,7 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
     assert f"{CORE_EXTENSION}:{PAGE_CHANGE_JOB}:boom_ext:_raise" in keys
 
 
-async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another(
+async def test_a_page_a_consumer_keeps_refusing_is_parked_and_blocks_no_other(
     db: None, tmp_path: object
 ) -> None:
     workspace_id = await _workspace()
@@ -364,37 +372,195 @@ async def test_a_failing_consumer_neither_advances_its_cursor_nor_blocks_another
     runner = _runner(blob, manifests=(boom, _sample_manifest()))
     consumers = {consumer.extension: consumer for consumer in runner.consumers()}
     boom_consumer, sample_consumer = consumers["boom_ext"], consumers[sample.NAME]
+    boom_store = ScopedStore(extension="boom_ext")
+    cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{boom_consumer.discriminator}"
+    parked_key = f"{PAGE_CHANGE_PARKED_KEY}:{boom_consumer.discriminator}"
 
-    with pytest.raises(RuntimeError), ws(workspace_id):
-        await runner.drive(boom_consumer)
+    for _ in range(PAGE_CHANGE_PARK_STRIKES - 1):
+        with pytest.raises(RuntimeError), ws(workspace_id):
+            await runner.drive(boom_consumer)
+        with ws(workspace_id):
+            assert await boom_store.get(cursor_key) is None
+            assert await boom_store.get(parked_key) is None
+
     with ws(workspace_id):
-        boom_cursor = await ScopedStore(extension="boom_ext").get(
-            f"{PAGE_CHANGE_CURSOR_KEY}:{boom_consumer.discriminator}"
-        )
-    assert boom_cursor is None
+        await runner.drive(boom_consumer)
+        boom_cursor = await boom_store.get(cursor_key)
+        boom_parked = await boom_store.get(parked_key)
+    assert isinstance(boom_parked, list)
+    assert [entry["page_id"] for entry in boom_parked] == [str(page)]
+    assert isinstance(boom_cursor, str) and boom_cursor.endswith(f"|{page}")
 
     with ws(workspace_id):
         await runner.drive(sample_consumer)
         scoped = ScopedStore(extension=sample.NAME)
         record = await scoped.get(sample.HOOK_PAGE_CHANGE_KEY)
-        sample_cursor = await scoped.get(
-            f"{PAGE_CHANGE_CURSOR_KEY}:{sample_consumer.discriminator}"
+        sample_parked = await scoped.get(
+            f"{PAGE_CHANGE_PARKED_KEY}:{sample_consumer.discriminator}"
         )
     assert record == {"page_ids": [str(page)], "model_wired": False}
-    assert isinstance(sample_cursor, str) and sample_cursor != boom_cursor
+    assert sample_parked is None
 
 
-async def test_a_stalled_consumer_says_which_one_stopped_and_counts_every_replay(
+@dataclass
+class _Taker:
+    refused: set[UUID] = field(default_factory=set)
+    taken: list[UUID] = field(default_factory=list)
+    refuses_batches: bool = False
+
+    def reset(self, refused: Iterable[UUID] = (), refuses_batches: bool = False) -> None:
+        self.refused = set(refused)
+        self.taken = []
+        self.refuses_batches = refuses_batches
+
+
+_TAKER = _Taker()
+
+
+async def _take_unrefused_pages(ctx: HookContext) -> HookOutcome:
+    match ctx.payload:
+        case PageChangeBatch(changes=changes):
+            if _TAKER.refuses_batches and len(changes) > 1:
+                raise RuntimeError(f"a batch of {len(changes)} is over the provider's cap")
+            for change in changes:
+                if change.page_id in _TAKER.refused:
+                    raise RuntimeError(f"never taking {change.page_id}")
+            _TAKER.taken.extend(change.page_id for change in changes)
+    return None
+
+
+def _taker_manifest() -> Manifest:
+    return Manifest(
+        name="taker_ext",
+        version="0",
+        hooks=(HookSpec(event="page_change", handler=_take_unrefused_pages),),
+    )
+
+
+async def _taker_state(discriminator: str) -> tuple[JsonValue | None, JsonValue | None]:
+    store = ScopedStore(extension="taker_ext")
+    return (
+        await store.get(f"{PAGE_CHANGE_CURSOR_KEY}:{discriminator}"),
+        await store.get(f"{PAGE_CHANGE_PARKED_KEY}:{discriminator}"),
+    )
+
+
+async def test_a_batch_the_handler_refuses_whole_is_retried_a_page_at_a_time(
+    db: None, tmp_path: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal a batch earns as a whole — the embedding request its bodies add up to is over the
+    provider's token cap — is not any one page's. The runner hands the same window back a page at a
+    time, so every page lands and the cursor clears the batch that failed."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    pages = [await _seed_page(blob, workspace_id, f"page {n}") for n in range(3)]
+    _TAKER.reset(refuses_batches=True)
+    runner = _runner(blob, manifests=(_taker_manifest(),))
+    (consumer,) = runner.consumers()
+
+    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
+        await runner.drive(consumer)
+        cursor, parked = await _taker_state(consumer.discriminator)
+
+    assert _TAKER.taken == pages
+    assert parked is None
+    assert isinstance(cursor, str) and cursor.endswith(f"|{pages[-1]}")
+    narrowed = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "jobs.page_change_narrowed"
+    ]
+    assert len(narrowed) == 1
+    assert narrowed[0]["pages"] == 3
+    assert narrowed[0]["extension"] == "taker_ext"
+
+
+async def test_a_page_the_handler_never_takes_is_parked_and_the_rest_move_past_it(
     db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A handler that raises leaves the cursor where it was, so the same batch returns on the next
-    tick. For a fault that passes that is the recovery; for one that does not, every later page in
-    the workspace waits behind it and nothing says so — a `jobs.failed` a minute reads exactly like
-    unrelated blips.
+    """One page the handler can never accept used to hold every later page in the workspace behind
+    it, replayed every tick forever. It holds the cursor while the refusal might be a fault that
+    passes, and is parked once it is not: recorded where it sits, stepped over, and counted, so the
+    pages behind it index and the page itself is set aside, not dropped."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    pages = [await _seed_page(blob, workspace_id, f"page {n}") for n in range(3)]
+    _TAKER.reset(refused=[pages[1]])
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    runner = _runner(blob, manifests=(_taker_manifest(),))
+    (consumer,) = runner.consumers()
 
-    So each replay states which consumer stopped, at which cursor, and counts. The count is what a
-    monitor separates the two faults by: a blip lands once or twice, a batch that can never be
-    accepted lands at the tick rate until somebody looks."""
+    for _ in range(PAGE_CHANGE_PARK_STRIKES - 1):
+        with pytest.raises(RuntimeError), ws(workspace_id):
+            await runner.drive(consumer)
+    assert _TAKER.taken == [pages[0]]
+
+    with caplog.at_level(logging.ERROR, logger="ufo"), ws(workspace_id):
+        await runner.drive(consumer)
+        cursor, parked = await _taker_state(consumer.discriminator)
+
+    assert _TAKER.taken == [pages[0], pages[2]]
+    assert isinstance(cursor, str) and cursor.endswith(f"|{pages[2]}")
+    assert isinstance(parked, list)
+    assert [entry["page_id"] for entry in parked] == [str(pages[1])]
+    assert [str(entry["cursor"]).endswith(f"|{pages[0]}") for entry in parked] == [True]
+    logged = [
+        record.ufo for record in caplog.records if record.getMessage() == "jobs.page_change_parked"
+    ]
+    assert len(logged) == 1
+    assert logged[0]["page_id"] == str(pages[1])
+    assert logged[0]["error_class"] == "RuntimeError"
+    assert _counted(reader, "ufo.page_change_parked_total") == 1
+    assert _counted(reader, "ufo.page_change_stalled_total") == PAGE_CHANGE_PARK_STRIKES - 1
+
+
+async def test_a_parked_page_waits_its_hour_then_lands_on_its_own(
+    db: None, tmp_path: object
+) -> None:
+    """A parked page is retried off the main line, so whatever refused it — fixed — indexes it
+    without anyone rewinding a cursor. Until its hour is up it costs the tick nothing."""
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    pages = [await _seed_page(blob, workspace_id, f"page {n}") for n in range(2)]
+    _TAKER.reset(refused=[pages[0]])
+    runner = _runner(blob, manifests=(_taker_manifest(),))
+    (consumer,) = runner.consumers()
+    parked_key = f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}"
+
+    for _ in range(PAGE_CHANGE_PARK_STRIKES - 1):
+        with pytest.raises(RuntimeError), ws(workspace_id):
+            await runner.drive(consumer)
+
+    with ws(workspace_id):
+        await runner.drive(consumer)
+        assert _TAKER.taken == [pages[1]]
+
+        _TAKER.reset()
+        await runner.drive(consumer)
+        assert _TAKER.taken == []
+
+        store = ScopedStore(extension="taker_ext")
+        entries = await store.get(parked_key)
+        assert isinstance(entries, list)
+        aged = datetime.now(UTC) - timedelta(seconds=PAGE_CHANGE_PARK_RETRY_SECONDS + 60)
+        await store.put(parked_key, [{**entries[0], "tried_at": aged.isoformat()}])
+
+        await runner.drive(consumer)
+        assert _TAKER.taken == [pages[0]]
+        assert await store.get(parked_key) == []
+
+
+async def test_a_consumer_refusing_every_page_stops_at_its_cursor_and_counts(
+    db: None, tmp_path: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Parking is for a page, not for a consumer. With PAGE_CHANGE_PARK_MAX pages already set aside
+    the refusal is the handler's own, so the drive stops at its cursor rather than stepping the
+    workspace's whole backlog into the parked list — and every replay says which consumer stopped
+    and counts, so a fault that passes reads once or twice and one that does not holds at the tick
+    rate until somebody looks."""
     workspace_id = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     await _seed_page(blob, workspace_id, "a page the handler will never accept")
@@ -407,33 +573,53 @@ async def test_a_stalled_consumer_says_which_one_stopped_and_counts_every_replay
     )
     runner = _runner(blob, manifests=(boom,))
     (consumer,) = runner.consumers()
+    store = ScopedStore(extension="boom_ext")
+    parked_key = f"{PAGE_CHANGE_PARKED_KEY}:{consumer.discriminator}"
+    cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
+    full = [
+        {
+            "cursor": f"{n}|{uuid4()}",
+            "page_id": str(uuid4()),
+            "tried_at": datetime.now(UTC).isoformat(),
+        }
+        for n in range(PAGE_CHANGE_PARK_MAX)
+    ]
+    replays = PAGE_CHANGE_PARK_STRIKES + 1
 
+    with ws(workspace_id):
+        await store.put(parked_key, full)
     with caplog.at_level(logging.ERROR, logger="ufo"):
-        for _ in range(3):
+        for _ in range(replays):
             with pytest.raises(RuntimeError), ws(workspace_id):
                 await runner.drive(consumer)
+    with ws(workspace_id):
+        held, cursor = await store.get(parked_key), await store.get(cursor_key)
 
+    assert held == full
+    assert cursor is None
     stalled = [
         record.ufo for record in caplog.records if record.getMessage() == "jobs.page_change_stalled"
     ]
-    assert len(stalled) == 3
-    assert stalled[0]["extension"] == "boom_ext"
-    assert stalled[0]["workspace_id"] == str(workspace_id)
-    assert stalled[0]["error_class"] == "RuntimeError"
-    assert stalled[0]["pages"] == 1
+    assert len(stalled) == replays
+    assert stalled[-1]["extension"] == "boom_ext"
+    assert stalled[-1]["workspace_id"] == str(workspace_id)
+    assert stalled[-1]["error_class"] == "RuntimeError"
+    assert stalled[-1]["parked"] == PAGE_CHANGE_PARK_MAX
+    assert _counted(reader, "ufo.page_change_stalled_total") == replays
+    assert _counted(reader, "ufo.page_change_parked_total") == 0
 
+
+def _counted(reader: InMemoryMetricReader, name: str) -> float:
     data = reader.get_metrics_data()
     assert data is not None
-    counted = [
-        point
+    return sum(
+        point.value
         for resource in data.resource_metrics
         for scope in resource.scope_metrics
         for metric in scope.metrics
-        if metric.name == "ufo.page_change_stalled_total"
+        if metric.name == name
         for point in metric.data.data_points
-    ]
-    assert sum(point.value for point in counted) == 3
-    assert {point.attributes["extension"] for point in counted} == {"boom_ext"}
+    )
 
 
 @dataclass(frozen=True)
