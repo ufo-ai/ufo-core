@@ -9,115 +9,135 @@ CHARTED_REPLY = (
     "Signups are still growing, about 6 percent a week: the twelve weeks run 118 to 205, and the "
     "last four weeks alone add 47."
 )
+CLAIMING_REPLY = (
+    "Seated workspaces went 54 to 113 over the week, which is what I have charted; the growth all "
+    "lands Thursday through Saturday."
+)
 PLAIN_REPLY = "July ads spend is 910 dollars above June, about 22 percent up."
 
 
-def _carried(response: str, *artifacts: SharedArtifact) -> CapabilityOutput:
+def _delivered(response: str, *artifacts: SharedArtifact) -> CapabilityOutput:
     return CapabilityOutput(response=response, calls=(), artifacts=artifacts)
 
 
-async def test_a_charted_answer_passes_with_one_tagged_chart() -> None:
-    grader = charted_answer_scorer(100, 6)
+async def test_a_chart_delivered_by_either_carrier_passes() -> None:
+    """The role decides what a surface draws, and that is a rendering fault, not this one."""
+    grader = charted_answer_scorer(120)
 
-    verdict = await grader(
-        _carried(CHARTED_REPLY, SharedArtifact("weekly-signups.png", CHART_PNG, "details"))
+    tagged = await grader(
+        _delivered(CHARTED_REPLY, SharedArtifact("signups.png", CHART_PNG, "details"))
     )
-
-    assert verdict.passed, verdict.reason
-    assert verdict.evidence["carriedImages"] == [
-        {"name": "weekly-signups.png", "role": "details", "bytes": len(CHART_PNG)}
-    ]
-
-
-async def test_a_charted_answer_fails_without_a_chart() -> None:
-    grader = charted_answer_scorer(100, 6)
-
-    verdict = await grader(_carried(CHARTED_REPLY))
-
-    assert not verdict.passed
-    assert "carried no chart image" in verdict.reason
-
-
-async def test_a_charted_answer_fails_on_a_shared_chart_and_on_a_truncated_one() -> None:
-    grader = charted_answer_scorer(100, 6)
-
     shared = await grader(
-        _carried(CHARTED_REPLY, SharedArtifact("weekly-signups.png", CHART_PNG, "file"))
-    )
-    truncated = await grader(
-        _carried(
-            CHARTED_REPLY,
-            SharedArtifact("weekly-signups.png", PNG_MAGIC + b"cut", "details"),
-        )
+        _delivered(CHARTED_REPLY, SharedArtifact("signups.png", CHART_PNG, "file"))
     )
 
-    assert not shared.passed
-    assert "not an artifact tag" in shared.reason
-    assert not truncated.passed
-    assert "truncated" in truncated.reason
+    assert tagged.passed, tagged.reason
+    assert shared.passed, shared.reason
+    assert tagged.evidence["deliveredCharts"][0]["role"] == "details"
+    assert shared.evidence["deliveredCharts"][0]["role"] == "file"
 
 
-async def test_a_charted_answer_fails_one_chart_sent_and_carried_both() -> None:
-    """The same PNG under both carriers is one chart delivered twice, not two charts."""
-    grader = charted_answer_scorer(100, 6)
+async def test_a_turn_that_never_drew_is_named_as_such() -> None:
+    grader = charted_answer_scorer(120)
+
+    verdict = await grader(_delivered(CHARTED_REPLY))
+
+    assert not verdict.passed
+    assert "drew no chart" in verdict.reason
+
+
+async def test_a_drawn_chart_that_was_never_delivered_is_its_own_failure(tmp_path: Path) -> None:
+    """The engine logs this one as turn.carried_file_unavailable and ships the words regardless."""
+    grader = charted_answer_scorer(120)
+    (tmp_path / "signups.png").write_bytes(CHART_PNG)
 
     verdict = await grader(
-        _carried(
+        CapabilityOutput(response=CHARTED_REPLY, calls=(), workspace_dir=tmp_path)
+    )
+
+    assert not verdict.passed
+    assert "drew signups.png and delivered none of it" in verdict.reason
+    assert verdict.evidence["drawnInWorkspace"] == ["signups.png"]
+
+
+async def test_a_claimed_chart_with_nothing_behind_it_is_its_own_failure() -> None:
+    """The Slack fault: prose says it charted, no file exists, and the member sees the claim."""
+    grader = charted_answer_scorer(120)
+
+    verdict = await grader(_delivered(CLAIMING_REPLY))
+
+    assert not verdict.passed
+    assert "spoke of a chart the member never received" in verdict.reason
+    assert verdict.evidence["spokeOfAChart"] is True
+
+
+async def test_two_charts_for_one_series_fail() -> None:
+    grader = charted_answer_scorer(120)
+
+    verdict = await grader(
+        _delivered(
             CHARTED_REPLY,
-            SharedArtifact("weekly-signups.png", CHART_PNG, "file"),
-            SharedArtifact("weekly-signups.png", CHART_PNG, "details"),
+            SharedArtifact("signups.png", CHART_PNG, "details"),
+            SharedArtifact("growth-rate.png", CHART_PNG, "details"),
         )
     )
 
     assert not verdict.passed
-    assert "weekly-signups.png was both sent and carried" in verdict.reason
+    assert "delivered 2 charts for one series" in verdict.reason
 
 
-async def test_a_charted_answer_fails_two_charts_for_one_series() -> None:
-    grader = charted_answer_scorer(100, 6)
+async def test_a_truncated_chart_fails() -> None:
+    grader = charted_answer_scorer(120)
 
     verdict = await grader(
-        _carried(
-            CHARTED_REPLY,
-            SharedArtifact("weekly-signups.png", CHART_PNG, "details"),
-            SharedArtifact("weekly-growth-rate.png", CHART_PNG, "details"),
-        )
+        _delivered(CHARTED_REPLY, SharedArtifact("signups.png", PNG_MAGIC + b"cut", "details"))
     )
 
     assert not verdict.passed
-    assert "carried 2 charts for one series" in verdict.reason
+    assert "truncated" in verdict.reason
 
 
-async def test_a_charted_answer_fails_a_reply_that_sends_the_member_to_the_picture() -> None:
-    grader = charted_answer_scorer(100, 6)
+async def test_bullets_are_not_a_fault_but_headers_and_paths_are() -> None:
+    """The register gives parallel items a bullet path; failing them for it hid the real signal."""
+    grader = charted_answer_scorer(120)
+    chart = SharedArtifact("signups.png", CHART_PNG, "details")
 
-    verdict = await grader(
-        _carried(
-            "## Signups\n\n- The chart has the numbers.\n- Open it for the growth rate.",
-            SharedArtifact("weekly-signups.png", CHART_PNG, "details"),
-        )
+    bulleted = await grader(
+        _delivered("Growth held all quarter.\n- Q1 was 118.\n- Q4 was 205.", chart)
     )
+    headed = await grader(_delivered("## Signups\n\nGrowth held all quarter.", chart))
+    pathed = await grader(_delivered("The picture is at /workspace/signups.png.", chart))
 
-    assert not verdict.passed
-    assert "section headers" in verdict.reason
+    assert bulleted.passed, bulleted.reason
+    assert not headed.passed
+    assert "1 section headers" in headed.reason
+    assert not pathed.passed
+    assert "/workspace/signups.png" in pathed.reason
 
 
 async def test_an_under_floor_answer_passes_in_words_alone() -> None:
-    grader = unillustrated_answer_scorer(60, 4)
+    grader = unillustrated_answer_scorer(60)
 
-    verdict = await grader(_carried(PLAIN_REPLY))
+    verdict = await grader(_delivered(PLAIN_REPLY))
 
     assert verdict.passed, verdict.reason
 
 
-async def test_an_under_floor_answer_fails_a_chart_it_carried_or_only_drew(tmp_path: Path) -> None:
-    grader = unillustrated_answer_scorer(60, 4)
+async def test_an_under_floor_answer_fails_a_chart_delivered_drawn_or_claimed(
+    tmp_path: Path,
+) -> None:
+    grader = unillustrated_answer_scorer(60)
     (tmp_path / "ads.png").write_bytes(CHART_PNG)
 
-    carried = await grader(_carried(PLAIN_REPLY, SharedArtifact("ads.png", CHART_PNG, "details")))
+    delivered = await grader(
+        _delivered(PLAIN_REPLY, SharedArtifact("ads.png", CHART_PNG, "details"))
+    )
     drawn = await grader(CapabilityOutput(response=PLAIN_REPLY, calls=(), workspace_dir=tmp_path))
+    claimed = await grader(_delivered(f"{PLAIN_REPLY} I charted it for you."))
 
-    assert not carried.passed
-    assert "carried ads.png under the chart floor" in carried.reason
+    assert not delivered.passed
+    assert "delivered ads.png under the floor" in delivered.reason
     assert not drawn.passed
-    assert drawn.evidence["drawnImages"] == ["ads.png"]
+    assert "drew ads.png under the floor" in drawn.reason
+    assert not claimed.passed
+    assert "spoke of a chart under the floor" in claimed.reason

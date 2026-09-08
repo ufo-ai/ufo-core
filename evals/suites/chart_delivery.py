@@ -1,35 +1,46 @@
-"""Chart cases: a member delivery that rests on a series of numbers carries a picture of them.
+"""Chart cases: what a member actually receives when an answer rests on a series of numbers.
 
-The register sets a floor — one measure at five or more points — so the cases run in opposing
-pairs: two asks whose answer clears the floor and must arrive with one charted PNG carried in an
-artifact tag, two that sit under it and must arrive in words alone. A suite that only rewarded the
-chart would score highest on a turn that plots a pair of numbers, which is the failure the floor
-exists to stop; the four-quarter case sits one point under the floor, so a rule that fires on
+The register's rule has a floor — five or more numbers in one measure — so the cases run in opposing
+pairs: four asks above the floor that must put a chart in front of the member, two below it that
+must stay in words. The four-quarter case sits one point under the floor, so a rule firing on
 "there are numbers here" fails it while the rule as written passes.
 
-Every case's numbers arrive in the member's own message, so no case turns on workspace state, a
-connected account, or a tool result: what is measured is which shape the delivery takes, never what
-the agent could find out. Every ask is single-subject: an ask that invites parallel items earns the
-register's bullet path, and the case then measures the bullet rule instead of the chart.
+The four above the floor are four shapes, because the shape decides whether the turn ever draws. Two
+carry their numbers in the member's own message and are answered from a standing start. One is a
+thread follow-up: the numbers arrived a turn ago and an answer is already in the transcript, so
+nothing forces the agent into the sandbox and drawing costs a round it can skip — the shape both
+live misses took (2026-09-07, #ufo-eng). One holds its numbers in a workspace file, so the figures
+reach the answer through a tool rather than from the words the member typed.
 
-The reply is graded to that register beside the image, because a chart is not licence to abandon
-the words: a member who reads only the message still gets the conclusion, and a reply that points
-at the picture for the answer fails on the same 100-word budget the register gives a member
-delivery. The chart must arrive as a `details` artifact — the tag's own carrier — since an
-unrequested share_file is a share the ask never triggered, and the same PNG sent both ways puts the
-picture in front of the member twice.
+**A chart the member never receives is the failure this suite exists to name.** Three states are
+distinguished, because they are three faults and the earlier grader collapsed them into one "carried
+no chart image":
 
-The vision judge reads the shared PNG on the two charted cases. Its criteria are the ones the
-register names and the ones a matplotlib default breaks: an axis with no measure or unit on it, a
-tick label too small or too rotated to read, a title that names no subject.
+- nothing drawn and nothing delivered — the turn never took the round;
+- a PNG in the workspace with nothing on the turn — the turn drew it and the delivery dropped it,
+  which the engine logs as `turn.carried_file_unavailable` and no member can see;
+- a reply that speaks of a chart with nothing on the turn — the turn claimed a drawing that does not
+  exist, which is worse than silence and is what shipped to Slack in turn
+  `a09b64a6-6250-52cd-93f1-7adcbd1ced10`.
 
-Each case carries `samples=2` because whether one reply draws a chart swings wider than the effect
-a wording change produces.
+Either carrier counts as delivered, and the role is recorded rather than graded. The role decides
+what a surface draws — `details` renders as a link on web and Slack, `file` as a picture — but that
+is a rendering fault of its own, not one to fail a turn for.
+
+The reply is graded for its budget, its headers and any /workspace path, and not for bullets: the
+register gives parallel items a bullet path, both live replies took it legitimately, and failing
+them for it made the pass counts stop tracking the behaviour under test.
+
+Each above-floor case carries `samples=3` and each under-floor case `samples=2`: whether one reply
+draws a chart swings wider than the effect a wording change produces, and the above-floor side is
+where that swing lives.
 
 The suite runs off the nightly sweep. A chart is drawn with the sandbox image's matplotlib, and the
 sweep gives a non-app shard the local carrier, which runs host subprocesses with no plotting library
 at all — so a nightly run would score the shard's environment rather than the model. The ablation
 harness names `sandbox = { backend = "docker" }` and is where this suite measures."""
+
+import re
 
 from evals.harness.artifact_checks import valid_image
 from evals.harness.capability import (
@@ -40,23 +51,47 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
     SharedArtifact,
+    WorkspaceFile,
 )
 from evals.harness.harness import JsonObject
-from evals.suites.response_register import conversational_scorer
+from evals.suites.response_register import HEADER_RE, WORKSPACE_PATH_RE, measure
 
 WORKFLOW_WAIT_SECONDS = 600.0
-CARRIED_ROLE = "details"
+CHART_CLAIM_RE = re.compile(r"\bchart(?:ed|s)?\b|\bplot(?:ted|s)?\b|\bgraph(?:ed|s)?\b", re.I)
 CHART_CRITERIA = (
-    "Every axis carries a label naming what it measures and the unit it is measured in, and the "
-    "chart has a title that names the subject rather than restating the axis.",
+    "A reader can tell what is plotted and in what units from the title, the axis labels and the "
+    "tick labels together, and the title names the subject rather than restating an axis. A "
+    "categorical axis whose ticks name the categories needs no further label; a value axis whose "
+    "numbers could stand for anything must say what they count.",
     "Every tick label and legend entry is fully readable: not clipped at an edge, not overlapping "
     "another label, and not shrunk past legibility.",
     "The plotted values are the member's own series, drawn in proportion — no invented points, no "
     "truncated axis that exaggerates the movement, and nothing cut off at a boundary.",
 )
+DAILY_TURNS = (
+    "daily production turns last week: Mon 5, Tue 3, Wed 7, Thu 182, Fri 369, Sat 86, Sun 77",
+    "Got it — 729 for the week, about 104 a day.",
+)
+TURNS_CSV = WorkspaceFile(
+    "production-turns.csv",
+    b"day,turns\nMon,5\nTue,3\nWed,7\nThu,182\nFri,369\nSat,86\nSun,77\n",
+)
+DAILY_CUT = (
+    "how many turns did production run last week? the daily numbers are in "
+    "/workspace/production-turns.csv",
+    "729 for the week, about 104 a day.",
+)
+SIGNUP_CSV = WorkspaceFile(
+    "weekly-signups.csv",
+    b"week,signups\n1,118\n2,131\n3,127\n4,144\n5,139\n6,152\n7,166\n8,158\n9,174\n10,191\n"
+    b"11,187\n12,205\n",
+)
 
 
-def _images(output: CapabilityOutput) -> tuple[SharedArtifact, ...]:
+def _delivered(output: CapabilityOutput) -> tuple[SharedArtifact, ...]:
+    """Every image the turn attached to itself, by either carrier. `file` is a share_file share and
+    `details` a closing-message artifact tag; both put the file on the turn, and which one decides
+    whether a surface draws a picture or a link."""
     return tuple(
         artifact
         for artifact in output.artifacts
@@ -64,10 +99,9 @@ def _images(output: CapabilityOutput) -> tuple[SharedArtifact, ...]:
     )
 
 
-def _drawn_images(output: CapabilityOutput) -> tuple[str, ...]:
-    """Every image file the turn left in its own workspace, delivered or not. A chart drawn under
-    the floor and then withheld is still the work the floor exists to stop, and the reply alone
-    cannot show it."""
+def _drawn(output: CapabilityOutput) -> tuple[str, ...]:
+    """Every image the turn left in its own workspace, delivered or not. Read against the delivered
+    set, it separates a turn that never drew from one whose chart was dropped on the way out."""
     if output.workspace_dir is None:
         return ()
     return tuple(
@@ -79,87 +113,105 @@ def _drawn_images(output: CapabilityOutput) -> tuple[str, ...]:
     )
 
 
-def charted_answer_scorer(max_words: int, max_lines: int) -> Grader:
-    """A chat-register reply carrying one chart, once, in an artifact tag.
+def _reply_faults(response: str, max_words: int) -> list[str]:
+    """The reply's own shape: its budget, its headers, and any workspace path it exposes. Bullets
+    are not a fault — the register gives parallel items a bullet path."""
+    faults = []
+    words = measure(response).words
+    headers = HEADER_RE.findall(response)
+    paths = WORKSPACE_PATH_RE.findall(response)
+    if words > max_words:
+        faults.append(f"{words} words over the {max_words} budget")
+    if headers:
+        faults.append(f"{len(headers)} section headers")
+    if paths:
+        faults.append("member-inaccessible workspace paths: " + ", ".join(paths))
+    return faults
 
-    A chart is a file, not a row: the same PNG reaches a member twice when the turn calls
-    share_file and carries the tag as well, and counting rows read that as two charts. So the count
-    is over distinct names, and the double delivery is its own failure — the member sees the same
-    picture twice, which is the fault, not that two rows exist."""
-    conversational = conversational_scorer(max_words, max_lines)
+
+def charted_answer_scorer(max_words: int) -> Grader:
+    """A reply inside its budget that puts one chart in front of the member."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        verdict = await conversational(output)
-        failures = [] if verdict.passed else [verdict.reason]
+        response = output.response.strip()
+        failures = _reply_faults(response, max_words)
         if output.artifact_error:
             failures.append(f"artifact inspection failed: {output.artifact_error}")
-        images = _images(output)
-        names = {image.name for image in images}
-        carried = {image.name for image in images if image.role == CARRIED_ROLE}
-        sent = {image.name for image in images if image.role != CARRIED_ROLE}
-        if not names:
-            failures.append("carried no chart image")
+        delivered = _delivered(output)
+        drawn = _drawn(output)
+        names = {artifact.name for artifact in delivered}
+        claimed = bool(CHART_CLAIM_RE.search(response))
+        if not names and drawn:
+            failures.append(f"drew {', '.join(drawn)} and delivered none of it")
+        elif not names and claimed:
+            failures.append("spoke of a chart the member never received")
+        elif not names:
+            failures.append("drew no chart")
         elif len(names) > 1:
-            failures.append(f"carried {len(names)} charts for one series")
+            failures.append(f"delivered {len(names)} charts for one series")
         else:
             corrupt = next(
-                (image for image in images if not valid_image(image.content).passed), None
+                (item for item in delivered if not valid_image(item.content).passed), None
             )
             if corrupt is not None:
                 failures.append(f"{corrupt.name}: {valid_image(corrupt.content).reason}")
-            if carried & sent:
-                failures.append(f"{', '.join(carried & sent)} was both sent and carried")
-            elif not carried:
-                failures.append(f"{', '.join(sent)} arrived as a file, not an artifact tag")
-        evidence: JsonObject = verdict.evidence | {
-            "carriedImages": [
-                {"name": image.name, "role": image.role, "bytes": len(image.content)}
-                for image in images
-            ]
+        evidence: JsonObject = {
+            "words": measure(response).words,
+            "deliveredCharts": [
+                {"name": item.name, "role": item.role, "bytes": len(item.content)}
+                for item in delivered
+            ],
+            "drawnInWorkspace": list(drawn),
+            "spokeOfAChart": claimed,
         }
         if failures:
             return CapabilityVerdict(False, "charted answer: " + ", ".join(failures), evidence)
         return CapabilityVerdict(
-            True, f"charted answer: {verdict.reason}, {names.pop()} carried", evidence
+            True,
+            f"charted answer: {delivered[0].name} delivered as {delivered[0].role}",
+            evidence,
         )
 
     return DescribedGrader(
-        f"a chat-register reply — at most {max_words} words and {max_lines} lines, no section "
-        "headers, no bullet list — carrying one valid chart, once, as a tagged artifact",
+        f"a reply inside {max_words} words, with no section header and no /workspace path, "
+        "delivering exactly one valid chart to the member by either carrier",
         grade,
     )
 
 
-def unillustrated_answer_scorer(max_words: int, max_lines: int) -> Grader:
-    """A chat-register reply to a series under the floor: no chart carried, and none drawn."""
-    conversational = conversational_scorer(max_words, max_lines)
+def unillustrated_answer_scorer(max_words: int) -> Grader:
+    """A reply under the floor: no chart delivered, none drawn, and none spoken of."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        verdict = await conversational(output)
-        failures = [] if verdict.passed else [verdict.reason]
+        response = output.response.strip()
+        failures = _reply_faults(response, max_words)
         if output.artifact_error:
             failures.append(f"artifact inspection failed: {output.artifact_error}")
-        carried = _images(output)
-        drawn = _drawn_images(output)
-        if carried:
+        delivered = _delivered(output)
+        drawn = _drawn(output)
+        claimed = bool(CHART_CLAIM_RE.search(response))
+        if delivered:
             failures.append(
-                "carried " + ", ".join(image.name for image in carried) + " under the chart floor"
+                "delivered " + ", ".join(item.name for item in delivered) + " under the floor"
             )
         if drawn:
-            failures.append("drew " + ", ".join(drawn) + " under the chart floor")
-        evidence: JsonObject = verdict.evidence | {
-            "carriedImages": [image.name for image in carried],
-            "drawnImages": list(drawn),
+            failures.append("drew " + ", ".join(drawn) + " under the floor")
+        if claimed:
+            failures.append("spoke of a chart under the floor")
+        evidence: JsonObject = {
+            "words": measure(response).words,
+            "deliveredCharts": [item.name for item in delivered],
+            "drawnInWorkspace": list(drawn),
+            "spokeOfAChart": claimed,
         }
         if failures:
             return CapabilityVerdict(
                 False, "unillustrated answer: " + ", ".join(failures), evidence
             )
-        return CapabilityVerdict(True, f"unillustrated answer: {verdict.reason}", evidence)
+        return CapabilityVerdict(True, f"unillustrated answer: {evidence['words']} words", evidence)
 
     return DescribedGrader(
-        f"a chat-register reply — at most {max_words} words and {max_lines} lines, no section "
-        "headers, no bullet list — that carries no image and leaves none in the workspace",
+        f"a reply inside {max_words} words that delivers no chart, draws none, and claims none",
         grade,
     )
 
@@ -169,24 +221,52 @@ CASES = (
         "series-over-period",
         "Weekly signups for the last twelve weeks, oldest first: 118, 131, 127, 144, 139, 152, "
         "166, 158, 174, 191, 187, 205. Are we still growing, and how fast?",
-        charted_answer_scorer(max_words=100, max_lines=6),
+        charted_answer_scorer(max_words=120),
         digest_tag="chart:series-over-period",
-        samples=2,
+        samples=3,
         visual_rubric=CHART_CRITERIA,
     ),
     CapabilityCase(
         "spend-across-categories",
         "Last month's software spend, in dollars: AWS 5400, Datadog 3900, Slack 1240, GitHub 640, "
         "Vercel 520, Figma 480, Zoom 300, Notion 210, Linear 180. How concentrated is that?",
-        charted_answer_scorer(max_words=100, max_lines=6),
+        charted_answer_scorer(max_words=120),
         digest_tag="chart:spend-across-categories",
-        samples=2,
+        samples=3,
+        visual_rubric=CHART_CRITERIA,
+    ),
+    CapabilityCase(
+        "thread-followup-week",
+        "what does that week actually look like?",
+        charted_answer_scorer(max_words=120),
+        digest_tag="chart:thread-followup-week",
+        samples=3,
+        prior_messages=DAILY_TURNS,
+        visual_rubric=CHART_CRITERIA,
+    ),
+    CapabilityCase(
+        "file-sourced-series",
+        "/workspace/weekly-signups.csv has our signups by week. What is the trend?",
+        charted_answer_scorer(max_words=120),
+        digest_tag="chart:file-sourced-series",
+        samples=3,
+        workspace_files=(SIGNUP_CSV,),
+        visual_rubric=CHART_CRITERIA,
+    ),
+    CapabilityCase(
+        "thread-followup-daily-cut",
+        "what about each day?",
+        charted_answer_scorer(max_words=120),
+        digest_tag="chart:thread-followup-daily-cut",
+        samples=3,
+        prior_messages=DAILY_CUT,
+        workspace_files=(TURNS_CSV,),
         visual_rubric=CHART_CRITERIA,
     ),
     CapabilityCase(
         "two-month-comparison",
         "We spent 4180 dollars on ads in June and 5090 in July. How much is that up?",
-        unillustrated_answer_scorer(max_words=60, max_lines=4),
+        unillustrated_answer_scorer(max_words=60),
         digest_tag="chart:two-month-comparison",
         samples=2,
     ),
@@ -194,7 +274,7 @@ CASES = (
         "four-quarter-total",
         "Revenue by quarter last year was 210k, 244k, 231k, and 268k. Did we finish the year "
         "ahead of where we started?",
-        unillustrated_answer_scorer(max_words=60, max_lines=4),
+        unillustrated_answer_scorer(max_words=60),
         digest_tag="chart:four-quarter-total",
         samples=2,
     ),

@@ -1,18 +1,11 @@
 name = "chart-delivery-register"
 base = "HEAD"
-suites = ["chart_delivery", "delegated_response_register"]
-cases = [
-  "series-over-period",
-  "spend-across-categories",
-  "two-month-comparison",
-  "four-quarter-total",
-  "delegated-latency-result-only",
-]
-repeats = 3
+suites = ["chart_delivery"]
+repeats = 2
 concurrency = 3
 max_stacks = 1
-budget_usd = 60.0
-est_usd_per_case = 0.60
+budget_usd = 40.0
+est_usd_per_case = 0.30
 
 [template]
 database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
@@ -24,35 +17,47 @@ research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
 # The sandbox draws the chart, so the carrier is docker: the template image holds matplotlib and the
-# local carrier runs host subprocesses that do not. Pass counts read the whole contract at once, so
-# read the arms by what the samples did — every figure below is charts drawn, of 12 positive samples.
+# local carrier runs host subprocesses that do not. Read the arms by what the samples did, not by
+# pass counts — a case passes on any sample, and the behaviour lives in the per-sample evidence.
 #
-# Round one measured the rule at 134, 69, 37 and 0 words: 12, 8, 11 and 0. The trigger sentence is
-# the whole rule and the length above it bought nothing, so the floor sentence, the axis-label
-# sentence and the no-file deference came out. Round two cut three more words: naming the artifact
-# tag in the rule charted 12 against control's 12 and reached the tag 7 times against 8, so the rule
-# ships at 31 words without it.
+# Earlier rounds measured the rule's length at 134, 69, 37, 31 and 0 words. It charted 12, 8, 11, 12
+# and 0 of 12 above-floor samples, so the trigger sentence is the whole rule and everything above 31
+# words was inert: the axis-label sentence, the floor sentence, the no-file deference and naming the
+# artifact tag all came out on that evidence.
 #
-# Round two also found that no wording fixes the double delivery — one PNG sent by share_file and
-# carried by the tag. Control doubled 6 of 12; share_file's old "ONLY way out of the sandbox"
-# description doubled 6; dropping the ban on sending a file both ways doubled 7. The description
-# keeps its factual half, that a file reaches a member by one of two routes, and lost the ban, which
-# measured inert. The double delivery is open and wants a mechanism, not a sentence.
+# The suite measures delivery now, and the standing baseline over 15 above-floor samples is 12
+# delivered, 3 drew nothing, and 2 of the 12 named the workspace path in the reply. These arms take
+# those two faults.
 #
-# What is left to measure is the floor itself, against the anchor that keeps proving the rule works.
-# `delegated-latency-result-only` rides every arm as the neighbor case: its five phase timings sit on
-# the floor and the member says "I do not need a file". It has never passed in any arm, the no-rule
-# anchor included, so it fails on its own rubric rather than on the chart.
+# `no-workspace-path` drops "written as a PNG under /workspace". The register already forbids a
+# /workspace path in a member reply, and the suspicion is that the rule itself puts the path in the
+# model's mouth. If the leak survives the cut, the rule is not its cause; if charts stop arriving,
+# the mechanics were load-bearing after all.
+#
+# `numbers-already-said` adds one clause for the shape that misses: a follow-up whose numbers are
+# already in the thread, which is where both live Slack misses happened (2026-09-07, #ufo-eng) and
+# where `thread-followup-daily-cut` reproduces them.
 
 [[arm]]
-name = "no-floor"
+name = "no-workspace-path"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
 written as a PNG under /workspace. Fewer numbers stay in words.'''
-new = '''An answer to a member that rests on numbers carries one chart of them, written as a PNG under
-/workspace.'''
+new = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them.
+Fewer numbers stay in words.'''
+
+[[arm]]
+name = "numbers-already-said"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/delivery_register.md"
+old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
+written as a PNG under /workspace. Fewer numbers stay in words.'''
+new = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
+written as a PNG under /workspace, and a follow-up carries one whether or not the numbers were
+already said. Fewer numbers stay in words.'''
 
 [[arm]]
 name = "no-chart-rule"
