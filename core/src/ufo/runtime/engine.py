@@ -1932,6 +1932,7 @@ class TurnEngine:
                     self.turn,
                     self.agent,
                     None,
+                    self.sandbox,
                 )
                 frame = await self._commit(
                     "done",
@@ -2077,6 +2078,7 @@ class TurnEngine:
                 self.turn,
                 self.agent,
                 self.turn.speaker_member_id,
+                self.sandbox,
             )
         injected = inbound.injected
         if inbound.denied is not None:
@@ -2668,6 +2670,7 @@ class TurnEngine:
             self.turn,
             self.agent,
             speaker_member_id,
+            self.sandbox,
         )
         if submitted.denied is not None:
             return None, submitted.denied
@@ -3746,6 +3749,7 @@ class TurnEngine:
             self.turn,
             self.agent,
             bound.context.speaker_member_id,
+            self.sandbox,
         )
         if pre.denied is not None:
             outcome, error_class = (
@@ -3868,6 +3872,7 @@ class TurnEngine:
                 self.turn,
                 self.agent,
                 ready.context.speaker_member_id,
+                self.sandbox,
             )
         else:
             post = await self.hooks.fire(
@@ -3882,6 +3887,7 @@ class TurnEngine:
                 self.turn,
                 self.agent,
                 ready.context.speaker_member_id,
+                self.sandbox,
             )
             if post.output is not None:
                 content = post.output

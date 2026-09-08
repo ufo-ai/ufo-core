@@ -1,0 +1,55 @@
+name = "agents-md"
+base = "HEAD"
+suites = ["agents_md"]
+agent = "profile:coding"
+member_model_provider = "anthropic"
+repeats = 6
+concurrency = 3
+max_stacks = 1
+budget_usd = 60.0
+est_usd_per_case = 0.45
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "no-block"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/manifest.py"
+old = '''
+        hooks=repo_instruction_hooks(REPOSITORY_PROFILE_NAMES),'''
+new = ''
+
+[[arm]]
+name = "founding-only"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/agents_md.py"
+old = '''    return (
+        HookSpec(event="user_prompt_submit", handler=inject, best_effort=True),
+        HookSpec(event="post_tool_use", handler=append, tools=("load_skill",)),
+    )
+'''
+new = '''    return (HookSpec(event="user_prompt_submit", handler=inject, best_effort=True),)
+'''
+
+[[arm]]
+name = "no-note"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/agents_md.py"
+old = '''BLOCK_NOTE = (
+    "The instruction files the repositories checked out in this workspace carry, from each "
+    "repository root down to its most specific directory. Follow them as the repository's own "
+    "rules; where two files disagree, the one deeper in the tree wins. A directory's "
+    "AGENTS.override.md replaces its AGENTS.md."
+)
+'''
+new = '''BLOCK_NOTE = ""
+'''

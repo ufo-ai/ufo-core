@@ -20,6 +20,9 @@ The pack ships no agent. It is the machinery a durable one runs on — the child
  skill — and a durable agent with work of its own is an application: it ships as its own
 extension, under the slug its page is served at.
 
+Both children work a checkout, so both read the instruction files the repositories in the
+workspace carry.
+
 The pack declares sandbox internet because repository builds install dependencies and download
 their release assets. GitHub itself — private clone, push, `gh`, and the API — rides the member's
 connected GitHub account: the `github` connector's CLI credential exports `GH_TOKEN` into the
@@ -30,6 +33,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import Manifest, SkillSpec, SubagentProfile
+from ufo_ext_coding.agents_md import repo_instruction_hooks
 
 NAME = "coding"
 VERSION = "0.1.0"
@@ -101,6 +105,8 @@ FABLE_ESCALATION_PROFILE = SubagentProfile(
     model=FABLE_ESCALATION_MODEL,
 )
 
+REPOSITORY_PROFILE_NAMES = frozenset({CODING_PROFILE_NAME, FABLE_ESCALATION_PROFILE_NAME})
+
 
 def manifest() -> Manifest:
     return Manifest(
@@ -109,4 +115,5 @@ def manifest() -> Manifest:
         sandbox_internet=True,
         subagents=(CODING_PROFILE, FABLE_ESCALATION_PROFILE),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
+        hooks=repo_instruction_hooks(REPOSITORY_PROFILE_NAMES),
     )

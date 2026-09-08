@@ -23,7 +23,7 @@ from starlette.responses import Response
 from ufo.blob import BlobStore
 from ufo.browser import CdpProvider
 from ufo.harness.models.spec import ModelSpec
-from ufo.harness.sandbox.session import Carrier
+from ufo.harness.sandbox.session import Carrier, Sandbox
 from ufo.harness.sandbox.terminal import TerminalTransport
 from ufo.runtime.access.connectors import (
     AuthProxy,
@@ -631,7 +631,12 @@ class HookContext:
     wired: a listener classifies and invokes exactly as a scheduled fire does, fed only by the
     source pipeline so it can never fire on work it caused. A control-plane event
     (connection_recorded) fires outside any turn as well — inside the request that completed the
-    OAuth handoff, with that workspace bound and the connection already committed."""
+    OAuth handoff, with that workspace bound and the connection already committed.
+
+    `sandbox` is the turn's own `/workspace`, so a hook that must read the tree the turn works in
+    reads what the turn's own tools do rather than opening a session of its own. Every fire point
+    states it, and the ones that hold no sandbox — the compaction events an extension fires, and
+    every event outside a turn — state None."""
 
     ext: ExtensionContext
     payload: HookPayload
@@ -639,6 +644,7 @@ class HookContext:
     agent: Agent | None = None
     audience: Audience = SHARED_AUDIENCE
     speaker_member_id: UUID | None = None
+    sandbox: Sandbox | None = None
 
 
 @dataclass(frozen=True)

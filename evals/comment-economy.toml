@@ -1,6 +1,8 @@
 name = "comment-economy"
 base = "HEAD"
 suites = ["comment_economy"]
+agent = "profile:coding"
+member_model_provider = "anthropic"
 repeats = 6
 concurrency = 3
 max_stacks = 3

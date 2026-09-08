@@ -2550,6 +2550,33 @@ async def test_absorbing_arrivals_publishes_the_ids_the_window_took(
     ] == [first, second, invoked]
 
 
+async def test_a_turn_hook_holds_the_turns_own_sandbox(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
+    seen: list[object] = []
+
+    async def observe(ctx: HookContext) -> HookOutcome:
+        seen.append(ctx.sandbox)
+        return None
+
+    engine = _engine(turn, EchoModel(), tmp_path)
+    ext = context_for("probe", frozenset(), audience=engine.audience)
+    engine = replace(
+        engine,
+        hooks=HookChain(
+            hooks={
+                event: (BoundHook(spec=HookSpec(event=event, handler=observe), ext=ext),)
+                for event in ("user_prompt_submit", "stop")
+            },
+            audience=engine.audience,
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert seen == [engine.sandbox, engine.sandbox]
+
+
 async def test_denied_arrival_keeps_only_the_safe_denial_in_the_aggregate(
     db: None, tmp_path: Path
 ) -> None:

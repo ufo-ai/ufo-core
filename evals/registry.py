@@ -20,6 +20,7 @@ from evals.skill_loading.runner import skill_loading_task
 from evals.skill_selection.runner import skill_selection_task
 from evals.suites import (
     ab_reversal,
+    agents_md,
     app_builder,
     app_home_change,
     authority_handoff,
@@ -163,6 +164,7 @@ TASKS: tuple[EvalTask, ...] = (
         coding_caveat_completeness.CASES,
         agent="profile:coding",
     ),
+    capability_task("agents_md", agents_md.CASES, agent="profile:coding"),
     capability_task("comment_economy", comment_economy.CASES, agent="profile:coding"),
     capability_task("scope_preservation", scope_preservation.CASES),
     capability_task("completeness_inventory", completeness_inventory.CASES),

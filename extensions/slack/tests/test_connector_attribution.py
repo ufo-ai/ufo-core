@@ -121,6 +121,7 @@ async def _fire(chain: HookChain, call: CallExternalToolInput) -> HookResolution
         None,
         None,
         None,
+        None,
     )
 
 

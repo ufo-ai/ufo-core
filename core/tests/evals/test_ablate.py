@@ -48,6 +48,7 @@ from evals.memory_ingestion.models import (
     load_snapshot,
     write_snapshot,
 )
+from evals.registry import TASKS
 from evals.rollover.models import PlantedFact, RolloverCase
 from evals.rollover.snapshot import write_snapshot as write_rollover_snapshot
 from evals.stack import Matrix
@@ -55,6 +56,7 @@ from ufo.harness.models.interface import Message
 
 TEMPLATE = 'template = { pack = { name = "assistant_eval" } }'
 INGESTION_SUITE = "memory_ingestion.longmem.information_extraction"
+PROFILE_NEEDING_OWN_MODEL_KEY = "profile:coding"
 
 
 def _experiment(tmp_path: Path, body: str) -> Path:
@@ -1522,3 +1524,31 @@ def test_every_committed_experiment_can_afford_its_own_estimate() -> None:
         )
         checked += 1
     assert checked, "no committed experiment budget was checked"
+
+
+def test_every_committed_experiment_declares_the_agent_its_suites_pin() -> None:
+    """A suite that pins a workspace agent is refused unless the run names it.
+
+    `python -m evals` errors on `task.agent != args.agent` while parsing, so an experiment whose
+    suites pin one and whose spec leaves `agent` empty spends every arm's materialization and stack
+    boot before dying at `requires --agent`, with no record from any arm to compare.
+    """
+    pinned = {task.name: task.agent for task in TASKS if task.agent}
+    checked = 0
+    for path in sorted((Path(__file__).resolve().parents[3] / "evals").glob("*.toml")):
+        spec = load_experiment(path)
+        for suite in spec.suites:
+            wanted = pinned.get(suite)
+            if wanted is None:
+                continue
+            assert spec.agent == wanted, (
+                f"{path.name}: suite {suite!r} pins agent {wanted!r}, "
+                f"experiment declares {spec.agent!r}"
+            )
+            if wanted == PROFILE_NEEDING_OWN_MODEL_KEY:
+                assert spec.member_model_provider is not None, (
+                    f"{path.name}: {wanted} needs the member's own model key, so the run seeds one "
+                    "— set member_model_provider"
+                )
+            checked += 1
+    assert checked

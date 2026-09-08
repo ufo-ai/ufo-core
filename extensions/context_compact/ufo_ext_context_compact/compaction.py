@@ -416,6 +416,7 @@ class Compaction:
                 self.turn,
                 self.agent,
                 None,
+                None,
             )
             drained = self.loaded_skills.drain()
             return _Boundary(
@@ -471,6 +472,7 @@ class Compaction:
                 ),
                 self.turn,
                 self.agent,
+                None,
                 None,
             )
 

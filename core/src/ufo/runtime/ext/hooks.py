@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from ufo.harness.o11y import log, log_error
+from ufo.harness.sandbox.session import Sandbox
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.manifest import (
     Deny,
@@ -99,6 +100,7 @@ class HookChain:
         turn: Turn | None,
         agent: Agent | None,
         speaker_member_id: UUID | None,
+        sandbox: Sandbox | None,
     ) -> HookResolution:
         """Run every hook bound to `event` in order and fold their outcomes. Any Deny denies and
         short-circuits (later hooks skip); ModifyInput/ModifyOutput fold left-to-right so each hook
@@ -136,6 +138,7 @@ class HookChain:
                 agent=agent,
                 audience=self.audience,
                 speaker_member_id=speaker_member_id,
+                sandbox=sandbox,
             )
             try:
                 async with asyncio.timeout(HOOK_TIMEOUT_SECONDS):
