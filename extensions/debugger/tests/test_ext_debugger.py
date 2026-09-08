@@ -40,7 +40,7 @@ from ufo.runtime.turns.transcript import (
     transcript_key,
 )
 from ufo.schema import tables
-from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame
+from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame, Usage
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
 
@@ -63,7 +63,8 @@ class _StubDbos:
                 "started_at_epoch_ms": 1_777_215_600_123,
                 "completed_at_epoch_ms": 1_777_215_606_577,
                 "output": StreamResult(
-                    tool_calls=(ToolUseBlock(id="call-1", name="bash", input={"command": "pwd"}),)
+                    tool_calls=(ToolUseBlock(id="call-1", name="bash", input={"command": "pwd"}),),
+                    usages=(Usage(input_tokens=120, output_tokens=340),),
                 ),
             },
             {

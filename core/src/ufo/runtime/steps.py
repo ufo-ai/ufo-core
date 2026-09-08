@@ -9,6 +9,7 @@ from dbos import DBOSClient
 from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock
 from ufo.runtime.engine import DispatchResult, StreamResult
 from ufo.runtime.ext.surface import TurnStep
+from ufo.schema.records import Usage
 
 IMAGE_ATTACHMENT_NOTE = "\n[{count} image attachment(s) omitted]"
 
@@ -98,9 +99,31 @@ class DurableTurnSteps:
                         else max(completed_ms - started_ms, 0)
                     ),
                     messages=_step_messages(step.get("output")),
+                    usage=self._usage(step.get("output")),
                 )
             )
         return tuple(projected)
+
+    @staticmethod
+    def _usage(output: object) -> Usage | None:
+        """The step output's metered tokens, summed across the round's calls — the model round's
+        own usage, or a tool dispatch's embedded find calls. No output or none recorded is None."""
+        usages: tuple[Usage, ...] = ()
+        match output:
+            case StreamResult(usages=streamed):
+                usages = streamed
+            case DispatchResult(usages=dispatched):
+                usages = dispatched
+        if not usages:
+            return None
+        return Usage(
+            input_tokens=sum(u.input_tokens for u in usages),
+            output_tokens=sum(u.output_tokens for u in usages),
+            cache_read_tokens=sum(u.cache_read_tokens for u in usages),
+            cache_write_5m_tokens=sum(u.cache_write_5m_tokens for u in usages),
+            cache_write_30m_tokens=sum(u.cache_write_30m_tokens for u in usages),
+            cache_write_1h_tokens=sum(u.cache_write_1h_tokens for u in usages),
+        )
 
     @staticmethod
     def _timestamp(epoch_ms: int | None) -> datetime | None:
