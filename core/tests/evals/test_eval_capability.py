@@ -251,19 +251,17 @@ async def test_a_judge_fault_of_our_own_still_raises() -> None:
         await harness_capability.sample_capability(case, target)
 
 
-def test_the_rebuilt_answer_drops_the_artifact_span_the_window_keeps() -> None:
-    """The transcript keeps the closing answer with its artifact tag, so a later ask for the file
-    has its path; the member read the answer without it, and the engine landed the named file
-    beside the reply — so the grader-visible answer is the text without the tag."""
+def test_the_rebuilt_answer_projects_the_workspace_link_the_window_keeps() -> None:
+    """The transcript keeps the workspace link for later turns while the member reads its label."""
     messages = (
         Message(role="user", content="should we move?"),
         Message(
             role="assistant",
-            content=('Move the jobs onto a queue.\n\n<artifact path="/workspace/plan.md"/>\n'),
+            content="Move the jobs onto a queue.\n\n[plan.md](/workspace/plan.md)\n",
         ),
     )
 
     output = capability_output(messages)
 
-    assert output.response == "Move the jobs onto a queue.\n"
+    assert output.response == "Move the jobs onto a queue.\n\nplan.md\n"
     assert output.calls == ()

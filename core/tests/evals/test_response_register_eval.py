@@ -161,7 +161,11 @@ async def test_shared_report_accepts_the_exact_shared_artifact_url(tmp_path: Pat
 
 
 def test_workspace_link_regression_runs_each_attempt() -> None:
-    cases = [case for case in CASES if "workspace" in case.name and "not-a-link" in case.name]
+    names = {
+        "workspace-report-followup-stays-undelivered",
+        "report-workspace-link-opens-detail",
+    }
+    cases = [case for case in CASES if case.name in names]
 
     assert len(cases) == 2
     assert all(case.samples == 1 for case in cases)

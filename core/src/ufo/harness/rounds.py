@@ -22,6 +22,8 @@ class TextFilter(Protocol):
 
     def feed(self, chunk: str) -> str: ...
 
+    def finish(self) -> str: ...
+
 
 class ModelStreamInterrupted(RuntimeError):
     """A provider stream died mid-round to a transient provider or transport fault — an error frame
@@ -135,6 +137,8 @@ class ModelRoundRunner[RequestT, ToolCallT, ReasoningT, UsageT]:
                     error = caught
         wall_ms = int((self.monotonic() - started) * 1000)
         await state.flush()
+        if error is None:
+            await state.finish()
         return state.result(error, wall_ms)
 
 
@@ -207,6 +211,14 @@ class _RoundState[RequestT, ToolCallT, ReasoningT, UsageT]:
                 published = self.runner.publish_text(visible)
                 if inspect.isawaitable(published):
                     await published
+
+    async def finish(self) -> None:
+        visible = self.text_filter.finish()
+        if not visible:
+            return
+        published = self.runner.publish_text(visible)
+        if inspect.isawaitable(published):
+            await published
 
     def result(
         self, error: Exception | None, wall_ms: int

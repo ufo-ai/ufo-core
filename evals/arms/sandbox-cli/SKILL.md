@@ -40,11 +40,11 @@ bridge call with the corresponding direct tool.
 
 ## Handing a result back
 
-A file reaches the user through `share_file`, which returns a time-limited download link — put that
-link in your reply. Writing a file into `/workspace` does not deliver it; nothing leaves the sandbox
-until it is shared. Save the finished artifact, then share the exact path only when the ask carries a
+A file reaches the user through a Markdown link in the closing message or through `share_file`,
+which returns a time-limited download link. A plain `/workspace` path does not deliver it. Save the
+finished artifact, then share the exact path only when the ask carries a
 share trigger from the delivery register: the user asked for a file, a document, or a format, or for
 a copy of the write-up or a new revision of a file you already shared.
 A verb alone is not a trigger — "send", "give me", and "write up" name the delivery, so answer inline
-and carry the file by its path in the closing message's artifact tag. Without `share_file` in your
+and link the file as `[name](/workspace/name)` in the closing message. Without `share_file` in your
 tool set, the workspace is the handoff: name the path in your result, and the parent carries it.

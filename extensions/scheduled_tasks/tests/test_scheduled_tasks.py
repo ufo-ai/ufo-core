@@ -25,6 +25,8 @@ from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, manifest
 from ufo_ext_scheduled_tasks.runner import (
+    FINAL_FIRE_INSTRUCTION,
+    REPORT_INSTRUCTION,
     ScheduledTaskRunner,
 )
 from ufo_ext_scheduled_tasks.schedules import (
@@ -81,6 +83,12 @@ TOOL_NARRATION = "setting up the reminder"
 
 DAILY_9AM = "0 9 * * *"
 APPLY_NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
+
+
+def test_each_fire_selects_the_workspace_delivery_path() -> None:
+    assert "share_file to broadcast a result worth sharing with the workspace" in REPORT_INSTRUCTION
+    assert "use Markdown links as usual" in REPORT_INSTRUCTION
+    assert FINAL_FIRE_INSTRUCTION.startswith(REPORT_INSTRUCTION)
 
 
 def _object_tool(name: str) -> ToolDef:

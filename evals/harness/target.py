@@ -1324,7 +1324,7 @@ def _terminal_text(terminal: Json) -> str:
 
 def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
     """Rebuild the grader-visible output from the transcript: the final answer (the last assistant
-    text, without the artifact spans the window keeps and the member never reads — the engine lands
+    text, without the file links the window keeps and the member reads as labels — the engine lands
     those as files beside the reply), the ordered tool calls (each tool_use joined to its
     tool_result by id), and the error text of any call that failed."""
     private_results, private_values = _private_handoffs(messages)

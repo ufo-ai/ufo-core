@@ -2041,9 +2041,9 @@ async def _stream_closing_spans(self, spoken: tuple[MarkedReply, ...]) -> None
 def _carried_artifacts(self, answer: str) -> tuple[tuple[MarkedArtifact, ...], str]
 ```
 
-**Purpose**: Extracts artifact tags from a final answer for top-level member turns and removes those tags from the delivered answer text.
+**Purpose**: Extracts workspace file links from a final answer for top-level member turns and reduces those links to their labels in delivered text.
 
-**Data flow**: It receives answer text, returns no artifacts for child turns, otherwise parses marked artifacts and returns the carried artifacts plus cleaned answer.
+**Data flow**: It receives answer text, returns no artifacts for child turns, otherwise parses Markdown links and returns the carried artifacts plus projected answer.
 
 **Call relations**: TurnEngine.run calls it just before staging artifacts and committing the final answer.
 
@@ -3297,9 +3297,9 @@ async def _exhaust(self, messages: tuple[Message, ...]) -> Finished
 
 `domain_logic` · `request handling and live response streaming`
 
-This file solves a presentation problem. The model sometimes needs to send two kinds of extra instructions inside its answer: “this part replies to message X” and “this answer includes file Y.” Those instructions are written as small XML-like tags, such as `<reply-to ...>` or `<artifact .../>`. They are useful to the system, but they should not appear to the user as raw markup.
+This file solves a presentation problem. The model can address an earlier message with a `<reply-to ...>` span or link a workspace file with Markdown. Reply markup and workspace paths should not appear to the user.
 
-The file has two batch readers for completed text. `marked_replies` finds closed reply spans, extracts the spoken text inside them, links it to the message id if the id is valid, and returns the full text with the reply markup removed. `marked_artifacts` finds artifact tags, turns safe paths into display names, reads optional short link text, and removes the artifact markup from the final answer.
+The file has two batch readers for completed text. `marked_replies` finds closed reply spans, extracts the spoken text inside them, links it to the message id if the id is valid, and returns the full text with the reply markup removed. `marked_artifacts` finds Markdown links to workspace files, records their paths, and reduces them to their labels in the delivered answer.
 
 It also has `SpanRedaction`, which does the same kind of hiding while text is still streaming in chunks. This matters because a tag can be split across chunk boundaries, like receiving “<arti” now and “fact .../>” later. The redactor temporarily holds suspicious partial text until it knows whether it is a real tag or ordinary prose. Like a stagehand pulling cue cards out of view before the curtain opens, it lets normal words through but keeps control markup off every visible surface.
 
@@ -3326,9 +3326,9 @@ def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]
 def marked_artifacts(text: str) -> tuple[tuple[MarkedArtifact, ...], str]
 ```
 
-**Purpose**: Finds artifact tags in a finished closing answer and turns them into file attachment records. It removes the artifact markup from the answer so the user sees a clean message, while the file appears beside it as an attachment or link.
+**Purpose**: Finds workspace file links in a finished closing answer and turns them into detail records. It reduces each link to its label while the file appears beside the reply.
 
-**Data flow**: It receives one full text string. It scans for modern self-closing artifact tags and also old-style artifact body tags, but only modern tags with a non-empty path produce an artifact record. For each usable path it makes a safe display name and optional short link text, then outputs the artifact records plus the answer with artifact markup and old artifact spans stripped away.
+**Data flow**: It receives one full text string. It scans for Markdown links to local paths, records each usable path with a safe display name, and outputs the artifact records plus the answer with those links reduced to their labels.
 
 **Call relations**: This runs when a final answer is being prepared for display. It calls `_artifact_name` to decide the download/display name and `_link_text` to clean and limit the optional link text, then creates `MarkedArtifact` records that can travel alongside the cleaned reply.
 
@@ -3358,7 +3358,7 @@ def _artifact_name(named: str) -> str
 
 **Purpose**: Turns an artifact path into a safe file name for display or download. It prevents a path from smuggling in unwanted directory pieces and gives extension-less names a Markdown `.md` suffix.
 
-**Data flow**: It receives the path text from an artifact tag. It trims it, asks `contained_leaf` for only the safe final file-name part, falls back to `artifact` if there is no usable name, and adds `.md` when the name has no dot. It returns the final display name.
+**Data flow**: It receives the path from a Markdown link. It trims it, asks `contained_leaf` for only the safe final file-name part, falls back to `artifact` if there is no usable name, and adds `.md` when the name has no dot. It returns the final display name.
 
 **Call relations**: `marked_artifacts` calls this when building each `MarkedArtifact`. This keeps artifact naming predictable before the artifact information is handed to the user-facing layer.
 
@@ -3373,7 +3373,7 @@ def _link_text(named: str | None) -> str | None
 
 **Purpose**: Cleans the optional text that should be shown as the clickable label for an artifact. It accepts only short, non-empty one-line text so a tag cannot create a huge or messy link label.
 
-**Data flow**: It receives either the raw `text` attribute from an artifact tag or `None`. It collapses all whitespace into single spaces, then checks the length. It returns the cleaned text if it is between 1 and 80 characters, otherwise it returns `None`.
+**Data flow**: It receives a raw link label or `None`. It collapses all whitespace into single spaces, then checks the length. It returns the cleaned text if it is between 1 and 80 characters, otherwise it returns `None`.
 
 **Call relations**: `marked_artifacts` calls this while creating artifact records. Its output becomes the optional visible link wording; if it returns `None`, the surrounding interface can use its own default label.
 
@@ -3386,7 +3386,7 @@ def _link_text(named: str | None) -> str | None
 def feed(self, chunk: str) -> str
 ```
 
-**Purpose**: Filters one incoming stream chunk so reply and artifact markup does not appear while the model response is still being generated. It is careful with half-finished tags that may be split across chunks.
+**Purpose**: Filters one incoming stream chunk so reply markup and workspace paths do not appear while the model response is still being generated. It is careful with syntax split across chunks.
 
 **Data flow**: It receives a new text chunk and appends it to any text held back from earlier chunks. If it is currently inside a span, it looks for the matching closer and withholds everything until that closer is found. If it sees a new opener, it publishes only the normal text before it and starts withholding the tagged span. If no opener is found, it publishes only the part that is safe, keeping any trailing fragment that might still become a tag. It returns the text that can safely be shown now, with any stray span markup stripped.
 
@@ -3420,7 +3420,7 @@ def _growing_suffix(text: str, token: str) -> str
 
 **Data flow**: It receives the current held text and the closing token it is waiting for. It checks suffixes at the end of the text and returns the longest suffix that matches the beginning of that closing token. If no suffix could become the token, it returns an empty string.
 
-**Call relations**: `SpanRedaction.feed` calls this while it is inside a reply or old-style artifact span and has not yet seen the closer. The returned tail stays held for the next chunk, while non-useful hidden content is dropped.
+**Call relations**: `SpanRedaction.feed` calls this while it is inside a reply span and has not yet seen the closer. The returned tail stays held for the next chunk, while non-useful hidden content is dropped.
 
 *Call graph*: called by 1 (feed).
 
@@ -3431,7 +3431,7 @@ def _growing_suffix(text: str, token: str) -> str
 def _settled_chars(text: str) -> int
 ```
 
-**Purpose**: Decides how much buffered text is definitely ordinary text and can be shown now. It holds back a trailing `<` fragment if that fragment might become a reply or artifact tag in the next chunk.
+**Purpose**: Decides how much buffered text is definitely ordinary text and can be shown now. It holds back syntax that might become a reply span or Markdown file link in the next chunk.
 
 **Data flow**: It receives the current held text. If there is no `<`, all text is safe. If there is one, it examines the tail starting at the last `<` and checks whether it could be the start of a known opener, closer, or partial tag. It returns the number of characters safe to publish now.
 

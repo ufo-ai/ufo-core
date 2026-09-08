@@ -8,8 +8,8 @@ Markdown report artifacts produce research reports in standard GitHub-Flavored M
 
 ### Where the report goes
 
-**Write the report to `/workspace/<topic>.md` and carry it in the closing message as
-`<artifact path="/workspace/<topic>.md"/>`; as a subagent, name that path in your result instead.
+**Write the report to `/workspace/<topic>.md` and link it from the closing message as
+`[<topic>.md](/workspace/<topic>.md)`; as a subagent, name that path in your result instead.
 Share it with `share_file` only when the user asked for a file, a document, or a format.**
 
 - Derive the filename from the query topic: `<topic>.md`
@@ -284,8 +284,8 @@ Adapt structure to what the query actually requires—do not force a template on
 
 ### Quality Checklist
 
-- [ ] Report written to `/workspace/<topic>.md`, carried in the closing message's
-      `<artifact path="…"/>` tag, and shared only when the user asked for a file, a document, or
+- [ ] Report written to `/workspace/<topic>.md`, linked from the closing message with Markdown,
+      and shared only when the user asked for a file, a document, or
       a format
 - [ ] Valid GFM syntax, appropriate heading hierarchy
 - [ ] Markdown tables for comparisons and structured data

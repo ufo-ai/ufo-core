@@ -446,7 +446,7 @@ CARRYING_ANSWER = "Move the event-driven jobs onto a queue and keep cron for the
 
 
 def _carried(answer: str, name: str = REPORT_NAME) -> str:
-    return f'{answer}\n\n<artifact path="/workspace/{name}"/>\n'
+    return f"{answer}\n\n[{name}](/workspace/{name})\n"
 
 
 async def _local_sandbox(conversation_id: UUID, workspace: Path) -> SandboxSession:
@@ -471,8 +471,8 @@ async def _carrying_engine(
     hub: RecordingHub | None = None,
     member_id: UUID | None = None,
 ) -> TurnEngine:
-    """An engine whose sandbox is a local carrier over a workspace holding the report the tag names,
-    with the workspace-scoped store production hands it."""
+    """An engine whose sandbox is a local carrier over a workspace holding the report the link
+    names, with the workspace-scoped store production hands it."""
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     (workspace / REPORT_NAME).write_text(REPORT_BODY + "\n")
@@ -487,8 +487,7 @@ async def _carrying_engine(
 
 @dataclass
 class CarryingModel:
-    """Closes the turn with an answer that carries its write-up by the tag naming its /workspace
-    file, streamed in chunks that split the tag's markup."""
+    """Closes the turn with an answer linking its write-up, split across stream chunks."""
 
     text: str = _carried(CARRYING_ANSWER)
 
@@ -514,9 +513,9 @@ async def _shared(turn_id: UUID) -> list[sa.Row]:
 async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_beside_the_reply(
     db: None, tmp_path: Path
 ) -> None:
-    """The file the tag names is a `details` share of the turn — measured and stored by the route
-    `share_file` takes, under its own name — the terminal reply is the answer without the tag, the
-    live stream never carried the markup, and the window keeps the answer as written so a later ask
+    """The file the link names is a `details` share of the turn — measured and stored by the route
+    `share_file` takes, under its own name — the terminal reply and live stream keep its label,
+    and the window keeps the answer as written so a later ask
     for the file finds its path."""
     turn = await _seed_turn("queued", None)
     with ws(turn.workspace_id):
@@ -528,20 +527,21 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
         bytes_stored = await engine.blob.get(rows[0].blob_key) if rows else b""
 
     assert frame is not None
-    assert (frame.status, frame.text) == ("done", CARRYING_ANSWER + "\n")
+    delivered = f"{CARRYING_ANSWER}\n\n{REPORT_NAME}\n"
+    assert (frame.status, frame.text) == ("done", delivered)
     assert [(row.filename, row.role, row.media_type, row.size_bytes) for row in rows] == [
         (REPORT_NAME, "details", "text/markdown", len(REPORT_BODY) + 1)
     ]
     assert bytes_stored == (REPORT_BODY + "\n").encode()
     streamed = "".join(f.text for f in hub.frames if isinstance(f, TextDelta))
-    assert streamed == CARRYING_ANSWER + "\n\n\n"
+    assert streamed == delivered
     assert stored is not None
     said = [
         message.content if isinstance(message.content, str) else message.content[0].text
         for message in stored.messages
         if message.role == "assistant"
     ]
-    assert any(f'<artifact path="/workspace/{REPORT_NAME}"/>' in text for text in said)
+    assert any(f"[{REPORT_NAME}](/workspace/{REPORT_NAME})" in text for text in said)
 
 
 async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_once(
@@ -606,11 +606,11 @@ async def test_a_replayed_terminal_keeps_the_bytes_its_landed_rows_point_at(
     assert [row.blob_key for row in after] == [rows[0].blob_key]
 
 
-async def test_a_child_answer_keeps_its_artifact_tag_as_text_for_its_parent(
+async def test_a_child_answer_keeps_its_file_link_as_text_for_its_parent(
     db: None, tmp_path: Path
 ) -> None:
     """A child's answer is text its parent reads, whether the child ran a profile or is a workspace
-    agent spawned as a target: the tag stays in the answer as written and no file lands, so a child
+    agent spawned as a target: the link stays in the answer as written and no file lands, so a child
     cannot deliver to a member it does not have."""
     turn = (await _seed_turn("queued", None)).model_copy(update={"parent_turn_id": uuid4()})
     with ws(turn.workspace_id):
@@ -1088,8 +1088,7 @@ async def test_a_path_the_sandbox_cannot_serve_costs_the_report_and_never_the_an
     it with nothing a re-run could recover."""
     turn = await _seed_turn("queued", None)
     text = (
-        f"{CARRYING_ANSWER}\n\n"
-        '<artifact path="/workspace/missing.md"/>\n<artifact path="../outside.md"/>\n'
+        f"{CARRYING_ANSWER}\n\n[missing.md](/workspace/missing.md)\n[outside.md](../outside.md)\n"
     )
     with ws(turn.workspace_id):
         engine = await _carrying_engine(turn, CarryingModel(text=text), tmp_path)
@@ -1099,7 +1098,12 @@ async def test_a_path_the_sandbox_cannot_serve_costs_the_report_and_never_the_an
         status = await _turn_status(turn.id)
 
     assert frame is not None
-    assert (frame.status, frame.text, rows, status) == ("done", CARRYING_ANSWER + "\n", [], "done")
+    assert (frame.status, frame.text, rows, status) == (
+        "done",
+        f"{CARRYING_ANSWER}\n\nmissing.md\noutside.md\n",
+        [],
+        "done",
+    )
     missed = [
         record.ufo
         for record in caplog.records
@@ -1132,7 +1136,11 @@ async def test_a_store_that_refuses_the_bytes_costs_the_report_and_never_the_ans
         rows = await _shared(turn.id)
 
     assert frame is not None
-    assert (frame.status, frame.text, rows) == ("done", CARRYING_ANSWER + "\n", [])
+    assert (frame.status, frame.text, rows) == (
+        "done",
+        f"{CARRYING_ANSWER}\n\n{REPORT_NAME}\n",
+        [],
+    )
     missed = [
         record.ufo
         for record in caplog.records

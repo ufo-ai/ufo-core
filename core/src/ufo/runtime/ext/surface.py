@@ -616,7 +616,7 @@ class SharedArtifact:
 
 
 def _without_carried(conversation: Conversation) -> Conversation:
-    """The transcript with every artifact span removed from its assistant messages."""
+    """The transcript with workspace file links reduced to their labels."""
     messages = []
     for message in conversation.messages:
         if message.role != "assistant":
@@ -4592,7 +4592,7 @@ class SurfaceContext:
         blocks — or None when the conversation is not this workspace's or has no transcript yet.
         The ownership gate runs first because the blob store is unscoped: a foreign conversation id
         must yield nothing, never another tenant's transcript. An assistant message reads as the
-        member read it: the artifact spans a closing answer carried stay in the model's window and
+        member read it: workspace file links stay in the model's window and
         leave here, since their files stand beside the reply as the turn's `details` rows."""
         if not await self._owned_conversation(conversation_id):
             return None

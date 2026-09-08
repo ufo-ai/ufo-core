@@ -16,7 +16,7 @@ produced workspace files in the blob store under `artifacts/<uuid>/` — a direc
 of itself, and on S3 the sandbox uploads each itself to a presigned PUT bound to the size and
 sha256 a preflight measured — and returns a TTL-token URL per file that core's artifact route
 serves: the route for a file the member asked for, with no read cap and no whole-file buffer,
-beside the artifact tag a closing answer carries.
+beside a closing answer's linked detail.
 `spawn` delegates a typed subtask to a child turn through `ctx.spawn` — a subagent profile or a
 workspace agent, one verb over both. It blocks on the child, and a message arriving on the
 conversation ends that wait the way a foreground budget ends bash's: the child keeps running in the
@@ -1274,7 +1274,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         description=(
             "Send files to the user as downloadable links, delivered in list order, for a file "
             "the user asked for. A workspace file reaches the user by this call or by the "
-            "artifact tag a closing answer carries, and by nothing else. Every file must be "
+            "Markdown link a closing answer carries, and by nothing else. Every file must be "
             "under the /workspace "
             "directory. Any file type works (reports, code, csv, json, images, PDFs, archives) "
             "up to 5 GiB each; each is streamed out, never read whole into memory. A directory "

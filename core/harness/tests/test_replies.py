@@ -1,6 +1,4 @@
-"""What a round's span tags mean: which spans a member is owed, what the window keeps, what a
-closing answer carries as a file, and what a live stream is allowed to publish while a tag is
-still arriving."""
+"""Reply spans and Markdown links that carry workspace files, batch and streamed."""
 
 from uuid import UUID
 
@@ -16,7 +14,7 @@ MESSAGE = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
 OTHER = UUID("b6f0c2de-0d7a-5a2f-9f5e-8f6b2ad1c4e7")
 REPORT_PATH = "/workspace/nightly-runner-queue.md"
 ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
-CARRIED = f'{ANSWER}\n\n<artifact path="{REPORT_PATH}"/>\n'
+CARRIED = f"{ANSWER}\n\n[nightly-runner-queue.md]({REPORT_PATH})\n"
 
 
 def _span(message: str, body: str) -> str:
@@ -59,46 +57,36 @@ def test_nested_markup_is_stripped_and_invalid_refs_remain_deliverable() -> None
     assert replies == (MarkedReply(message_ref=None, text="here it is"),)
 
 
-def test_reply_markup_leaves_an_artifact_tag_in_the_window() -> None:
+def test_reply_markup_leaves_a_file_link_in_the_window() -> None:
     replies, window = marked_replies(f"{_span(str(MESSAGE), 'hi')}{CARRIED}")
     assert [reply.text for reply in replies] == ["hi"]
     assert window == f"\nhi\n{CARRIED}"
 
 
-def test_a_closing_answer_yields_its_artifact_and_the_words_without_it() -> None:
+def test_a_closing_answer_yields_its_file_and_the_link_label() -> None:
     artifacts, delivered = marked_artifacts(CARRIED)
     assert artifacts == (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),)
-    assert delivered == ANSWER + "\n"
+    assert delivered == ANSWER + "\n\nnightly-runner-queue.md\n"
 
 
-def test_artifacts_keep_their_order_and_an_empty_one_carries_nothing() -> None:
-    text = (
-        '<artifact path="/workspace/a.md"/>'
-        '<artifact path="  "/>'
-        '<artifact path="/workspace/out/c.csv"/> done'
-    )
+def test_file_links_keep_their_order_and_names() -> None:
+    text = "[first](/workspace/a.md) [second](out/c.csv) [third](plan)"
     artifacts, delivered = marked_artifacts(text)
     assert [(artifact.name, artifact.path) for artifact in artifacts] == [
         ("a.md", "/workspace/a.md"),
-        ("c.csv", "/workspace/out/c.csv"),
+        ("c.csv", "out/c.csv"),
+        ("plan.md", "plan"),
     ]
-    assert delivered == " done"
+    assert delivered == "first second third"
 
 
-def test_an_artifact_name_is_its_leaf_and_defaults_to_markdown() -> None:
-    text = (
-        '<artifact path="/workspace/reports/q3.md"/>'
-        '<artifact path="/workspace/plan"/>'
-        '<artifact path=".."/>'
+def test_non_file_links_images_code_and_call_syntax_stay_prose() -> None:
+    prose = (
+        "[docs](https://example.test/plan.md) [mail](mailto:a@b.test) [top](#top) "
+        "[cdn](//cdn.test/x.md) ![chart](chart.png) handlers[name](event) "
+        "`[read](plan.md)` and [x] (y)\n"
     )
-    artifacts, _ = marked_artifacts(text)
-    assert [artifact.name for artifact in artifacts] == ["q3.md", "plan.md", "artifact.md"]
-
-
-def test_a_tag_that_does_not_close_itself_is_stripped_and_carries_nothing() -> None:
-    artifacts, delivered = marked_artifacts('Done. <artifact path="/workspace/x.md"> half a report')
-    assert artifacts == ()
-    assert delivered == "Done.  half a report"
+    assert marked_artifacts(prose) == ((), prose)
 
 
 def test_a_stream_publishes_narration_at_every_chunk_size_and_never_the_span() -> None:
@@ -111,22 +99,21 @@ def test_a_stream_publishes_narration_at_every_chunk_size_and_never_the_span() -
         assert published == "before  after"
 
 
-def test_a_stream_withholds_an_artifact_span_at_every_chunk_size() -> None:
-    for size in (1, 5, 7, 512):
+def test_a_stream_turns_a_file_link_into_its_label_at_every_chunk_size() -> None:
+    for size in range(1, len(CARRIED) + 1):
         redaction = SpanRedaction()
         published = "".join(
             redaction.feed(CARRIED[start : start + size]) for start in range(0, len(CARRIED), size)
         )
-        assert published == ANSWER + "\n\n\n"
-        assert "artifact" not in published
-        assert "Nightly" not in published
+        published += redaction.finish()
+        assert published == ANSWER + "\n\nnightly-runner-queue.md\n"
 
 
-def test_a_stream_redacts_a_reply_and_an_artifact_in_one_round() -> None:
-    text = f'Working. {_span(str(MESSAGE), "spoken")} then <artifact path="/workspace/x.md"/> end'
+def test_a_stream_redacts_a_reply_and_projects_a_file_link_in_one_round() -> None:
+    text = f"Working. {_span(str(MESSAGE), 'spoken')} then [details](/workspace/x.md) end"
     redaction = SpanRedaction()
     published = "".join(redaction.feed(char) for char in text)
-    assert published == "Working.  then  end"
+    assert published + redaction.finish() == "Working.  then details end"
 
 
 def test_stream_redaction_handles_partial_unclosed_and_stray_markup() -> None:
@@ -142,22 +129,13 @@ def test_stream_redaction_handles_partial_unclosed_and_stray_markup() -> None:
     assert SpanRedaction().feed("done <reply-to") == "done "
     assert SpanRedaction().feed("text</reply-to>more") == "textmore"
     assert SpanRedaction().feed("a <b> c <artifice> d") == "a <b> c <artifice> d"
-    assert SpanRedaction().feed("done <artifact") == "done "
-    assert SpanRedaction().feed("text</artifact>more") == "textmore"
 
 
-def test_the_earlier_body_span_is_stripped_and_carries_nothing() -> None:
-    earlier = f'{ANSWER}\n\n<artifact name="x.md">\n# Nightly\n\nMove the jobs.\n</artifact>\n'
-    assert marked_artifacts(earlier) == ((), ANSWER + "\n")
-    both = f'{CARRIED}<artifact name="x.md">body</artifact>\n'
-    assert marked_artifacts(both) == (
-        (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),),
-        ANSWER + "\n",
-    )
-    for size in (1, 5, 512):
+def test_stream_images_call_syntax_and_trailing_citations_stay_prose() -> None:
+    prose = "![chart](chart.png) handlers[name](event) [2]"
+    for size in range(1, len(prose) + 1):
         redaction = SpanRedaction()
         published = "".join(
-            redaction.feed(earlier[start : start + size]) for start in range(0, len(earlier), size)
+            redaction.feed(prose[start : start + size]) for start in range(0, len(prose), size)
         )
-        assert published == ANSWER + "\n\n\n"
-        assert "Nightly" not in published
+        assert published + redaction.finish() == prose

@@ -103,15 +103,13 @@ def test_shell_writes_the_report_and_sends_it_only_when_the_member_asks() -> Non
     assert "For a member, the artifact is a file in /workspace — a Markdown write-up" in prose
     assert "or a chart, one you wrote" in prose
     assert "one a subagent wrote in your sandbox" in prose
-    assert "carried by a tag at the end of the closing message," in prose
-    assert '<artifact path="/workspace/nightly-runner-queue.md"/>' in SHELL
-    assert '<artifact name="' not in SHELL
-    assert "when the agent shares your sandbox, carry its /workspace path in the tag" in prose
-    assert "save what it returned under /workspace as received and carry that" in prose
-    assert "The member's surface offers the file as a download beside the reply" in prose
-    assert "says nothing about where the write-up is or that it can be sent" in prose
+    assert "linked from the closing message under the file's own name" in prose
+    assert "[nightly-runner-queue.md](/workspace/nightly-runner-queue.md)" in SHELL
+    assert "when the agent shares your sandbox, link its /workspace path" in prose
+    assert "save what it returned under /workspace as received and link that" in prose
+    assert "The member's surface opens the linked file beside the reply" in prose
     assert (
-        "share a file with share_file only when the member's ask carries one of these triggers"
+        "Share a file with share_file only when the member's ask carries one of these triggers"
     ) in prose
     assert "- they asked for a file, a document, or a format;" in SHELL
     assert (

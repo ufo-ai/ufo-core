@@ -13,7 +13,8 @@ Call `spawn(target="coding", ...)` immediately after this skill loads. Do not ca
 
 1. Choose the repository setup mode (below) and `spawn(target="coding", ...)` with the setup sentence as the objective's first line, followed by the task and any instructions the request carried for whoever does the work, verbatim.
 2. Read the child's report; `read` its deliverable if you must inspect it.
-3. Deliver (`share_file` the file the child wrote, or the shared delivery register) and reply.
+3. Link the file the child wrote with Markdown under the shared delivery register, or use
+   `share_file` when the member's ask carries a share trigger, then reply.
 
 After a bare foreground `spawn` raises `TimeoutError`, do not infer the child stopped and do not
 expect a later result to be delivered. Do not inspect, pause, or spawn a duplicate. Report that the

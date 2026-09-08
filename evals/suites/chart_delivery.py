@@ -90,7 +90,7 @@ SIGNUP_CSV = WorkspaceFile(
 
 def _delivered(output: CapabilityOutput) -> tuple[SharedArtifact, ...]:
     """Every image the turn attached to itself, by either carrier. `file` is a share_file share and
-    `details` a closing-message artifact tag; both put the file on the turn, and which one decides
+    `details` a closing-message file link; both put the file on the turn, and which one decides
     whether a surface draws a picture or a link."""
     return tuple(
         artifact

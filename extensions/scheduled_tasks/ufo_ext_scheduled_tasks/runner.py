@@ -27,12 +27,13 @@ from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
 
 CLAIM_LEASE_SECONDS = 300
 REPORT_INSTRUCTION = (
-    "If this run produced something worth reporting, write the report to a markdown file and "
-    "share_file it — the shared file is the run's published result. A run with nothing to report "
-    "shares nothing."
+    "A run that found nothing new posts nothing. Use share_file to broadcast a result worth "
+    "sharing with the workspace. Otherwise follow the delivery register and use Markdown links "
+    "as usual."
 )
 FINAL_FIRE_INSTRUCTION = (
-    "This is the final permitted fire. Complete the scheduled task and settle its result; an "
+    f"{REPORT_INSTRUCTION}\n\nThis is the final permitted fire. Complete the scheduled task and "
+    "settle its result; an "
     "external-tool failure is a result, not a reason to retry after the check-in. Then call "
     'ask_user as the final tool with choices "Continue same cadence", "Change cadence", and '
     '"Stop". After ask_user returns, call no more tools; close with the task result and '

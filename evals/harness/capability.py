@@ -147,7 +147,7 @@ def shared_file_names(call: ToolInvocation) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class SharedArtifact:
     """One artifact durably attached to the evaluated turn: a `file` the turn shared, or the
-    `details` its closing reply carried in an artifact tag. A workspace file read for judging is a
+    `details` its closing reply carried in a Markdown link. A workspace file read for judging is a
     `file`."""
 
     name: str

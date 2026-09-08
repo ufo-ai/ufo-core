@@ -118,7 +118,6 @@ from ufo.harness.o11y import (
     warn,
 )
 from ufo.harness.replies import (
-    ARTIFACT_TAG,
     MarkedArtifact,
     MarkedReply,
     SpanRedaction,
@@ -257,6 +256,7 @@ CACHE_1H_SECONDS = 60 * 60
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
 MAX_MIDSTREAM_ROUND_RETRIES = 1
+CARRIED_FILE_KEY_PART = "artifact"
 PROVIDER_RETRY_NOTICE = "The model provider limited this task. It will retry after {retry_at}."
 SANDBOX_PROVIDER_RETRY_NOTICE = (
     "The sandbox provider is unavailable. This task will retry after {retry_at}."
@@ -2549,9 +2549,9 @@ class TurnEngine:
             await self._publish(TextDelta(text=reply.text))
 
     def _carried_artifacts(self, answer: str) -> tuple[tuple[MarkedArtifact, ...], str]:
-        """The artifact spans a closing answer carries for a member, and the answer without them —
+        """The workspace files a closing answer links for a member, and the answer with labels —
         the words the terminal frame delivers. A child turn's answer — a spawned profile's or a
-        workspace agent's — is text its parent reads, so its tags stay in place and nothing is
+        workspace agent's — is text its parent reads, so its links stay in place and nothing is
         carried."""
         if self.turn.parent_turn_id is not None:
             return (), answer
@@ -2562,18 +2562,18 @@ class TurnEngine:
     ) -> tuple[_CarriedFile, ...]:
         """Put each carried file's bytes in the blob store ahead of the commit that lands its
         `details` row: the row lands in the commit's own transaction, so a writeback claimed the
-        instant the turn is terminal finds it. The tag names a /workspace file, measured and stored
+        instant the turn is terminal finds it. The link names a /workspace file, measured and stored
         by the route `share_file` takes, so a report the turn or another agent wrote crosses as
         written. A file that cannot be staged — a path that leaves /workspace or has no regular
         file behind it, a file over the carried bound, a store that refuses the bytes — costs the
         report and is logged, never the answer: the words the model wrote still deliver, since a
         failed terminal would lose them with nothing a re-run could recover. The key is the turn,
-        attempt and tag position, as a spoken reply's identity is, so a replayed run puts the same
+        attempt and link position, as a spoken reply's identity is, so a replayed run puts the same
         bytes under the same key and the rows it already landed keep them."""
         staged = []
         for index, artifact in enumerate(carried):
             artifact_id = uuid5(
-                NAMESPACE_URL, f"{self.turn.id}/{self.attempt}/{ARTIFACT_TAG}/{index}"
+                NAMESPACE_URL, f"{self.turn.id}/{self.attempt}/{CARRIED_FILE_KEY_PART}/{index}"
             )
             key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{artifact.name}"
             try:

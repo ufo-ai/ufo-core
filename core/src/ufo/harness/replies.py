@@ -1,16 +1,10 @@
-"""The spans a round marks — `<reply-to message="…">` replies spoken mid-turn and the
-`<artifact path="…"/>` tag naming the file a closing answer carries — and the redaction that keeps
-their markup off every surface.
+"""The spans a round marks and the Markdown links that carry workspace files.
 
 `marked_replies` reads the reply spans out of a completed round's text and returns the text the
-window keeps, the same words with the markup gone. `marked_artifacts` reads the artifact tags out
-of a closing answer and returns the answer without them: the file a tag names lands beside the
-reply, never words in it. `SpanRedaction` does both incrementally over the live delta stream, where
-a chunk boundary falls anywhere. Malformed markup reaches no member: a stray closer and a nested
-opener are stripped, a reply no closer answered delivers nothing, and an artifact tag that does not
-close itself carries nothing. The tag's earlier form, a `name` opener closed by `</artifact>` around
-the write-up, is withheld and stripped the same way, so a transcript the release being replaced
-wrote reads as the member read it."""
+window keeps, the same words with the markup gone. `marked_artifacts` reads workspace file links
+out of a closing answer and returns the answer with each link reduced to its label. `SpanRedaction`
+applies the same projection incrementally wherever a model stream splits. Malformed reply markup
+reaches no member; incomplete Markdown remains prose when the stream ends."""
 
 import re
 from dataclasses import dataclass, field
@@ -24,19 +18,11 @@ REPLY_OPENER = re.compile(rf'<{REPLY_TAG}\s+message="([^"<>]*)"\s*>')
 REPLY_SPAN = re.compile(f"{REPLY_OPENER.pattern}(.*?){re.escape(REPLY_CLOSER)}", re.DOTALL)
 REPLY_MARKUP = re.compile(rf"<{REPLY_TAG}(?:\s[^<>]*)?>|{re.escape(REPLY_CLOSER)}")
 
-ARTIFACT_TAG = "artifact"
-ARTIFACT_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+path="([^"<>]*)"\s*/>')
-ARTIFACT_CLOSER = f"</{ARTIFACT_TAG}>"
-ARTIFACT_BODY_OPENER = re.compile(rf'<{ARTIFACT_TAG}\s+name="[^"<>]*"\s*>')
-ARTIFACT_BODY_SPAN = re.compile(
-    rf"{ARTIFACT_BODY_OPENER.pattern}.*?{re.escape(ARTIFACT_CLOSER)}", re.DOTALL
-)
-ARTIFACT_SPAN = re.compile(
-    rf"\s*(?:{ARTIFACT_OPENER.pattern}|{ARTIFACT_BODY_SPAN.pattern})", re.DOTALL
-)
-ARTIFACT_MARKUP = re.compile(rf"<{ARTIFACT_TAG}(?:\s[^<>]*)?>|{re.escape(ARTIFACT_CLOSER)}")
 ARTIFACT_FALLBACK_NAME = "artifact"
 ARTIFACT_DEFAULT_SUFFIX = ".md"
+FILE_LINK = re.compile(r"(?<![\w!`])\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))\s*\)")
+LINK_TAIL = re.compile(r"\[[^\]\n]*(?:\](?:\([^)\s]*)?)?$")
+LINK_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 @dataclass(frozen=True)
@@ -52,15 +38,7 @@ class _Tag:
 
 SPAN_TAGS = (
     _Tag(REPLY_OPENER, REPLY_CLOSER, f"<{REPLY_TAG}", re.compile(rf"<{REPLY_TAG}\s[^<>]*")),
-    _Tag(ARTIFACT_OPENER, "", f"<{ARTIFACT_TAG}", re.compile(rf"<{ARTIFACT_TAG}\s[^<>]*")),
-    _Tag(
-        ARTIFACT_BODY_OPENER,
-        ARTIFACT_CLOSER,
-        f"<{ARTIFACT_TAG}",
-        re.compile(rf"<{ARTIFACT_TAG}\s[^<>]*"),
-    ),
 )
-SPAN_MARKUP = re.compile(f"{REPLY_MARKUP.pattern}|{ARTIFACT_MARKUP.pattern}")
 
 
 @dataclass(frozen=True)
@@ -74,8 +52,7 @@ class MarkedReply:
 
 @dataclass(frozen=True)
 class MarkedArtifact:
-    """One artifact a closing answer carried: the /workspace file its tag named, and the download
-    name it takes — the file's own."""
+    """One workspace file a closing answer linked and its download name."""
 
     name: str
     path: str
@@ -94,19 +71,18 @@ def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
 
 
 def marked_artifacts(text: str) -> tuple[tuple[MarkedArtifact, ...], str]:
-    """The answer's artifact tags in the order the model wrote them, and the answer with every tag
-    and every trace of the markup removed — the whitespace that led into a tag goes with it. A tag
-    naming no path carries no file. A name is the path's last segment, `artifact` when it has none,
-    and a name with no extension is a Markdown file. A transcript the release being replaced wrote
-    holds the tag's earlier form, `<artifact name="…">` to `</artifact>` with the write-up inside;
-    that span is stripped like the rest and carries nothing, since its file already stands beside
-    the reply it closed."""
+    """The linked workspace files in written order and the answer with only their labels."""
     artifacts: list[MarkedArtifact] = []
-    for match in ARTIFACT_SPAN.finditer(text):
-        path = match.group(1)
-        if path is not None and path.strip():
-            artifacts.append(MarkedArtifact(name=_artifact_name(path), path=path.strip()))
-    return tuple(artifacts), ARTIFACT_MARKUP.sub("", ARTIFACT_SPAN.sub("", text))
+
+    def link(match: re.Match[str]) -> str:
+        target = match.group(2) or match.group(3)
+        if not _file_target(target):
+            return match.group(0)
+        artifacts.append(MarkedArtifact(name=_artifact_name(target), path=target))
+        return match.group(1)
+
+    delivered = FILE_LINK.sub(link, text)
+    return tuple(artifacts), delivered
 
 
 def _named_message(named: str) -> UUID | None:
@@ -121,17 +97,17 @@ def _artifact_name(named: str) -> str:
     return name if "." in name else name + ARTIFACT_DEFAULT_SUFFIX
 
 
+def _file_target(target: str) -> bool:
+    return not (LINK_SCHEME.match(target) or target.startswith(("#", "//")))
+
+
 @dataclass
 class SpanRedaction:
-    """One round's live text minus its marked spans, chunk by chunk: a reply span is delivered on
-    its own and an artifact span becomes a file, so neither streams as narration and their markup
-    never reaches a member. `feed` publishes text before an opener, text after a closer, and a `<`
-    the following characters prove to be prose; a span and a tail still growing into a tag are
-    withheld, and whatever is withheld when the round ends is dropped — the window keeps the whole
-    text."""
+    """Project reply spans and workspace links consistently from arbitrary model chunks."""
 
     held: str = field(default="")
     closer: str | None = field(default=None)
+    previous: str = field(default="")
 
     def feed(self, chunk: str) -> str:
         self.held += chunk
@@ -156,7 +132,26 @@ class SpanRedaction:
             published.append(self.held[:settled])
             self.held = self.held[settled:]
             break
-        return SPAN_MARKUP.sub("", "".join(published))
+        text = REPLY_MARKUP.sub("", "".join(published))
+        if not text:
+            return ""
+        linked = FILE_LINK.sub(
+            lambda match: (
+                match.group(1) if _file_target(match.group(2) or match.group(3)) else match.group(0)
+            ),
+            self.previous + text,
+        )[len(self.previous) :]
+        self.previous = text[-1]
+        return linked
+
+    def finish(self) -> str:
+        if self.closer is not None or _settled_chars(self.held) < len(self.held):
+            visible = self.held if self.held.startswith("[") else ""
+        else:
+            visible = self.held
+        self.held = ""
+        self.closer = None
+        return visible
 
 
 def _first_opener(text: str) -> tuple[re.Match[str], _Tag] | None:
@@ -174,13 +169,15 @@ def _growing_suffix(text: str, token: str) -> str:
 
 
 def _settled_chars(text: str) -> int:
-    """How much of `text` can be published now: everything up to a trailing `<` that could still be
-    growing into a span tag, and all of it when the last `<` cannot be one."""
-    cut = text.rfind("<")
-    if cut == -1:
-        return len(text)
-    tail = text[cut:]
-    for tag in SPAN_TAGS:
-        if tag.head.startswith(tail) or tag.closer.startswith(tail) or tag.partial.fullmatch(tail):
-            return cut
-    return len(text)
+    """The prefix settled as prose rather than a partial reply span or file link."""
+    cut = len(text)
+    angle = text.rfind("<")
+    if angle != -1:
+        tail = text[angle:]
+        if any(
+            tag.head.startswith(tail) or tag.closer.startswith(tail) or tag.partial.fullmatch(tail)
+            for tag in SPAN_TAGS
+        ):
+            cut = angle
+    growing = LINK_TAIL.search(text[:cut])
+    return growing.start() if growing is not None else cut

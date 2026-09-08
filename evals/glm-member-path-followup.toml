@@ -1,7 +1,7 @@
 name = "glm-member-path-followup"
 base = "017fc2a84cafb31a8a29fa1eaff9f4d54bb570c9"
 suites = ["response_register"]
-cases = ["workspace-report-followup-is-not-a-link"]
+cases = ["workspace-report-followup-stays-undelivered"]
 repeats = 8
 concurrency = 4
 max_stacks = 2

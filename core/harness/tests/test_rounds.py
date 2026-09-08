@@ -58,6 +58,22 @@ class Withheld:
         visible, self.held = self.held.split("|", 1)
         return visible
 
+    def finish(self) -> str:
+        return ""
+
+
+@dataclass
+class Trailing:
+    held: str = ""
+
+    def feed(self, chunk: str) -> str:
+        self.held += chunk
+        return ""
+
+    def finish(self) -> str:
+        visible, self.held = self.held, ""
+        return visible
+
 
 EVENTS = RoundEventTypes(
     stream_start=StreamStart,
@@ -106,6 +122,25 @@ async def test_collects_one_stream_and_builds_tool_calls_in_provider_order() -> 
     assert result.usages == (Usage(12),)
     assert published == ["shown"]
     assert milestones == ["provider_start", "first_visible_event"]
+
+
+async def test_a_clean_stream_publishes_text_the_filter_settles_at_the_end() -> None:
+    async def complete(_request: str) -> AsyncIterator[object]:
+        yield Text("[2]")
+        yield Usage(1)
+
+    published: list[str] = []
+    runner = ModelRoundRunner(
+        complete=complete,
+        events=EVENTS,
+        new_tool_call=ToolCall,
+        publish_text=published.append,
+    )
+
+    result = await runner.run("request", Trailing())
+
+    assert result.text == "[2]"
+    assert published == ["[2]"]
 
 
 async def test_a_stream_that_ends_on_unclosed_tool_arguments_is_an_interruption() -> None:

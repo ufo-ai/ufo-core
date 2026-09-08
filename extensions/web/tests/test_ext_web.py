@@ -5167,11 +5167,7 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
                 ),
                 Message(
                     role="assistant",
-                    content=(
-                        'Move the jobs onto a queue.\n\n<artifact path="/workspace/plan.md"/>\n'
-                        '<artifact name="earlier.md">\n# Earlier\n\nA span the release '
-                        "being replaced wrote.\n</artifact>\n"
-                    ),
+                    content="Move the jobs onto a queue.\n\n[plan.md](/workspace/plan.md)\n",
                 ),
             ),
         ),
@@ -5183,7 +5179,7 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
         headers=headers,
     )
     (reply,) = [m for m in loaded.json()["messages"] if m["role"] == "assistant"]
-    assert reply["text"] == "Move the jobs onto a queue."
+    assert reply["text"] == "Move the jobs onto a queue.\n\nplan.md"
     assert sorted((f["filename"], f["role"]) for f in reply["files"]) == [
         ("data.csv", "file"),
         ("plan.md", "details"),

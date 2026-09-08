@@ -111,10 +111,10 @@ name = "report-says-it-once"
 path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = """
 - report, when you deliver analysis, comparison, research, or a document: put the full report in
-  one Markdown artifact using the carrier in <delivery>. Inline carries its conclusion, key
+  one Markdown artifact using the link in <delivery>. Inline carries its conclusion, key
 """
 new = """
 - report, when you deliver analysis, comparison, research, or a document: put the report in one
-  Markdown artifact using the carrier in <delivery>, each finding stated once and no source the
+  Markdown artifact using the link in <delivery>, each finding stated once and no source the
   reader already holds copied back into it. Inline carries its conclusion, key
 """

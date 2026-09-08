@@ -4076,7 +4076,7 @@ async def turn(self, request: ModelRequest) -> Message
 def _without_carried(conversation: Conversation) -> Conversation
 ```
 
-**Purpose**: Removes embedded artifact markup from assistant messages in a transcript. This lets readers see the answer text without hidden file-carrying spans.
+**Purpose**: Reduces workspace file links in assistant messages to their labels. This lets transcript readers see the answer text as the member did.
 
 **Data flow**: It receives a `Conversation`, walks each message, strips marked artifact text from assistant text blocks, and returns a copied conversation with cleaned content.
 
@@ -6306,7 +6306,7 @@ async def read_transcript(self, conversation_id: UUID) -> Conversation | None
 
 **Purpose**: Reads and decodes a conversation’s durable transcript from blob storage. It returns null for foreign or missing transcripts.
 
-**Data flow**: It verifies conversation ownership, loads transcript bytes by key, decodes them, removes carried artifact spans, and returns a `Conversation`.
+**Data flow**: It verifies conversation ownership, loads transcript bytes by key, decodes them, reduces workspace file links to labels, and returns a `Conversation`.
 
 **Call relations**: Debugger and web conversation, slot, and subagent views call this.
 

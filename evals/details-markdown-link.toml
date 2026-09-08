@@ -1,0 +1,85 @@
+name = "details-markdown-link"
+base = "HEAD"
+suites = ["response_register"]
+cases = [
+  "report-workspace-link-opens-detail",
+  "report-coding-skill-links-child-report",
+  "report-research-skill-links-the-report",
+  "report-file-asked-for-up-front",
+  "scheduled-worthy-result-broadcasts",
+]
+repeats = 1
+concurrency = 4
+max_stacks = 1
+budget_usd = 45.0
+est_usd_per_case = 0.35
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "no-link-carrier"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/delivery_register.md"
+old = '''When detail crosses the chosen register's inline boundary, put it in one artifact and never
+duplicate its body inline. For a member, the artifact is a file in /workspace — a Markdown write-up
+or a chart, one you wrote or one a subagent wrote in your sandbox — linked from the closing
+message under the file's own name:
+
+[nightly-runner-queue.md](/workspace/nightly-runner-queue.md)
+
+The member's surface opens the linked file beside the reply and keeps only its label in the
+message. Never name a /workspace path as plain text. Reuse the name for a later revision.'''
+new = '''When detail crosses the chosen register's inline boundary, put it in one artifact and never
+duplicate its body inline. Write the artifact to /workspace and name its file in the closing
+message. Never name a /workspace path as plain text.'''
+
+[[arm]]
+name = "no-coding-link"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
+old = '''3. Link the file the child wrote with Markdown under the shared delivery register, or use
+   `share_file` when the member's ask carries a share trigger, then reply.'''
+new = '''3. Reply under the shared delivery register and use `share_file` only when the member's ask
+   carries a share trigger.'''
+
+[[arm]]
+name = "no-research-link"
+
+[[arm.replacements]]
+path = "extensions/research/ufo_ext_research/skills/research-report/SKILL.md"
+old = '''**Write the report to `/workspace/<topic>.md` and link it from the closing message as
+`[<topic>.md](/workspace/<topic>.md)`; as a subagent, name that path in your result instead.
+Share it with `share_file` only when the user asked for a file, a document, or a format.**'''
+new = '''**Write the report to `/workspace/<topic>.md`; as a subagent, name that path in your result.
+Share it with `share_file` only when the user asked for a file, a document, or a format.**'''
+
+[[arm]]
+name = "no-scheduled-share"
+
+[[arm.replacements]]
+path = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/runner.py"
+old = '''REPORT_INSTRUCTION = (
+    "A run that found nothing new posts nothing. Use share_file to broadcast a result worth "
+    "sharing with the workspace. Otherwise follow the delivery register and use Markdown links "
+    "as usual."
+)'''
+new = '''REPORT_INSTRUCTION = "Follow the delivery register for this scheduled run."'''
+
+[[arm]]
+name = "no-tool-link"
+
+[[arm.replacements]]
+path = "core/src/ufo/host/tools/builtins.py"
+old = '''"Send files to the user as downloadable links, delivered in list order, for a file "
+            "the user asked for. A workspace file reaches the user by this call or by the "
+            "Markdown link a closing answer carries, and by nothing else. Every file must be "'''
+new = '''"Send files to the user as downloadable links, delivered in list order, for a file "
+            "the user asked for. Every file must be "'''

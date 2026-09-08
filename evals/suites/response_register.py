@@ -4,14 +4,14 @@ Each case seeds a thread with `prior_messages` and grades the closing text's mea
 words, lines, headers, bullet lines — against the register the turn earns. One case per register
 the shell declares, run in opposing pairs so a suite score cannot be bought by going uniformly
 terse or uniformly structured. Each dispute and report crosses one boundary: chat carries a short
-standalone summary, while one Markdown report carried in the reply's artifact tag — never sent as
+standalone summary, while one Markdown report linked from the reply — never sent as
 a file, because the ask named none — carries the structured detail. Two cases flip register
 mid-thread — an acknowledgement after a report, an analysis after banter — because the register is
 chosen per turn, never inherited from the thread.
 
 Sending that report as a file is decided by the trigger in the ask and by nothing else, so the
 cases sit on both sides of the line: an ask that names a file has to arrive through share_file,
-while an ask that only says "send me" or "give me" leaves the same report in its tag. A suite that
+while an ask that only says "send me" or "give me" leaves the same report linked. A suite that
 graded one side alone would score highest on a turn that always shares or never does. One further
 case grades a chat register against the workspace, because a discuss reply that quietly writes a
 report satisfies its word budget while breaking the rule that an ack, answer, or discuss delivery
@@ -45,7 +45,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from ufo_ext_research.manifest import SKILLS_ROOT
+from ufo_ext_coding.manifest import SKILLS_ROOT as CODING_SKILLS_ROOT
+from ufo_ext_research.manifest import SKILLS_ROOT as RESEARCH_SKILLS_ROOT
+from ufo_ext_scheduled_tasks.runner import REPORT_INSTRUCTION
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -284,7 +286,7 @@ def carried_report_scorer(
     expected_name: str = "",
     expected_body: bytes = b"",
 ) -> Grader:
-    """A standalone chat summary, plus one Markdown report the reply carried in its artifact tag
+    """A standalone chat summary, plus one Markdown report the reply carried in a Markdown link
     and no file sent.
 
     The report keeps the word and header floors, because the floors are what stops brevity from
@@ -384,7 +386,7 @@ def carried_report_scorer(
         f"{summary_max_words} words over at most {summary_max_lines} lines without a workspace "
         f"path or member-unreachable Markdown link, plus exactly one Markdown report of at least "
         f"{report_min_words} words under at least {report_min_headers} section headers, carried in "
-        f"the reply's artifact tag{reuse}{verbatim} and never sent as a file",
+        f"the reply's Markdown link{reuse}{verbatim} and never sent as a file",
         grade,
     )
 
@@ -898,9 +900,8 @@ def _file(path: str, body: str) -> WorkspaceFile:
 
 
 def _carried(report: WorkspaceFile) -> str:
-    """A seeded assistant message's artifact tag: the report as the closing reply carried it, naming
-    the workspace file a follow-up ask reuses — the case stages that file too."""
-    return f'<artifact path="/workspace/{report.path}"/>'
+    """A seeded assistant message's file link, naming the workspace file a follow-up ask reuses."""
+    return f"[{report.path}](/workspace/{report.path})"
 
 
 CHANGE_NOTE = _file(
@@ -1073,7 +1074,60 @@ INVOICE_EXPORT_NOTES = _file(
     - finance re-runs a partial export by hand, about forty minutes each time
     """,
 )
-RESEARCH_REPORT_SKILL = SKILLS_ROOT / "research-report"
+CODING_CHILD_REPORT = _file(
+    "coding-child-report.md",
+    """
+# Parser failure and fix
+
+## Root cause
+The stream parser held a trailing opening bracket because another chunk could complete a Markdown
+link. The provider then ended the stream without another text delta. The round runner flushed its
+ordinary text buffer but gave the parser no end-of-stream signal, so a final citation marker such
+as `[2]` remained inside the parser and never reached the member. The stored closing answer still
+contained the marker, which made the live stream and committed answer disagree.
+
+## Change
+The text-filter contract now has a finish operation. A cleanly completed model stream calls it
+after the provider and byte buffers finish. The Markdown parser uses that signal to release any
+incomplete link syntax as ordinary prose. Complete links to workspace files still reduce to their
+labels and stage their files, while links inside code, image syntax, web links, and bracketed call
+syntax remain untouched.
+
+## Proof
+Focused tests split links at every chunk boundary and compare live output with batch projection.
+Separate cases cover trailing citation markers, images, inline and fenced code, external URLs,
+relative files, absolute workspace files, and expression syntax such as `handlers[name](event)`.
+The engine test proves a linked file becomes one durable detail row while the visible answer keeps
+only its label.
+""",
+)
+CODING_SKILL = CODING_SKILLS_ROOT / "coding"
+RESEARCH_REPORT_SKILL = RESEARCH_SKILLS_ROOT / "research-report"
+
+
+CODING_SKILL_LOADED = (
+    Message(
+        role="user",
+        content="Fix the stream parser and have the coding child leave its complete report.",
+    ),
+    Message(
+        role="assistant",
+        content=(ToolUseBlock(id="load-coding", name="load_skill", input={"name": "coding"}),),
+    ),
+    Message(
+        role="user",
+        content=(
+            ToolResultBlock(
+                tool_use_id="load-coding",
+                content=loaded_context((LoadedSkill(parse_skill(CODING_SKILL)),)),
+            ),
+        ),
+    ),
+    Message(
+        role="assistant",
+        content="The coding child finished and wrote /workspace/coding-child-report.md.",
+    ),
+)
 
 
 RESEARCH_REPORT_LOADED = (
@@ -1460,11 +1514,11 @@ CASES = (
         ),
     ),
     CapabilityCase(
-        "workspace-report-followup-is-not-a-link",
+        "workspace-report-followup-stays-undelivered",
         "Where is the full write-up? Do not send the file yet.",
         conversational_scorer(max_words=50, max_lines=4),
         samples=1,
-        digest_tag="register:workspace-report-followup-is-not-a-link",
+        digest_tag="register:workspace-report-followup-stays-undelivered",
         workspace_files=(
             WorkspaceFile(
                 "glm-provider-routing.md",
@@ -1491,7 +1545,7 @@ CASES = (
         ),
     ),
     CapabilityCase(
-        "report-workspace-path-is-not-a-link",
+        "report-workspace-link-opens-detail",
         "GitHub access is unavailable. Write up the full OpenRouter provider-routing plan as "
         "glm-provider-routing.md. Cover the environment value for glm-5.3 and glm-5.3-flash, "
         "client parsing, the provider object, and tests. In chat, give me only the conclusion. "
@@ -1505,7 +1559,7 @@ CASES = (
             expected_name="glm-provider-routing.md",
         ),
         samples=1,
-        digest_tag="register:report-workspace-path-is-not-a-link",
+        digest_tag="register:report-workspace-link-opens-detail",
         rubric=(
             "The summary gives the conclusion without a workspace path and without claiming that "
             "a file was sent or saying where the write-up is.",
@@ -1587,7 +1641,27 @@ CASES = (
         ),
     ),
     CapabilityCase(
-        "report-research-skill-carries-the-tag",
+        "report-coding-skill-links-child-report",
+        "Give me what the coding child found. Do not send the file.",
+        carried_report_scorer(
+            summary_min_words=15,
+            summary_max_words=100,
+            summary_max_lines=5,
+            report_min_words=150,
+            report_min_headers=2,
+            expected_name="coding-child-report.md",
+            expected_body=CODING_CHILD_REPORT.content,
+        ),
+        digest_tag="register:report-coding-skill-links-child-report",
+        workspace_files=(CODING_CHILD_REPORT,),
+        prior_transcript=CODING_SKILL_LOADED,
+        rubric=(
+            "The summary says the stream parser failed to release an incomplete trailing link or "
+            "citation when the stream ended and that the finish operation fixes it.",
+        ),
+    ),
+    CapabilityCase(
+        "report-research-skill-links-the-report",
         "The notes are in research/invoice-export-notes.md. Turn them into the report on whether "
         "the weekly invoice export stays on cron or moves onto a queue. In chat, give me only the "
         "conclusion.",
@@ -1598,7 +1672,7 @@ CASES = (
             report_min_words=150,
             report_min_headers=2,
         ),
-        digest_tag="register:report-research-skill-carries-the-tag",
+        digest_tag="register:report-research-skill-links-the-report",
         workspace_files=(INVOICE_EXPORT_NOTES,),
         prior_transcript=RESEARCH_REPORT_LOADED,
         rubric=(
@@ -1610,6 +1684,35 @@ CASES = (
             "the notes back.",
             "The report states that the export runs before the close finishes on the late nights, "
             "which is what produces a partial week.",
+        ),
+    ),
+    CapabilityCase(
+        "scheduled-worthy-result-broadcasts",
+        "<scheduled_task>\n"
+        "scheduled_fire: 2026-09-07T09:00:00Z\n"
+        "</scheduled_task>\n"
+        "Prepare the weekly capacity report. Requests rose from 42,100 to 51,800, p95 latency "
+        "rose from 210 ms to 460 ms, and the primary pool exceeded 85 percent for six hours. "
+        "This is the first report of these changes.\n"
+        "<scheduled_task_instruction>\n"
+        f"{REPORT_INSTRUCTION}\n"
+        "</scheduled_task_instruction>",
+        shared_report_scorer(
+            summary_min_words=15,
+            summary_max_words=80,
+            summary_max_lines=6,
+            report_min_words=120,
+            report_min_headers=2,
+        ),
+        samples=1,
+        digest_tag="register:scheduled-worthy-result-broadcasts",
+        rubric=(
+            "The reply says capacity or latency needs attention and cites at least one deciding "
+            "change from the scheduled input.",
+        ),
+        artifact_rubric=(
+            "The report includes requests, p95 latency, and primary-pool utilization with the "
+            "figures from the scheduled input.",
         ),
     ),
     CapabilityCase(
