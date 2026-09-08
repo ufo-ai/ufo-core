@@ -24,14 +24,17 @@ API_KEY_ENV = "OPENAI_API_KEY"
 EMBED_MODEL = "text-embedding-3-large"
 EMBED_DIM = 3072
 EMBED_BATCH_MAX_ITEMS = 2048
-EMBED_BATCH_MAX_CHARS = 600_000
+EMBED_BATCH_MAX_CHARS = 120_000
 EMBED_MAX_ITEM_CHARS = 24_000
 PROVIDER_TIMEOUT_SECONDS = 60.0
 PROVIDER_MAX_RETRIES = 2
 
 
 def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
-    """Bound the request payload: clip each item and pack batches under the item/char ceilings."""
+    """Bound the request payload: clip each item and pack batches under the item/char ceilings. The
+    provider refuses a request over 300,000 tokens whatever its item count, and a dense script runs
+    near a token per character, so the char ceiling stays well under that — a batch it rejects
+    would be replayed by the page-change cursor every tick, forever."""
     batches: list[tuple[str, ...]] = []
     batch: list[str] = []
     chars = 0

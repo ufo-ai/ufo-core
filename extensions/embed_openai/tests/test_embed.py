@@ -1,6 +1,7 @@
 import pytest
 from ufo_ext_embed_openai import (
     API_KEY_ENV,
+    EMBED_BATCH_MAX_CHARS,
     EMBED_BATCH_MAX_ITEMS,
     EMBED_MAX_ITEM_CHARS,
     OpenAIEmbedClient,
@@ -26,6 +27,15 @@ def test_splits_on_item_count() -> None:
     texts = tuple("x" for _ in range(EMBED_BATCH_MAX_ITEMS + 5))
     batches = plan_embed_batches(texts)
     assert [len(batch) for batch in batches] == [EMBED_BATCH_MAX_ITEMS, 5]
+
+
+def test_splits_on_char_budget() -> None:
+    item = "x" * 6_000
+    texts = tuple(item for _ in range(EMBED_BATCH_MAX_CHARS // 6_000 + 5))
+    batches = plan_embed_batches(texts)
+    assert len(batches) == 2
+    assert all(sum(map(len, batch)) <= EMBED_BATCH_MAX_CHARS for batch in batches)
+    assert sum(len(batch) for batch in batches) == len(texts)
 
 
 def test_clips_oversized_item() -> None:
