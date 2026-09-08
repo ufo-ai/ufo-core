@@ -1,9 +1,3 @@
-//! The signup Slack Connect delivery: what it sends, what it reconciles, and where each fault lands.
-//!
-//! Driven against a local Slack stand-in and a real Postgres. The invariants under test are the ones
-//! that decide whether a customer gets a second invitation — the lease, the reconciliation reads, and
-//! which faults are transient — so both halves are real.
-
 mod harness;
 
 use harness::{ledger_pool, spawn_http};
@@ -55,7 +49,6 @@ async fn a_granted_domain_materializes_one_row_with_a_derived_channel_name() {
         .mint(None, "founder@acme.com", None)
         .await
         .unwrap();
-    // No Slack response is queued, so the claim is what this asserts, not the delivery.
     let worker = inviter(pool.clone(), vec![]).await;
     worker.poll().await.unwrap();
 
@@ -70,8 +63,6 @@ async fn a_granted_domain_materializes_one_row_with_a_derived_channel_name() {
 
 #[tokio::test]
 async fn two_domains_sharing_a_label_yield_one_channel_and_the_second_is_skipped() {
-    // `acme.com` and `acme.io` both derive `ext-acme-ufo`. The unique constraint is what
-    // keeps that safe: the second customer is skipped rather than pointed at the first's channel.
     let pool = ledger_pool().await;
     let invites = InviteCodes::new(pool.clone());
     invites.mint(None, "founder@acme.com", None).await.unwrap();
@@ -98,7 +89,6 @@ async fn two_domains_sharing_a_label_yield_one_channel_and_the_second_is_skipped
 #[tokio::test]
 async fn a_member_who_joined_an_existing_workspace_earns_no_channel() {
     let pool = ledger_pool().await;
-    // A claim that joined rather than founded carries `created_workspace = false`.
     pool.get()
         .await
         .unwrap()
@@ -155,9 +145,6 @@ async fn a_personal_mail_grant_earns_no_shared_customer_channel() {
 #[tokio::test]
 async fn a_personal_mail_workspace_earns_no_shared_customer_channel() {
     let pool = ledger_pool().await;
-    // A founding claim as this image files one: the identity column carries the signup subject, and
-    // a personal-mail subject is the member's own address. A channel derived from the provider
-    // instead would be one channel every customer at that provider shares.
     pool.get()
         .await
         .unwrap()
@@ -349,7 +336,6 @@ async fn a_retried_row_reconciles_a_live_invite_rather_than_sending_a_second() {
         pool.clone(),
         vec![
             auth_ok(),
-            // The previous attempt did reach Slack; the invitation is live, so it is adopted.
             ok(r#"{"ok":true,"invites":[{"channel":{"id":"C123"},"status":"sent","invite":{"id":"IPRIOR"}}]}"#),
             ok(r#"{"ok":true}"#),
         ],
@@ -369,8 +355,6 @@ async fn a_retried_row_reconciles_a_live_invite_rather_than_sending_a_second() {
 
 #[tokio::test]
 async fn a_dead_invite_is_not_read_as_proof_one_landed() {
-    // Slack keeps listing a revoked invitation. Reading it as live would settle a customer who never
-    // got a working invite, so a dead status means it is safe to invite again.
     let pool = ledger_pool().await;
     pool.get()
         .await
@@ -498,7 +482,6 @@ async fn the_bot_token_never_reaches_a_stored_error() {
         .mint(None, "founder@acme.com", None)
         .await
         .unwrap();
-    // A Slack refusal whose body echoes the token back must not persist it into the row.
     let worker = inviter(
         pool.clone(),
         vec![(400, format!(r#"{{"ok":false,"error":"bad {TOKEN}"}}"#))],
@@ -567,7 +550,6 @@ async fn a_lapsed_lease_is_taken_again() {
 
 #[test]
 fn the_switch_is_off_by_default_and_garbage_fails_loud() {
-    // A half-configured deploy must never reach Slack, and the switch must not default to on.
     let guard = harness::ROLE_LOCK.try_lock();
     drop(guard);
     let previous: Vec<(&str, Option<String>)> = [ENABLED_ENV, BOT_TOKEN_ENV, TEAM_ID_ENV]
@@ -608,7 +590,6 @@ fn slack_connect_from_env_unset() -> bool {
         .unwrap_or(false)
 }
 
-/// A pool that is never dialled: these three cases refuse before any connection is taken.
 fn dummy_pool() -> deadpool_postgres::Pool {
     let config: tokio_postgres::Config = "postgresql://ufo:ufo@127.0.0.1:1/none".parse().unwrap();
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);

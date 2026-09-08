@@ -11,9 +11,6 @@ beforeEach(() => {
 });
 
 test("the bytes travel to the store measured by the checksum the mint signed", async () => {
-  /** The surface signs the size and the sha256 into the URL, so S3 stores exactly the file the
-   *  member picked and a URL that leaks buys nothing else. The PUT must therefore carry the same
-   *  checksum the mint declared — a body of another length or another content is refused. */
   const calls: [string, RequestInit][] = [];
   vi.stubGlobal(
     "fetch",
@@ -43,8 +40,6 @@ test("the bytes travel to the store measured by the checksum the mint signed", a
 });
 
 test("a deploy that signs no upload leaves the file for the send to carry", async () => {
-  /** A filesystem dev store mints nothing, so the composer keeps the file inline and the send
-   *  rides the body it always has rather than naming a key nothing landed under. */
   const fetched = vi.fn(async () => new Response("", { status: 409 }));
   vi.stubGlobal("fetch", fetched);
 

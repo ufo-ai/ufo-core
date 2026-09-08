@@ -5,12 +5,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { CLAIMED, DIALOG, LANE_NEXT, LANE_PRIOR, TYPING } from "@/kernel/slots";
 import { ASK_KEY, CHORD as SEARCH } from "@/views/Spotlight";
 
-/** The key that opens this list, pressed bare, as Linear spends it — so a member arrives already
- *  holding it. Shift is what makes the character, so shift is not a modifier the guard refuses. */
 const CHORD = "?";
 
-/** The command key as a Mac keyboard draws it. The palette answers Meta alone, so a keyboard
- *  without one reaches the palette by its bar rather than by a second chord this could name. */
 const COMMAND = "⌘";
 
 const LEAVE_FIELD = "Esc";
@@ -21,11 +17,6 @@ const ROW_RANGE = "1…9";
 
 const TITLE = "Keyboard shortcuts";
 
-/** Where `?` is a character the member is typing rather than a chord: the composer, a search box, a
- *  name field. Focus standing in one of these is what tells the two apart. */
-
-/** Every chord the portal answers. Each key is read from the module that answers it, so what this
- *  prints cannot drift from what the keyboard does. */
 const SHORTCUTS: { group: string; rows: { act: string; keys: string[] }[] }[] = [
   {
     group: "Navigation",
@@ -55,8 +46,6 @@ const SHORTCUTS: { group: string; rows: { act: string; keys: string[] }[] }[] = 
   },
 ];
 
-/** The list of chords, opened by `?` from anywhere and shut by `?` again or by Escape. It draws
- *  nothing until it is opened, so it stands beside the shell rather than inside a screen. */
 export function Shortcuts() {
   const [open, setOpen] = useState(false);
 

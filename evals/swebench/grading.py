@@ -165,8 +165,6 @@ def load_submission_patches(
         try:
             patches[case.instance_id] = expected_patch.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
-            # A prediction is UTF-8 JSON, so a non-UTF-8 patch cannot be submitted; the official
-            # harness scores an empty patch as unresolved. Skip this one case, not the whole run.
             print(f"SWE-bench patch for {case.instance_id} is not UTF-8; submitting empty patch")
     return patches
 
@@ -211,8 +209,6 @@ class SWEbenchGrading:
     def run(self) -> Path:
         """Run official grading once and return the factual summary path."""
         self._validate_parquet()
-        # Load and validate submissions before minting the grade directory: a rejected submissions
-        # root then leaves no half-made directory to collide with a corrected retry.
         patches = None if self.gold else self._load_patches()
         self._validate_harness()
         grade_directory = self.grade_directory.resolve()

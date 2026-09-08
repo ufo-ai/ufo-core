@@ -1,4 +1,3 @@
-//! The exec primitive: one command as the member's own subprocess.
 
 use std::collections::HashMap;
 use std::env;
@@ -37,9 +36,8 @@ const GH_FILE: &str = "gh";
 const GH_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gh.gz"));
 const GH_LICENSE: &str = include_str!("../../licenses/github-cli.txt");
 const GH_LICENSE_FILE: &str = "gh-LICENSE";
-// The CA-bundle env vars the toolchains read. libcurl tools (git, cargo) ignore CURL_CA_BUNDLE when
-// they set their own CAINFO, so each needs its own override or a MITM'd host (a cache-fronted
-// registry, or git rewritten to the cache) fails with "unable to get local issuer certificate".
+// libcurl tools (git, cargo) ignore CURL_CA_BUNDLE when they set their own CAINFO, so each needs its
+// own override or a MITM'd host fails with unable to get local issuer certificate.
 const CA_CERT_CONSUMERS: [&str; 6] = [
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
@@ -59,15 +57,8 @@ struct Params {
     safety_argv: Option<Vec<String>>,
 }
 
-/// Run the params' argv with its env overlaid, in `cwd`, group-killed at `timeout_s`, and answer
-/// the `{"exit_code", "timed_out", "stdout_b64", "stderr_b64"}` reply JSON. Output lands in workdir
-/// files, not pipes: a backgrounded child inheriting the streams must not hold the reply open after
-/// the command itself exits.
-///
-/// `timed_out` says the deadline here ended the command, which nothing else can tell: the group
-/// signal makes it exit `128 + SIGKILL`, the same code a member's own `kill` produces. The server
-/// reads it to report the budget that expired, and the work a command detached into its own group
-/// keeps running behind that report.
+/// Output lands in workdir files, not pipes: a backgrounded child inheriting the streams must not hold
+/// the reply open. `timed_out` is the only teller — the group signal exits `128 + SIGKILL`, like a member's kill.
 #[cfg(test)]
 pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<Vec<u8>, String> {
     run_at_home(params, workdir, cwd, &Home::resolve(), timeout_s)
@@ -204,12 +195,6 @@ pub fn run_at_home(
     Ok(reply(code, timed_out, &out, &err))
 }
 
-/// What a command verifies TLS with: this machine's own trust store, then the deploy's egress CA.
-/// Both halves are load-bearing — the CA signs the leaves the proxy mints for the hosts it
-/// terminates, and the roots cover every host it tunnels untouched, whose real certificate the
-/// command sees. The container carriers merge the same two by installing the CA into the system
-/// store; nothing here touches the member's, so the merged copy lives in the op's workdir and the
-/// environment points at it.
 fn trust_bundle(ca_cert: &str) -> Result<String, String> {
     let roots = rustls_native_certs::load_native_certs()
         .map_err(|error| format!("could not read this machine's trust store: {error}"))?;
@@ -328,7 +313,6 @@ fn sink(path: &Path) -> Result<File, String> {
     File::create(path).map_err(|error| format!("could not create {}: {error}", path.display()))
 }
 
-/// The command's exit code, and whether the deadline is what ended it.
 fn await_exit(child: &mut Child, timeout_s: u64) -> (i32, bool) {
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
     loop {
@@ -714,8 +698,6 @@ mod tests {
     #[test]
     fn materializes_the_trust_bundle() {
         let dir = scratch("ca");
-        // The `test` guards prove git and cargo see the same bundle as curl/openssl; if either var
-        // is unset or points elsewhere the `cat` is skipped and the certificate assertions fail.
         let reply = run(
             r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$GODEBUG\" = \"http2debug=1,x509sslcertoverrideplatform=1\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"GODEBUG":"http2debug=1,x509sslcertoverrideplatform=0","UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
             &dir,

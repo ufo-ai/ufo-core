@@ -27,9 +27,8 @@ import { atPhoneWidth } from "./harness";
 
 vi.mock("@/lib/sound", () => ({ soundMoved: vi.fn(), soundEnded: vi.fn() }));
 
-/** Motion's frame loop needs a browser to run in, so the spring lands at once here and every arm
- *  of it is recorded: what the row does is where each lane comes to rest, where the spring carrying
- *  it started, and which lanes were moved at all. */
+/** Motion's frame loop needs a browser to run in, so the spring lands at once here and every arm of it
+ *  is recorded. */
 const glided = vi.hoisted(() => ({ starts: [] as number[], moves: [] as number[], still: false }));
 
 vi.mock("motion/react", async (whole) => {
@@ -105,10 +104,6 @@ function Standing({
   return useSlot(children, { id: name, kind, title: name, crumb, onClose });
 }
 
-/** A screen with a place: the address holds the track, every act writes it, and the lanes are drawn
- *  from it. A lane is opened beside the ones already standing, and each lane holds a link to every
- *  other, which is the press that walks the path. `opening` is the row the screen stands whole on
- *  its first render, which is a member arriving on an address that already names lanes. */
 function Walk({ names, opening = [] }: { names: string[]; opening?: string[] }) {
   const [opens, setOpens] = useState<string[]>(opening);
   return (
@@ -221,9 +216,8 @@ test("a press inside a lane shuts the lanes after it and stands the target at it
   ]);
 });
 
-/** The views place what comes back, so a fresh array of the same ids is a press that changed
- *  nothing pushing a history entry and remounting the record being read. Identity is the answer,
- *  not equal contents. */
+/** Identity is the answer, not equal contents: a fresh array of the same ids pushes a history entry and
+ *  remounts the record being read. */
 test("re-pressing the lane that already stands hands back the very track it was given", () => {
   const track = ["one", "two", "three"];
   expect(opened(track, "two", "one")).toBe(track);
@@ -232,12 +226,10 @@ test("re-pressing the lane that already stands hands back the very track it was 
   expect(closed(track, "four")).toBe(track);
 });
 
-/** The track is keyed by id, so the same id twice is two hosts fighting over one record. */
 test("a lane reached again from further down the path moves rather than doubling", () => {
   expect(opened(["one", "two", "three"], "one", "three")).toEqual(["two", "three", "one"]);
 });
 
-/** A `from` naming a lane that has already been shut raised nothing, so it is the root. */
 test("a press from a lane that no longer stands is a press in the root list", () => {
   expect(opened(["one", "two"], "three", "gone")).toEqual(["three"]);
 });
@@ -253,8 +245,6 @@ test("closing a lane closes every lane opened from it", () => {
   expect(closed(["one", "two", "three"], "three")).toEqual(["one", "two"]);
 });
 
-/** The gesture the browser already gave the member for a second tab, and nothing else: a plain
- *  press walks the path. */
 test("command, control and the middle button ask for a lane beside", () => {
   expect(beside({ metaKey: true, ctrlKey: false, button: 0 })).toBe(true);
   expect(beside({ metaKey: false, ctrlKey: true, button: 0 })).toBe(true);
@@ -263,7 +253,6 @@ test("command, control and the middle button ask for a lane beside", () => {
   expect(beside({ metaKey: false, ctrlKey: false })).toBe(false);
 });
 
-/** Two records reached from one list are two open things, not a column one of them has to win. */
 test("two records opened from one list stand side by side, and neither is hidden", async () => {
   render(
     <SlotTrack>
@@ -295,8 +284,6 @@ test("one width rule to a kind, and the reading slot is the one that gives", asy
 
   for (const name of ["Threads", "Run", "Detail"]) await open(name);
 
-  // A list is read down, not across: it holds the measure the sheet names it at and neither takes
-  // the width the reading lane gives up nor gives up its own.
   expect(rule("Threads")).toEqual(
     expect.arrayContaining(["grow-0", "shrink-0", "basis-(--container-index)"]),
   );
@@ -314,9 +301,8 @@ test("one width rule to a kind, and the reading slot is the one that gives", asy
   );
 });
 
-/** `display: contents` promotes whatever the view rendered to be the flex item, so the pane's own
- *  body is in the track on the same terms as the slots and needs the same rule — from one place,
- *  not a class each screen remembers to add. */
+/** `display: contents` promotes whatever the view rendered to be the flex item, so the pane's own body
+ *  is in the track on the same terms as the slots. */
 test("the body the slots stand beside takes the reading slot's own width rule", async () => {
   render(
     <SlotTrack>
@@ -360,9 +346,7 @@ test("closing a slot gives its width to the slots that remain", async () => {
   expect(rule("Run").some((name) => name.startsWith("basis-(--"))).toBe(false);
 });
 
-/** A record that reached its slot through a portal must not have stood inline first: an element
- *  that moves position is torn down and built again, firing every read inside it twice. And nothing
- *  in the track is displaced, so a slot opened beside a record leaves that record alone. */
+/** An element that moves position is torn down and built again, firing every read inside it twice. */
 test("a record mounts once on its way into the track, and a slot beside it never rebuilds it", async () => {
   const mounts: string[] = [];
   render(
@@ -380,10 +364,6 @@ test("a record mounts once on its way into the track, and a slot beside it never
   expect(mounts).toEqual(["mount:assistant"]);
 });
 
-/** The lane takes focus as it lands, so what a member who cannot see it is told is the whole of
- *  what the lane says about itself. A panel whose one line states what it will do with everything
- *  typed into it says that line to the member standing in it, or says it to nobody. A lane that
- *  states nothing points at nothing: an empty description is a promise the reader steps over. */
 test("a lane says what it does to the member focus lands on", async () => {
   render(
     <SlotTrack>
@@ -406,10 +386,6 @@ test("a lane says what it does to the member focus lands on", async () => {
   expect(slotFor("Detail").hasAttribute("aria-describedby")).toBe(false);
 });
 
-/** A lane is headed by what it is called. The kinds that stand for a body of something — an index,
- *  a reading — wear a glyph that says which, because a track holding several says what each one is
- *  before it says what is in it. A panel stands for nothing but itself, so its title is the whole
- *  of its head and a glyph beside it would only restate the word. */
 test("a panel lane is headed by its title alone, where the other kinds wear a glyph", async () => {
   render(
     <SlotTrack>
@@ -431,9 +407,6 @@ test("a panel lane is headed by its title alone, where the other kinds wear a gl
   expect(glyphs("Detail")).toBe(0);
 });
 
-/** The lane lands on itself so a member who cannot see it is told what it is. Content that opens on
- *  a field the member is meant to type in has already answered that question, and taking the lane's
- *  own focus after it would drop the cursor out of the words they came to write. */
 function Composer() {
   const box = useRef<HTMLTextAreaElement>(null);
   useEffect(() => box.current?.focus(), []);
@@ -460,10 +433,6 @@ test("a lane leaves focus where its content has already put it", async () => {
   expect(document.activeElement).toBe(screen.getByLabelText("Message"));
 });
 
-/** Escape in a field the lane holds is the way out of the field, and that is the whole of what it
- *  does in a lane. A row is several open things at once, and a key that shut one of them would spend
- *  a member's whole row on a mistyped press — the way out of a lane is the close control on its
- *  band. Out of the field, the bracket keys walk the row again. */
 test("Escape steps out of a lane's field, and shuts nothing", async () => {
   render(
     <SlotTrack>
@@ -493,8 +462,6 @@ test("Escape steps out of a lane's field, and shuts nothing", async () => {
   expect(standing()).toEqual(["Compose", "Beside"]);
 });
 
-/** The way out of a lane is the close control on its band, and focus goes back to the act that
- *  raised the lane rather than being left on a control that no longer stands. */
 test("the band's close control leaves a slot, and focus goes back where it came from", async () => {
   render(
     <SlotTrack>
@@ -514,11 +481,6 @@ test("the band's close control leaves a slot, and focus goes back where it came 
   expect(document.activeElement).toBe(act);
 });
 
-/** A screen whose every column is a lane hands the track its whole box. The row lies over that box —
- *  edge to edge, above what is under it, with its own hairline either side — rather than standing
- *  beside a body: a reading lane in all but name would take an equal share of the width, so one
- *  open lane would hold half the screen instead of the whole of it. What the track was handed still
- *  stands underneath, because that is what registers the lanes; it is not one of them. */
 test("a track handed the whole box lies over it, and holds only its own lanes", async () => {
   render(
     <SlotTrack>
@@ -554,8 +516,8 @@ test("a track handed the whole box lies over it, and holds only its own lanes", 
   expect(slotFor("New task").closest("[data-slot=slot-track]")).toBe(cover);
 });
 
-/** A resize observer the test drives by hand. The track reads nothing off the report — it measures
- *  the row itself — so a wake-up carrying no records is the whole of what it needs. */
+/** The track reads nothing off the report — it measures the row itself — so a wake-up carrying no
+ *  records is the whole of what it needs. */
 class Sizing {
   static made: Sizing[] = [];
   seen: Element[] = [];
@@ -591,10 +553,6 @@ function Spread({ names }: { names: string[] }) {
 /** The width the rail leaves on the 1512px laptop `--size-slot-min` is set against. */
 const PANE_WIDTH = 1472;
 
-/** A track handed the whole pane fills it. The lanes on screen divide the row exactly — as many as
- *  the floor leaves room for — and the rest stand off the right edge at that same width, so a row of
- *  nine on this pane is four across and five waiting, none of them a lane cut in half at the edge.
- *  The row snaps to those boundaries at every width, not only where a lane is the whole screen. */
 test("a track handed the whole pane divides its width between the lanes that fit", () => {
   Sizing.made = [];
   vi.stubGlobal("ResizeObserver", Sizing);
@@ -619,8 +577,6 @@ test("a track handed the whole pane divides its width between the lanes that fit
   }
 });
 
-/** Fewer lanes than fit still divide the whole row: three lanes take a third of the pane each,
- *  rather than a lane's worth apiece with the rest of the pane left empty beside them. */
 test("a row with room to spare divides its width between the lanes it holds", () => {
   Sizing.made = [];
   vi.stubGlobal("ResizeObserver", Sizing);
@@ -645,8 +601,6 @@ test("a row nothing can measure gives every lane an equal share", () => {
   expect(track().style.getPropertyValue("--lane-share")).toBe("5");
 });
 
-/** A track standing beside a body is not the pane, so its lanes are sized by what they hold and page
- *  one to a screen at the narrow width, the way they always have. */
 test("a track standing beside a body sizes its lanes by kind and shares nothing", async () => {
   render(
     <SlotTrack>
@@ -669,10 +623,6 @@ test("a track standing beside a body sizes its lanes by kind and shares nothing"
   expect(track().style.getPropertyValue("--lane-share")).toBe("");
 });
 
-/** A lane that arrived by a press is the one the member is looking for: it scrolls into view and
- *  lands on itself. A screen mounting a row whole is restating lanes the member already arranged,
- *  and a track that scrolled and focused each of those in turn would open paged to the lane at the
- *  far end rather than the first. */
 test("a row stood whole scrolls to none of its lanes, where a lane joining it lands", async () => {
   const scrolled: string[] = [];
   const scrolls = vi
@@ -697,8 +647,6 @@ test("a row stood whole scrolls to none of its lanes, where a lane joining it la
   }
 });
 
-/** The track is a row of open things, not a path: a link followed from a slot opens beside that
- *  slot rather than at the far end, where the member would have to scroll to find it. */
 test("a link followed inside a slot opens the next one immediately to its right", async () => {
   render(
     <SlotTrack>
@@ -717,10 +665,6 @@ test("a link followed inside a slot opens the next one immediately to its right"
   expect(standing()).toEqual(["Records", "Run", "Detail"]);
 });
 
-/** One thing owns the order. The address is the one: it is what a link states, what the store holds,
- *  what a crumb reads as the lane to its left, and what shutting a lane cuts from. So a lane the
- *  address moved moves on the screen without being placed again — the lane's own props did not
- *  change, and a track that waited for them would draw a row the address no longer holds. */
 test("a lane the address moved stands where the address puts it", async () => {
   render(<Walk names={["A", "B", "C", "D"]} />);
 
@@ -741,10 +685,6 @@ test("a lane the address moved stands where the address puts it", async () => {
   expect(standing()).toEqual(address());
 });
 
-/** A lane carried by hand is a lane the member put there, so it is put there in the one place a
- *  lane's place is kept. A move the address never hears is a row that reads one way and closes,
- *  crumbs and reloads another. What the member takes hold of is the band already reading as this
- *  lane's name, rather than a grip drawn beside it that names nothing. */
 test("a lane dragged by its band is moved in the address", async () => {
   render(<Walk names={["A", "B"]} />);
 
@@ -769,8 +709,6 @@ test("a lane dragged by its band is moved in the address", async () => {
   expect(standing()).toEqual(address());
 });
 
-/** Nothing is evicted: past the floor the track runs off the pane's edge and scrolls, rather than
- *  dividing the width into columns none of the open things can be read in. */
 test("past its floor the track scrolls rather than crushing a slot under it", async () => {
   const names = ["One", "Two", "Three", "Four", "Five"];
   render(
@@ -844,9 +782,6 @@ test("a narrow viewport pages one slot to a screen", async () => {
   }
 });
 
-/** A lane wears the portal's one header, so its name, the kind of thing it holds and the way out of
- *  it stand where a page's and a record's do. The band draws no rule of its own — the track draws
- *  the hairline between one lane and the next, and a line under every band would cross it. */
 test("a slot states its name, the kind of thing it holds, and how to shut it", async () => {
   render(
     <SlotTrack>
@@ -868,9 +803,6 @@ test("a slot states its name, the kind of thing it holds, and how to shut it", a
   expect(within(slotFor("Records")).queryByRole("button", { name: /^Close/ })).toBeNull();
 });
 
-/** A page standing under a band of its own draws its headers as that band's acts. A lane it opens is
- *  not one of them: the lane is a surface the band outside never named, so it wears the portal's
- *  header whole — the name, the kind, and the way out — and stands no row of acts in its place. */
 test("a lane under a band draws that band whole", async () => {
   render(
     <Banded value>
@@ -893,11 +825,6 @@ test("a lane under a band draws that band whole", async () => {
   expect(lane.querySelector("[data-slot=page-acts]")).toBeNull();
 });
 
-/** A lane holding a record reached from a list is "Radar / morning-digest", and the crumb is what a
- *  lane paged one to a screen has instead of the lane that would otherwise stand to its left. It
- *  states where the record came from and shuts nothing: a lane on the screen is no address, and the
- *  way out of the lane is its own verb. At the floor the track shrinks a lane to there is room for
- *  exactly that band: the measure the name is guaranteed, and the way out beside it. */
 test("a lane names the surface it was reached from, and that band fits the lane's floor", () => {
   render(
     <SlotTrack>
@@ -922,10 +849,6 @@ test("a lane names the surface it was reached from, and that band fits the lane'
   ).toBeLessThanOrEqual(token("--size-slot-min"));
 });
 
-/** Both verbs that stand a lane grow the track — `appended` always, and `opened` whenever the lane
- *  it was pressed from is the one at the far end — so both stop at the same cap. What comes back is
- *  the very array they were handed, which is what every other press that changes nothing hands
- *  back, so the screen writes no address and records no step for it. */
 test("neither verb stands a lane past the cap", () => {
   const full = Array.from({ length: TRACK_MAX_SLOTS }, (_, at) => "object/report/" + at);
   const room = full.slice(0, -1);
@@ -938,8 +861,6 @@ test("neither verb stands a lane past the cap", () => {
   expect(opened(full, "object/report/late")).toEqual(["object/report/late"]);
 });
 
-/** An observer the test drives by hand: what it has been asked to watch, and a report it delivers
- *  about which of those stand in view. */
 class Watching {
   static made: Watching[] = [];
   seen: Element[] = [];
@@ -973,10 +894,6 @@ class Watching {
   }
 }
 
-/** A lane holds its body only near the scrollport. Its width and its band stand whatever the
- *  observer says, so the row's scroll width, its handles and the address hold still; the body is
- *  drawn once the lane comes within a scrollport of view and torn down again when it leaves. One
- *  observer per track, rooted on the scrolling row with a scrollport of margin either side. */
 test("a lane past a scrollport of the view keeps its width and band, and holds no body", () => {
   Watching.made = [];
   vi.stubGlobal("IntersectionObserver", Watching);
@@ -1015,8 +932,8 @@ test("a lane past a scrollport of the view keeps its width and band, and holds n
   expect(mounts.slice(-2)).toEqual(["unmount:One", "mount:Three"]);
 });
 
-/** A row jsdom never laid out has no width, so every lane in it is near and every body is drawn —
- *  which is what a track measured before its first layout answers too. */
+/** A row jsdom never laid out has no width, so every lane in it is near — which is what a track
+ *  measured before its first layout answers too. */
 test("a row no layout has given a width holds every body", () => {
   Watching.made = [];
   vi.stubGlobal("IntersectionObserver", Watching);
@@ -1032,8 +949,6 @@ test("a row no layout has given a width holds every body", () => {
   expect(mounts).toEqual(["mount:One", "mount:Two"]);
 });
 
-/** The boxes a laid-out row and its lanes stand in: the row is the scrollport, a lane stands where
- *  the record puts it, and everything else measures the zeros jsdom hands back. */
 function laidOut(port: [number, number], lanes: Record<string, [number, number]>) {
   return vi
     .spyOn(Element.prototype, "getBoundingClientRect")
@@ -1046,10 +961,8 @@ function laidOut(port: [number, number], lanes: Record<string, [number, number]>
     });
 }
 
-/** An observer's first batch arrives a task after the paint, so a track that drew nothing until it
- *  spoke would show a member every lane on their screen empty on the way in. The track measures the
- *  row and its lanes itself as they stand: a lane within a scrollport of the row holds its body in
- *  the frame it stands in, with nothing reported about it. */
+/** An observer's first batch arrives a task after the paint, so the track measures the row and its
+ *  lanes itself as they stand. */
 test("a lane the track measures beside the row holds its body before the observer speaks", () => {
   Watching.made = [];
   vi.stubGlobal("IntersectionObserver", Watching);
@@ -1071,9 +984,6 @@ test("a lane the track measures beside the row holds its body before the observe
   }
 });
 
-/** The measurement reaches exactly as far as the observer's own margin: one scrollport past either
- *  edge. A lane standing further out is the row of twenty app pages the rule is for, and it waits
- *  for the observer like any other. */
 test("a lane a scrollport past the row's edge holds none until the observer says otherwise", () => {
   Watching.made = [];
   vi.stubGlobal("IntersectionObserver", Watching);
@@ -1114,9 +1024,6 @@ test("a track nothing can observe draws every body", () => {
   expect(screen.getByText("Two body")).toBeTruthy();
 });
 
-/** A screen where a press inside a lane takes that lane over: the id picked stands where the lane
- *  stood and the lane's own id leaves the row, which is what home's history rows and its picker
- *  both do. */
 function Taking({
   opening,
   coming,
@@ -1143,9 +1050,6 @@ function Taking({
   );
 }
 
-/** A lane that writes down what the row decided about it on every commit: whether the row showed
- *  it, and whether it held its body there. It is read per commit rather than at rest, because a
- *  body torn down and built again inside one press leaves the DOM a body that never moved leaves. */
 function Taken({
   name,
   opens,
@@ -1180,12 +1084,6 @@ function Taken({
   return lane;
 }
 
-/** A pick inside an expanded lane takes that lane over, so the expansion names a lane the row no
- *  longer holds and the row is a row again — in the very commit the pick lands in. Every lane the
- *  row shows there holds its body: one value says what the row is standing expanded, and the bodies
- *  read the same one the lanes are drawn from. A track answering from the raw ask instead calls no
- *  lane near, so it tears down every transcript and every app frame standing in the row and builds
- *  them all again on the commit after. */
 test("a pick that takes the expanded lane over leaves the lanes beside it drawn", async () => {
   const drawn: string[] = [];
   render(<Taking opening={["One", "Two", "Three"]} coming="Four" drawn={drawn} />);
@@ -1206,9 +1104,8 @@ test("a pick that takes the expanded lane over leaves the lanes beside it drawn"
   expect(screen.getByText("Two body")).toBeTruthy();
 });
 
-/** Under an expansion the walk carries the expansion. Every lane beside an expanded one wears
- *  `hidden`, and a browser puts no focus on one of those — a press reaching for a hidden lane would
- *  sound the move and leave the member exactly where they stood, once per press, forever. */
+/** A browser puts no focus on an element wearing `hidden`, so a press reaching for one would sound the
+ *  move and leave the member where they stood. */
 test("the walk under an expansion carries the expansion and reaches for no hidden lane", async () => {
   const drawn: string[] = [];
   render(<Taking opening={["One", "Two", "Three"]} coming="Four" drawn={drawn} />);
@@ -1249,7 +1146,6 @@ test("the walk under an expansion carries the expansion and reaches for no hidde
   }
 });
 
-/** A screen whose track is sought from outside it — the rail's tile naming a lane. */
 function Seeking({
   names,
   opening,
@@ -1290,8 +1186,6 @@ function Seeking({
   );
 }
 
-/** A seek scrolls the lane it names into view, and every press is its own ask: the member scrolled
- *  away between two presses on one tile. A lane not standing is sought in vain and scrolls nothing. */
 test("a seek scrolls the standing lane it names into view, once per press", async () => {
   const scrolled: string[] = [];
   const scrolls = vi
@@ -1317,11 +1211,6 @@ test("a seek scrolls the standing lane it names into view, once per press", asyn
   }
 });
 
-/** A row stood whole scrolls to none of its lanes — unless one of them was sought as the screen
- *  mounted, which is the rail's tile pressed from another screen: that lane scrolls in as it lands.
- *  A seek is a scroll and nothing else, so the lane it lands takes no focus: the member asked to see
- *  it, and a lane that stood itself in the member's hands would take the keys off whatever they were
- *  doing. A lane arriving by a press does land on itself, because the press was that ask. */
 test("a lane sought before it stands scrolls into view as it lands, and takes no focus", () => {
   const scrolled: string[] = [];
   const scrolls = vi
@@ -1341,11 +1230,6 @@ test("a lane sought before it stands scrolls into view as it lands, and takes no
   }
 });
 
-/** A track mounting with a seek is named a lane none of its entries has registered yet — the rail's
- *  tile pressed from a screen that is not home, which places home and brings that lane in. The ask
- *  waits for the lane and names it as it lands, so the tile the member pressed carries the mark. A
- *  lane closing is what ends the ask, and the lane opened again after that is one the member has not
- *  gone to. */
 test("a lane sought before it stands is the lane the track names as it lands", async () => {
   const seen: (string | undefined)[] = [];
   const note = (id: string | undefined) => void seen.push(id);
@@ -1381,13 +1265,6 @@ const lit = () =>
 
 const lands = (on: HTMLElement) => act(() => on.focus());
 
-/** A row is several open things at once, and the lane the words are going into says so on its own
- *  top edge: the focus stripe, on that lane alone. Nothing is taken from the lanes beside it. A
- *  press into a second lane's field moves the stripe rather than adding one. It is the cursor that is
- *  read and not the press, so a lane focused at a button draws no stripe, and Escape out of the field
- *  ends it along with the typing. The stripe is the first thing every lane stands, four pixels tall
- *  in the flow above the header whether drawn or not, and it scales out rather than leaving the
- *  tree — so every header stands at one height and the stripe is animated out as it was in. */
 test("the lane being typed in draws the focus stripe, and clears when the typing ends", async () => {
   render(<Fields names={["A", "B", "C"]} />);
 
@@ -1412,8 +1289,6 @@ test("the lane being typed in draws the focus stripe, and clears when the typing
   for (const name of ["A", "B", "C"]) expect(slotFor(name).firstElementChild).toBe(stripe(name));
   expect(slotFor("B").className).not.toContain("opacity-");
   expect(slotFor("A").className.split(" ")).not.toContain("outline-ring");
-  // The stripe stands in for the page-wide focus ring where the lane itself is focus-visible, so a
-  // lane the keyboard walks to is marked the same way as one being typed in.
   expect(slotFor("B").className.split(" ")).toContain("outline-none");
   expect(worn("B")).toContain("group-focus-visible/lane:scale-x-100");
 
@@ -1428,15 +1303,6 @@ test("the lane being typed in draws the focus stripe, and clears when the typing
   expect(lit()).toEqual([]);
 });
 
-/** The cursor moving straight from one lane's field into another's is one move, and the stripes
- *  say so: the leaving stripe folds toward the edge facing the lane the cursor went to, fast and
- *  gathering speed, and the arriving one unfolds from the edge facing the lane it came from once the
- *  leaving one is nearly gone, slowing as it fills — one stripe crossing the seam. A cursor arriving
- *  from nowhere, or leaving for nowhere, scales about the centre — and the lane neither left nor
- *  landed in is not moved. */
-/** One lane standing alone is where the words are going, so it draws no stripe — not for the
- *  cursor, not for the keyboard walk — while keeping the four pixels above its header, so the header
- *  holds its height when a second lane opens beside it. */
 test("a lane standing alone keeps the stripe's room and never draws it", () => {
   render(<Fields names={["A"]} />);
   const stripe = slotFor("A").querySelector('[data-slot="focus"]');
@@ -1449,10 +1315,8 @@ test("a lane standing alone keeps the stripe's room and never draws it", () => {
   expect(stripe.className).not.toContain("group-focus-visible");
 });
 
-/** The lane's own mark is named, so it reaches the stripe and nothing else: an unnamed `group` on
- *  the lane would make every `group-hover:` and `group-focus-visible:` utility standing inside it —
- *  the rows of an app history, the chevrons of a chat list — fire on the lane's hover and focus,
- *  revealing every row's trailing stamp at once. */
+/** An unnamed `group` on the lane would fire every `group-hover:` and `group-focus-visible:` utility
+ *  standing inside it on the lane's own hover and focus. */
 test("the lane names its group, so the mark reaches the stripe alone", () => {
   render(<Fields names={["A", "B"]} />);
   const worn = slotFor("A").className.split(" ");
@@ -1501,8 +1365,6 @@ test("the stripe sweeps toward the lane the cursor moved to", async () => {
   expect(origins("A")).toEqual([]);
 });
 
-/** The lanes beside the marked one are drawn at full strength: each answers a press like any other,
- *  and the press that lands in its own field is what carries the stroke to it. */
 test("a lane beside the marked one is pressed and typed into like any other", async () => {
   render(<Fields names={["A", "B"]} />);
 
@@ -1518,9 +1380,8 @@ test("a lane beside the marked one is pressed and typed into like any other", as
   expect(lit()).toEqual(["B"]);
 });
 
-/** Every place the track takes focus has already scrolled the lane to where it wants it. A browser
- *  scrolling a second time to the element it has just focused fights the row's snap and leaves it
- *  resting between two lanes, which is a screen that opens with a lane cut off at its left edge. */
+/** A browser scrolling a second time to the element it has just focused fights the row's snap and
+ *  leaves it resting between two lanes. */
 test("the track takes focus without scrolling, having scrolled the lane itself", () => {
   const landed: (FocusOptions | undefined)[] = [];
   const focuses = vi
@@ -1545,8 +1406,6 @@ test("the track takes focus without scrolling, having scrolled the lane itself",
   }
 });
 
-/** A lane opened by a press lands where the member was already pointing, and a row the screen
- *  stood whole opened nothing at all, so neither says anything. */
 test("a lane opened by a press is silent, and so is a row stood whole", async () => {
   heard();
   render(<Walk names={["A", "B", "C", "D"]} opening={["A", "B", "C"]} />);
@@ -1559,7 +1418,6 @@ test("a lane opened by a press is silent, and so is a row stood whole", async ()
   expect(soundEnded).not.toHaveBeenCalled();
 });
 
-/** The bracket keys are the one act the track says out loud, once a press. */
 test("the row moving under a bracket press is heard, once per press", async () => {
   heard();
   render(<Row names={["A", "B", "C"]} />);
@@ -1571,8 +1429,6 @@ test("the row moving under a bracket press is heard, once per press", async () =
   expect(soundMoved).toHaveBeenCalledTimes(2);
 });
 
-/** A seek is a lane the member picked off the rail with the pointer already on it, so the row
- *  brings it in without saying so — the lane already standing and the lane that lands alike. */
 test("a seek is silent, whether the lane stands or lands", async () => {
   heard();
   const { unmount } = render(<Seeking names={["A", "B", "C"]} opening={["A", "B"]} />);
@@ -1589,10 +1445,6 @@ test("a seek is silent, whether the lane stands or lands", async () => {
 });
 
 
-/** The lane the member is standing in is the track's to name, since the walk and the cursor both
- *  move it and neither passes through the address. It outlives the focus that set it: a rail drawn
- *  outside the row takes the press that leaves the row, and a mark that went out under that press
- *  would say the member is in no lane at all. */
 test("the track names the lane the member stands in, and keeps naming it after focus leaves", () => {
   const seen: (string | undefined)[] = [];
   const note = (id: string | undefined) => void seen.push(id);
@@ -1618,7 +1470,6 @@ test("the track names the lane the member stands in, and keeps naming it after f
   expect(seen.at(-1)).toBe("B");
 });
 
-/** A row stood whole, one lane of it holding a field the member types in. */
 function Row({ names, typing }: { names: string[]; typing?: string }) {
   return (
     <SlotTrack>
@@ -1634,10 +1485,6 @@ function Row({ names, typing }: { names: string[]; typing?: string }) {
 const press = (key: string, held: KeyboardEventInit = {}, on: Node = document) =>
   fireEvent.keyDown(on, { key, ...held });
 
-/** `[` and `]` walk the row. From outside it the first press moves the way it was pressed; after
- *  that the lane holding focus is where the walk stands, and the walk stops at both ends. The lane
- *  it reaches takes focus and scrolls to itself, which is the whole of the act; a press past an end
- *  reaches no lane, moves no focus, and is heard as the end. */
 test("the bracket keys walk the row, and it stops at both ends", () => {
   const scrolled: string[] = [];
   const scrolls = vi
@@ -1713,9 +1560,6 @@ test("a press another handler has already taken is left alone", () => {
   expect(document.activeElement).toBe(document.body);
 });
 
-/** A bare bracket is a character first. Typed into a composer it is the member's text and the row
- *  neither moves nor takes the press; from the lane itself it is the shortcut, and the press is
- *  taken so nothing else answers it too. */
 test("a bracket typed into a field is the member's text, and from the lane it walks the row", () => {
   render(<Row names={["A", "B"]} typing="A" />);
   const composer = screen.getByRole("textbox", { name: "A composer" });
@@ -1753,9 +1597,6 @@ test("a press inside an open select is left to the select", () => {
   expect(document.activeElement).toBe(option);
 });
 
-/** Two tracks, one standing inside a lane of the other. The row nearest the focused element walks
- *  and the other holds still, so one press never moves two rows; outside both, the row no other row
- *  encloses is the one that answers. */
 test("the row nearest the focused element is the one that walks", () => {
   render(
     <SlotTrack>
@@ -1784,7 +1625,6 @@ test("the row nearest the focused element is the one that walks", () => {
   expect(document.activeElement).toBe(slotFor("Outer two"));
 });
 
-/** A row of nine on a pane four lanes wide, the order it stands in written in the address. */
 function Rolled({ opening }: { opening: string[] }) {
   const [opens, setOpens] = useState(opening);
   return (
@@ -1815,16 +1655,13 @@ function Rolled({ opening }: { opening: string[] }) {
 
 const NINE = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
 
-/** The lane a press puts on the row, whatever the row is already standing. */
 const LATE = "J";
 
-/** The pane the laptop leaves, four lanes across at `--size-slot-min`, and the step from one
- *  lane's left edge to the next: the share of the row it takes, and the hairline after it. */
+/** The pane the laptop leaves, four lanes across at `--size-slot-min`, and the step from one lane's left
+ *  edge to the next: its share of the row, and the hairline after it. */
 const ROW_WIDTH = 1472;
 const STEP = (ROW_WIDTH - 3) / 4 + 1;
 
-/** Where a lane stands along the row, in lanes. The row itself never scrolls, so a lane's place is
- *  where the flex row laid it plus the transform the track wrote over it. */
 const spotted = (name: string): number => {
   const lanes = screen.getAllByRole("region");
   const at = lanes.findIndex((lane) => lane.getAttribute("aria-label") === name);
@@ -1845,8 +1682,6 @@ function rolling(names: string[]): () => void {
   return () => boxes.mockRestore();
 }
 
-/** A row holding more lanes than fit stands them in the one order the address states: the four
- *  that fit on the screen, and the rest queued past the right edge waiting to be walked to. */
 test("a row wider than the pane queues its far lanes past the right edge", () => {
   const done = rolling(NINE);
   try {
@@ -1859,8 +1694,6 @@ test("a row wider than the pane queues its far lanes past the right edge", () =>
   }
 });
 
-/** `]` and `[` move the member, not the row: the lane the press lands on takes focus, and the row
- *  holds still for as long as that lane is already on the screen. */
 test("a bracket press stands the member in the next lane, and holds the row still", () => {
   const done = rolling(NINE);
   try {
@@ -1883,9 +1716,6 @@ test("a bracket press stands the member in the next lane, and holds the row stil
   }
 });
 
-/** The row follows the walk only as far as it has to: a step onto the lane past the right edge
- *  brings that lane in by one and no further, so the lanes the member walked through are still
- *  beside the one they are standing in. */
 test("the walk carries the row only where the lane it lands on is off the screen", () => {
   const done = rolling(NINE);
   try {
@@ -1905,9 +1735,6 @@ test("the walk carries the row only where the lane it lands on is off the screen
   }
 });
 
-/** The row has two ends and the walk stops against them: the first lane at the left edge, the last
- *  at the right. A press asking past one moves nothing and is heard as the end, so a member walking
- *  the row hears where it stops rather than finding themselves back at the other end of it. */
 test("the walk stops at both ends, and the press past one is heard as the end", () => {
   const done = rolling(NINE);
   try {
@@ -1937,7 +1764,6 @@ test("the walk stops at both ends, and the press past one is heard as the end", 
   }
 });
 
-/** A row every lane already fits has nothing to bring round, so the keys move it nowhere. */
 test("a row every lane fits rolls nowhere", () => {
   const done = rolling(["A", "B", "C"]);
   try {
@@ -1952,8 +1778,6 @@ test("a row every lane fits rolls nowhere", () => {
   }
 });
 
-/** The horizontal wheel carries the row under the hand, and the row settles on the nearest lane
- *  boundary once the hand stops — a row left resting between two lanes shows both of them cut. */
 test("the horizontal wheel carries the row, and it settles on a lane boundary", () => {
   vi.useFakeTimers();
   const done = rolling(NINE);
@@ -1973,8 +1797,6 @@ test("the horizontal wheel carries the row, and it settles on a lane boundary", 
   }
 });
 
-/** The wheel is held by the two ends the walk is: a hand pushing the row past its first lane or
- *  its last leaves it standing against that end rather than opening a gap beside it. */
 test("the wheel stops at both ends of the row", () => {
   vi.useFakeTimers();
   const done = rolling(NINE);
@@ -2008,7 +1830,6 @@ test("the wheel stops at both ends of the row", () => {
   }
 });
 
-/** A wheel down the page is the page's, whatever it also carries sideways. */
 test("a wheel that is mostly vertical is left to the page", () => {
   const done = rolling(NINE);
   try {
@@ -2022,8 +1843,6 @@ test("a wheel that is mostly vertical is left to the page", () => {
   }
 });
 
-/** A lane holds its body only near the row: one lane of reach past either edge, read off the place
- *  the lane stands in rather than off anything the browser has to observe. */
 test("a lane more than a lane past either edge of the rolling row holds no body", () => {
   const done = rolling(NINE);
   try {
@@ -2038,9 +1857,6 @@ test("a lane more than a lane past either edge of the rolling row holds no body"
   }
 });
 
-/** The order the address states is what the row stands in, and a lane the address moved slides from
- *  where it stood to where it now stands rather than being redrawn there. A lane that did not move
- *  is not animated at all. */
 test("a lane the address moved slides to its new place, and a lane that stayed does not", () => {
   const done = rolling(NINE);
   try {
@@ -2061,11 +1877,6 @@ test("a lane the address moved slides to its new place, and a lane that stayed d
   }
 });
 
-/** A lane a press puts on a row every lane fits comes in from off the row's leading edge: it starts
- *  one lane's width left of the place it will stand and glides to it, and the lanes already
- *  standing glide to the places the narrower step leaves them. Opening a lane moves the step the
- *  same way a narrower pane does, and a row that read the step alone would answer the press by
- *  jumping — the one movement a member reads as nothing having happened. */
 test("a lane joining a fitting row glides in from one step left, and the row glides with it", () => {
   const done = rolling(["A", "B", "C"]);
   try {
@@ -2083,10 +1894,6 @@ test("a lane joining a fitting row glides in from one step left, and the row gli
   }
 });
 
-/** The same arrival on a row already holding more lanes than fit. The step does not move there, so
- *  the lanes standing keep their places and the lane that joined is the only one that glides — in
- *  from one lane's width left of the end of the row, while the row carries to stand it against the
- *  right edge. */
 test("a lane joining a rolling row glides in from one step left of the row's end", () => {
   const done = rolling(NINE);
   try {
@@ -2101,8 +1908,6 @@ test("a lane joining a rolling row glides in from one step left of the row's end
   }
 });
 
-/** A screen standing several lanes at once is restating a row the member already arranged, not a
- *  row they opened a lane on, so every one of them is drawn where it stands and nothing slides. */
 test("a row that stands several lanes at once slides none of them", () => {
   const done = rolling([]);
   try {
@@ -2118,9 +1923,6 @@ test("a row that stands several lanes at once slides none of them", () => {
   }
 });
 
-/** A member who asked for stillness gets the arrival seated rather than slid: the lane that joined
- *  stands in its place from the frame it appears in, the lanes it narrowed are re-seated at the new
- *  step, and no spring is started for any of them. */
 test("a reduced-motion arrival seats the lane in its place without a glide", () => {
   glided.still = true;
   const done = rolling(["A", "B", "C"]);
@@ -2138,8 +1940,6 @@ test("a reduced-motion arrival seats the lane in its place without a glide", () 
   }
 });
 
-/** A member who asked for stillness gets the row moved, not animated: the same press lands the same
- *  lane, and no spring is ever started. */
 test("a reduced-motion walk lands the row without a glide", () => {
   glided.still = true;
   const done = rolling(NINE);
@@ -2155,8 +1955,6 @@ test("a reduced-motion walk lands the row without a glide", () => {
   }
 });
 
-/** A pane that changes width keeps the row on the lane it was showing: every lane re-seats at the
- *  new step in one jump, and nothing springs across the change. */
 test("a resize re-seats the row at its new step without a glide", () => {
   const done = rolling(NINE);
   try {
@@ -2177,8 +1975,6 @@ test("a resize re-seats the row at its new step without a glide", () => {
   }
 });
 
-/** A phone has no bracket keys, no rail and no wheel, so the row it holds is the base row: scrolled
- *  and snapped one lane to a screen by the finger, with no lane carried off by a transform. */
 test("a phone pages the row by scrolling, and the ticker stays off", () => {
   atPhoneWidth();
   const done = rolling(NINE);
@@ -2199,8 +1995,6 @@ test("a phone pages the row by scrolling, and the ticker stays off", () => {
   }
 });
 
-/** A phone's row scrolls under the finger, so what stands in view is the observer's to say, not the
- *  offset's: a lane swiped to from the far end of the row mounts its body as it comes into view. */
 test("a phone's row mounts the lane the finger reaches", () => {
   atPhoneWidth();
   Watching.made = [];

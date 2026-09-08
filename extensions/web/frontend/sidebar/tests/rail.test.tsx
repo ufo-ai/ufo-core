@@ -168,9 +168,6 @@ const TERMINAL_CHAT = {
   surface: "ufo",
 };
 
-/** The settings menu adjusts the rail in place without hiding it, so the tick is the whole act; the
- *  menu is dismissed afterwards so a later `filterBy` starts shut. A surface is a choice turned on
- *  and off, so its row is a menu checkbox rather than a button. */
 async function filterBy(label: string) {
   await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: label }));
@@ -224,9 +221,6 @@ test("the filter admits a surface into the rail and the browser keeps the choice
   expect(await screen.findByRole("button", { name: /Migration run/ })).toBeTruthy();
 });
 
-/** A phone screen has no width for a column beside the page, so the nav drawer holds the rail
- *  there: the same rows, the filter that governs them, and a pick that both opens the conversation
- *  and shuts the drawer. */
 test("the drawer holds the rail at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
   wire({ ...chatsOnWire([CHAT_ROW]) });
@@ -357,8 +351,6 @@ test("the collapsed run is the same length whatever the workspace is doing", () 
   expect(ids(idle.shown)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
   expect(ids(idle.more)).toEqual(["i", "j"]);
 
-  /* One app starts working: it rises to the top and the run keeps its length, so the column does
-     not collapse around whatever happens to be busy. */
   const busy = appRun(many, (agentId) => agentId === "i");
   expect(ids(busy.shown)).toEqual(["i", "a", "b", "c", "d", "e", "f", "g"]);
   expect(ids(busy.more)).toEqual(["h", "j"]);
@@ -367,8 +359,6 @@ test("the collapsed run is the same length whatever the workspace is doing", () 
 test("the tail behind More holds every app the run did not, however many there are", () => {
   const many = Array.from({ length: 30 }, (_, at) => app("a" + at, "A" + at));
   const run = appRun(many, () => false);
-  /* An app the list refused to draw is one the member has no way to reach: the open list scrolls
-     rather than ending, so nothing past the run's length is dropped. */
   expect(run.shown.length).toBe(8);
   expect(run.more.length).toBe(22);
   expect(ids(run.shown.concat(run.more))).toEqual(ids(many));
@@ -381,8 +371,6 @@ test("a working app rises to the top and leaves the order under it alone", () =>
   expect(ids(run.shown)).toEqual(["radar", "brief", "wiki"]);
   expect(ids(run.more)).toEqual([]);
 
-  /* The work ends and the app falls back to where the ladder already had it — the two rows it
-     passed are in the same order they were before it rose. */
   const rested = appRun(apps, () => false);
   expect(ids(rested.shown)).toEqual(["brief", "radar", "wiki"]);
 });
@@ -510,7 +498,6 @@ test("a rail read that fails states so and keeps the rows it has", async () => {
   wire({ "/objects/conversation$": () => new Response("nope", { status: 503 }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  // The primitive stands its own live region beside the card, so the card is what is read here.
   await screen.findByText("Conversations did not refresh.");
   const toast = document.querySelector("[data-slot=toast]") as HTMLElement;
   expect(toast.textContent).toContain("Conversations did not refresh.");
@@ -572,9 +559,8 @@ test("a second message sent before the first is answered opens no second convers
   await userEvent.type(screen.getByLabelText("Ask UFO"), "first half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  // Until that POST answers, nothing here knows which conversation it opened, and a second send to
-  // the `new` sentinel opens another one: the two halves would end up in separate conversations,
-  // each answered without the other. So the composer holds the words rather than founding again.
+  // Until that POST answers nothing knows which conversation it opened, and a second send to the `new`
+  // sentinel opens another one, so the composer holds the words rather than founding again.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "second half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -584,7 +570,6 @@ test("a second message sent before the first is answered opens no second convers
   found({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half", opened_run: true });
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
 
-  // The conversation exists now, so the second message joins it mid-turn instead of founding.
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
   );
@@ -607,8 +592,6 @@ test("two submits the page could not re-render between still open one conversati
   await userEvent.type(screen.getByLabelText("Ask UFO"), "one thought");
   const form = screen.getByLabelText("Ask UFO").closest("form");
 
-  // Both submits read the composer of one render, so a held form cannot be what keeps the second
-  // from founding — the send is, which is where the `new` sentinel is spent.
   await act(async () => {
     form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -792,14 +775,10 @@ test("a conversation another member spoke stands at the foot and names them", as
   const section = railRow.closest("section");
   expect(section?.textContent).toContain("Other members");
   expect(section?.textContent).not.toContain("Pick one thread");
-  /* The member's own conversations stand in the run above, which no heading and so no section
-     encloses. */
   expect(screen.getByRole("button", { name: /Pick one thread/ }).closest("section")).toBeNull();
 });
 
-/** jsdom lays nothing out, so the frame and the words it holds are given their widths rather than
- *  measured. What the test is after is the arithmetic the row does with them and what it draws on
- *  either side of the pointer. */
+/** jsdom lays nothing out, so the frame and the words it holds are given their widths rather than measured. */
 function overrunning(row: HTMLElement, frameWidth: number, textWidth: number) {
   const frame = row.querySelector("span") as HTMLElement;
   const text = frame.querySelector("span") as HTMLElement;
@@ -818,7 +797,6 @@ test("a title too long for its row travels its overrun under the pointer, and re
   expect(text.style.transform).toBe("translateX(0px)");
   expect(frame.className).toContain("text-ellipsis");
 
-  /* At rest the title is an inline run, which is what the frame can ellipse. */
   expect(text.className).toContain("inline");
   expect(text.className).not.toContain("inline-block");
 
@@ -826,8 +804,6 @@ test("a title too long for its row travels its overrun under the pointer, and re
   expect(text.style.transform).toBe("translateX(-120px)");
   /* Travelled at a pace rather than in a duration: 120px at 45px a second. */
   expect(text.style.transitionDuration).toBe("2667ms");
-  /* A transform moves a box, not an inline run — and the mark that says there is more has nothing
-     to say while the more is being read. */
   expect(text.className).toContain("inline-block");
   expect(frame.className).toContain("text-clip");
 
@@ -927,8 +903,6 @@ test("a private extension conversation opens the live chat", async () => {
   expect(await screen.findByText("Work to finish")).toBeTruthy();
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Daily brief")).toBeTruthy();
-  // The agent holds the conversation but is not one this member can open, so it is named and not
-  // linked.
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("link")).toBeNull();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
@@ -1019,9 +993,6 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
   ).toBeTruthy();
 });
 
-/** The pane a conversation another surface holds is read in is headed the way a portal chat's is:
- *  the agent holding it and what it is called — never a list of conversations
- *  standing over the transcript in place of a header. */
 test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
@@ -1054,8 +1025,6 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
   expect(header.queryByRole("button", { name: "Back to Agents" })).toBeNull();
 });
 
-/** A terminal session is not a place a link can land, so the same mark states the surface and goes
- *  nowhere. */
 test("a terminal conversation is marked with its surface and no way out", async () => {
   location.hash = "#/c/" + CONVO_ID;
   const terminal = slackConversation({
@@ -1083,7 +1052,6 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
-/** A conversation another surface holds shares files through the same attachment sheet. */
 test("a markdown file in a Slack conversation opens the attachment sheet", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
@@ -1213,8 +1181,6 @@ test("the ask control targets the main agent, and offers no other", async () => 
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
-  // A conversation that does not exist yet is headed by nothing: the address names the app that
-  // would hold it, and a crumb back to a conversation nobody has founded leads nowhere.
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
@@ -1236,9 +1202,6 @@ test("the apps list opens the agent's page, and the sidebar starts the conversat
 });
 
 test("an app with nothing in flight states nothing under its name", async () => {
-  /** The second line is for work in flight. A column of apps that each printed a standing line
-   *  would state the ones doing something and the ones doing nothing in the same weight, and the
-   *  row that matters would stop being the one that catches the eye. */
   location.hash = "#/";
   wire({
     "/settings": () => json(SETTINGS),
@@ -1254,7 +1217,6 @@ test("an app with nothing in flight states nothing under its name", async () => 
   const row = await index.findByRole("button", { name: /^Assistant/ });
   expect(within(row).queryByText("Answers from what this workspace has recorded.")).toBeNull();
   expect(index.queryByText(/Idle|Active/)).toBeNull();
-  // The name is all the row states, so it is the whole of what the row reads as.
   expect(row.textContent).toBe("Assistant");
 });
 

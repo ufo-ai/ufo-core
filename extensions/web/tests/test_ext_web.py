@@ -3640,7 +3640,6 @@ async def test_a_conversation_the_member_cannot_name_is_not_railed(
 
     assert [row["name"] for row in await _rail_rows(client, cookie)] == [str(named_id)]
 
-    # The row is hidden, never destroyed: its permalink still resolves the conversation it names.
     reached = await client.get(f"/surface/web/api/chats?conversation={nameless_id}", headers=cookie)
     assert reached.status_code == 200
 
@@ -4980,7 +4979,6 @@ async def test_transcript_reload_draws_the_standing_connect_without_minting(
     assert loaded.status_code == 200
     control = _drawn_connect(loaded)
     assert control == {"provider": "github", "label": "GitHub", "turn": str(turn_id)}
-    # The stream and the reload draw one control, and neither mints: a read answers a read.
     assert streamed["connect"] == control
     assert "oauth.example.test" not in loaded.text
     unbrokered = await client.get(
@@ -7288,8 +7286,6 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
-    # The kind holds a connection private to its owner however the connection itself is shared, so
-    # another member cannot even name the account, let alone unshare it.
     assert "no connection object named" in refused.json()["message"]
     async with workspace_tx() as connection:
         still_shared = (
@@ -8234,8 +8230,6 @@ async def test_a_private_account_is_connected_only_for_the_member_who_made_it(
         {"provider": "acme", "label": "acme", "summary": "", "granted": False, "required": False}
     ]
 
-    # Shared is the workspace's own: every member reads the one account, because every member's
-    # turns work from it.
     shared_id = await _seed_account(workspace_id, agent_id, owner_id, "acme", shared=True)
     await _grant_account(workspace_id, agent_id, shared_id)
     assert await connectors(other_token) == [
@@ -8534,8 +8528,6 @@ async def test_a_member_reads_the_room_the_sweep_opened_for_them(
         headers=cookie,
     )
     assert read.status_code == 200, read.text
-    # And speaks in it: the room is where the app answers, so a member who wants a different page
-    # says so where the build was asked for rather than opening a second conversation about it.
     spoke = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
         content=b"Put the open pull requests at the top.",
@@ -8543,7 +8535,6 @@ async def test_a_member_reads_the_room_the_sweep_opened_for_them(
     )
     assert spoke.status_code == 200, spoke.text
 
-    # Another member's room is still another member's, whatever its surface.
     _other_id, other_token = await _seed_member(workspace_id, "onlooker@example.com")
     other = {"cookie": f"{SESSION_COOKIE}={other_token}"}
     onlooking = await client.get(

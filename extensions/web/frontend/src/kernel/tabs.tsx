@@ -10,10 +10,6 @@ function panelId(group: string, tab: string) {
   return group + "-" + tab + "-panel";
 }
 
-/** A destination's tabs as the one segmented row the portal picks with — the same control a
- *  listing narrows itself by, so a member learns one control and reads it everywhere. Selection is
- *  the filled pill; there is no underline and no rule, because a line under a page's tabs states a
- *  boundary between its name and its contents that the surface does not have. */
 export function TabRow<T extends string>({
   group,
   tabs,

@@ -1,9 +1,3 @@
-//! The shared workspace database boundary: the three roles, the per-table policy, and the fence
-//! that keeps the gateway's own role out of every tenant table.
-//!
-//! These run against a real Postgres as a superuser-capable owner, because what is under test is
-//! Postgres's own grant and policy machinery — a fake would assert nothing.
-
 mod harness;
 
 use harness::{admin_dsn, fresh_database, ROLE_LOCK};
@@ -12,8 +6,6 @@ use ufo_control::rls::{
     CONTROL_ROLE, IDLE_IN_TRANSACTION_TIMEOUT, OWNER_ROLE, POLICY_NAME, SERVE_ROLE,
 };
 
-/// A tenant-shaped `public` schema: the workspace table the policy scopes by `id`, and one
-/// workspace-scoped table it scopes by `workspace_id`.
 const TENANT_TABLES: &str = "create table workspace (id uuid primary key); \
      create table member (id uuid primary key, workspace_id uuid not null, email text not null); \
      create table alembic_version (version_num text primary key)";
@@ -48,7 +40,6 @@ async fn bootstrap_policies_scopes_every_public_table_and_skips_alembic() {
         );
     }
 
-    // The alembic bookkeeping table carries no workspace and is deliberately left unpoliced.
     let alembic: bool = client
         .query_one(
             "select relrowsecurity from pg_class where relname = 'alembic_version'",
@@ -66,7 +57,6 @@ async fn bootstrap_is_idempotent_and_recreates_a_drifted_policy() {
     let mut client = database.client().await;
     client.batch_execute(TENANT_TABLES).await.unwrap();
     bootstrap_policies(&mut client).await.unwrap();
-    // A second pass finds every table conformant and writes nothing.
     bootstrap_policies(&mut client).await.unwrap();
 
     client
@@ -118,7 +108,6 @@ async fn the_serve_role_is_created_with_its_grants_and_dbos_database() {
     database.ensure_owner_role(&client).await;
 
     ensure_serve_role(&client).await.unwrap();
-    // Running twice must reset the password rather than refuse.
     ensure_serve_role(&client).await.unwrap();
 
     let exists: Option<i32> = client
@@ -195,7 +184,6 @@ async fn the_control_role_reaches_its_own_schema_and_no_tenant_table() {
     assert_eq!(control_password().unwrap().len(), 64);
     assert_ne!(control_password().unwrap(), serve_password().unwrap());
 
-    // The fence: no privilege on any table in `public`, held by the absence of a grant.
     for table in ["workspace", "member"] {
         for privilege in ["select", "insert", "update", "delete"] {
             let granted: bool = client
@@ -213,7 +201,6 @@ async fn the_control_role_reaches_its_own_schema_and_no_tenant_table() {
         }
     }
 
-    // And it does reach its own schema, or the gateway could not read its own ledgers.
     let usage: bool = client
         .query_one(
             "select has_schema_privilege($1, 'ufo_control', 'usage')",
@@ -235,15 +222,8 @@ async fn a_select_on_a_tenant_table_as_the_control_role_is_denied() {
     database.ensure_owner_role(&client).await;
     ensure_serve_role(&client).await.unwrap();
     ensure_control_role(&client).await.unwrap();
-    // The policies are enabled first, because that is the shape a deploy runs in and it changes
-    // which error a refused read surfaces: with RLS on, Postgres evaluates the policy predicate
-    // before reporting the privilege failure, so the read dies on the unset `app.workspace_id` GUC
-    // rather than on `permission denied`. Asserting one SQLSTATE would then pass only against a
-    // database the deploy never has.
     bootstrap_policies(&mut client).await.unwrap();
 
-    // The grant is the fence, so its absence is the assertion — every read below fails, but this is
-    // the fact that makes them fail.
     for table in ["workspace", "member"] {
         let granted: bool = client
             .query_one(
@@ -256,7 +236,6 @@ async fn a_select_on_a_tenant_table_as_the_control_role_is_denied() {
         assert!(!granted, "{CONTROL_ROLE} holds select on {table}");
     }
 
-    // `set role` drops to the gateway's own rights inside this session, which is what the pod has.
     client
         .batch_execute(&format!("set role \"{CONTROL_ROLE}\""))
         .await
@@ -285,8 +264,6 @@ async fn a_new_table_receives_no_serve_grant_before_the_policy_bootstrap() {
     client.batch_execute(TENANT_TABLES).await.unwrap();
     ensure_serve_role(&client).await.unwrap();
 
-    // A table created after the grants must not be readable until the next bootstrap runs, or a
-    // migration would open an unpoliced table to the serve role in the window before its policy.
     client
         .batch_execute("create table later (id uuid primary key, workspace_id uuid not null)")
         .await
@@ -307,6 +284,5 @@ async fn a_new_table_receives_no_serve_grant_before_the_policy_bootstrap() {
 
 #[tokio::test]
 async fn the_admin_dsn_names_a_database_this_suite_can_reach() {
-    // A guard on the harness itself: every test above is meaningless against an unreachable server.
     assert!(admin_dsn().starts_with("postgres"), "{}", admin_dsn());
 }

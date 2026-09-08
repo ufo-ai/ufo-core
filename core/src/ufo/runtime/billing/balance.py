@@ -25,15 +25,8 @@ BALANCE_PRESENCE_TTL_SECONDS = 5.0
 BALANCE_PRESENCE_CACHE_MAX = 4096
 BALANCE_CHARGED_METRIC = "balance_charged_micro_usd_total"
 _no_balance: dict[UUID, float] = {}
-# How far a workspace whose card has already paid may run past the line before a gate stops it.
-# The refill job cannot be instant: it ticks, then Stripe answers, and one turn can outspend that
-# gap, so a balance tested against the bare line refuses turns for a workspace that is solvent and
-# about to be topped up. This absorbs the gap.
-#
-# It is a flat figure, not a share of the refill the member chose, because a member-scaled overdraft
-# is a credit line whose limit the borrower sets: arranging a huge refill would earn a huge one. And
-# it is earned rather than granted, so the exposure on a workspace that never pays is nothing at
-# all — a card that has settled a charge has proved itself in the only way that counts.
+# The refill job cannot be instant, and one turn can outspend the gap, so a balance tested against
+# the bare line would refuse a workspace about to be topped up.
 TOPUP_GRACE_MICRO_USD = 100_000_000
 
 

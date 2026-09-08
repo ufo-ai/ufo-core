@@ -1,8 +1,3 @@
-// The Notification app's page: a static site built with the portal's app kit. Edit this file and
-// redeploy to change the page.
-//
-// It renders what agents have raised for the signed-in member, newest first, each row opening its
-// record beside the list, and the conversations the app holds.
 
 import {
   AppConversations,

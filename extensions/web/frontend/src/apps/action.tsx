@@ -25,7 +25,6 @@ type ActionOutcome = {
   detail?: unknown;
 };
 
-/** Apply one connector-supplied prepared action and show its durable result. */
 export function ApplicationAction({
   action,
   className,
@@ -45,8 +44,6 @@ export function ApplicationAction({
         const result = answer.payload.status?.result;
         if (typeof result === "string") setMessage(result);
       })
-      /* The cleanup aborts this read, and that abort rejects the chain: it is the row's own act,
-         so it ends here. A read that broke for any other reason says so. */
       .catch((error: unknown) => {
         if (!aborted(error)) setMessage("Network error — try again.");
       });

@@ -129,9 +129,6 @@ class DockerCarrier:
             "no_proxy": NO_PROXY_HOSTS,
             "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
             "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-            # Point the toolchains that ignore the system trust store at the CA `_install_ca` merges
-            # in, so a MITM'd host (a cache-fronted registry included) is trusted by pip, requests,
-            # curl, and Node alike — not only by the tools that read `/etc/ssl`.
             "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
             "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
             "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,

@@ -30,9 +30,6 @@ from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.workspace import ws_current
 
 HANDBOOK_PACKS = ("assistant", "assistant_eval")
-# Grading copies the finished conversation workspace into the environment container, so the carrier
-# must serve `/workspace` from a host directory. `local` and `docker` both bind the conversation
-# directory; an off-cluster carrier (E2B) keeps `/workspace` on its own disk and cannot be graded.
 HANDBOOK_BACKENDS = ("local", "docker")
 ENVELOPE_REVISION = "workspace-only-scratch-4"
 WORKSPACE_ROOT = "/workspace"

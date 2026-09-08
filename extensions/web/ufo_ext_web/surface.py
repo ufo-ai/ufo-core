@@ -317,9 +317,6 @@ PORTAL_FILE = STATIC_DIR / "index.html"
 PORTAL_HTML = PORTAL_FILE.read_text() if PORTAL_FILE.is_file() else None
 SIDEBAR_FILE = STATIC_DIR / "sidebar.html"
 SIDEBAR_HTML = SIDEBAR_FILE.read_text() if SIDEBAR_FILE.is_file() else None
-# Which shell the portal serves: the lanes shell (`index.html`) where this flag answers true, the
-# sidebar shell (`sidebar.html`) everywhere else. It reads closed like a shipped app's flag —
-# offering the lanes shell is a deliberate act, and every silence serves the sidebar shell.
 LANES_SHELL_FLAG = "enable-lanes-shell"
 STATIC_PREFIX = f"{PORTAL_PATH}/static/"
 ASSET_MEDIA_TYPES = {
@@ -1293,14 +1290,6 @@ PORTAL_SURFACES = {
     "app-store": "enable-app-store",
 }
 APP_STORE_FLAG = PORTAL_SURFACES["app-store"]
-# The flags that read closed. A flag withholding one of the portal's own screens reads open, so no
-# outage, no unseeded deploy and no key an operator has yet to create takes away what a member
-# already had. Every shipped app is the other case: it is listed where its flag says so and nowhere
-# else. That is the whole of what withholding one does — the workspace still holds the app, its
-# address still opens it, and its standing work keeps its clock — so the silences that must not take
-# a screen away are free to withhold an app, and offering one is a deliberate act. The App Store is
-# a screen the product has not offered yet, so its flag reads the way an app's does: the sidebar
-# ends in App Creator, as it did, until somebody turns the store on.
 CLOSED_UNTIL_ANSWERED = frozenset([*APP_FLAGS.values(), APP_STORE_FLAG])
 
 
@@ -1388,8 +1377,6 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     grants = None
     if audience.admin:
         grants = await granted_emails(web_extension().store)
-    # The agent carries its homepage — an app's own page or the answer it has none — so a screen
-    # opens the page from the boot read and never asks per agent as the member moves between them.
     await _assets_published(ctx.fleet_blob, apps())
     bound_pages = {agent.id: await _bound_page(ctx, agent, member_id) for agent in audience.agents}
     homepages = {
@@ -1413,9 +1400,6 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
             and all(order.armed for order in state.standing if order.required)
         )
     )
-    # An app that declared nothing has no setup screen to stand on — chat, radar, tasks, wiki and
-    # artifacts stand on their page from the first moment — and an app whose page this workspace
-    # built stands on that page from then on, todos or no todos.
     on_setup = frozenset(
         agent.id
         for agent, state in zip(provisioned, setup_states, strict=True)
@@ -2650,8 +2634,6 @@ async def _conversation_messages(
     if recorded is None:
         rendered: list[dict[str, object]] = []
         earlier = 0
-        # A conversation with no written transcript has no settled turn, so it asked nothing and
-        # nothing it holds is an answer to a card.
         stated: frozenset[str] = frozenset()
     else:
         aids = await _transcript_aids(
@@ -2662,9 +2644,6 @@ async def _conversation_messages(
         stated = aids.asks.stated
     if detail is None:
         return rendered, None, earlier
-    # A message folded into the live turn shares its turn id, so one read of the turn's attachments
-    # serves the message that opened it and every arrival that joined it, each drawing the ones its
-    # own note names, matched by filename.
     member_rows = {
         artifact.filename: _file_payload(ctx, artifact)
         for artifact in await ctx.shared_artifacts(detail.turn.id)
@@ -3586,10 +3565,6 @@ async def _project_slot_context(
                 artifact_url = ctx.artifact_link(artifact_entry.artifact)
                 artifact_preview = None
                 artifact_preview_url = ctx.artifact_preview_link(artifact_entry.artifact)
-                # The link is minted only for bytes that are a raster of a declared type — the
-                # file's own where it is a picture, its rendered first page where it is a document —
-                # so the picture's type is read off the blob the link serves, never off the
-                # member's filename, which for a document names the document.
                 if artifact_preview_url is not None:
                     preview_path = urlsplit(artifact_preview_url).path
                     preview_media_type = raster_image_media_type(preview_path)
@@ -5257,9 +5232,6 @@ def _homepage_state(
     return {"state": "none"}
 
 
-# The most pages one render answers with. A caller names how many it draws and is held to this
-# ceiling here, so a long document costs one batch of pages rather than all of them and a card
-# drawing a cover costs one page rather than a batch.
 PREVIEW_PAGE_BATCH = 8
 
 

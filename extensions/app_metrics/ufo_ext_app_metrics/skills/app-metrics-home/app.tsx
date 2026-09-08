@@ -1,10 +1,3 @@
-// The metrics app's page: a static site built with the portal's app kit. Edit this file and
-// redeploy to change the page.
-//
-// It ships filled in. Every number below is placeholder written to read exactly like the real
-// thing, because this file is the shape the app rebuilds against its own sources on the first
-// Build app. Each measure states the rule it was counted by: a number whose rule nobody can state
-// is a number nobody can act on.
 
 import {
   AppConversations,
@@ -93,8 +86,6 @@ type MeasureSet = {
   measures: Measure[];
 };
 
-/** One set per subject. An unarmed set states what it would report and carries the ask that turns
- *  it on, so the app states its whole capability rather than burying it in a prompt. */
 const SETS: MeasureSet[] = [
   {
     title: "Engineering",
@@ -189,9 +180,6 @@ const MERGED_RULE =
   "One column a day, counted the same way as Shipped. The reported week is drawn apart from the "
   + "five before it, and a day nothing merged draws the shortest column rather than a gap.";
 
-/** Six weeks a day at a time — the run Figma draws, at the column and gap it draws them with. The
- *  band says which week a day belongs to, so the reported week reads against the five it followed
- *  without a second chart beside it. */
 const MERGED: ChartBar[] = [
   ...[2, 5, 3, 4, 1, 0, 2].map((value) => ({ value, tone: "muted" as const })),
   ...[3, 6, 2, 5, 4, 0, 1].map((value) => ({ value, tone: "muted" as const })),
@@ -212,8 +200,6 @@ const CONNECTORS_MORE = "By share of runs";
 
 type Share = { provider: string; name: string; share: string };
 
-/** Which connectors the week's runs actually reached. Share of runs and not of spend: a run that
- *  read one issue and a run that read a thousand cost differently, and this states reach. */
 const SHARES: Share[] = [
   { provider: "github", name: "GitHub", share: "41.2%" },
   { provider: "slack", name: "Slack", share: "22.8%" },
@@ -235,8 +221,6 @@ type Allowance = {
   rule: string;
 };
 
-/** What the workspace has used of what it is allowed. Drawn as cells rather than a length, because
- *  a member reads four of six off the bar and reads nothing off two thirds of a stripe. */
 const ALLOWANCES: Allowance[] = [
   {
     label: "Runs this month",
@@ -272,8 +256,6 @@ const SIGNED_RULE =
   + "week are each drawn apart from the weeks before them, and a day nothing was signed draws the "
   + "shortest column rather than a gap.";
 
-/** Four weeks a day at a time, in thousands. Contracts do not sign daily, so most days are empty
- *  and the four weeks read as their totals: 20, 28, 23, and the 48 the week reports. */
 const SIGNED: ChartBar[] = [
   ...[0, 8, 0, 0, 12, 0, 0].map((value) => ({ value, tone: "muted" as const })),
   ...[6, 0, 0, 18, 0, 0, 4].map((value) => ({ value, tone: "muted" as const })),
@@ -288,8 +270,6 @@ const COMMITTED = [9, 16, 22, 12, 31, 14, 18, 26, 20, 28, 23, 48];
 
 type Source = { provider: string; name: string; move: string };
 
-/** Where the week's contracts were signed, and how each source moved against the week before.
- *  Three sources and not six: a source under a point of movement is a row a member reads past. */
 const SOURCES: Source[] = [
   { provider: "stripe", name: "Stripe", move: "+2.3%" },
   { provider: "quickbooks", name: "QuickBooks", move: "−3.2%" },
@@ -306,9 +286,6 @@ type Target = {
   people: AvatarStackPerson[];
 };
 
-/** The two wholes revenue is read against: the quarter's target and the book up for renewal. The
- *  figure over each bar is the share the first part has taken, so the bar and the number state one
- *  thing, and the faces under it are the members those contracts sit with. */
 const TARGETS: Target[] = [
   {
     title: "Committed against target",
@@ -359,8 +336,6 @@ type Need = {
   wires: Connector[];
 };
 
-/** Each card states one prerequisite and what answering it turns on, so the page states its whole
- *  capability rather than leaving a member to guess which numbers are missing and why. */
 const NEEDS: Need[] = [
   {
     title: "Name where support happens",
@@ -669,7 +644,6 @@ function Home({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  // The one record a row opens stands beside the page, and closing it clears the track.
   const held = place.opens?.at(-1) ?? null;
   const at = held === null ? null : objectAt(held);
   const band = usePageHead(

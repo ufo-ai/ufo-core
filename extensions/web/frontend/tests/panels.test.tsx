@@ -13,8 +13,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The workspace column, which the shell draws at a phone width alone: the drawer the hamburger
- *  opens holds it, and it is drawn whole there. */
 async function openWorkspaceColumn(): Promise<HTMLElement> {
   await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
@@ -69,11 +67,9 @@ test("the settings page states the agent's facts, renders its schema, and submit
   expect(fact("Web audience")).toBe("Every member");
   expect(fact("Usage")).toBe("Workspace usage");
   expect(screen.queryByRole("tab", { name: "Usage" })).toBeNull();
-  // Connectors have a tab of their own in this dialog; the spec form states none of them.
   expect(screen.queryByRole("button", { name: "Add connector" })).toBeNull();
   expect(screen.getByText("be useful")).toBeTruthy();
 
-  // A preference is kept the moment it is changed, so the pick is the whole act.
   await pick("reasoning", "Low");
 
   await waitFor(() => expect(posted.length).toBe(1));
@@ -97,18 +93,15 @@ test("the settings page states the agent's facts, renders its schema, and submit
     name: "assistant",
     spec: { prompt: "review every request" },
   });
-  // Saving closes the editor, leaving the section stating the prompt again.
   expect(await screen.findByRole("button", { name: "Edit prompt" })).toBeTruthy();
   expect(screen.queryByLabelText("Prompt")).toBeNull();
 });
 
-/** Two preferences changed in quick succession are two whole-spec intents. Sent at once they can
- *  land either way round, and the older one landing last would undo the newer choice — so they are
- *  sent one after the other, and the last request carries the last answer. */
+/** Two whole-spec intents sent at once can land either way round, and the older landing last would undo
+ *  the newer choice — so they are sent one after the other. */
 test("a second preference changed mid-save is the one that lands last", async () => {
   const posted: { spec: Record<string, unknown> }[] = [];
-  // Held on an object rather than in a local: a local assigned only inside the executor narrows to
-  // never by the time the test releases it.
+  // Held on an object rather than in a local: a local assigned only inside the executor narrows to never.
   const held: { release?: () => void } = {};
   wire({
     "/settings": () => json(SETTINGS),
@@ -116,7 +109,6 @@ test("a second preference changed mid-save is the one that lands last", async ()
     "/transcript": () => json({ messages: [] }),
     "/intents": async (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
-      // The first intent is held open, so the second change is made while it is still in flight.
       if (posted.length === 1) {
         await new Promise<void>((resume) => {
           held.release = resume;
@@ -133,22 +125,17 @@ test("a second preference changed mid-save is the one that lands last", async ()
   await waitFor(() => expect(posted.length).toBe(1));
 
   await userEvent.click(screen.getByLabelText("Use workspace skills"));
-  // Nothing is sent while the first is outstanding.
   expect(posted.length).toBe(1);
 
   held.release?.();
   await waitFor(() => expect(posted.length).toBe(2));
 
-  // The last request carries both answers, so neither change is undone by the other.
   expect(posted[1].spec).toMatchObject({
     internet_access_allowed: false,
     use_workspace_skills: false,
   });
 });
 
-/** A refused preference cannot be followed by the change queued behind it — that spec still carries
- *  the refused value. What the member changed while the first was in flight is still drawn on the
- *  control, so the read is taken again and the column goes back to stating what is stored. */
 test("a refusal names itself and puts the controls back to what is stored", async () => {
   const posted: unknown[] = [];
   const held: { release?: () => void } = {};
@@ -179,14 +166,12 @@ test("a refusal names itself and puts the controls back to what is stored", asyn
   await userEvent.click(await screen.findByLabelText("internet_access_allowed"));
   await waitFor(() => expect(posted.length).toBe(1));
 
-  // A second change made while the refusal is still in flight.
   const skills = screen.getByLabelText("Use workspace skills") as HTMLInputElement;
   await userEvent.click(skills);
   expect(skills.checked).toBe(false);
 
   held.release?.();
 
-  // The refusal is named, the queued spec is not sent, and the read is taken again.
   expect(await screen.findByText("reasoning is required by that model.")).toBeTruthy();
   await waitFor(() => expect(reads).toBeGreaterThan(before));
   expect(posted.length).toBe(1);
@@ -300,8 +285,6 @@ test("settings polling preserves a dirty prompt edit", async () => {
       await Promise.resolve();
     });
     expect(reads).toBe(2);
-    // The prompt is the one read a member holds unsaved, so it is the one a poll must not write
-    // over. A preference keeps itself as it is changed and has no unsaved state to lose.
     expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe(
       "review every request",
     );
@@ -801,15 +784,11 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByText("member@example.com")).toBeTruthy();
   expect(screen.getByText("Origins")).toBeTruthy();
   expect(screen.getByText("#eng")).toBeTruthy();
-  // An agent's line is headed the way every screen heads that agent; the line the rollup gives no
-  // agent id is the report's own word for work no agent ran, and stands as the report wrote it.
   expect(screen.getByText("Assistant")).toBeTruthy();
   expect(screen.getAllByText("Workspace jobs").length).toBe(2);
   expect(screen.getByRole("img", { name: "$9.00 across 1 daily buckets" })).toBeTruthy();
   expect(usageWire.calls.some((url) => url.includes("range=30d"))).toBe(true);
 
-  // The range is a place the pane holds, not state the screen keeps to itself: the press reports it
-  // and the screen redraws at the range the place came back with.
   await userEvent.click(screen.getByRole("button", { name: "90 days" }));
   await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=90d"))).toBe(true));
   expect(screen.getByRole("button", { name: "90 days" }).getAttribute("aria-pressed")).toBe("true");
@@ -833,9 +812,6 @@ test("the usage range offers the last 24 hours, and the day history is the kit's
     </MainAgentProvider>,
   );
 
-  // The plot is the kit's chart rather than this screen's own polyline, so the point under the
-  // pointer can state its own value. A day is what was billed on it, so the history states dollars
-  // and draws each day as its own column.
   const plot = await screen.findByRole("img", { name: "$1.50 across 1 daily buckets" });
   expect(plot.getAttribute("data-slot")).toBe("chart");
 
@@ -877,11 +853,8 @@ test("the daily average is an average over the chosen period, not over the dates
       expect(within(tile).getByText(note)).toBeTruthy();
     });
 
-  // A 30-day range divides its tokens by its 30 days, not by the two dates the history drew.
   await average("40", "2 active days");
 
-  // A 24-hour range stands on two calendar dates and is still one day: the tile states the tokens the
-  // same screen states as the period's total, and its note names one day.
   await userEvent.click(screen.getByRole("button", { name: "24 hours" }));
   await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=1d"))).toBe(true));
   await average("1.2K", "1 active day");
@@ -952,7 +925,6 @@ test("an app opens on the conversation that moved last, and an address names ano
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  // Landing writes nothing to the address: the app's own hash already means "the latest".
   expect(await heldConversation()).toBe("Newest thread");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
   expect(screen.queryByRole("tab", { name: "Home" })).toBeNull();
@@ -964,10 +936,6 @@ test("an app opens on the conversation that moved last, and an address names ano
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + older);
 });
 
-/** The app's own conversations are a lane of the pane's track, which is the whole of what a member
- *  holding one of several has to reach the rest by. The lane lists them, marks the one the pane is
- *  holding, and opens the one pressed — and the address is what it writes, so the mark it draws is
- *  read back off the same place the pane reads. */
 test("an app with no page opens its newest conversation whole, with no lane beside", async () => {
   const older = "44444444-4444-4444-8444-444444444444";
   const listed = (id: string, description: string, readable = true) => ({
@@ -1002,7 +970,6 @@ test("an app with no page opens its newest conversation whole, with no lane besi
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await waitFor(async () => expect(await heldConversation()).toBe("Newest thread"));
-  // The sidebar is the list of conversations; the pane draws no second one beside the chat.
   expect(screen.queryByRole("region", { name: "Conversations" })).toBeNull();
 });
 
@@ -1018,7 +985,6 @@ test("the app pane starts a conversation where it stands, without leaving for th
   const pane = await screen.findByRole("region", { name: "Assistant" });
   const act = within(pane).getByRole("button", { name: "New" });
   const menu = within(pane).getByRole("button", { name: "Menu for Assistant" });
-  // The act stands at the far end, immediately before the menu.
   expect(menu.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
 
   await userEvent.click(act);
@@ -1077,7 +1043,6 @@ test("the model field offers the deploy's models, which its schema alone cannot 
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
-  // The wire's names, read as the member reads them.
   expect((await opened("model")).map((option) => option.textContent)).toEqual([
     "Opus",
     "Sonnet",
@@ -1228,9 +1193,8 @@ test("an applied grant change keeps a live consent link on screen", async () => 
   expect(screen.getByRole("link", { name: "Open the provider consent page" })).toBeTruthy();
 });
 
-/** The bands a screen stacks carry no margin of their own, so whatever stacks them states the gap.
- *  A container that forgets it renders them flush — which is a fault no band can see, and which
- *  eight sections of Usage shipped past a green suite once already. */
+/** The bands a screen stacks carry no margin of their own, so whatever stacks them states the gap. A
+ *  container that forgets renders them flush, which is a fault no band can see. */
 test("every container that stacks bands states the one gap between them", async () => {
   wire({ "/workspace/team": () => json({ members: [], can_manage: false }) });
   location.hash = "#/workspace/team";
@@ -1240,16 +1204,12 @@ test("every container that stacks bands states the one gap between them", async 
 
   const panel = await screen.findByTestId("workspace");
   expect(panel.className).toContain("gap-6xl");
-  /* The column the shell is read in stacks the bands, and the page under it stacks the column. */
   const column = panel.parentElement;
   expect(column?.className).toContain("gap-6xl");
   expect(column?.className).toContain("max-w-page");
   expect(column?.parentElement?.className).toContain("gap-6xl");
 });
 
-/** The lane a slot stands in already states its name over it and draws the way out, so the list
- *  inside it states no landmark of its own: two of them reading "Artifacts", one nested in the
- *  other, is one place a member moving by landmark arrives at twice. */
 test("a slot standing in a lane names nothing of its own", async () => {
   wire({
     ["/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
@@ -1270,8 +1230,6 @@ test("a slot standing in a lane names nothing of its own", async () => {
   expect(screen.queryByLabelText("Artifacts")).toBeNull();
 });
 
-/** Read at an address of its own the slot is a destination, so its name is the page's one heading —
- *  said as the last step of the crumb that leads back to the app holding it. */
 test("a slot standing on its own address is headed by its name under the app", async () => {
   wire({
     ["/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
@@ -1296,9 +1254,6 @@ test("a slot standing on its own address is headed by its name under the app", a
   );
 });
 
-/** Every conversation the app holds, reached from the lane its chat stands in. The list is the
- *  app's own index rather than the rail's chats — every surface it has spoken on — so a thread
- *  another surface holds stands here beside the ones this lane founded. */
 const APP_SITE = { state: "set", url: "https://tasks.example.test", deploy_generation: 1 } as const;
 
 function appConversation(id: string, description: string, surface = "web") {
@@ -1331,7 +1286,6 @@ function appOnWire(conversations: ReturnType<typeof appConversation>[], more = f
   };
 }
 
-// The pane draws the page off the agent it was handed; the read only refreshes it later.
 const APP = { ...AGENT, app: "tasks", homepage: APP_SITE };
 const OLDER = "44444444-4444-4444-8444-444444444444";
 
@@ -1347,15 +1301,11 @@ test("the lane's History lists the app's conversations, and one press opens it i
 
   const act = await screen.findByRole("button", { name: "History for Assistant" });
   const start = screen.getByRole("button", { name: "New conversation with Assistant" });
-  // Starting a conversation leads the bar; reaching the old ones stands after it.
   expect(start.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
   await userEvent.click(act);
 
   expect(act.getAttribute("aria-pressed")).toBe("true");
-  // A conversation the portal holds is named by what it is about and nothing else; one another
-  // surface holds names that surface, because the portal is not where it is read. The day is at
-  // the row's own end rather than in the line the member scans down.
   const row = await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
   const other = screen.getByRole("button", { name: "Older thread Slack Jul 30 2026" });
   const line = within(row).getByText("Newest thread");
@@ -1365,15 +1315,12 @@ test("the lane's History lists the app's conversations, and one press opens it i
 
   await userEvent.click(other);
 
-  // The address is what opens the conversation, and it names a lane this list is not standing over.
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + OLDER));
   expect(
     screen.queryByRole("button", { name: "History for Assistant" })?.getAttribute("aria-pressed"),
   ).toBe("false");
 });
 
-/** The way out shuts what is standing: the list first, then the lane under it. One X that took the
- *  lane away from a member reading the list would shut two things on one press. */
 test("the lane's way out names the list, and shuts it without shutting the lane", async () => {
   location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
   wire(appOnWire([appConversation(CONVO_ID, "Newest thread")]));
@@ -1399,9 +1346,6 @@ test("an app nobody has spoken to says so rather than standing an empty list", a
   expect(await screen.findByText("No conversations yet.")).toBeTruthy();
 });
 
-/** The read carries the newest conversations and no cursor. A list that drew them and stopped
- *  would state a history the app does not have, so where the answer says it stopped at its bound
- *  the list says so and names the way past it. */
 test("a history longer than the read carries says so under the rows", async () => {
   location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
   wire(appOnWire([appConversation(CONVO_ID, "Newest thread")], true));

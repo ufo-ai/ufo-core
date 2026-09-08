@@ -38,7 +38,6 @@ test("the workspace Tasks tab draws both of its listings", async () => {
   expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
   expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
-  // This screen is the one that writes a task: it holds every app's, and asks which app runs it.
   expect(screen.getByRole("button", { name: "New scheduled task" })).toBeTruthy();
 });
 

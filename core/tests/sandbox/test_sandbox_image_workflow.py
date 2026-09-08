@@ -32,7 +32,6 @@ MOVED_DIGEST = "sha256:" + "2" * 64
 KEY_LENGTH = 16
 WALLED_CALLS = 3
 JOIN_WALLS = 1
-# Every input the image key moves with, as the publisher's `paths` names them.
 KEY_INPUTS = frozenset(
     {
         "sandbox/build_template.py",

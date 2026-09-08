@@ -36,9 +36,6 @@ from ufo.sdk.http import JSONResponse, RedirectResponse, Request, Response, set_
 OPERATOR_COOKIE = "ufo_debug"
 TOKEN_FIELD = "token"
 OPERATOR_PAGE_PATH = re.compile(r"/surface/[^/]+/?")
-# The sign-in page posts the minted bearer to the member portal unless it is asked for the operator
-# surfaces by name, so the bounce below carries the ask: the click that wanted one comes back to it,
-# and an ordinary sign-in on the same page is never diverted there.
 OPERATOR_LOGIN_PATH = f"{LOGIN_PATH}?debug=1"
 
 

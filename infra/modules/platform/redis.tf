@@ -1,5 +1,3 @@
-# ElastiCache Redis — the live-frame hub (core's [hub] backend="redis"). In-VPC, reachable only from
-# the node group SG. The shared runtime uses the primary endpoint and keys channels by conversation.
 
 resource "aws_security_group" "redis" {
   name        = "${local.name}-redis"

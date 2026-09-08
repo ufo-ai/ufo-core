@@ -225,7 +225,6 @@ async def test_a_pinned_floor_bounds_the_channel_walk_and_dissolves_there() -> N
         if path == "/api/conversations.history":
             body = json.loads(request.content) if request.content else {}
             history_calls.append(body)
-            # slack honours `oldest`, so nothing below the floor comes back
             return _ok({"messages": [{"ts": "1783000000.000000", "user": "U1", "text": "in"}]})
         return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
 
@@ -235,7 +234,6 @@ async def test_a_pinned_floor_bounds_the_channel_walk_and_dissolves_there() -> N
     assert history_calls[0]["inclusive"] == "true"
     assert "latest" not in history_calls[0]
     assert _refs(result) == {"messages/C1:1783000000.000000"}
-    # dissolved to the watermark: the next run is incremental, not another descent
     assert json.loads(str(result.next_cursor)) == {"C1": "1783000000.000000"}
 
 

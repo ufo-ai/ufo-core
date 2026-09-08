@@ -1,4 +1,3 @@
-//! The `ufo run` workload boundary: proxy adaptation, process groups, and durable task state.
 
 use std::env;
 use std::ffi::OsString;
@@ -30,8 +29,6 @@ struct Call {
     argv: Vec<String>,
 }
 
-/// Run one command and answer its exit code. A task is journaled at `PATH.{pid,log,exit}` and may
-/// be reattached without running twice.
 pub fn main(args: &[String]) -> i32 {
     let call = match parse(args) {
         Ok(call) => call,

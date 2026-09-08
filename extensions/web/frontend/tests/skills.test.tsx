@@ -55,13 +55,10 @@ const MINE_DETAIL = {
 const NO_COMMUNITY = { "/skills/community": () => json({ skills: [] }) };
 const MINE_OBJECT = { "/objects/skill/mine": () => json(MINE_DETAIL) };
 
-/** The skills stand on the workspace page, which its own address opens. */
 function renderSkills() {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
 
-/** The page opens on the directory, so every read of the workspace's own skills starts with the
- *  pick that names the other collection. */
 async function openInstalled() {
   await userEvent.click(await screen.findByRole("tab", { name: "Installed" }));
 }
@@ -117,7 +114,6 @@ test("the settings form states the workspace-skill setting and saves it", async 
 
   const checkbox = (await screen.findByLabelText("Use workspace skills")) as HTMLInputElement;
   expect(checkbox.checked).toBe(true);
-  // A preference is kept the moment it is changed, so the switch is the whole act.
   await userEvent.click(checkbox);
 
   await waitFor(() => expect(posted.length).toBe(1));

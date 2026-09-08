@@ -1,6 +1,5 @@
-# One-time bootstrap: the S3 bucket that holds remote state for the env root modules.
-# Runs with LOCAL state (no backend). S3-native locking means no DynamoDB table.
-# After apply, copy the bucket name into each env's backend.tf and `terraform init`.
+# Runs with LOCAL state, no backend. S3-native locking means no DynamoDB table; after apply, copy the
+# bucket name into each env's backend.tf and `terraform init`.
 
 terraform {
   required_version = ">= 1.9"
@@ -22,8 +21,8 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-# Bucket names are immutable — renaming means creating a new bucket and migrating every env's
-# state, so the name keeps its original prefix.
+# Bucket names are immutable — renaming means creating a new bucket and migrating every env's state,
+# so the name keeps its original prefix.
 resource "aws_s3_bucket" "state" {
   bucket = "metalcraft-tfstate-${data.aws_caller_identity.current.account_id}"
 

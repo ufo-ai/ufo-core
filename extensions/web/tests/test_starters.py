@@ -396,16 +396,12 @@ async def test_a_failed_generation_answers_what_is_held_and_then_stands_down(db:
 
         answered = await _cache(member_id, bad).read()
         assert bad.calls == 1
-        # The member reads the ranking they already had rather than an error or an empty screen,
-        # and nothing overwrote it.
         assert answered is not None
         assert answered.ranked == first.ranked
         assert await store.get(starters_key(member_id)) == aged
 
-        # The cooldown holds the next read back rather than walking into the same wall.
         await _cache(member_id, bad).read()
         assert bad.calls == 1
-        # And the claim was released, so a later read is free to try again.
         assert await store.get(claim_key(member_id)) is None
 
 

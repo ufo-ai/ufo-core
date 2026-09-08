@@ -1,7 +1,3 @@
-//! Local rendering of the ops a `run` directive asks of this terminal: a header naming the act,
-//! a colored diff for edits, and a bounded tail of exec output — all from data the client
-//! already holds, nothing added to the wire. The rows come out full width; the transcript that
-//! holds them clips them to its own.
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine as _;
@@ -14,7 +10,6 @@ use crate::ops::{OP_EXEC, OP_FILE, OP_READ, OP_WRITE};
 use crate::ui::theme::Theme;
 use crate::wire::OpRequest;
 
-/// How many trailing output lines an op result shows before folding.
 const RESULT_TAIL_LINES: usize = 5;
 
 const MARKER: &str = "⏺ ";
@@ -22,7 +17,6 @@ const INDENT: &str = "  ";
 const BODY_MAX_LINES: usize = 40;
 const DIFF_CONTEXT_LINES: usize = 2;
 
-/// One op as the transcript states it: the header when the op starts, the body when it answers.
 pub struct OpView {
     pub kind: String,
     pub name: String,
@@ -40,8 +34,6 @@ impl OpView {
         }
     }
 
-    /// The header line stating what is running: the agent's own narration where it wrote one,
-    /// else the command a member reads — `⏺ edit src/main.rs`.
     pub fn header(&self, description: Option<&str>, theme: &Theme) -> Line<'static> {
         Line::styled(
             format!("{MARKER}{}", self.title(description)),
@@ -49,7 +41,6 @@ impl OpView {
         )
     }
 
-    /// What the header states, for the activity row to say while the op runs.
     pub fn title(&self, description: Option<&str>) -> String {
         match description {
             Some(said) if !said.trim().is_empty() => said.trim().to_string(),
@@ -57,9 +48,6 @@ impl OpView {
         }
     }
 
-    /// The body lines once the op answered: a diff for edits (old/new from the op's own params),
-    /// the bounded output tail for exec, one status line otherwise. `reply` is the op's reply
-    /// body, `failed` the failure string when the op refused.
     pub fn body(&self, reply: Result<&[u8], &str>, theme: &Theme) -> Vec<Line<'static>> {
         let reply = match reply {
             Ok(reply) => reply,
@@ -135,9 +123,6 @@ fn argv(params: &Value) -> String {
         .join(" ")
 }
 
-/// The member's view of a command: the server's walk program is named for what it does, a
-/// `sh -c` wrapper is unwrapped, leading environment assignments are dropped, and whitespace
-/// flattens to one line — a header row can hold no newline.
 fn command_display(command: &str) -> String {
     if command.contains("UFO_WALK_ROOT") {
         return "list files".to_string();

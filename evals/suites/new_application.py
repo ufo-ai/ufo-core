@@ -310,8 +310,6 @@ class _ApplicationHomepageArtifacts:
         )
         result = await probe.run(audit.command, APPLICATION_ARTIFACT_TIMEOUT_SECONDS)
         captured_root = self.directory(workspace, Path(APPLICATION_ARTIFACT_OUTPUT), required=False)
-        # The design SVG is taken from the workspace above, where the builder wrote it; the audit's
-        # copy of it under the capture directory would land the same bytes under the same name.
         own_design = f"{APPLICATION_ARTIFACT_NAME}-design.svg"
         names = tuple(
             (output_name, output_name) for output_name in audit.outputs if output_name != own_design
@@ -623,8 +621,6 @@ def _design_pass_failure(
         for index, call in enumerate(output.calls)
         if index < create and call.name == SHARE_TOOL and call.succeeded
     )
-    # The interview, one ask per picture, whatever opens the run, and one round of slack for the
-    # detail the skill lets ride the form.
     settled = previews + 1 + opening_asks
     allowed_asks = {settled, settled + 1}
     if len(asks) not in allowed_asks:
@@ -1641,10 +1637,6 @@ SCENARIOS = (
             "build repairs the same application and binds its first retained homepage",
             _graded_repair_journey,
         ),
-        # Three member messages reach the create on this path: the request, the answered form, and
-        # `Build it` on the design. The trial sends one message per turn, so a smaller cap ends the
-        # conversation on the design ask, creates nothing, and the followup raises rather than
-        # grading the repair this case exists for.
         max_turns=3,
         seed=_seeded(),
         rubric=(

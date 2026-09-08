@@ -104,10 +104,8 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
                 )
             ).all()
     assert members == [("founder@acme.com", True)], "the first member administers"
-    # `visibility` is stated rather than defaulted. The column defaults to `private`, and a main
-    # agent owned by nobody would then be invisible to every non-admin member of its own workspace —
-    # they would open the portal to an empty agent list. `ufoctl init` states the same value, so the
-    # two paths that found a workspace agree.
+    # `visibility` is stated rather than defaulted: the column defaults to `private`, and a main
+    # agent owned by nobody would then be invisible to every non-admin member of its own workspace.
     assert agents == [
         (DEFAULT_AGENT_NAME, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_MODEL, True, "workspace")
     ]
@@ -136,16 +134,12 @@ async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) 
         assert after_create.granted_micro_usd == SIGNUP_GRANT_MICRO_USD
         assert after_create.reserve_micro_usd == SIGNUP_RESERVE_MICRO_USD
 
-        # A teammate can join a workspace whose main agent still has the prior default name, and
-        # joining must never fund the workspace a second time.
         joined = await client.post(
             "/internal/onboard/seat",
             json={**body, "email": "teammate@acme.com"},
         )
         assert joined.status_code == 200
         assert joined.json()["admin"] is False
-        # The first run belongs to the sign-in that seated the first member, exactly as the signup
-        # balance does — a teammate joining a workspace that already stands earns neither.
         assert joined.json()["founding"] is False
 
     with ws(workspace_id):
@@ -220,8 +214,6 @@ async def test_seat_refuses_a_workspace_its_domain_no_longer_names(
                 "signup_subject": "acme.com",
             },
         )
-        # A different domain arriving at a workspace whose first member is someone else's is a
-        # refusal, not a join: it would hand that customer's workspace to an outsider.
         refused = await client.post(
             "/internal/onboard/seat",
             json={
@@ -301,7 +293,6 @@ def test_a_form_answer_cannot_brick_the_workspace_it_describes() -> None:
     for hostile in ["{{name}}", "{{{{name}}}}", "{{{{{{deep}}}}}}", "a {{b}} c {{d}}"]:
         prompt = agent_prompt(SignupProfile(business=hostile, goals=hostile))
         assert not PROMPT_VAR_RE.search(prompt), f"{hostile} survived as a prompt var"
-        # The braces thin rather than vanish, so the answer still reads as what they typed.
         assert "name" in prompt or "deep" in prompt or "b" in prompt
 
 
@@ -329,7 +320,6 @@ async def test_choices_offers_the_domain_workspace_and_every_exact_membership(
                     )
                 )
                 await create_member(connection, workspace_id, email, is_admin=True)
-    # An outside address added to someone else's workspace resolves to it as an exact membership.
     with ws(other_workspace):
         async with workspace_tx() as connection:
             await create_member(connection, other_workspace, "contractor@acme.com")
@@ -391,9 +381,6 @@ async def test_two_workspaces_sharing_a_label_are_told_apart(
     for _ in range(2):
         workspace_id = uuid4()
         ids.append(workspace_id)
-        # Each member lands in its own transaction. `first_member` orders by `created_at` and falls
-        # back to a random uuid, and `now()` is transaction time — two members written together
-        # would tie, and the founder's own domain would be the label only by coin flip.
         with ws(workspace_id):
             async with workspace_tx() as connection:
                 await connection.execute(
@@ -417,8 +404,6 @@ async def test_two_workspaces_sharing_a_label_are_told_apart(
         )
     assert response.status_code == 200, response.json()
     labels = {choice["label"] for choice in response.json()["choices"]}
-    # Both workspaces label as `acme.com`, so neither may be offered bare — the member has to be
-    # able to tell them apart.
     assert labels == {f"acme.com ({str(workspace_id)[:8]})" for workspace_id in ids}
 
 
@@ -805,9 +790,6 @@ def _cursor(row: dict[str, str]) -> dict[str, str]:
 async def test_the_invitation_page_cursor_walks_past_a_shared_stamp(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
-    # Two teammates stamped in one instant. The cursor is the whole ordering key, so the second is
-    # reachable: a cursor of the stamp alone would either repeat the first forever or hide the
-    # second behind it.
     if not database_url.startswith("postgresql"):
         pytest.skip("the invitation read is postgres SQL, for a fleet sqlite never serves")
     workspace_id = signup_workspace_id("acme.com")

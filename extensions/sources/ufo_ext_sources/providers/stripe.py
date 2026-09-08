@@ -57,9 +57,6 @@ VOLATILE_FIELDS = frozenset({"receipt_url", "hosted_invoice_url", "invoice_pdf"}
 USAGE_PERIOD_KEY = "usage_period"
 CREATED_LOOKBACK_SECONDS = 30 * 24 * 60 * 60
 SWEEP_INTERVAL_SECONDS = 60 * 60
-# Stripe stamps `created` off its own clock, so a record minted while a walk runs can carry an
-# instant slightly behind the walk's start: the sweep is stored that far back, and the next filter
-# still reaches such a record.
 CLOCK_SKEW_SECONDS = 120
 _MISSING_RESOURCE_STATUS = frozenset({400, 404})
 _MISSING_RESOURCE_CODE = "resource_missing"
@@ -404,8 +401,6 @@ class StripeConnector(RestConnector):
             item = normalized.get("subscription_item")
             if isinstance(period, dict) and item:
                 normalized[USAGE_PERIOD_KEY] = f"{item}:{period.get('start')}:{period.get('end')}"
-            # Stripe mints a fresh summary id per request, so it is wire addressing and never
-            # part of the record: kept, it moves the page body and digest on every run.
             normalized.pop("id", None)
         for field in ("created_at", "updated_at"):
             value = normalized.get(field)

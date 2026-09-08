@@ -1,5 +1,3 @@
-//! The activity row and footer: spinner with elapsed time, the transient status, reconnect
-//! countdowns, and the terminal-integration signals (title, progress, bell) around a turn.
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -20,7 +18,6 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 const MINUTE: u64 = 60;
 const HOUR: u64 = 60 * MINUTE;
 
-/// What the activity row is doing right now.
 #[derive(Debug, Clone)]
 pub enum Activity {
     Idle,
@@ -36,7 +33,6 @@ pub enum Activity {
     },
 }
 
-/// The activity row state: what is happening and for how long.
 pub struct StatusRow {
     pub activity: Activity,
     tick: usize,
@@ -50,18 +46,14 @@ impl StatusRow {
         }
     }
 
-    /// Advance the spinner one frame.
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    /// The animation phase, for anything else that throbs on the same clock.
     pub fn phase(&self) -> usize {
         self.tick
     }
 
-    /// Render the activity row: the spinner over what the turn is doing and how long it has been
-    /// doing it, or the reconnect countdown. The status is what gives when the row is too wide.
     pub fn render(&self, theme: &Theme, width: u16) -> Line<'static> {
         match &self.activity {
             Activity::Idle | Activity::WaitingInput => Line::raw(""),
@@ -98,8 +90,6 @@ impl Default for StatusRow {
     }
 }
 
-/// How long a turn has run, at the coarsest unit that still states the wait: `3s`, `1m12s`,
-/// `1h02m`. The trailing unit is zero-padded so the row does not shift under its own clock.
 pub fn elapsed(ran: Duration) -> String {
     let secs = ran.as_secs();
     match secs {
@@ -109,25 +99,15 @@ pub fn elapsed(ran: Duration) -> String {
     }
 }
 
-/// The key that opens the conversation list, drawn at the footer's right end as a reminder and
-/// a click target. Plain narrow characters: a menu glyph here is drawn double width by some
-/// terminals, which wraps the row.
 pub const LIST_HINT: &str = "⌃K list";
-/// The dock's rules stop a cell short of the right edge; the hint ends with them.
 const HINT_INSET: usize = 1;
 
-/// The click targets a footer carries: the PR link's columns, and the list hint's.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FooterHits {
     pub pr: Option<Range<usize>>,
     pub list: Option<Range<usize>>,
 }
 
-/// The dock's last line: the workspace this client is talking to, the channel the conversation
-/// sits in, the working directory's PR when one exists and fits, and — under a conversation,
-/// where `hint` names the list key — that hint at the right end, padded across `width`. The PR
-/// label carries OSC 8 markers so the terminal keeps it a link; the returned columns are the
-/// click targets. Nothing where there is no host to state.
 pub fn footer(
     theme: &Theme,
     width: u16,
@@ -190,15 +170,11 @@ pub fn footer(
     (Line::from(spans), hits)
 }
 
-/// Terminal-integration escape emissions around a turn. Every function answers the bytes to
-/// write, or empty when the capability is off; callers write them, so tests read them.
 pub struct Signals {
     pub enabled: bool,
 }
 
 impl Signals {
-    /// OSC 0: the terminal title while this conversation runs. The title comes off the wire, so
-    /// control characters — the BEL that would end the sequence early — are dropped.
     pub fn title(&self, title: &str) -> String {
         if !self.enabled {
             return String::new();
@@ -207,7 +183,6 @@ impl Signals {
         format!("\x1b]0;{}\x07", wrap::clip(&stated, TITLE_COLS))
     }
 
-    /// OSC 9;4: indeterminate progress on, cleared with `progress_off`.
     pub fn progress_on(&self) -> String {
         if !self.enabled {
             return String::new();
@@ -222,7 +197,6 @@ impl Signals {
         "\x1b]9;4;0\x07".to_string()
     }
 
-    /// The bell when a turn ends waiting on input.
     pub fn bell(&self) -> String {
         if !self.enabled {
             return String::new();
@@ -231,8 +205,6 @@ impl Signals {
     }
 }
 
-/// The progress state a running turn holds. Terminals drop a progress they have not heard about,
-/// so the state is said again every second until the turn ends.
 pub struct Progress {
     last_emit: Option<Instant>,
 }
@@ -242,8 +214,6 @@ impl Progress {
         Progress { last_emit: None }
     }
 
-    /// The bytes to write at `now`: the progress state on the first tick and once a second from
-    /// then, nothing in between.
     pub fn tick(&mut self, signals: &Signals, now: Instant) -> String {
         if !signals.enabled {
             return String::new();
@@ -258,7 +228,6 @@ impl Progress {
         signals.progress_on()
     }
 
-    /// Clear the progress state, and only where this set one.
     pub fn off(&mut self, signals: &Signals) -> String {
         match self.last_emit.take() {
             Some(_) => signals.progress_off(),

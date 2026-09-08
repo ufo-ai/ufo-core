@@ -13,7 +13,6 @@ beforeEach(() => {
 
 const ASKED = { question: "Which?", options: [{ label: "left" }, { label: "right" }] };
 
-/** The turn's ask as the transcript carries it, with every answer the member sends recorded. */
 function asking(question: Record<string, unknown>, posts: RequestInit[] = []) {
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -54,8 +53,7 @@ test("the ask is one card, headed by what it is about and marked at its trailing
   expect(within(card).getByRole("button", { name: "Continue" })).toBeTruthy();
 });
 
-/** jsdom lays nothing out, so the class is the contract: a row without its own minimum is a grid
- *  item sized to its never-wrapping description, and every row rides past the card's edge. */
+/** jsdom lays nothing out, so the class is the contract. */
 test("an answer row shrinks inside the card rather than carrying past it", async () => {
   asking({
     title: "Pick one",
@@ -77,9 +75,6 @@ test("an answer row shrinks inside the card rather than carrying past it", async
   expect(document.querySelector("[data-slot=questionnaire-write]")!.className).toContain("min-w-0");
 });
 
-/** A description cut at the row's edge loses the clause that tells one answer from the next, so it
- *  wraps and holds to two lines. The chosen one states itself whole: jsdom lays nothing out, so the
- *  clamp and the release the checked row carries are the contract. */
 test("an answer stacks its description under its label, clamped until it is the chosen one", async () => {
   const wordy = "a description far longer than the card is wide";
   asking({
@@ -200,10 +195,8 @@ test("words in the last row are an answer, and they take the place of a choice",
   expect(posts[0].body).toBe("neither");
 });
 
-/** The row is submitted by the name it takes once it holds words, and by nothing else. A row the
- *  form has disowned reads as filled and submits nothing: Gecko keeps an element out of its
- *  ancestor form for good once a `form` attribute has stood on it, so the member's words never
- *  reach the answer and Continue moves nowhere. */
+/** Gecko keeps an element out of its ancestor form for good once a `form` attribute has stood on it, so
+ *  the member's words would never reach the answer. */
 test("the row the member types into is never taken out of the form", async () => {
   asking({ title: "Pick one", questions: [ASKED] });
 
@@ -478,9 +471,8 @@ test("a question taking several answers is asked even with one of them chosen", 
   expect(document.querySelector("[data-slot=questionnaire-stepper]")!.textContent).toBe("1/2");
 });
 
-/** The arrow keys select each radio they pass and the browser fires a click for every one —
- *  detail 0, no pointer under it. fireEvent.click carries the same signature, so this is the
- *  arrow-borne click by proxy: a run that moves on it fails here. */
+/** The arrow keys select each radio they pass and the browser fires a click for every one — detail 0,
+ *  no pointer under it. `fireEvent.click` carries the same signature, so this is that click by proxy. */
 test("a click no pointer pressed does not carry the member off the question", async () => {
   asking({
     title: "Two things",

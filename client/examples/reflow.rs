@@ -1,6 +1,3 @@
-//! Re-wrap a code-heavy transcript as fast as the renderer allows, the way dragging a window edge
-//! does, and state how many frames land per second. The work is real: the same `Retained` the
-//! terminal paints, at the same widths, over answers carrying fenced code.
 
 use std::io::Write;
 use std::time::{Duration, Instant};

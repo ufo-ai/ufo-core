@@ -412,7 +412,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
         boxSizing: "border-box"
       }}
     >
-      {/* Region 1: Header / Orientation */}
       <header
         id="region-header"
         data-app-region="header"
@@ -495,7 +494,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
         </div>
       </header>
 
-      {/* Region 2: Meeting Tabs / Selector */}
       <nav
         id="region-meeting-tabs"
         data-app-region="meeting-tabs"
@@ -621,7 +619,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
         })}
       </nav>
 
-      {/* Notifications / Toast Area */}
       {copyFeedback && (
         <div
           role="status"
@@ -660,7 +657,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
         </div>
       )}
 
-      {/* Main Grid: Region 3 (Context & Signals) and Region 4 (Action Points) */}
       <div
         style={{
           display: "grid",
@@ -669,7 +665,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
           alignItems: "start"
         }}
       >
-        {/* Region 3: Active Meeting Detail & Context Signals */}
         <section
           id="region-context-signals"
           data-app-region="context-signals"
@@ -730,7 +725,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             </p>
           </div>
 
-          {/* Source Recency Audit Box */}
           <div
             style={{
               padding: "0.875rem",
@@ -793,7 +787,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             </div>
           </div>
 
-          {/* Prior Context Box */}
           <div
             style={{
               padding: "1rem",
@@ -839,7 +832,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             </div>
           </div>
 
-          {/* Live Work Box */}
           <div
             style={{
               padding: "1rem",
@@ -923,7 +915,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             </div>
           </div>
 
-          {/* Missing / Uncertain Information Box */}
           <div
             style={{
               padding: "1rem",
@@ -966,7 +957,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
           </div>
         </section>
 
-        {/* Region 4: Points to Raise & Meeting Actions */}
         <section
           id="region-action-points"
           data-app-region="action-points"
@@ -1035,7 +1025,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             </p>
           </div>
 
-          {/* Search/Filter Bar */}
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <input
               type="text"
@@ -1073,7 +1062,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             )}
           </div>
 
-          {/* Points List */}
           <div style={{ display: "flex", flexDirection: "column", gap: "0.875rem" }}>
             {filteredPoints.length === 0 ? (
               <div
@@ -1173,7 +1161,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             )}
           </div>
 
-          {/* Prepared Action Controls */}
           <div
             style={{
               marginTop: "0.5rem",
@@ -1195,7 +1182,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "0.625rem" }}>
-              {/* Copy Brief Button */}
               <div
                 style={{
                   display: "flex",
@@ -1227,7 +1213,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
                 </button>
               </div>
 
-              {/* Action 2 */}
               <div
                 style={{
                   display: "flex",
@@ -1265,7 +1250,6 @@ ${currentMeeting.pointsToRaise.map((p, idx) => `${idx + 1}. ${p.title}: ${p.deta
                 </button>
               </div>
 
-              {/* Action 3 */}
               <div
                 style={{
                   display: "flex",

@@ -960,8 +960,6 @@ async def test_object_read_returns_one_flat_row_per_member_named_by_email(db: No
                 ext, "nobody@simplecasual.com", member_id=member_id, admin=False
             )
         with agent(app):
-            # The portal fans its index out over every agent, and these rows belong to the
-            # workspace, so only the main agent's page and detail state them.
             fanned = await store.member_page(ext, member_id=member_id, admin=False, query=_query())
             off_lane = await store.member_detail(ext, ALEX, member_id=member_id, admin=False)
         listed = await store.list(_tool_ctx(ext, workspace_id, member_id), _query())

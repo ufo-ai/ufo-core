@@ -7,17 +7,6 @@ max_stacks = 2
 budget_usd = 60.0
 est_usd_per_case = 0.30
 
-# Four levers on what a delegated child generates that no parent reads, each read with
-# `python -m evals.delegated_generation` over the arm's own records. Every figure below is
-# intermediate output tokens per child turn, then the suite's pass count, against that round's own
-# control — arms compare only inside one experiment.
-#
-# What the measurement settled first: 80-85% of a child's output does not carry the payload, and
-# almost none of it is prose. Across 30 attempts a control wrote 1,155 characters that reached
-# nobody — under 40 per child — while its children generated 39,171 intermediate tokens. The finish
-# contract already works. The balance is reasoning and the bytes of the artifact the child was asked
-# for, which is why every arm that moved the token count moved `delegated_delivered_chars` with it.
-
 [template]
 database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5561/ufo" }
 blob = { backend = "filesystem", root = "./blobs" }
@@ -25,16 +14,6 @@ connect = { public_base_url = "http://evals.invalid" }
 pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
-
-# The child's report states one finding five times and pastes both source files back whole, so this
-# puts the say-it-once rule in the carrier every child reads.
-#
-# 977 vs 1574 (-38%, 9/20 -> 8/20), 1161 vs 1831 (-37%, 13/25 -> 11/25), 1267 vs 1395 (-9%,
-# 13/25 -> 10/25). The largest reduction measured, and rejected: in all three rounds a result-only
-# child — one that writes no artifact at all — blew its 60-word inline budget, and delivered
-# characters fell with the tokens every time. `one-round-per-step` below, carrying an entirely
-# different sentence, cost the same cases the same way, so the price is one more sentence in the
-# block rather than this sentence's content.
 
 [[arm]]
 name = "artifact-says-it-once"
@@ -49,12 +28,6 @@ its reader already holds, and a later section restating an earlier one in other 
 finding twice. For a member, the artifact is a file in /workspace — a Markdown write-up
 """
 
-# Six rounds to read two files the task named by path. Each round is paid for before anything is
-# delivered, so this asks for the calls a step allows in one round.
-#
-# 1445 vs 1574 (-8%, 9/20 -> 10/20), 1585 vs 1831 (-13%, 13/25 -> 9/25). Rejected: the reduction is
-# small and it cost the same two result-only cases their inline budget in both rounds.
-
 [[arm]]
 name = "one-round-per-step"
 [[arm.replacements]]
@@ -67,13 +40,6 @@ result-only task, give the result directly and create no file. Call in one round
 inputs you already hold, rather than one tool per round, and stop looking once the sources the task
 named answer it.
 """
-
-# The finish contract is stated three times: this paragraph, the FINISH_CONTRACT the prompt ends on,
-# and the description on the `result` field itself. This deletes the third copy and adds nothing.
-#
-# 1227 vs 1395 (-12%, 13/25 -> 6/25). Rejected, and the sharpest negative result here: the copy is
-# load-bearing. Deleting it halved the suite while the tokens barely moved, so the three sentences
-# stay.
 
 [[arm]]
 name = "one-finish-contract"
@@ -89,21 +55,6 @@ result-only task, give the result directly and create no file.
 new = """
 the `finish` call. Everything outside `finish` is working text and reaches nobody.
 """
-
-# The same rule carried by the `report` bullet — the register that writes the artifact — replacing
-# the word that licenses the restatement ("the full report") rather than adding to the block. A
-# child answering inline never reads it as an instruction about its own prose.
-#
-# 1378 vs 1264 (+9%, 9/30 -> 19/30, three cases improved and none regressed) at six repeats, and
-# prose reaching nobody fell 1,155 -> 389 characters. It did not reduce generation, which is what
-# this experiment asks, so it was set aside as the one arm that had moved the suite.
-#
-# REJECTED. Replicated at eight repeats on later main: 15/40 against the control's 16/40, with
-# delegated-jsonl-result-only 3/8 against 5/8 and delegated-latency-result-only 2/8 against 4/8,
-# both called regressed. The six-repeat result was noise. Every case here swings run to run, and
-# this suite's own control has moved 9/30, 16/40 and 22/48 across three runs of the same text, so
-# thirty samples cannot separate a two-case gap from nothing. Do not read a verdict off this suite
-# under forty samples an arm.
 
 [[arm]]
 name = "report-says-it-once"

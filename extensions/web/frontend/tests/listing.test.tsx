@@ -49,9 +49,6 @@ function spec(
   };
 }
 
-/** A listing is drawn under the shell that heads it, because the search it narrows on is the
- *  header's box and not its own. Mounting it bare would prove the narrowing against a control the
- *  member never touches. */
 function mount(declaration: ListingSpec<Payload, Row>, place: Placement = {}) {
   const placed: Placement[] = [];
   const views = {

@@ -47,19 +47,10 @@ import {
   Ziggurat,
 } from "@/lib/elementIcons";
 
-/** The sprite each opening letter's marks are drawn in, by letter, at the URL the build resolved
- *  for the file it emitted — a reference the bundler owns, so a page built against the kit reads
- *  the sprites its own build emitted rather than a name only this tree answers. */
 declare const __MARK_SPRITES__: Record<string, string>;
 
-/** The product's own mark: reserved, so the picker offers it to no app, while the row that holds
- *  it — the workspace's main agent — draws the brand's own mark, `BrandMark` below. */
 const RESERVED_MARK = "ufo";
 
-/** The marks the picker offers, in the order it draws them: the element pack with kindred marks
- *  adjacent, so the member scans groups instead of a wall of unrelated shapes. This is the whole of
- *  what an app is offered. A row holding any other slug tabler draws still draws it, read from that
- *  letter's sprite, so an icon written before this pack arrived keeps its mark. */
 export const AGENT_ICONS = {
   propylon: Propylon,
   nabatu: Nabatu,
@@ -107,20 +98,8 @@ type AgentIconName = keyof typeof AGENT_ICONS;
 type MarkPath = { d: string; fill?: string; stroke?: string; opacity?: string };
 
 const GLYPH = "size-(--size-glyph)";
-/** The shape of every name tabler draws a mark under. A name is matched against this before it is
- *  looked up, so a slug that happens to name something every object carries — `constructor`,
- *  `valueOf` — is a name no mark answers rather than a lookup that finds one. */
 const MARK_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
-/** One app's mark, drawn at `--size-glyph` unless its caller sets another size, in the ink of
- *  whatever it sits in. It is always hidden from assistive technology: the mark restates what the
- *  row's own text and the picker's own label already say.
- *
- *  The picker's marks are the element pack's own paths, bundled and drawn at once, and the reserved
- *  mark is the brand's own file; any other slug tabler draws is read from its letter's sprite, one
- *  fetch per letter for the page's life. A slug no sprite answers is reported to the console and
- *  drawn as the unknown mark, so the hole is visible and named while the row it sits in still lists
- *  its app. */
 export function AgentIcon({ name, className }: { name: string; className?: string }) {
   if (!MARK_NAME.test(name)) return <UnknownMark name={name} className={className} />;
   if (name === RESERVED_MARK) return <BrandMark className={className} />;
@@ -131,10 +110,6 @@ export function AgentIcon({ name, className }: { name: string; className?: strin
   return <FetchedMark name={name} className={className} />;
 }
 
-/** The brand's three-dot mark, the glyph the top nav's wordmark opens with, worn as a mask over the
- *  ink around it: the artwork is the brand file itself, so the mark the main agent's row draws is
- *  the mark the tab icon and the wordmark are cut from, and nothing here holds a second copy of the
- *  geometry to drift. */
 function BrandMark({ className }: { className?: string }) {
   return (
     <span
@@ -148,10 +123,6 @@ function BrandMark({ className }: { className?: string }) {
 const marks = new Map<string, Map<string, MarkPath[]>>();
 const reading = new Map<string, Promise<void>>();
 
-/** A mark read from its letter's sprite, drawn as the bundled marks are drawn: `currentColor`
- *  strokes it, so it takes the ink of the row, the menu item or the picker cell around it. Until
- *  the sprite is read the mark is an empty box of the same size, so nothing beside it moves when
- *  the paths arrive. */
 function FetchedMark({ name, className }: { name: string; className?: string }) {
   const letter = name.slice(0, 1);
   const [, redraw] = useState(0);
@@ -190,14 +161,12 @@ function FetchedMark({ name, className }: { name: string; className?: string }) 
   );
 }
 
-/** Every mark one letter's sprite draws, by slug, read once for the life of the page: the fetch
- *  is held here, so the second mark under a letter draws from what the first read. */
 function readSprite(letter: string): Promise<void> {
   const held = reading.get(letter);
   if (held) return held;
   const asked = fetchSprite(letter).then((read) => {
-    // A read that answered nothing is not held: one refused fetch would otherwise draw every mark
-    // under its letter as unknown for the life of the page.
+    // A read that answered nothing is not held: one refused fetch would otherwise draw every mark under
+    // its letter as unknown for the life of the page.
     if (read.size) marks.set(letter, read);
     else reading.delete(letter);
   });
@@ -205,10 +174,6 @@ function readSprite(letter: string): Promise<void> {
   return asked;
 }
 
-/** Every mark one letter's sprite draws, from the URL the build resolved for the file it emitted
- *  beside this module. A sprite the page cannot read reads as no marks rather than rejecting: the
- *  caller reports the slug it could not draw and draws the unknown mark, which is what keeps a row
- *  whose mark is missing a row the member can still read and open. */
 async function fetchSprite(letter: string): Promise<Map<string, MarkPath[]>> {
   const read = new Map<string, MarkPath[]>();
   const file = __MARK_SPRITES__[letter];

@@ -1,8 +1,3 @@
-//! Terminal integrations spoken in OSC: hyperlinks, clipboard, inline images, and desktop
-//! notifications. Clipboard, images, and notifications are gated by a detected capability,
-//! because an escape a terminal swallows is content the member never sees; a hyperlink's label
-//! is the content, so its markers ship everywhere and the client reads them back itself. The
-//! browser handoff lives here too, as the other integration that leaves the terminal.
 
 use std::process::{Command, Stdio};
 
@@ -28,7 +23,6 @@ const JPEG_RST_LAST: u8 = 0xd7;
 const JPEG_SOF_FIRST: u8 = 0xc0;
 const JPEG_SOF_LAST: u8 = 0xc2;
 
-/// What the running terminal is known to honor, sniffed from the environment once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
     pub osc52: bool,
@@ -43,8 +37,6 @@ pub enum ImageProtocol {
     Iterm2,
 }
 
-/// The terminal-identifying variables the capability matrix reads, taken once so the matrix is a
-/// pure function of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TermEnv {
     pub term: String,
@@ -56,7 +48,6 @@ pub struct TermEnv {
 }
 
 impl TermEnv {
-    /// Read the running process's terminal environment.
     pub fn snapshot() -> TermEnv {
         TermEnv {
             term: std::env::var("TERM").unwrap_or_default(),
@@ -71,15 +62,11 @@ impl TermEnv {
 }
 
 impl Caps {
-    /// Sniff the environment: known terminals get their known features, unknown terminals get
-    /// none — a swallowed escape renders its payload invisible, so the default is off.
     pub fn detect() -> Caps {
         caps_for(&TermEnv::snapshot())
     }
 }
 
-/// The capability matrix, pure over a snapshot. Under tmux no image protocol and no notification
-/// reaches the outer terminal; under screen nothing passes through at all.
 pub fn caps_for(env: &TermEnv) -> Caps {
     let none = Caps {
         osc52: false,
@@ -154,18 +141,12 @@ fn identify(env: &TermEnv) -> Terminal {
     }
 }
 
-/// OSC 8 markers around a transcript label, BEL-terminated — some terminals only make
-/// BEL-terminated links clickable. The client reads them back for click-to-open, terminals that
-/// speak hyperlinks make the label natively clickable, and every other terminal swallows them.
 pub fn link_open(url: &str) -> String {
     format!("\x1b]8;;{url}\x07")
 }
 
 pub const LINK_CLOSE: &str = "\x1b]8;;\x07";
 
-/// Open `url` in the member's browser and return: the child is detached, holding none of this
-/// process's streams, and nothing waits on it. Anything that is not http(s) opens nothing, so a
-/// link the member follows can never reach a scheme handler beyond the browser.
 pub fn open_url(url: &str) {
     let Some((program, args)) = browser_command(url) else {
         return;
@@ -178,8 +159,6 @@ pub fn open_url(url: &str) {
         .spawn();
 }
 
-/// The platform's browser handoff for an http(s) `url`, or `None` for every other scheme. The url
-/// is one argument to a real executable, never a string a shell parses.
 fn browser_command(url: &str) -> Option<(&'static str, Vec<String>)> {
     if !url.starts_with(HTTP_SCHEME) && !url.starts_with(HTTPS_SCHEME) {
         return None;
@@ -194,7 +173,6 @@ fn browser_command(url: &str) -> Option<(&'static str, Vec<String>)> {
     Some((program, vec![url.to_string()]))
 }
 
-/// OSC 52: place `text` on the clipboard. Empty when the terminal is not known to honor it.
 pub fn copy_to_clipboard(caps: Caps, text: &str) -> String {
     if !caps.osc52 {
         return String::new();
@@ -203,10 +181,6 @@ pub fn copy_to_clipboard(caps: Caps, text: &str) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
-/// OSC 9: a desktop notification reading `body`. Empty when the terminal is not known to honor
-/// it, and empty for a body that sanitizes to nothing — a blank notification says less than none.
-/// Control characters are dropped, since the escape ends at the first one the terminal reads, and
-/// the rest is clipped to a line a notification pane can show whole.
 pub fn notification(caps: Caps, body: &str) -> String {
     if !caps.notifications {
         return String::new();
@@ -219,10 +193,6 @@ pub fn notification(caps: Caps, body: &str) -> String {
     format!("\x1b]9;{shown}\x07")
 }
 
-/// Emit one image inline at up to `max_width_cells` columns — zero leaves the sizing to the
-/// terminal — or nothing when no protocol is spoken or the protocol does not carry this mime.
-/// Kitty carries PNG alone; iTerm2 carries any image. The cursor stays where it was, so the
-/// caller reserves the rows the image covers from [`png_dimensions`] or [`jpeg_dimensions`].
 pub fn inline_image(caps: Caps, bytes: &[u8], mime: &str, max_width_cells: u16) -> String {
     if bytes.is_empty() {
         return String::new();
@@ -283,8 +253,6 @@ fn image_id() -> u32 {
     u32::from_be_bytes(raw) % KITTY_ID_CEILING + 1
 }
 
-/// Pixel width and height read from a PNG's IHDR, or `None` when the bytes are not a PNG whose
-/// header is intact.
 pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < PNG_HEADER_LEN || bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
         return None;
@@ -294,8 +262,6 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
-/// Pixel width and height read from a JPEG's first frame header, or `None` when the bytes are not
-/// a JPEG whose markers lead to one intact.
 pub fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 4 || bytes[0] != JPEG_FILL || bytes[1] != JPEG_SOI {
         return None;

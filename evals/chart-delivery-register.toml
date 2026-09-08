@@ -16,28 +16,6 @@ pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
-# The sandbox draws the chart, so the carrier is docker: the template image holds matplotlib and the
-# local carrier runs host subprocesses that do not. Read the arms by what the samples did, not by
-# pass counts — a case passes on any sample, and the behaviour lives in the per-sample evidence.
-#
-# Earlier rounds measured the rule's length at 134, 69, 37, 31 and 0 words. It charted 12, 8, 11, 12
-# and 0 of 12 above-floor samples, so the trigger sentence is the whole rule and everything above 31
-# words was inert: the axis-label sentence, the floor sentence, the no-file deference and naming the
-# file carrier all came out on that evidence.
-#
-# The suite measures delivery now, and the standing baseline over 15 above-floor samples is 12
-# delivered, 3 drew nothing, and 2 of the 12 named the workspace path in the reply. These arms take
-# those two faults.
-#
-# `no-workspace-path` drops "written as a PNG under /workspace". The register already forbids a
-# /workspace path in a member reply, and the suspicion is that the rule itself puts the path in the
-# model's mouth. If the leak survives the cut, the rule is not its cause; if charts stop arriving,
-# the mechanics were load-bearing after all.
-#
-# `numbers-already-said` adds one clause for the shape that misses: a follow-up whose numbers are
-# already in the thread, which is where both live Slack misses happened (2026-09-07, #ufo-eng) and
-# where `thread-followup-daily-cut` reproduces them.
-
 [[arm]]
 name = "no-workspace-path"
 

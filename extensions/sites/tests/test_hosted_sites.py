@@ -1154,9 +1154,6 @@ async def test_an_unauthenticated_viewer_is_sent_to_sign_in_unless_the_site_is_p
     anonymous = await client.get(link)
     assert anonymous.status_code == 200
     assert "not signed in to the workspace" in anonymous.text
-    # The door the page names is the sign-out one: a browser holding a live session for another
-    # workspace is answered this same page, and the sign-in door would forward it to its own portal
-    # instead of drawing the form.
     assert f'<a href="{LOGOUT_PATH}">Sign in</a>' in anonymous.text
     assert LOGOUT_PATH in RESERVED_HOST_PREFIXES
     assert "<iframe" not in anonymous.text
@@ -1215,11 +1212,8 @@ async def test_the_frame_head_carries_the_card_and_names_only_a_public_site(
     assert private["og:title"] == GENERIC_SHARE_TITLE
     assert private["twitter:title"] == GENERIC_SHARE_TITLE
     assert SITE not in " ".join(private.values())
-    # The page the creator reads still names their own site; only the crawler's half is generic.
     assert f"<title>{SITE}</title>" in frame.text
 
-    # An anonymous viewer of a non-public site gets the sign-in page, which is also the page an
-    # unfurler gets, so it carries the same generic card rather than nothing at all.
     anonymous = _head_tags((await client.get(link)).text)
     assert anonymous["og:title"] == GENERIC_SHARE_TITLE
     assert anonymous["og:image"] == SHARE_CARD_URL
@@ -2369,16 +2363,11 @@ async def test_a_shipped_app_frame_redirects_without_viewer_or_agent_reads(
     url = shipped_homepage_url(PUBLIC_BASE_URL, workspace.id, "radar", SHIPPED_DIGEST)
     assert url is not None
 
-    # A visit from outside the portal's frame is sent to the app's screen there, signed in or not:
-    # the page draws from the `init` the portal hands it over the bridge, so on its own it would
-    # hold a screen that never receives one. The portal asks whoever arrives to sign in.
     anonymous = await client.get(url)
     assert anonymous.status_code == 303
     assert anonymous.headers["location"] == f"{PUBLIC_BASE_URL}/surface/web#/agents/{app_agent}"
     assert "<iframe" not in anonymous.text
 
-    # The same rule with a session: a kit page opened outside the portal's frame lands on the app's
-    # screen in the portal.
     standalone = await client.get(url, headers=_cookie(other_token))
     assert standalone.status_code == 303
     assert standalone.headers["location"] == f"{PUBLIC_BASE_URL}/surface/web#/agents/{app_agent}"

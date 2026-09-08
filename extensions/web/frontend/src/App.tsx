@@ -115,27 +115,11 @@ export type AppProps = {
   onAgents: () => void;
 };
 
-/** Whether the member stands in an app the workspace is still building: the app's setup address or
- *  its own address — the pane replaces the second with the first — while the boot read says the app
- *  stands on that setup screen.
- *
- *  An app that has been built reaches the same setup address of its own accord, to reconnect an
- *  account, and that is not this: the member is somewhere they move around from, and the answer is
- *  no. An app the roster does not carry is not one either — the pane answers `No such app.` */
 function inSetup(route: Route, agents: Agent[]): boolean {
   if (route.kind !== "agent" && route.kind !== "agent-setup") return false;
   return agents.some((agent) => agent.id === route.agentId && agent.stands_on_setup === true);
 }
 
-/** Apps the workspace gained after this page loaded. A workspace ships its apps on its first turn,
- *  which is a turn the member takes from inside an already-loaded portal — so the boot read that
- *  seeded the sidebar predates every one of them, and without this the column states one app until
- *  the member happens to reload.
- *
- *  The status read is the signal, and it costs nothing: it already answers for every agent the
- *  member reaches, so an id the boot read never carried is the workspace having gained one. Each id
- *  is asked about once. A re-read that comes back without it — an app this member may not read —
- *  must not send the next tick asking again. */
 function useProvisioned(agents: Agent[], onAgents: () => void): void {
   const { statuses } = useAppStatus();
   const asked = useRef<Set<string>>(new Set());
@@ -162,23 +146,9 @@ export function App({
   const narrow = useNarrow();
   useScrollMark();
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
-  /** What the navigation draws. An app the deploy withholds is still the workspace's, still opens
-   *  from its address, and still answers a picker — it is kept out of the sidebar, the flyout and
-   *  the apps listing, which is the whole of what hiding one means. `mainAgent` reads the whole set
-   *  above, so withholding the assistant costs the composer and the first run nothing. */
   const listed = agents.filter((agent) => !agent.hidden);
-  /** The apps the member pinned, which is the order every list of apps takes — the sidebar's own
-   *  column and the palette's alike. */
   const pinned = rail.pinned ?? defaultPins(listed);
 
-  /** The lanes home stands, for the rail that lists them. The address answers while the member is
-   *  standing on home and the row home was left holding answers everywhere else — the two the
-   *  router keeps in step, so the rail names the lanes the member will find when they go back.
-   *
-   *  A tile is the app the lane stands, which a conversation's lane names through the rail row it
-   *  was picked off — the rail is where that lane was found and where it is resolved. A lane
-   *  resolving to no app this roster holds is not listed: the rail is a way to a lane, and a row it
-   *  cannot name is a row nobody can read. */
   const homePlace = useMemo<WorkspacePlace>(
     () => (route.kind === "home" ? route.place : {}),
     [route],
@@ -200,22 +170,11 @@ export function App({
         .filter((row): row is { lane: string; agent: Agent } => row !== null),
     [homeOpens, rail.rows, agents],
   );
-  /** The lane the rail was last pressed for. The press places home and home brings the lane into
-   *  view; a member who leaves home afterwards has been answered, so the seek does not outlive the
-   *  screen and land again the next time home mounts. */
   const [seeking, setSeeking] = useState<Seek | undefined>(undefined);
   useEffect(() => {
     if (route.kind !== "home") setSeeking(undefined);
   }, [route.kind]);
-  /** The lane home says the member is standing in, which the rail marks. The track is what knows it
-   *  — the walk and the cursor both move it, and neither passes through the address — so it is held
-   *  here rather than derived, and the track clears it as home unmounts. */
   const [activeLane, setActiveLane] = useState<string | undefined>(undefined);
-  /** Home standing `opens`, with `lane` brought into view as it lands: the one act every way of
-   *  opening a lane runs — the rail's tiles and every row of the launcher alike — so a lane arrives
-   *  the same whichever of them the member pressed. A lane the row is gaining ends an expansion,
-   *  since a row expanded onto one lane hides the lane that just entered; a lane already standing
-   *  keeps it and the member is carried across to that lane instead. */
   const enterLane = useCallback(
     (lane: string, opens: string[]) => {
       setSeeking({ id: lane, expansion: homeOpens.includes(lane) ? "switch" : "restore" });
@@ -224,17 +183,12 @@ export function App({
     [homeOpens, homePlace],
   );
 
-  /** The router owns the address: it states the boot address in the bar, lands the arrival on the
-   *  track the screen was left holding, and follows the browser from there. It starts here rather
-   *  than while the shell renders, because it writes the address and the track store both. */
   useEffect(startRouter, []);
 
   useEffect(readRail, []);
 
   useProvisioned(agents, onAgents);
 
-  /** The drawer stands over the page, so every act that moves the page shuts it. The router
-   *  publishes a route for each of those acts, whether or not the address it wrote had changed. */
   useEffect(() => setMenu(false), [route]);
 
   /** A drawer left open while the window grows past the breakpoint would trap focus behind a
@@ -247,14 +201,10 @@ export function App({
     document.title = pageTitle(route, agents, rail.rows, rail.linked);
   }, [route, agents, rail.rows, rail.linked]);
 
-  // A workspace with no agent to talk to has no first run to stand in, so the member is sent to the
-  // one screen they can act on.
   useEffect(() => {
     if (route.kind === "first-run" && !mainAgent) openHome();
   }, [mainAgent, route.kind]);
 
-  /** A conversation the rail does not carry — a permalink to one another surface holds, or one past
-   *  the rail's own bound — is resolved by a read of its own, once the rail has answered. */
   useEffect(() => {
     if (route.kind === "chat" && rail.phase === "ready") seekChat(route.conversationId);
   }, [route, rail]);
@@ -275,9 +225,6 @@ export function App({
     forwardApps();
   }, []);
 
-  /** The first run draws no shell. It is the one destination a member reaches before the workspace
-   *  is theirs to move around in, so the bar's four places are all somewhere they cannot use yet —
-   *  and the page carries its own mark and its own foot instead. */
   if (route.kind === "first-run") {
     return (
       <WorkspaceId.Provider value={member.workspace_id ?? null}>
@@ -293,9 +240,6 @@ export function App({
                   onStep={placeFirstRun}
                   onClose={() => openNewChat(mainAgent.id)}
                   onDone={(conversationId) => {
-                    /* The thread the run founded, where the first task is already answering. A run
-                       whose founding send never landed has no thread to stand, so the chat app's
-                       own lane stands in its place and the member says the first thing themselves. */
                     const speaks = chatSurface(agents) ?? mainAgent;
                     openHomeWithConnectors(
                       conversationId
@@ -314,15 +258,6 @@ export function App({
     );
   }
 
-  /** An app the workspace is still building draws no navigation either. Its setup screen is the one
-   *  act it offers, and the column beside it names destinations the app is not one of yet — so the
-   *  screen is the whole page until the setup ends.
-   *
-   *  The boot read carries the fact, so the app's own address answers it as surely as the setup
-   *  address the pane replaces it with. Both are held before the first render: the sidebar is never
-   *  drawn and then taken away, which is a column the member watches appear and vanish. A build
-   *  that landed after that read is the pane's to find — it confirms before it moves the member,
-   *  and the roster it re-reads is what stands this column back up. */
   const shell = !inSetup(route, agents);
 
   return (
@@ -361,11 +296,6 @@ export function App({
                     onBuild={startBuild}
                   />
                 ) : null}
-                {/* The column opening the shell on the left, on every signed-in screen — an app's
-                    setup page drops the wide navigation but keeps this rail, so the way to the other
-                    apps never leaves. A phone width draws one column and the drawer holds what a
-                    desk width puts beside the pane, so the rail is not drawn there rather than
-                    stacked over the screen it stands beside. */}
                 {!narrow ? (
                   <MinimalSidebar
                     lanes={homeLanes}
@@ -409,10 +339,6 @@ export function App({
   );
 }
 
-/** A conversation a send has just founded: the rail carries the row at once rather than waiting for
- *  its next read, and the screen that drew the unfounded chat hands the member to the conversation
- *  their message founded — a screen left standing on one would redraw an empty composer over what
- *  they just sent. */
 function founded(agent: Agent, conversationId: string, title: string): void {
   railFounded({
     conversation_id: conversationId,
@@ -429,9 +355,6 @@ function founded(agent: Agent, conversationId: string, title: string): void {
   if (seen.kind === "new-chat" && seen.agentId === agent.id) openChat(conversationId);
 }
 
-/** The bar a phone width keeps: the hamburger that opens the drawer holding the sidebar, the mark
- *  centred between it and the search and account closing the row. A desk width draws no bar at all
- *  — the sidebar is the shell. */
 function NarrowBar({
   agents,
   chats,
@@ -486,8 +409,6 @@ function NarrowBar({
   );
 }
 
-/** The sidebar at a phone width, where the page has no column for it: the same rows, held by the
- *  drawer the hamburger opens. */
 function NavDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const hold = useDrawerSlot();
   return (
@@ -525,16 +446,10 @@ function NavDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   );
 }
 
-/** The way back to the form, offered wherever the shell states who is signed in. The sign-in door
- *  forwards a browser that already holds a session, so signing in as another address — or into
- *  another workspace an invitation offered — starts by clearing this one. */
 function signOut(): void {
   window.location.assign(SIGN_OUT_PATH);
 }
 
-/** The submenu trigger states the palette the member picked, not the one the browser resolved:
- *  `System` is a choice they can read back, and a value that flipped itself at dusk would say they
- *  had picked light. */
 function AccountMenu({ member }: { member: Member }) {
   const scheme = useScheme();
   return (
@@ -584,14 +499,9 @@ const CREATE_APP = "Create app";
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
 
-/** Which way a section's fold stands, stated by the chevron on its heading: down over an open
- *  section, along the row over a shut one. */
 const SECTION_HEAD_CHEVRON =
   "size-icon shrink-0 transition-transform duration-100 ease-control motion-reduce:transition-none";
 
-/** What stands pinned until the member pins for themselves: the chat app, and nothing else. Chat is
- *  where a member starts, so it holds the top of the column on a workspace nobody has arranged yet;
- *  every other app answers to the order the list already gives it. */
 function defaultPins(agents: Agent[]): string[] {
   const chat = agents.find((agent) => agent.app === CHAT_SURFACE);
   return chat ? [chat.id] : [];
@@ -635,8 +545,6 @@ function NavRow({
   );
 }
 
-/** The glyph states the palette the member picked, not the one the browser resolved: `System` is a
- *  choice they can read back, and a sun that flips itself at dusk would say they had picked light. */
 function SchemeGlyph({ scheme }: { scheme: Scheme }) {
   if (scheme === "light") return <IconSun className={GLYPH} aria-hidden />;
   if (scheme === "dark") return <IconMoon className={GLYPH} aria-hidden />;
@@ -669,10 +577,6 @@ function SchemePick() {
   );
 }
 
-/** A sidebar section's head: the band is the section's name and the whole of it is the fold, because
- *  putting a section away is the thing a member does to a heading. A chevron states which way that
- *  fold stands — pointing down over an open section, along the row over a shut one — so the band
- *  answers "is my column hiding anything" without being clicked. */
 function SectionHead({
   label,
   shut,
@@ -702,12 +606,6 @@ function SectionHead({
   );
 }
 
-/** The shell's one nav: the mark and its fold control, search, the new-conversation act, the
- *  Applications section with the cross-app reads under it, and the workspace-wide destinations at
- *  the foot. It is the way to another screen and nothing else — a member finds a conversation by
- *  name on the chat app's own page, which is the screen that lists them. At a desk width it is the
- *  left column, folding to a glyph rail; at a phone width the drawer holds it and the fold is
- *  ignored, because a drawer is always drawn whole. */
 function WorkspaceSidebar({
   route,
   agents,
@@ -734,11 +632,6 @@ function WorkspaceSidebar({
         "max-narrow:flex-1 max-narrow:border-r-0 max-narrow:py-0",
       )}
     >
-      {/* The two acts the shell carries, above the places it reaches: starting a conversation and
-          building an app are the things a member does here rather than screens they go to, and every
-          member is offered both — the `agent` kind admits a create from any speaking member and
-          stamps them the owner, and the wizard rides the main agent's own chat, so a workspace with
-          no main agent offers neither. */}
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
         {mainAgent ? (
           <>
@@ -767,13 +660,6 @@ function WorkspaceSidebar({
           </>
         ) : null}
       </ul>
-      {/* The workspace's apps, drawn where the member works rather than behind a hover: the column
-          states what each one is doing, which is the fact the sidebar exists to carry. Pinned rows
-          lead, the apps that worked lately follow, and the rest wait behind `More`. */}
-      {/* The section yields before the shell does. Held at its natural height it would stand a
-          full sixteen rows tall on a screen with no room for them, and the nav scrolls nowhere —
-          so the foot of the sidebar, and the way out of it, would be pushed off the bottom edge.
-          Shrinking here spends the squeeze inside the list, which already scrolls. */}
       <div className="flex min-h-0 flex-col gap-px px-sm">
         <SectionHead
           label={APPS}
@@ -851,8 +737,6 @@ function WorkspaceSidebar({
   );
 }
 
-/** A section address whose screen ships as an app: the name outlives who renders it, so the
- *  address lands on that app with its place carried rather than dying as a bad link. */
 function SectionLanding({ agentId, place }: { agentId: string; place: WorkspacePlace }) {
   useEffect(() => openAgentPlace(agentId, place), [agentId, place]);
   return null;
@@ -883,9 +767,6 @@ function RoutedPane({
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
-  /** Where the member came from, off the trail that makes the tab title: every band on this screen
-   *  names the trail's innermost step, so they all draw this one step over it and none of them
-   *  derives it a second time. */
   const crumb = pageCrumb(route, agents, rail.rows, rail.linked);
   switch (route.kind) {
     case "agent-setup": {
@@ -1050,9 +931,6 @@ function RoutedPane({
         />
       );
     }
-    /* The shell draws the first run itself, above this dispatch, and sends a workspace with no main
-       agent home, so `first-run` reaches here on neither path. It is answered all the same, because
-       every kind the table declares is answered here or the switch does not compile. */
     case "home":
       return (
         <Home
@@ -1067,9 +945,6 @@ function RoutedPane({
           onAgents={onAgents}
         />
       );
-    /* The shell draws the first run itself, above this dispatch, and sends a workspace with no main
-       agent home, so `first-run` reaches here on neither path. It is answered all the same, because
-       every kind the table declares is answered here or the switch does not compile. */
     case "first-run":
     case "new-chat": {
       const agent =
@@ -1077,12 +952,8 @@ function RoutedPane({
           ? agents.find((entry) => entry.id === route.agentId)
           : (mainAgent ?? undefined);
       if (!agent) return <PaneNote>No such app.</PaneNote>;
-      // One start screen, whichever agent it names. A route naming another agent renames the one
-      // this screen stands for, and a key carrying that agent would remount the box on every
-      // rename — a fresh box holds the draft again but not the member's place in it, and the
-      // cursor lands back at the first character. The chat state and the draft are keyed by the
-      // agent inside it instead, and its composer takes a pending ask on the agent it is renamed
-      // to, because no mount comes to read one handed to the agent the route has just named.
+      // A key carrying the agent would remount the box on every rename — a fresh box holds the draft again
+      // but not the member's place in it, and the cursor lands back at the first character.
       return (
         <ChatPane
           key="new"
@@ -1099,10 +970,6 @@ function RoutedPane({
   return missed;
 }
 
-/** A conversation another surface holds, read in the portal: the thread pane a portal chat wears,
- *  headed the same way — the agent holding it and what it is called — with the
- *  surface it is happening on marked at the far end of that header, as the way out to it. The
- *  header states the name once, so the transcript under it draws no heading of its own. */
 function LinkedPane({
   agent,
   conversation,
@@ -1181,17 +1048,10 @@ function NotShared() {
 
 export const SCROLL_MARK = "data-scrolling";
 
-/** How long a stopped pane keeps its thumb. It covers the pause between two wheel notches and the
- *  pause in the middle of a drag, so one gesture draws one bar rather than a blinking one, and it
- *  is short enough that a pane the member has left alone is quiet before their eye comes back. */
 export const SCROLL_QUIET_MS = 600;
 
-/** Writes `theme.css`'s scroll mark on whatever is moving, so the thumb is drawn while the member
- *  scrolls and at no other time. `scroll` does not bubble but it does capture, so one listener at
- *  the document reaches every scroller the portal draws, including one mounted after this ran.
- *  Each element carries its own quiet timer — a pane still moving keeps its bar while a pane that
- *  has stopped loses one — and the mark is written once per gesture rather than once per event,
- *  since a scroll fires every frame and the attribute already says what the next frame would. */
+/** `scroll` does not bubble but it does capture, so one listener at the document reaches every scroller
+ *  the portal draws, including one mounted after this ran. */
 function useScrollMark(): void {
   useEffect(() => {
     const quiet = new Map<Element, number>();

@@ -552,8 +552,6 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     )
     assert "const { height: designHeight, regions: designRegions } = design;" in source
     assert "await measuredDesign(browser, laneWidth, designPath, '')" in source
-    # The design lane has no width of its own: the caller passes it, so a drift shows up as a
-    # missing argument rather than as a second number nobody compares.
     assert "DESIGN_INITIAL_VIEWPORT" not in source
     assert "acceptedDesignRegions" not in source
     assert "fs.writeFileSync(staticPath, await frame.content())" in source
@@ -3146,7 +3144,6 @@ def test_every_design_mode_caller_passes_the_one_lane_width() -> None:
 
     root = Path(__file__).parents[3]
     named = re.compile(r"NARROW_WIDTH|APPLICATION_DESIGN_WIDTH|\b360\b")
-    # An invocation, not a mention: the flag as a quoted argument or inside an f-string command.
     invoked = re.compile(r"""["']--design["']|--design \{""")
     stale = []
     for area in ("core", "extensions", "evals"):

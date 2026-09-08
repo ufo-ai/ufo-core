@@ -45,7 +45,6 @@ MAX_MCP_RESPONSE_BYTES = ONE_MIB
 MCP_TIMEOUT_SECONDS = 30.0
 MCP_URL_RE = re.compile(r"^https?://.+")
 MAX_SUMMARY_CHARS = 160
-# What the loop's tool-result bound carries before it offloads.
 MAX_LISTING_CHARS = 25_600
 
 LIST_MCP_TOOLS_DESCRIPTION = (

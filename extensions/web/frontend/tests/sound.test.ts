@@ -20,8 +20,6 @@ beforeEach(() => {
   vi.stubGlobal("AudioContext", class {});
 });
 
-/** The engine is started by the first sound and by nothing else, so a member who never walks the
- *  row never holds an `AudioContext` — and the theme and the volume are settled in that one call. */
 test("the first sound starts the speaker, and the sounds after it find it started", () => {
   soundMoved();
   soundEnded();

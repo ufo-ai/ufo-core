@@ -18,8 +18,6 @@ const tile = () => document.querySelector("[data-slot=stat]") as HTMLElement;
 const partsOf = (element: Element) =>
   Array.from(element.children).map((part) => part.getAttribute("data-slot"));
 
-/** The comps' tile: what is counted, the period it was counted over at the far end of that line,
- *  the figure and its move, and the rule beneath them. */
 function comped() {
   render(
     <Stat>
@@ -36,8 +34,6 @@ function comped() {
   );
 }
 
-/** The metrics page's tile: a provider's mark before the label, and a move that asks for the
- *  member. */
 function live(unarmed = false) {
   render(
     <Stat unarmed={unarmed}>
@@ -92,8 +88,6 @@ test("the label is cut at the line's width, so the state beside it keeps its end
   expect(label.className).toContain("flex-1");
 });
 
-/** jsdom lays nothing out, so the class is the contract: the label naming a tone of its own is what
- *  would leave an unarmed measure's name in live ink over a faded figure. */
 test("the label takes the tile's tone rather than naming one", () => {
   comped();
 
@@ -146,8 +140,6 @@ test("a move that held draws no glyph, so a tile states a direction only when it
   expect(document.querySelector("[data-slot=stat-delta] svg")).toBeNull();
 });
 
-/** jsdom lays nothing out, so the class is the contract: a glyph joining the baseline group hands
- *  the delta the arrow's own box edge as its baseline and lifts the move off the figure's. */
 test("the glyph says nothing to a reader being read to and never sets the move's baseline", () => {
   comped();
 

@@ -158,8 +158,7 @@ test("a dialog's two footer controls measure the same, so neither reads as the l
   expect(padding("Cancel")).toEqual(padding("Add members"));
 });
 
-/** The primitive stands an empty live region beside the card it draws, so a test that wants the
- *  message reads the card rather than the first thing carrying the status role. */
+/** The primitive stands an empty live region beside the card it draws, so the message is read off the card. */
 function toastCard(): HTMLElement {
   const card = document.querySelector("[data-slot=toast]");
   if (!card) throw new Error("no toast is standing");
@@ -178,15 +177,11 @@ test("a toast states what applied and then takes itself away", async () => {
   vi.useRealTimers();
 });
 
-/** A screen lays its own panes out, and the toast is drawn over them rather than among them. Every
- *  element the component puts on the page stands out of flow, so nothing it renders can take a
- *  track in the grid the screen behind it is laid out by — silent, and it halves the screen. */
 test("a toast takes no room in the layout it is drawn over", () => {
   const { container } = render(
     <Toast state={{ title: "2 members added." }} onDone={vi.fn()} />,
   );
-  // jsdom lays nothing out and loads no sheet, so what is asserted is that every element the
-  // component puts on the page is taken out of flow by its own class.
+  // jsdom lays nothing out and loads no sheet, so the class is what states an element is out of flow.
   const laid = [...container.children].filter(
     (node) => !/(^|\s)(fixed|absolute)(\s|$)/.test(node.className),
   );

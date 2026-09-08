@@ -55,21 +55,13 @@ SIGNUP_PROMPT = (
 )
 INTAKE_FIELDS = "business: {business}\ngoals: {goals}"
 
-# What a workspace founded here starts with, and the headroom a turn needs to begin. Only the entry
-# that creates the workspace grants it: a later member joining an existing one must not fund it,
-# or a workspace that predates the balance would be handed a ceiling — and a gate — by whoever
-# next signed in. The grant is marketing spend priced at our own cost and is stated in no
-# member-visible string; at the rates a turn is billed today it is roughly forty member turns. The
-# reserve is one round, so a nearly-empty workspace never admits a turn that can only spend once
-# and park.
+# Only the entry that creates the workspace grants it, or a later joiner would fund a workspace that
+# predates the balance. At today's rates it is roughly forty member turns; the reserve is one round.
 SIGNUP_GRANT_MICRO_USD = 100_000_000
 SIGNUP_RESERVE_MICRO_USD = 2_000_000
 
 CROSS_WORKSPACE_READ = "onboard.cross_workspace_read"
 
-# One page of invitations. The page bounds what one answer can carry; the caller walks the rest
-# with the cursor this read hands back to it, so a fleet inviting more than one page at a time
-# costs another call and never a row.
 INVITATION_PAGE = 500
 
 CHOICES_SQL = (
@@ -128,17 +120,10 @@ class MemberModelKey(BaseModel):
 
 class SeatRequest(BaseModel):
     workspace_id: UUID
-    # Optional because the verified address already carries it, and because the two images either
-    # side of a rollout state a different half of this pair. A gateway pod from the release being
-    # replaced states the claim ledger's identity as `domain` and no subject; that identity may be
-    # the exact address when a pod of this release wrote the claim. A pod of this release states the
-    # subject, and states the domain only where the subject is that domain — a serve pod of the
-    # release being replaced requires the field and reads it as the whole identity, so a
-    # personal-mail call states none and is refused there rather than resolved by a shared provider.
+    # Optional because the two images either side of a rollout state a different half of this pair:
+    # one states `domain` and no subject, the other the subject.
     domain: str | None = None
     email: str
-    # Optional for the mirror of that reason: absent, the subject is the verified domain — the rule
-    # `ufo_control.fill_signup_subject` applies to the rows that same pod writes.
     signup_subject: str | None = None
     profile: SignupProfile | None = None
     model_key: MemberModelKey | None = None
@@ -375,9 +360,8 @@ class OnboardControl:
                         prompt=agent_prompt(request.profile),
                         model=DEFAULT_AGENT_MODEL,
                         is_main=True,
-                        # The column defaults to `private`, and a main agent owned by nobody would
-                        # then be invisible to every non-admin member of the workspace it belongs
-                        # to. `ufoctl init` states the same value for the same reason.
+                        # `visibility` is stated, not defaulted: the column defaults to `private`,
+                        # hiding the main agent from every non-admin member.
                         visibility="workspace",
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),

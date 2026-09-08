@@ -1,5 +1,3 @@
-//! What the terminal pays to paint a turn: a reply through the markdown renderer, and an edit's
-//! diff through the op renderer.
 
 use base64::Engine;
 
@@ -48,8 +46,6 @@ fn edit_params(old: &str, new: &str) -> String {
     )
 }
 
-/// The common reply: prose and a list, no fence. Beside `render_a_reply` it says what the syntax
-/// highlighter costs, first call and steady state alike.
 #[divan::bench]
 fn render_a_reply_without_code(bencher: divan::Bencher) {
     let theme = theme();

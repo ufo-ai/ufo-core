@@ -5,21 +5,6 @@ repeats = 3
 max_stacks = 2
 budget_usd = 30.0
 
-# The control reads the description as it stands: PDF, DOCX and XLSX named together. The arm hides
-# docx and xlsx behind "Cannot read binary files", the wording the 09-07 nightly ran, where both
-# target models answered by unzipping the OOXML in bash and never called read at all. The suite's
-# third case forbids read, so a declaration that pulls the model toward it is measured for its cost
-# in the same run as its benefit.
-#
-# Needs a preview service on the template's address, since every paginated document read routes
-# through it: UFO_PREVIEW_TOKEN for serve, UFO_EGRESS_PREVIEW_DAEMON for the proxy that relays the
-# synthetic host to it. Four serves at once, so run it against a Postgres nothing else is holding —
-# the shared one carries 100 connections and another experiment's arms exhaust it before any turn.
-#
-# Ran 2026-09-07 on z-ai/glm-5.3-flash: docx-second-page 3/3 control against 1/3 with the kinds
-# hidden, which calls the wording load-bearing. The other two cases did not move — xlsx_repl fails
-# to complete under the local carrier either way, and it is that failure, not the declaration, that
-# sends the model to read in the formula case: both arms spend the same read calls there.
 [template]
 database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
 blob = { backend = "filesystem", root = "./blobs" }

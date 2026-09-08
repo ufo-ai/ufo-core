@@ -16,8 +16,6 @@ _spec = importlib.util.spec_from_file_location("ufo_gates", _GATES_PATH)
 gates = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gates)
 
-# A retired flag key of this module's own: the repo's tombstone list is swept, so a case naming
-# one of its entries goes red the day that entry is dropped.
 SWEPT_KEY = "enable-swept-away"
 ROGUE = Path("extensions/rogue/rogue.py")
 CORE_FILE = Path("core/src/ufo/db.py")

@@ -8,8 +8,8 @@ import { resetRouter } from "@/lib/router";
 import { resetScheme } from "@/lib/scheme";
 import { resetStreams } from "@/lib/turnStream";
 
-// A CI failure's DOM dump is the one record of what actually rendered there; the default limit
-// cuts it off inside the page's own top bar.
+// A CI failure's DOM dump is the one record of what actually rendered; the default limit cuts it off
+// inside the page's own top bar.
 process.env.DEBUG_PRINT_LIMIT ??= "30000";
 
 const KEY_FAULT = /unique "key" prop|two children with the same key/;
@@ -26,8 +26,7 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem" | "
 }
 
 function installWhatJsdomLacks() {
-  // jsdom's Blob hands its bytes back only through FileReader, so an attached file a browser reads
-  // with `arrayBuffer()` throws here. Reading it through the reader keeps the two answering alike.
+  // jsdom's Blob hands its bytes back only through FileReader, so `arrayBuffer()` throws here.
   Blob.prototype.arrayBuffer ??= function arrayBuffer(this: Blob) {
     return new Promise<ArrayBuffer>((resolve, reject) => {
       const reader = new FileReader();
@@ -40,9 +39,8 @@ function installWhatJsdomLacks() {
   Element.prototype.setPointerCapture = () => {};
   Element.prototype.releasePointerCapture = () => {};
   Element.prototype.scrollIntoView = () => {};
-  // jsdom gives an element `scrollTop` but no `scrollTo` to move it, so a transcript that scrolls
-  // itself throws where a browser would simply scroll. Writing the offset through keeps the two
-  // agreeing, which is what the code under test reads back.
+  // jsdom gives an element `scrollTop` but no `scrollTo` to move it, so a transcript that scrolls itself
+  // throws where a browser would scroll.
   Element.prototype.scrollTo = function scrollTo(
     to?: number | ScrollToOptions,
     top?: number,
@@ -51,10 +49,8 @@ function installWhatJsdomLacks() {
     if (asked?.top !== undefined) this.scrollTop = asked.top;
     if (asked?.left !== undefined) this.scrollLeft = asked.left;
   };
-  // jsdom implements no `window.open`, and calling it there raises rather than returning anything a
-  // caller can read. A member's browser may also refuse the window, and that refusal is the case
-  // every act already falls back from — so it is the default here, and a test that cares about the
-  // window opening stubs this with its own.
+  // jsdom implements no `window.open` and raises rather than returning anything a caller can read. A
+  // browser may also refuse the window, which is the case every act already falls back from.
   window.open = () => null;
   globalThis.ResizeObserver = class {
     observe() {}

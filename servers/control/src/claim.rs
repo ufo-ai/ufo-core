@@ -1,9 +1,5 @@
-//! Signup-email verification through WorkOS, under a claim time-to-live.
-//!
-//! The time-to-live is the Magic Auth code's own ten minutes. WorkOS answers a code it will not
-//! redeem the same way whether the digits are wrong or the code has died, so the claim's window is
-//! what tells the member which happened: inside it a refused code is one to retype, and at its edge
-//! the claim ends and says so.
+//! WorkOS answers a code it will not redeem the same way whether the digits are wrong or the code has
+//! died, so the claim's ten-minute window is what tells the member which happened.
 
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
@@ -17,7 +13,6 @@ pub const VERIFICATION_CHANGED: &str = "Another verification attempt changed thi
 pub const CODE_EXPIRED: &str = "The verification code expired. Start onboarding again.";
 pub const CODE_INCORRECT: &str = "The verification code is incorrect.";
 
-/// The onboarding flow renders the message.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ClaimError {
     #[error("{0}")]
@@ -34,9 +29,6 @@ impl From<StoreError> for ClaimError {
     }
 }
 
-/// The claim is the machine's state and the seam the verifier sits behind: the terminal earns its
-/// verified stamp by confirming a code, the browser arrives already verified, and every write that
-/// could race another attempt is a conditional one whose loser says so.
 #[derive(Debug, Clone)]
 pub struct ClaimWorkflow {
     pub store: OnboardStore,
@@ -55,9 +47,6 @@ impl ClaimWorkflow {
         }
     }
 
-    /// Open a claim and ask WorkOS to mail its code. A verifier that refuses takes the claim with
-    /// it, so the session is free for the member's next attempt rather than holding a claim whose
-    /// code was never sent.
     pub async fn start(
         &self,
         email: &str,
@@ -78,9 +67,6 @@ impl ClaimWorkflow {
         Ok(signup.domain)
     }
 
-    /// Grade one code against a live claim. Each refusal takes the claim only if this attempt is the
-    /// one that got there first: the loser of a race says so rather than reporting a verdict another
-    /// attempt reached.
     pub async fn verify(&self, claim: &OnboardClaim, code: &str) -> Result<(), ClaimError> {
         if Utc::now() >= claim.expires_at {
             return Err(
@@ -112,9 +98,6 @@ impl ClaimWorkflow {
         Ok(())
     }
 
-    /// The browser's claim: WorkOS has already answered, so the claim is stamped as it is written. A
-    /// second callback for a session that already holds a live claim resolves that claim rather than
-    /// opening a second one, so the member lands where the first one left off.
     pub async fn admit_verified(
         &self,
         email: &str,

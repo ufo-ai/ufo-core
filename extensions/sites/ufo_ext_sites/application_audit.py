@@ -836,14 +836,6 @@ APPLICATION_KIT_COMPONENTS = frozenset(
 ROOT_MOUNT = re.compile(
     r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
 )
-# The rules a shipped app page is held to by `gates.py`, restated for the one page nothing else
-# reads. A shipped page is walked in the repo; a generated page exists only in a member's sandbox,
-# so this validator is where the same rules have to be true or they are true of half the product.
-# The refusals are worded as the repair the builder should make, because its repair loop reads them.
-# A Tailwind arbitrary value is always a utility carrying one — `w-[3px]`, `text-[#fff]` — or an
-# arbitrary property, which spells `[prop:value]`. A bare `[...]` is JavaScript: an array of issue
-# references or percentages reads exactly like a raw colour or length, and refusing it would block a
-# page over its data.
 ARBITRARY_VALUE = re.compile(r"[a-z][\w-]*-\[([^\]\n]*)\]")
 ARBITRARY_PROPERTY = re.compile(r"\[([a-z-]+:[^\]\n]*)\]")
 RAW_CSS_VALUE = re.compile(

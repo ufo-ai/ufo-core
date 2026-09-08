@@ -20,19 +20,6 @@ pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
-# Three things learned from one recorded run and one recorded wireframe, measured together because
-# they are one story: the drawing is made, shown, chosen, then built.
-#
-# The suite already graded that trajectory and the skill never described it — its failures read
-# "design 1 was not shared before its choice". The parent held `share_file` and was never told to
-# use it, so a member approved a description of a drawing they had not seen.
-#
-# The wireframe took about eighty steps. Twenty-five read the audit script, which measures and does
-# not explain; about fifteen tried to see the drawing, which `read` shows as an image and nothing
-# said so. Two wrote the design.
-#
-# Read it on the design-flow verdicts and on child rounds per case: two children in one recorded
-# case ran 101 and 95 rounds, 856 of that case's 1105 seconds.
 [[arm]]
 name = "before-the-flow"
 

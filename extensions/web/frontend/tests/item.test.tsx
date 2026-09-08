@@ -38,9 +38,6 @@ const MEETINGS = [
   },
 ];
 
-/** The faces of the members a row is about, overlapping by the one measure they spell. They are one
- *  element, so a slot's own gap separates the stack from what stands beside it rather than pulling
- *  the faces apart. */
 function Faces({ people }: { people: string[] }) {
   return (
     <span className="flex items-center">

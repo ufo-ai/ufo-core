@@ -362,8 +362,6 @@ fi
         ("light", NARROW_WIDTH),
         ("dark", NARROW_WIDTH),
     ]
-    # The script measures the design rather than echoing a file, so what the report carries is the
-    # painted geometry: the two names, in the order the lane draws them.
     measured = report["designRegions"]
     assert [region["name"] for region in measured] == ["queue", "detail"]
     queue, detail = measured

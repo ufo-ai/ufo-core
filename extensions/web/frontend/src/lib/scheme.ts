@@ -1,9 +1,7 @@
 import { useSyncExternalStore } from "react";
 
-/** Which of the theme's two palettes paints the portal. `theme.css` declares every colour as a
- *  `light-dark()` pair read off `color-scheme`, so a class on the root document is the whole
- *  mechanism: `system` carries none and leaves the choice with the browser. The boot entry marks
- *  the root before the first render, so a member who pinned dark never sees a light frame. */
+/** `theme.css` declares every colour as a `light-dark()` pair read off `color-scheme`, so a class on the
+ *  root is the whole mechanism. The boot entry marks it before the first render. */
 export type Scheme = "light" | "dark" | "system";
 
 export const SCHEME_OPTIONS: { scheme: Scheme; label: string }[] = [
@@ -24,10 +22,6 @@ export function markScheme(scheme: Scheme): void {
   document.documentElement.classList.toggle("dark", scheme === "dark");
 }
 
-/** The one preference every control that states it reads. The choice belongs to the browser rather
- *  than to a screen: the sidebar's glyph and the account menu's submenu are two views of it, and a
- *  pick in either is the same pick — two copies of it in component state would leave one saying the
- *  palette the member had left behind. */
 let held: Scheme | null = null;
 const listeners = new Set<() => void>();
 
@@ -43,8 +37,8 @@ export function useScheme(): Scheme {
   }, scheme);
 }
 
-/** Take the pick, hold it in this browser, and paint it. Radix names a radio value with a string,
- *  and anything but the two pinned palettes is the browser's own choice. */
+/** Radix names a radio value with a string, and anything but the two pinned palettes is the browser's
+ *  own choice. */
 export function pickScheme(value: string): void {
   const next: Scheme = value === "light" || value === "dark" ? value : "system";
   localStorage.setItem(HELD, next);

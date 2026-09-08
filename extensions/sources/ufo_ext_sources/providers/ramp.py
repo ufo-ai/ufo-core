@@ -31,7 +31,6 @@ PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
 _TRANSACTION_CURSOR = "user_transaction_time"
 
-# Stream-name → list path. Ramp keeps every collection under the one versioned developer prefix.
 _LIST_PATHS: dict[str, str] = {
     "transactions": "/developer/v1/transactions",
     "transfers": "/developer/v1/transfers",

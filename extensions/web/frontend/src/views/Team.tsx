@@ -23,8 +23,6 @@ import type { ActionView, Member } from "@/lib/types";
 
 type Roster = { members: Member[]; can_manage: boolean; actions: ActionView[] };
 
-/** The whole of one member row as the `member` kind takes it: an apply carries the complete spec,
- *  so a control changing one field states the other unchanged. */
 type MemberSpec = { admin: boolean; seated: boolean };
 
 const ADMINS = "admins";
@@ -33,9 +31,6 @@ const ROLES = [
   { label: "Members", value: "members" },
 ];
 
-/** What a member row states: the address it is held under, whether they administer the workspace,
- *  and whether the workspace answers them at all. An admin's acts stand after these, so the roster
- *  they read takes the same columns with one added. */
 const MEMBER_COLUMNS = [
   "Member",
   { label: "Role", fact: true },
@@ -44,8 +39,6 @@ const MEMBER_COLUMNS = [
 
 const MANAGED_COLUMNS = [...MEMBER_COLUMNS, ""];
 
-/** The three cells of one member row. Access is either live or it is not, and it is said the same
- *  word wherever it is stated. */
 function MemberCells({ member }: { member: Member }) {
   return (
     <>
@@ -56,9 +49,6 @@ function MemberCells({ member }: { member: Member }) {
   );
 }
 
-/** The acts an admin holds over one member: their role, and whether the workspace answers them.
- *  Both are one `apply` on the member kind, riding the main agent's lane, where the kind's own
- *  guards answer — the last admin keeps the role and the last active admin keeps the access. */
 function MemberActs({
   member,
   onApply,
@@ -99,10 +89,6 @@ function MemberActs({
   );
 }
 
-/** The roster, and the acts an admin holds over it — the add drawn from the member collection's
- *  own action schema, the role and access changes drawn as an apply on each row, both on the main
- *  agent's lane. `can_manage` keeps them off a screen whose reader the verbs would refuse; their
- *  gates still decide. */
 export function Team({
   place,
   onPlace,

@@ -1,12 +1,5 @@
-//! The `ufo fs` verb: `sbxfs`'s CLI contract on the client binary.
-//!
-//! One op name and one JSON object of params, a JSON object on stdout, and the exit code that says
-//! which kind of answer it is — 0 for a result, 1 for a refusal the model can act on, 2 for a usage
-//! error. The refusal strings are the API: the host maps them to the model's `ValueError` and an
-//! operator dashboard groups on them.
-//!
-//! No stdin is read by any op. Bytes reach a sandbox by a carrier copy-in, and `write` takes a
-//! `staged_path` that already holds them.
+//! Checks 2 to 4 of `core/src/ufo/harness/containment.py`, in Rust. Refusal messages are
+//! `ContainmentError`'s own, because the host maps them to the model's `ValueError` and dashboards group on them.
 
 #[cfg(unix)]
 use std::io::Write;
@@ -18,9 +11,8 @@ use crate::ops::fileops::{self, OpError, OPS};
 
 pub const USAGE: &str = "usage: ufo fs {read|write|edit|grep|glob|changes} <json>";
 
-/// The verb needs `openat` and `O_NOFOLLOW` for its containment descent, so the ops are unix only.
-/// The Windows build still answers the verb: a usage error on stderr and exit 2, because falling
-/// through the verb loop would post `fs read {…}` as a chat message.
+/// The verb needs `openat` and `O_NOFOLLOW`, so the ops are unix only. The Windows build still answers
+/// it with a usage error: falling through the verb loop would post `fs read {…}` as a chat message.
 #[cfg(not(unix))]
 pub fn main(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("skills") {
@@ -30,7 +22,6 @@ pub fn main(args: &[String]) -> i32 {
     2
 }
 
-/// What the verb writes and exits with, kept as data so a test can assert the exact bytes and code.
 #[cfg(unix)]
 pub struct Outcome {
     pub stdout: Vec<u8>,
@@ -38,7 +29,6 @@ pub struct Outcome {
     pub code: i32,
 }
 
-/// Run one `ufo fs` call from the launch directory and answer the exit code.
 #[cfg(unix)]
 pub fn main(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("skills") {
@@ -57,8 +47,6 @@ pub fn main(args: &[String]) -> i32 {
     outcome.code
 }
 
-/// `workdir` is where a caller-supplied `enum` listing is read from — the op workdir when the host
-/// drives the verb, the launch directory otherwise.
 #[cfg(unix)]
 pub fn run(args: &[String], workdir: &Path) -> Outcome {
     if args.len() != 2 || !OPS.contains(&args[0].as_str()) {
@@ -117,8 +105,6 @@ mod tests {
     use base64::Engine as _;
     use std::path::PathBuf;
 
-    /// A workspace holding one file, and an outside directory holding the file an escape would
-    /// reach — `test_sbxfs.py`'s own fixture.
     fn workspace(tag: &str) -> (PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("ufo-fs-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -142,7 +128,6 @@ mod tests {
         serde_json::from_slice(&outcome.stdout).expect("stdout is one JSON object")
     }
 
-    /// The paths one result names, owned so the JSON they came from can be dropped.
     fn named(outcome: &Outcome, key: &str, field: &str) -> Vec<String> {
         answered(outcome)[key]
             .as_array()
@@ -387,8 +372,8 @@ mod tests {
         );
     }
 
-    /// The case that tells check 2 from check 3: an ancestor link pointing inside the root is
-    /// canonicalized, so the bytes land on the real directory's inode and the link is left alone.
+    /// An ancestor link pointing inside the root is canonicalized, so the bytes land on the real
+    /// directory's inode and the link is left alone.
     #[test]
     fn write_through_an_in_root_symlinked_directory_lands_on_the_canonical_inode() {
         let (root, _outside) = workspace("inroot");
@@ -473,9 +458,6 @@ mod tests {
         );
     }
 
-    /// A caller may supply the listing a walking op reads, which is the terminal carrier's own path.
-    /// The listing decides what the walk visited and in which order; it does not decide what may be
-    /// read, so an entry the guard does not vouch for is dropped from the answer.
     #[test]
     fn a_supplied_listing_still_passes_the_guard() {
         let (root, outside) = workspace("listing");
@@ -573,8 +555,8 @@ mod tests {
         assert!(refused(&traversal).contains("leaves"));
     }
 
-    /// A scan of one file is a read of that file, so the link is refused rather than skipped: the
-    /// caller named it, and answering "no matches" would hide the refusal.
+    /// A scan of one file is a read of that file, so a link there is refused rather than skipped: the
+    /// caller named it, and answering no matches would hide the refusal.
     #[test]
     fn grep_refuses_a_planted_symlink_named_as_its_own_path() {
         let (root, outside) = workspace("grepnamed");
@@ -595,8 +577,6 @@ mod tests {
         );
     }
 
-    /// The guard roots a relative name at the workspace, never at the process cwd: here the cwd
-    /// holds a directory of that name and the workspace holds a file, so only one answer is right.
     #[test]
     fn grep_reads_a_relative_path_against_the_workspace_not_the_cwd() {
         let (root, outside) = workspace("greprelative");
@@ -616,8 +596,6 @@ mod tests {
         assert_eq!(files, vec![path(&root, "target.txt")]);
     }
 
-    /// A scan still answers for the workspace's own files reached through a link that stays inside
-    /// it: an ancestor link is followed once, under a resolution already proved contained.
     #[test]
     fn grep_reads_a_file_under_an_in_root_symlinked_directory() {
         let (root, _outside) = workspace("grepinroot");
@@ -713,8 +691,6 @@ mod tests {
         assert_eq!(files, vec![path(&root, "repo/report.txt")]);
     }
 
-    /// What a change is, and whose: git counts a modification, a deletion and an untracked add in
-    /// any checkout under the workspace, and counts nothing beside a checkout.
     #[test]
     fn changes_reports_every_checkout_and_nothing_outside_one() {
         let (root, _outside) = workspace("changes");
@@ -773,8 +749,6 @@ mod tests {
         );
     }
 
-    /// An unborn HEAD has nothing to diff against, so every file is read off its own contents — the
-    /// same path an untracked file takes.
     #[test]
     fn changes_reads_a_checkout_that_has_no_commit_yet() {
         let (root, _outside) = workspace("unborn");

@@ -1,5 +1,3 @@
-//! Markdown rendered to styled transcript lines: headings, emphasis, lists, tables, quotes,
-//! rules, and fenced code blocks highlighted through the theme's roles.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -32,57 +30,41 @@ const COLORED_BYTES_MAX: usize = 1 << 20;
 const INK_DARK: &str = "base16-ocean.dark";
 const INK_LIGHT: &str = "InspiredGitHub";
 
-/// Render one block of finished markdown to styled lines wrapped at `width`. A block that settles
-/// is rendered again at every width the terminal takes, so its colours are held.
 pub fn render(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     Render::new(theme, width, Colours::Held).run(text)
 }
 
-/// Render text that changes on the next delta — a reply's open tail. Its colours are computed and
-/// dropped: every delta is a different string, so holding them would fill the memo with prefixes
-/// nothing reads again.
 pub fn render_live(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     Render::new(theme, width, Colours::Dropped).run(text)
 }
 
-/// Whether a render's code colours are worth keeping.
 #[derive(Clone, Copy, PartialEq)]
 enum Colours {
     Held,
     Dropped,
 }
 
-/// Accumulates a streamed reply and commits fully-arrived markdown blocks as source text,
-/// holding back the open tail so a half-arrived construct is never committed mid-block. The
-/// committed source keeps its own blank separators, so the transcript re-wraps it whole.
 #[derive(Default)]
 pub struct StreamRenderer {
     pending: String,
 }
 
 impl StreamRenderer {
-    /// Feed one delta; returns the source now safe to commit to the transcript. A block still
-    /// arriving — an open fence, a table, a list, a paragraph — is held back whole.
     pub fn push(&mut self, chunk: &str) -> String {
         self.pending.push_str(chunk);
         let closed = closed_block_end(&self.pending);
         self.pending.drain(..closed).collect()
     }
 
-    /// The uncommitted tail, shown in the activity row while the reply streams.
     pub fn open_tail(&self) -> &str {
         &self.pending
     }
 
-    /// End of stream: whatever remains commits now.
     pub fn finish(&mut self) -> String {
         std::mem::take(&mut self.pending)
     }
 }
 
-/// The end of the last block that has fully arrived: a closing fence, or a blank line that no open
-/// fence or list is holding. A table ends at a blank line like any other block — the parser reads
-/// the line after a row as another row, so a commit there would state something a re-read denies.
 fn closed_block_end(text: &str) -> usize {
     let mut closed = 0;
     let mut at = 0;
@@ -358,10 +340,8 @@ impl<'a> Render<'a> {
         self.spans.push(Span::styled(text.to_string(), style));
     }
 
-    /// A closed link becomes a mark over its label's spans; the label is all the member sees,
-    /// and [`Render::flush`] wraps each rendered row's share of it in OSC 8 markers the client
-    /// reads back on click. A table cell clips rather than wraps, so its markers embed directly
-    /// and [`clip_spans`] carries them whole.
+    /// A closed link becomes a mark over its label's spans, and `Render::flush` wraps each rendered row's
+    /// share of it in OSC 8 markers the client reads back on click.
     fn close_link(&mut self) {
         let Some((at, dest)) = self.links.pop() else {
             return;
@@ -605,17 +585,13 @@ impl<'a> Render<'a> {
     }
 }
 
-/// One code line's colors: the highlighter's pieces, or the raw line when it refused to parse.
 enum Colored {
     Pieces(Vec<(InkColor, String)>),
     Plain(String),
 }
 
-/// A block's colors, which depend on its source, its language, and the scheme — never on the
-/// width. Highlighting is the whole cost of drawing code (a fenced reply renders two orders of
-/// magnitude slower than the same reply as prose, and the first block of a syntax pays the
-/// regex compile on top), while a re-wrap only re-clips. So the colors are held per block and a
-/// resize pays nothing for them. Bounded, and per thread, so no lock sits on the paint path.
+/// Highlighting is the whole cost of drawing code — a fenced reply renders two orders of magnitude
+/// slower than the same reply as prose — so colors are held per block and a resize pays nothing.
 fn highlighted(lang: &str, scheme: Scheme, code: &str) -> Rc<Vec<Colored>> {
     let key = (lang.to_string(), scheme, code.to_string());
     if let Some(held) = COLORS.with(|memo| memo.borrow().held.get(&key).cloned()) {
@@ -634,8 +610,8 @@ fn highlighted(lang: &str, scheme: Scheme, code: &str) -> Rc<Vec<Colored>> {
     held
 }
 
-/// What the memo holds, and how much source it took to fill: a block is bounded in count, but a
-/// count alone bounds no memory when one block can be a hundred kilobytes.
+/// A block is bounded in count, but a count alone bounds no memory when one block can be a hundred
+/// kilobytes.
 #[derive(Default)]
 struct Memo {
     held: HashMap<(String, Scheme, String), Rc<Vec<Colored>>>,
@@ -646,14 +622,11 @@ thread_local! {
     static COLORS: RefCell<Memo> = RefCell::new(Memo::default());
 }
 
-/// How many blocks the memo holds, for the tests that bound it.
 #[cfg(test)]
 pub(crate) fn held_blocks() -> usize {
     COLORS.with(|memo| memo.borrow().held.len())
 }
 
-/// One block's colours, computed. Pure: the same source, language, and scheme always answer the
-/// same way, which is what makes holding them sound.
 fn colour(lang: &str, scheme: Scheme, code: &str) -> Vec<Colored> {
     let (syntaxes, inks) = assets();
     let syntax = syntaxes
@@ -701,8 +674,7 @@ fn span_width(spans: &[Span<'static>]) -> usize {
         .sum()
 }
 
-/// The prefix of `spans` that fits `max` display columns. OSC markers take no columns and are
-/// all kept, clipped or not, so a link's open always meets its close.
+/// OSC markers take no columns and are all kept, clipped or not, so a link's open always meets its close.
 fn clip_spans(spans: &[Span<'static>], max: usize) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     let mut used = 0;
@@ -772,9 +744,6 @@ mod tests {
             .collect()
     }
 
-    /// A reply streams its fenced block one delta at a time, and the dock draws the open tail on
-    /// every one of them. Each delta is a longer prefix of the same block, so holding their colours
-    /// would leave a prefix per delta resident — the whole block over again, hundreds of times.
     #[test]
     fn a_streaming_tail_holds_no_colours() {
         let theme = lit();
@@ -816,8 +785,6 @@ mod tests {
         );
     }
 
-    /// The colors are held per block, the clipping is not: a cache that kept clipped text would
-    /// hand the second width the first width's rows.
     #[test]
     fn a_held_block_still_clips_to_the_width_it_is_asked_for() {
         let theme = lit();

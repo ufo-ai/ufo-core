@@ -25,8 +25,8 @@ async function readAgents(): Promise<Boot> {
   }
   if (!res) return { phase: "failed", message: "Network error — try again." };
   if (res.status === 401) return { phase: "signed-out", fault: sessionFault(res) };
-  // A seat this workspace took away refuses with 403 and names itself in the fault header; every
-  // other 403 is a route refusing one read, which a reload can still answer.
+  // A seat this workspace took away refuses with 403 and names itself in the fault header; every other
+  // 403 is a route refusing one read, which a reload can still answer.
   if (res.status === 403 && sessionFault(res) === "no-seat")
     return { phase: "signed-out", fault: "no-seat" };
   if (!res.ok) return { phase: "failed", message: "Error " + res.status + " — reload to retry." };
@@ -65,10 +65,6 @@ export function Portal() {
     document.title = titled(FAULTS[boot.fault].title);
   }, [boot]);
 
-  /** A re-read after an agent is created lands the new row everywhere the audience is read — the
-   *  cards, the sidebar's picker, and the router that opens one. It replaces a ready answer only:
-   *  the member is standing in a working portal, and a re-read that failed is not a reason to take
-   *  it away from them. */
   const reload = useCallback(async () => {
     const next = await readAgents();
     if (next.phase === "ready") setBoot(next);

@@ -1,19 +1,11 @@
 const CLI_UA = /^(curl|wget|httpie)\b/i;
 const PAGE_CACHE = "public, max-age=600";
-// One script fronts several doors, and every document it serves names the production apex as its
-// canonical home, so the sitemap and robots.txt name that apex too rather than the door they were
-// fetched from: a crawler on any other door is told where the pages actually live.
 const APEX = "https://ufo.ai";
 const INDEXED = ["/", "/privacy", "/terms"];
-// Everything else the worker answers is an endpoint rather than a page: a shell script, a counter,
-// the onboarding API, and the hop to the authenticated host.
 const UNCRAWLED = ["/ufo", "/fleet", "/v1/onboard/", "/login"];
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const ARTIFACT_PREFIX = "/artifacts/";
 const JOIN_PREFIX = "/join/";
-// Every door's card names the production join door. The key that opens one is that door's own
-// configuration, so a card served from any other host still hands the reader the one address
-// whose key is public.
 const JOIN_URL = `${APEX}${JOIN_PREFIX}ufo`;
 const ARTIFACT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 
@@ -117,8 +109,6 @@ export default {
     if (url.pathname.startsWith("/ufo/bin/")) {
       return fetch(`${env.ORIGIN_BASE}${url.pathname}`);
     }
-    // The signup link is shared as an apex address, and the door that binds the session lives on the
-    // app host with every other cookie this deploy sets. The key rides one hop and is answered there.
     if (request.method === "GET" && url.pathname.startsWith(JOIN_PREFIX)) {
       return Response.redirect(`https://app.${url.hostname}${url.pathname}`, 302);
     }
@@ -151,8 +141,6 @@ export default {
         return fetch(`${env.ORIGIN_BASE}/ufo`);
       case "/fleet":
         return fetch(`${env.ORIGIN_BASE}/fleet`);
-      // The query rides along: an apex door is only a hop to the host that binds the cookie, and the
-      // ask a link carries — the conversation it names, the invitation it answers — is read there.
       case "/login":
         return Response.redirect(`https://app.${url.hostname}/login${url.search}`, 302);
       case "/logout":

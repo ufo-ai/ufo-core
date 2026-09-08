@@ -169,9 +169,6 @@ class IntercomConnector(RestConnector):
             first = cls._first(contacts.get("contacts"))
             if first is not None:
                 flat["requester_id"] = first.get("id")
-        # Some Intercom inboxes nest the `team_assignee_id` inside a
-        # `teammates`/`assignee` envelope; the search API also returns
-        # it at the top level as `team_assignee_id`. Don't overwrite.
         return flat
 
     @classmethod

@@ -1,11 +1,3 @@
-//! Sign-in: the signed state and cookie seals, the four WorkOS calls, and the claim workflow the
-//! machine drives them through.
-//!
-//! The WorkOS half runs against a local server rather than a fake verifier, so the request bodies
-//! and the `grant_type` literals WorkOS actually accepts are what the assertions cover. The claim
-//! half runs against a real Postgres for the same reason its ledger tests do: every write that could
-//! race another attempt is a conditional one, and only the database arbitrates it.
-
 mod harness;
 
 use harness::{ledger_pool, spawn_http};
@@ -84,7 +76,6 @@ fn a_state_naming_no_session_is_refused() {
 
 #[test]
 fn a_carry_the_query_invented_is_dropped_rather_than_refused() {
-    // The member still signs in; they land on a new conversation instead of somewhere invented.
     let invented = carry("session-1", Some("not-a-uuid"), Some("https://elsewhere/x"));
     let unpacked = unpack_state(&pack_state(&invented, SECRET), SECRET).unwrap();
     assert_eq!(unpacked.session, "session-1");
@@ -134,7 +125,6 @@ fn a_sealed_session_opens_only_under_our_own_signature() {
 
 #[test]
 fn the_cookie_seal_and_the_state_seal_come_out_of_different_keys() {
-    // One key for both would let a state be replayed as a cookie, or the reverse.
     let sealed = seal_session("shared-value", SECRET);
     let cookie_signature = sealed.split_once('.').unwrap().1;
     let state = pack_state(&carry("shared-value", None, None), SECRET);
@@ -173,7 +163,6 @@ async fn the_console_verifier_confirms_only_its_fixed_code() {
         .confirm("founder@acme.com", "111111")
         .await
         .unwrap());
-    // The console exchange reads the typed address straight back as the identity.
     assert_eq!(
         verifier.exchange("  Founder@Acme.com ").await.unwrap(),
         "founder@acme.com"
@@ -200,7 +189,6 @@ fn the_authorization_url_routes_straight_to_google() {
     assert!(url.contains("response_type=code"));
     assert!(url.contains("client_id=client_123"));
     assert!(url.contains("state=packed.state"));
-    // The redirect URI is a full URL, so it has to survive as one parameter.
     assert!(
         url.contains("redirect_uri=https%3A%2F%2Fflyingobject.ai%2Fv1%2Fonboard%2Fauth%2Fcallback"),
         "{url}"
@@ -277,8 +265,6 @@ async fn confirm_posts_the_magic_auth_grant() {
 
 #[tokio::test]
 async fn an_invalid_grant_is_a_wrong_code_and_anything_else_is_a_refusal() {
-    // WorkOS answers a code it will not redeem with `invalid_grant` whether the digits are wrong,
-    // expired, or spent — so that answer alone is the one the member may retype past.
     for field in ["error", "code"] {
         let (base, _log) =
             spawn_http(vec![(400, format!(r#"{{"{field}":"invalid_grant"}}"#))]).await;
@@ -296,7 +282,6 @@ async fn an_invalid_grant_is_a_wrong_code_and_anything_else_is_a_refusal() {
     assert_eq!(refused.to_string(), "Sign-in failed. Try again.");
 }
 
-/// A claim workflow whose verifier is a real WorkOS client pointed at a local server.
 async fn workflow(responses: Vec<(u16, String)>) -> (ClaimWorkflow, OnboardStore) {
     let pool = ledger_pool().await;
     let store = OnboardStore::new(pool);
@@ -340,7 +325,6 @@ async fn a_disposable_address_never_reaches_workos() {
 
 #[tokio::test]
 async fn a_verifier_that_cannot_send_takes_the_claim_with_it() {
-    // Otherwise the session holds a claim whose code was never mailed, and the member is stuck.
     let (flow, store) = workflow(vec![(500, "boom".to_string())]).await;
     let refused = flow
         .start("founder@acme.com", WEB_CHANNEL, "session-1")
@@ -378,7 +362,6 @@ async fn a_correct_code_stamps_the_claim_once() {
         .unwrap();
     assert!(stamped.verified_at.is_some());
 
-    // A replay of the same code finds the claim already stamped and says so.
     let refused = flow.verify(&claim, "123456").await.unwrap_err();
     assert_eq!(refused.to_string(), VERIFICATION_CHANGED);
 }
@@ -400,7 +383,6 @@ async fn a_wrong_code_leaves_the_claim_open_to_retype() {
         .unwrap();
     let refused = flow.verify(&claim, "000000").await.unwrap_err();
     assert_eq!(refused.to_string(), CODE_INCORRECT);
-    // The claim survives, so the member types the code again rather than starting over.
     assert!(store
         .live_claim(WEB_CHANNEL, "session-1")
         .await
@@ -445,7 +427,6 @@ async fn a_refusal_that_lost_its_race_reports_the_race_not_a_verdict() {
         .unwrap()
         .unwrap();
     claim.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
-    // Another attempt already stamped it, so this one cannot delete it.
     store.mark_verified(claim.claim_id).await.unwrap();
 
     let refused = flow.verify(&claim, "123456").await.unwrap_err();
@@ -462,7 +443,6 @@ async fn the_browser_claim_arrives_verified_and_a_repeat_callback_resolves_it() 
     assert_eq!(admitted.email, "founder@acme.com");
     assert!(admitted.verified_at.is_some(), "WorkOS already answered");
 
-    // A second callback for the same session lands on the first claim rather than opening another.
     let again = flow
         .admit_verified("Founder@Acme.com", WEB_CHANNEL, "session-1")
         .await

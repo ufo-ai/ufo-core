@@ -1,26 +1,13 @@
-// The kit, described from the kit. Every name `kit.ts` exports, resolved to the module that defines
-// it and to the first sentence of that definition's docstring, written as the one page a model reads
-// before it composes an app. Generated at build time, because a list of components kept by hand is a
-// list that disagrees with the kit the moment either moves.
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
-// `fileURLToPath`, not the URL's own pathname: that spelling percent-encodes, so a checkout under a
-// path holding a space reads no kit and fails the build after all three vite builds have run.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KIT = join(HERE, "src/apps/kit.ts");
-// The house-style skill is where this lands, because the moment that matters is BEFORE anything is
-// deployed: an agent editing an app's page reads it while it writes. That skill is core, always
-// loadable, and every app-home skill depends on it. It is committed, and a gate holds it to what
-// this writes.
 const SKILL = resolve(HERE, "../../../core/src/ufo/runtime/skills/ufo-style/references/kit.md");
 
 const kit = readFileSync(KIT, "utf8");
 
-// name -> where it comes from. A type is a shape and a name from `react` or the icon set is
-// documented by its own package, so both are named and not described; a value this repo defines is
-// the kit proper, and the page describes every one of them or the build fails.
 const owned = new Map();
 const named = new Set();
 for (const found of kit.matchAll(/import\s*(type\s*)?\{([^}]*)\}\s*from\s*"([^"]+)"/g)) {
@@ -35,7 +22,6 @@ for (const found of kit.matchAll(/import\s*(type\s*)?\{([^}]*)\}\s*from\s*"([^"]
 }
 for (const found of kit.matchAll(/import \* as (\w+) from/g)) named.add(found[1]);
 
-// the export block is the surface; a name absent from it is not the kit
 const block = kit.slice(kit.indexOf("export {"), kit.length);
 const exported = [...block.matchAll(/^\s{2}([A-Za-z][A-Za-z0-9]*),$/gm)].map((m) => m[1]);
 
@@ -52,9 +38,7 @@ const read = (module) => {
   return source.get(module) ?? "";
 };
 
-/** The first sentence of the docstring standing directly over a definition — what the component is,
- *  in the words its author used, so this page cannot describe it differently from the file. Only
- *  whitespace may separate the two: a docstring with a type or a constant between it and the
+/** Only whitespace may separate the two: a docstring with a type or a constant between it and the
  *  definition is documenting that, and the definition is undocumented. */
 const says = (module, name) => {
   const text = read(module);
@@ -117,11 +101,8 @@ for (const [file, members] of [...families].sort()) {
   lines.push("");
 }
 
-// The rest of the surface, named rather than described: the types, and the React and icon exports
-// whose docstring lives in somebody else's package. A page that cannot see them here reaches for a
-// global that a framed page does not have. Naming every export is also what lets the gate be a set
-// equality, so a component added to the kit and never regenerated here fails a check instead of
-// being invisible to the agent that would have used it.
+// Naming every export is what lets the gate be a set equality, so a component added to the kit and
+// never regenerated here fails a check instead of being invisible to the agent that would have used it.
 lines.push(
   "## Also published",
   "",

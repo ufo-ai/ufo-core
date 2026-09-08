@@ -39,8 +39,6 @@ import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { useSurfaces } from "@/lib/surfaces";
 
-/** One saved or shipped skill as the workspace reads it. `depends` and `agents` are the
- *  frontmatter's routing metadata — a save regenerates SKILL.md, so it writes them back. */
 type Skill = {
   name: string;
   description: string;
@@ -50,10 +48,6 @@ type Skill = {
   agents: string[];
 };
 
-/** What an edit reads from the skill's object detail before the panel opens: the generation the
- *  save must carry back, every stored file by digest so the ones beside SKILL.md survive the save,
- *  and the always-show mark, which the form never shows and the save states back rather than
- *  clearing it to the spec's unpinned default. */
 type SkillDetail = {
   spec: {
     files: Record<string, { sha256: string }>;
@@ -64,11 +58,6 @@ type SkillDetail = {
 
 type CommunitySkill = { name: string; source: string; installs: number };
 
-/** One skill reads the same whether the workspace already holds it or it is still in the directory:
- *  the name, the one plain line under it, what it states about itself, and the acts it carries. The
- *  line is where the skill came from: `Custom` or `Built-in` for a skill the workspace holds, the
- *  source repository and the install count for a directory row, which the directory publishes no
- *  description for. */
 type SkillRow = {
   key: string;
   name: string;
@@ -86,9 +75,6 @@ type CommunityDocument = {
 
 const SOURCE_URL = "https://github.com/";
 
-/** A skill is prose the member reads, not a file they edit, so its boxes take the sans face — the
- *  mono `Textarea` states code where there is none. Only the family changes: the size stays the
- *  one every control in the portal is set at, and mono's narrow step goes with the mono. */
 const PROSE = "font-sans text-subtitle narrow:text-ui";
 
 const COMMUNITY = "community";
@@ -154,9 +140,6 @@ function skillDocument(
   ].join("\n");
 }
 
-/** The whole file set one save carries: the workflow as it now reads, and every stored file beside
- *  SKILL.md kept by its digest — an apply states the skill's files completely, so a file left out
- *  of it is a file deleted. */
 function skillFiles(
   name: string,
   description: string,
@@ -202,10 +185,6 @@ function SkillItems({ rows }: { rows: SkillRow[] }) {
   );
 }
 
-/** The workspace's skills: the directory to install from, the set the workspace holds, and the acts
- *  that write it. The set belongs to the workspace, and an app states in its own settings whether
- *  its turns load it — so the reads and the intents here ride the main agent, the one agent every
- *  member of the workspace reaches. */
 export function WorkspaceSkills({
   place,
   onPlace,
@@ -218,10 +197,6 @@ export function WorkspaceSkills({
   const [reloads, setReloads] = useState(0);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [saveNotice, setSaveNotice] = useState<NoticeState>(QUIET);
-  /** The panel's subject: the skill being edited with the generation and stored files its detail
-   *  read returned, null skill for one being written, and no draft at all while the panel is
-   *  closed. The save carries `generation` back, so a save over someone else's newer save refuses
-   *  instead of overwriting it. */
   const [draft, setDraft] = useState<{
     skill: Skill | null;
     generation: string | null;
@@ -233,10 +208,6 @@ export function WorkspaceSkills({
   const [instructions, setInstructions] = useState("");
   const [busy, setBusy] = useState(false);
   const surfaces = useSurfaces();
-  /** The two halves of this screen are offered one flag each, so a deploy may draw the workspace's
-   *  own skills without the community catalogue, or neither — the tab itself goes when neither
-   *  stands. The screen opens on whichever is offered, and the narrowing between them is drawn
-   *  only where both are. */
   const offered = NARROWINGS.filter(({ value }) =>
     value === COMMUNITY ? surfaces["community-skills"] : surfaces["installed-skills"],
   );

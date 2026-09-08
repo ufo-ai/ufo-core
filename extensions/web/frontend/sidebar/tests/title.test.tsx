@@ -72,9 +72,6 @@ test("a conversation is named by its own subject, and one still unread by the pr
   );
 });
 
-/** A band draws the trail's innermost step as its own name, so its crumb is the step the tab title
- *  states after that name: one derivation answers both, and the two cannot disagree. The step carries
- *  the address it stands at, and a page that is its own landmark has no step above it. */
 test("the crumb is the step the tab title names after the page", () => {
   expect(crumbed({ kind: "home" })).toEqual({ label: "Assistant", at: agentHash(AGENT_ID) });
   expect(crumbed({ kind: "chat", conversationId: CONVO_ID })).toEqual({
@@ -91,9 +88,6 @@ test("the crumb is the step the tab title names after the page", () => {
   expect(crumbed({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBeUndefined();
 });
 
-/** A conversation carried on an extension's own surface is held by an app no roster row of this
- *  member's answers for, so the step names that app and stands at no address: there is nowhere for a
- *  press to go, and the crumb is the name alone. */
 test("a step no roster row reaches is the app's name and nothing to press", () => {
   const held = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" };
   const route: Route = { kind: "chat", conversationId: CONVO_ID };

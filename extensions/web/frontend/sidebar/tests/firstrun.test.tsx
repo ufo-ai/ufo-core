@@ -1,8 +1,3 @@
-/** The sidebar half of the one first run. The screens, the memory write and the thread per goal
- *  are the shared component's and are proved once in the lanes suite (`tests/firstrun.test.tsx`);
- *  what only this shell can be wrong about is where the run leaves the member, so that is what this file
- *  holds. It also proves the shared module resolves against this shell's own tree — a `@/…` import
- *  that reached the other shell's kernel would draw the run with the wrong panel and API. */
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
@@ -18,7 +13,6 @@ const ADMIN = { ...MEMBER, admin: true };
 
 const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Setting up" };
 
-/** The memory act the run writes through, as the read projects it for this member. */
 const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
   name: "record_first_run",
   description: "Record what the first run learned.",
@@ -27,8 +21,6 @@ const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
   label: "Continue",
 };
 
-/** A deploy with no Slack install and no enrichment: the run is the five questions, which is the
- *  shortest path to the handoff this file is about. */
 const FIRST_RUN = {
   providers: [{ name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" }],
   connectors: [],
@@ -66,13 +58,11 @@ function mount(routes: Record<string, Route> = {}) {
 test("the run draws on this shell, and its thread is the chat the member lands on", async () => {
   mount();
 
-  // The shared component's own first screens, drawn through this shell's panel kernel.
   await userEvent.click(await screen.findByRole("button", { name: "Get started" }));
   await screen.findByRole("heading", { name: "What’s the website for your business?" });
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await userEvent.type(await screen.findByLabelText("About your business"), "Design studio");
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  // The first task is said off the business step, before every step after it.
   await waitFor(() =>
     expect(sent).toEqual([
       "I just set up this workspace. My business: Design studio. " +
@@ -87,7 +77,6 @@ test("the run draws on this shell, and its thread is the chat the member lands o
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   await userEvent.click(screen.getByRole("button", { name: "Next" }));
 
-  // The build screen is the shared component's too, and the way out of it is this shell's.
   await userEvent.click(
     await screen.findByRole("button", { name: "Open your workspace" }, { timeout: BUILD_STEP_MS * 5 }),
   );

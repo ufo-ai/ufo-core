@@ -39,11 +39,7 @@ ENGINE_CORE_FILES = (
 )
 FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
-# Retired flag keys. An entry authorises the terraform destroy and forbids re-declaring the key
-# while any environment still holds it; the doctrine sweep drops one once no app does.
 FLAG_TOMBSTONES = ROOT / "infra" / "flag_tombstones.json"
-# Retired terraform addresses. The plan guard reads the same record to permit their one destroy;
-# this holds the other half, so a retirement is also the name's retirement.
 RETIRED_RESOURCES = ROOT / "infra" / "retired_resources.json"
 INFRA_ROOT = ROOT / "infra"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
@@ -108,10 +104,6 @@ PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" /
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
 STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
-# A Tailwind arbitrary value is always a utility carrying one — `w-[3px]`, `text-[#fff]` — or an
-# arbitrary property, which spells `[prop:value]`. A bare `[...]` is JavaScript: an array of issue
-# references or percentages reads exactly like a raw colour or length, and refusing it would block a
-# page over its data.
 ARBITRARY_VALUE = re.compile(r"[a-z][\w-]*-\[([^\]\n]*)\]")
 ARBITRARY_PROPERTY = re.compile(r"\[([a-z-]+:[^\]\n]*)\]")
 PORTAL_CLASS_REFUSALS = (
@@ -1107,10 +1099,6 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
         for verb in sorted(WORKSPACE_WIRE - emitted)
     )
 
-    # The gateway is Rust, so its emitted verbs are read off the source rather than an AST. The
-    # two codecs sharing one escaping is proved instead by `servers/control/tests/contract.rs`,
-    # which renders the golden fixture `ufo_testsupport.wire_fixture` writes through the Python
-    # codec — an equivalence a test can hold and a text comparison could only approximate.
     gateway_emitted: set[str] = set()
     found_gateway = False
     for rel in GATEWAY_MODULES:
@@ -2139,11 +2127,6 @@ def _kit_catalogue_failures() -> list[str]:
         ]
     described = set(KIT_DESCRIBED.findall(page))
     described |= set(KIT_NAMED.findall(page[page.index(KIT_NAMED_HEADING) :]))
-    # Both directions, because each is a different failure and only one of them announces itself.
-    # A name the catalogue carries that the kit no longer exports is a component an agent reaches
-    # for and fails to import — loud, at build time. A name the kit exports that the catalogue
-    # never mentions is the silent one: the component simply does not exist as far as the agent
-    # writing a page can tell, and no page is ever built out of it.
     regenerate = f"regenerate with `node {KIT_CATALOGUE_SCRIPT.name}`"
     return [
         f"{KIT_CATALOGUE}: names {name}, which the kit does not export — {regenerate}"

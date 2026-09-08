@@ -69,16 +69,11 @@ test("a file sheet owns the shared title, metadata, preview, and download", () =
   );
   const download = within(sheet).getByRole("link", { name: "Download" });
   expect(download.getAttribute("href")).toBe("/files/report.png");
-  // Every app page bundles this component through `ufo/kit`, and those pages wear their own acts at
-  // the drawer's corner — so the download stands in the body, not in the header beside the title.
   const header = sheet.querySelector('[data-slot="sheet-header"]');
   expect(header).toBeTruthy();
   expect(header!.contains(download)).toBe(false);
 });
 
-/** A document opened from the transcript or the artifact shelf is read here, so the sheet draws it
- *  as the pages it is: the first batch the preview route renders, stacked down the sheet's own
- *  scroll, and the rest only when the member asks under the last of them. */
 test("a file sheet stacks a document's pages and renders the next batch on request", async () => {
   const asked: string[] = [];
   const page = (at: number) => "cGFnZS0" + String(at);
@@ -169,9 +164,6 @@ test("a file sheet draws a one-page document as the picture the store rendered",
   expect(within(sheet).queryByRole("button", { name: /Load more pages/ })).toBeNull();
 });
 
-/** A member who presses a second shared file while a batch is still rendering reads that file, not
- *  the last one's pages under its name: the sheet leaves the transcript behind it live, so the
- *  batch the file they left asked for lands after the file they opened is drawn. */
 test("a file sheet drops the batch of a file the member has already left", async () => {
   let land: () => void = () => {};
   const held = new Promise<void>((settle) => {
@@ -230,9 +222,6 @@ test("a file sheet drops the batch of a file the member has already left", async
   expect(screen.queryByRole("button", { name: /Load more pages/ })).toBeNull();
 });
 
-/** Only a document is drawn as its pages. A video renders to one frame however many pages are
- *  asked of it, so rendering an opened one would move its bytes twice — past the route's own
- *  ceiling for a long recording — to answer with the cover already on screen. */
 test("a file sheet draws a video's cover without rendering the file again", async () => {
   const asked = vi.fn(async () => new Response("bytes"));
   vi.stubGlobal("fetch", asked);
@@ -475,19 +464,15 @@ test("the fence aborts the request the member left behind", async () => {
   expect(signals[1].aborted).toBe(false);
 });
 
-/** A pane whose read is waiting on something the member does off the page, so it asks at its own
- *  rate rather than at the rate a pane showing records asks. */
 function Watched({ everyMs }: { everyMs: number }) {
   const state = usePanelRead<{ rows: Row[] }>("/watched", 0, everyMs);
   return <Panel state={state}>{(payload) => <span>{payload.rows[0].name}</span>}</Panel>;
 }
 
-/** Answers what it is told to, so a case moves the answer under a mounted read. */
 function answering(held: { name: string }): () => Promise<Response> {
   return async () => json({ rows: [{ name: held.name }] });
 }
 
-/** The tab going away and being looked at again. */
 async function returning() {
   for (const state of ["hidden", "visible"]) {
     Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
@@ -553,11 +538,6 @@ test("the table names its columns and one row per record", async () => {
   expect(screen.getAllByRole("row")).toHaveLength(3);
 });
 
-/** A card and a tile are one grid to the member, so `current` lights the same band on both: the
- *  `li` the grid makes a record out of, and not the letters of its name. A card already stands on a
- *  surface, so the mark replaces the one it stands on — and it rides beside `rowControl` rather
- *  than standing in for it, so a card the grid lights is still the control that opens the record,
- *  which is the role the band is read by. */
 test("a card grid lights the whole band of the record standing beside it", async () => {
   const opened: string[] = [];
   const { rerender } = render(
@@ -633,9 +613,6 @@ function headed() {
   );
 }
 
-/** A phone has no room for a title beside a search beside an act: the search states its own width
- *  and the act sizes to its words, so a title sharing that line is squeezed to nothing — the page's
- *  own name, invisible. It keeps a line of its own instead. */
 test("the header stacks below the narrow breakpoint, so the title keeps its line", () => {
   headed();
 
@@ -650,10 +627,8 @@ test("the header stacks below the narrow breakpoint, so the title keeps its line
   expect(controls.contains(heading)).toBe(false);
 });
 
-/** The search narrows the records, so it stands on the band of controls that narrow them rather
- *  than on the name above them. The controls wrap among themselves rather than shrink: `flex-1` on
- *  the search would let a crowded row take it to its padding — a box the member cannot type into —
- *  because the flex shorthand resets the basis it would have shrunk from. */
+/** `flex-1` on the search would let a crowded row take it to its padding, because the flex shorthand
+ *  resets the basis it would have shrunk from. */
 test("the search stands in the toolbar, and its controls wrap rather than squeeze it", () => {
   render(
     <PageSearch node={<Search label="Search automations" />}>
@@ -668,9 +643,6 @@ test("the search stands in the toolbar, and its controls wrap rather than squeez
   expect(toolbar.contains(screen.getByRole("button", { name: "Filter" }))).toBe(true);
 });
 
-/** The acts fold and wrap around the name; the name never gives way to them. A band whose title
- *  could be squeezed to an ellipsis by one more pill is a band that states nothing about where the
- *  member is. */
 test("the name keeps a floor the acts cannot take", () => {
   headed();
 
@@ -682,10 +654,6 @@ test("the name keeps a floor the acts cannot take", () => {
   );
 });
 
-/** The mark for what the surface holds is read with the name, so it is spent out of the measure the
- *  name is guaranteed rather than added to it. A mark standing beside that measure would widen the
- *  band's floor by its own width, and the surfaces narrow enough to need a mark are the ones with no
- *  width to give. */
 test("the kind's mark stands inside the name's measure, not beside it", () => {
   render(<Header heading={2} title="Reviewer" glyph={<svg aria-hidden />} />);
 
@@ -696,9 +664,6 @@ test("the kind's mark stands inside the name's measure, not beside it", () => {
 });
 
 test("the lede stands inside the band, under the name it belongs to", () => {
-  /** A member who arrived at an app they did not install reads what it is for before anything else
-   *  on the page. Inside the band rather than as the first band under it: a lede a full gap away
-   *  from the name reads as content rather than as the name's own line. */
   render(<Header heading={1} title="Meetings" lede="Briefs you before each meeting." />);
 
   const band = screen
@@ -717,10 +682,6 @@ test("a band with no lede draws none", () => {
   expect(band.querySelector("p")).toBeNull();
 });
 
-/** A band carrying a crumb ends it with the name, marked as the page the path leads to. Where the
- *  caller states no level the crumb is all it is, so a surface the landmark around it already names
- *  takes no second name. The step is an address, so it is a link: pressing it is navigation, and a
- *  member can take it into a second tab. */
 test("a header with a crumb and no level names the surface through the crumb alone", () => {
   render(<Header crumb={{ label: "Reviewer", at: "#/agents/reviewer" }} title="Tracked issue" />);
 
@@ -731,10 +692,6 @@ test("a header with a crumb and no level names the surface through the crumb alo
   );
 });
 
-/** The crumb's last step and the heading are the same words, so a band that draws both draws one
- *  element: the leaf is the heading. A screen whose name is only ever a crumb would otherwise state
- *  no heading at all, and a heading drawn beside the crumb would say the place twice. A step at no
- *  address is the landmark's name and nothing to press: there is nowhere for a press to go. */
 test("a header with a crumb makes the crumb's leaf the heading the caller asked for", () => {
   render(<Header heading={1} crumb={{ label: "Wiki" }} title="member@example.com" />);
 
@@ -747,10 +704,6 @@ test("a header with a crumb makes the crumb's leaf the heading the caller asked 
   expect(screen.queryByRole("link")).toBeNull();
 });
 
-/** Where the band stands is what says whether it takes an inset, so no call site decides it twice.
- *  A band scrolling with its page is already lined up by that page's gutter; a band held above a
- *  scroller has none and states its own. It draws no line under itself on either — the surfaces
- *  below a band already state their own edges, and a second one doubles them. */
 test("the inset is the pinned band's, and nothing else's, and neither band draws a line", () => {
   const { container, unmount } = render(<Header heading={2} title="Reviewer" />);
   expect(container.firstElementChild!.className).not.toContain("px-2xl");
@@ -763,11 +716,6 @@ test("the inset is the pinned band's, and nothing else's, and neither band draws
   expect(pinned.container.firstElementChild!.className).not.toContain("border-b");
 });
 
-/** A lane's band tops a column the track repeats, so every measure in it is the band's own and not
- *  the call site's: one padding over one control-high row, which is the height every lane on the
- *  track starts at; the name tight against the mark before it; and the acts a glyph's pitch apart.
- *  A screen's band has the pane to itself and keeps the deeper padding the portal's chrome is set
- *  in. */
 test("a lane's band takes the lane's measures, and a screen's takes the page's", () => {
   const lane = render(
     <Header
@@ -806,8 +754,6 @@ test("a lane's band takes the lane's measures, and a screen's takes the page's",
   expect(quiet.className).toContain("hover:bg-fill");
 });
 
-/** The band is the handle a lane is carried by, and the cursor is the whole of what says so. A
- *  track moves along one axis, so the arrow states that axis rather than a free hand. */
 test("a band that can be carried takes the cursor of the axis it travels", () => {
   const { container } = render(
     <Header pinned ruled heading={2} title="Meetings" onLift={() => {}} />,
@@ -818,8 +764,6 @@ test("a band that can be carried takes the cursor of the axis it travels", () =>
   expect(band.className).toContain("cursor-ew-resize");
 });
 
-/** One way out, in one place: the last thing on the line, past every act, on every surface that
- *  can be shut. A member who has learned the corner does not hunt for it again. */
 test("the way out is a glyph and stands last", async () => {
   const shut = vi.fn();
   render(
@@ -834,8 +778,6 @@ test("the way out is a glyph and stands last", async () => {
   expect(shut).toHaveBeenCalledOnce();
 });
 
-/** An icon act draws at the portal's glyph size rather than at the register the surface around it
- *  is set in, so the chevron beside a title and the way out beside it are one size. */
 test("an icon act sizes its glyph by the glyph token", () => {
   render(<Header heading={2} title="Reviewer" onClose={() => {}} />);
 
@@ -844,10 +786,6 @@ test("an icon act sizes its glyph by the glyph token", () => {
   );
 });
 
-/** Under a band drawn outside it, a header is its acts and nothing else. The lane above it already
- *  states the name, the trail it came by and the way out, so a second band under the first would say
- *  all three twice and stand the page's own words at half the height every other lane's start at.
- *  What that band cannot carry is the act this page offers, so that is what is left. */
 test("a header under a band is its acts, and states nothing the band already states", () => {
   render(
     <Banded value>
@@ -876,10 +814,8 @@ test("a header under a band is its acts, and states nothing the band already sta
   expect(document.querySelector("[data-slot=header]")).toBeNull();
 });
 
-/** A page offering no act spends no height on the row. The row is drawn either way, because the act
- *  slot is handed down as a `display: contents` host that stands empty until a view fills it — a
- *  child the row has and a box it does not, which is why `:empty` cannot decide this and the row
- *  asks for a descendant that draws. */
+/** The act slot is a `display: contents` host that stands empty until a view fills it — a child the row
+ *  has and a box it does not — so `:empty` cannot decide this and the row asks for a descendant that draws. */
 test("a banded header with nothing to offer draws a row that hides itself", () => {
   const { container, unmount } = render(
     <Banded value>
@@ -900,8 +836,6 @@ test("a banded header with nothing to offer draws a row that hides itself", () =
   expect(hosted.container.firstElementChild!.querySelector("*:not(.contents)")).toBeNull();
 });
 
-/** The rule reaches only what stands under a band. A header drawn under none — every screen the
- *  portal heads itself — is the whole band it always was. */
 test("a header under no band is unchanged", () => {
   render(
     <Banded value={false}>
@@ -951,9 +885,8 @@ test("the table states a floor covering every track it declares", async () => {
   );
 });
 
-/** A phone has no room for the tracks, so each row stacks into a record and every cell draws its own
- *  head beside its value. The head words reach the cells as custom properties, one per column in the
- *  order the cells stand in, and the column a row's acts stand in carries none. */
+/** The head words reach the cells as custom properties, because a cell's generated content cannot reach
+ *  the row above it for the word. */
 test("the table states its heads for the phone that stacks its rows", () => {
   render(
     <DataTable
@@ -974,8 +907,6 @@ test("the table states its heads for the phone that stacks its rows", () => {
   expect(table.style.getPropertyValue("--table-label-3")).toBe('""');
 });
 
-/** A screen that offers the cards on its bar keeps its table a table: it states no head words, so
- *  no width stacks it, and the floor it declares is what the container scrolls sideways to. */
 test("a table the member chose over cards holds its tracks at every width", () => {
   render(
     <DataTable
@@ -998,9 +929,6 @@ test("a table the member chose over cards holds its tracks at every width", () =
   );
 });
 
-/** A column marked whole is measured from the rows: the table drops its fixed tracks so the cell can
- *  be as wide as the name it carries, the measured head declares no width of its own, and the shared
- *  column beside it declares the track it would otherwise lose. */
 test("a table with a whole column measures it and holds the tracks beside it", () => {
   render(
     <DataTable
@@ -1025,8 +953,6 @@ test("a table with a whole column measures it and holds the tracks beside it", (
   expect(heads[2].className).toContain("w-(--size-fact-column)");
 });
 
-/** The cell carrying the name a member finds a record by never cuts it, and the prose beside it is
- *  cut inside the cell rather than by it — a measured column is as wide as its widest value. */
 test("the whole cell keeps its name and the prose beside it keeps its bound", () => {
   render(
     <table>
@@ -1306,8 +1232,6 @@ test("a section's action stands at the band's far edge, over the bar and the rec
   const heading = screen.getByRole("heading", { name: "Members" });
   const out = screen.getByRole("link", { name: "Elsewhere" });
   const band = heading.parentElement!.parentElement!;
-  // The act is the band's last child and the heading's column is what yields, so a column of bands
-  // puts every act on one right edge whether or not the band above it carried a note.
   expect(band.lastElementChild).toBe(out.parentElement);
   expect(out.parentElement!.className).toContain("shrink-0");
   expect(heading.parentElement!.className).toContain("flex-1");

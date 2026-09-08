@@ -1,8 +1,6 @@
 name: cache
 
-# The cache daemon (RFC 0032) is a standalone Rust crate outside the client workspace, so it needs
-# its own check. minio backs the one test that exercises the durable tier's real S3 code paths; it
-# runs as a step rather than a service because minio needs a `server` command a service can't set.
+# minio runs as a step rather than a service because minio needs a `server` command a service can't set.
 on:
   push:
     branches: [main]

@@ -708,8 +708,6 @@ async def test_slack_channels_searches_across_pages(
         )
     assert matched.untrusted is True
     payload = json.loads(matched.content[0].text)
-    # "engineering" hits each match on a different field — C2 by name, C3 by topic, C4 only by
-    # purpose ("ops" name and empty topic don't contain it) — across both pages.
     by_id = {convo["id"]: convo for convo in payload["conversations"]}
     assert set(by_id) == {"C2", "C3", "C4"}
     assert by_id["C4"]["purpose"] == "engineering on-call rotation"
@@ -795,7 +793,6 @@ async def test_slack_channels_stops_at_the_page_bound(
             tool.input_model.model_validate({"query": "eng"}),
         )
     assert len(requests) == slack.SLACK_CONVERSATIONS_MAX_PAGES
-    # the read scopes are exercised: every list request asks Slack for DMs and group DMs too.
     assert requests[0].url.params["types"] == "public_channel,private_channel,mpim,im"
     payload = json.loads(result.content[0].text)
     assert payload["conversations"] == []

@@ -1,19 +1,3 @@
-//! The `ufo_control` schema, shaped once per deploy.
-//!
-//! `create schema | table | index if not exists` is not atomic against a concurrent creator: two
-//! callers issuing it together both find the object absent, both issue it, and the loser raises a
-//! `pg_class`/`pg_namespace` unique violation. So the schema is shaped by one process before any
-//! replica starts — `ufo-control migrate`, an initContainer of the `ufo-migrate` Job the gateway
-//! Deployment waits on — and no replica issues DDL. `require_control_schema` is the other end: a
-//! gateway that finds a ledger absent says which verb shapes it and refuses to serve, never
-//! creating it under a request.
-//!
-//! The verb does not lean on that topology for correctness. A duplicated Job pod or an operator
-//! running it by hand mid-deploy is a second caller, and the Job's `backoffLimit: 0` gives a raced
-//! loser no second chance, so the statements run under `SHAPE_LOCK` — the writer that waits then
-//! finds everything present and writes nothing. Every statement is `if not exists` and the reshape
-//! is conditional, so the verb is a no-op on a database already at head.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use tokio_postgres::Client;
@@ -43,7 +27,6 @@ const TABLE_CONSTRAINTS: &[&str] = &[
 const LIVE_COLUMNS: &str = "select table_name, column_name from information_schema.columns \
                             where table_schema = $1 and table_name = any($2::text[])";
 
-/// Every statement that brings an empty database to head, in order.
 pub fn ddl() -> Vec<String> {
     let mut statements = vec![format!("create schema if not exists {SCHEMA}")];
     for group in [
@@ -57,9 +40,6 @@ pub fn ddl() -> Vec<String> {
     statements
 }
 
-/// What a `create table if not exists` cannot do: a table already there keeps the shape it was
-/// created with, so every column added after its first deploy arrives here. Each statement is
-/// idempotent, so the reshape is a no-op on a database at head.
 pub fn reshape() -> Vec<String> {
     vec![
         format!(
@@ -156,8 +136,6 @@ pub enum SchemaError {
     Query(#[from] tokio_postgres::Error),
 }
 
-/// The comma-separated definitions of one column list, keeping a `check (state in ('a', 'b'))`
-/// whole rather than splitting it on the commas inside its own parentheses.
 fn definitions(body: &str) -> Vec<String> {
     let mut parts = vec![String::new()];
     let mut depth = 0_i32;
@@ -182,13 +160,6 @@ fn definitions(body: &str) -> Vec<String> {
     parts
 }
 
-/// The columns every `create table if not exists` declares, by table — the head shape read off the
-/// only place that states it.
-///
-/// A create statement writes nothing to a table already there, so a column added to one reaches an
-/// existing database through the reshape alone. A column no reshape statement adds stays absent
-/// from every database shaped before it, and the first request that reads it fails under a member
-/// rather than in the deploy.
 pub fn head_shape() -> BTreeMap<String, BTreeSet<String>> {
     let mut shape = BTreeMap::new();
     for statement in ddl() {
@@ -208,7 +179,6 @@ pub fn head_shape() -> BTreeMap<String, BTreeSet<String>> {
     shape
 }
 
-/// Every declared column the database does not carry, qualified and sorted.
 async fn drifted_columns(client: &Client) -> Result<Vec<String>, SchemaError> {
     let shape = head_shape();
     let bare: Vec<String> = shape
@@ -242,13 +212,6 @@ async fn drifted_columns(client: &Client) -> Result<Vec<String>, SchemaError> {
     Ok(drifted)
 }
 
-/// Bring the whole schema to head in one transaction, one writer at a time.
-///
-/// The last act holds the shaped database to `head_shape`, which is the whole class of reshape
-/// omission rather than one column: a column added to a create statement and forgotten there
-/// reaches no database that already holds its table. The check runs inside the transaction, so a
-/// database the reshape cannot carry to head keeps everything it had — the Job fails naming every
-/// missing column, and the gateway Deployment it gates never rolls.
 pub async fn shape_control_schema(client: &mut Client) -> Result<(), SchemaError> {
     let transaction = client.transaction().await?;
     transaction.batch_execute(SHAPE_LOCK).await?;
@@ -266,10 +229,6 @@ pub async fn shape_control_schema(client: &mut Client) -> Result<(), SchemaError
     Ok(())
 }
 
-/// A replica serves only against the shape its own build declares. A ledger absent names the verb
-/// that shapes it. A ledger present but missing a column this build declares earns the same
-/// refusal: the build and the database disagree, and every path that reads the column fails one
-/// request at a time otherwise — a background sweep, where nobody is watching, included.
 pub async fn require_control_schema(client: &Client) -> Result<(), SchemaError> {
     for table in LEDGERS {
         let present: Option<String> = client
@@ -303,8 +262,6 @@ mod tests {
 
     #[test]
     fn a_check_constraints_own_commas_do_not_split_a_definition() {
-        // `check (state in ('pending', 'claimed', ...))` must stay one definition, or `'claimed'`
-        // reads as a column name and the head shape demands a column nothing declares.
         let shape = head_shape();
         let delivery = &shape[slack_connect::TABLE];
         assert!(delivery.contains("state"), "{delivery:?}");

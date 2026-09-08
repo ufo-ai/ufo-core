@@ -1,15 +1,3 @@
-# Does the member need to be named for the system to know who is asking, and when it does, does
-# telling the model how to name them help?
-#
-# Two model-facing changes ride PR #2679. In a member's own conversation the engine binds an omitted
-# `requested_by` to that member and stops offering the field; in a shared conversation the field
-# stays, and a handler refusing for want of a member gets its error extended with the active member
-# refs. O11 is the shared case: the founding admin asks the assistant to archive an app they own in a
-# shared room, so the archive lands only if the call carries the ref — first try, or after the
-# refusal says how. A02 is the own-conversation case the report came from: a member states the whole
-# app in their first message and the create must land, ref or no ref.
-#
-# `base = "HEAD"` is the PR. Each arm takes one piece away.
 name = "requested-by-hint"
 base = "HEAD"
 suites = ["object_tools", "new_application"]
@@ -28,8 +16,6 @@ pack = { name = "assistant_eval" }
 sandbox = { backend = "docker" }
 research = { search_provider = "perplexity" }
 
-# The refusal stands alone: no refs, no instruction. What the model does with a bare
-# "requires its owner or a workspace admin" in a room where it is one message ref away.
 [[arm]]
 name = "no-hint"
 
@@ -41,8 +27,6 @@ old = """REQUESTED_BY_HINT = (
 new = """REQUESTED_BY_HINT = ""
 """
 
-# The field is offered in the member's own conversation too, as before. The binding stays, so the
-# only question is whether a field that can say nothing new costs anything.
 [[arm]]
 name = "offer-ref-always"
 
@@ -53,8 +37,6 @@ old = """        if self._own_member(requesters) is not None:
         return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
 new = """        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
 
-# main's behavior on the own-conversation lane: nothing binds an omitted ref, and the field is
-# offered. The report's failure, reproduced as an arm.
 [[arm]]
 name = "no-own-binding"
 

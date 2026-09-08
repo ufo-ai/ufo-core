@@ -16,11 +16,6 @@ pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
-# Whether naming a kit component in the wireframe is load-bearing. Its enforcement needs a 90-name
-# list copied out of the kit, and the deploy gate's "renders at least one kit component" plus the
-# visual judge already cover the intent — so the arm drops the annotation from the design contract
-# and the validator that reads it. Scored on the visual-taste and source criteria: if they hold,
-# §3's cut lands; if they move, the list is generated from the kit at build time instead.
 [[arm]]
 name = "no-kit-annotations"
 

@@ -43,10 +43,8 @@ EXPIRED_DETAIL = "The download link expired. Ask the agent to share the file aga
 ARTIFACT_CACHE_SECONDS = 600
 SERVED_HEADERS = {
     "x-content-type-options": "nosniff",
-    # The grant is the whole gate: a signed URL serves whoever holds it, so a cache keyed on the
-    # exact URL — query and all — answers only what the signature already grants, and the window
-    # sits well inside the shortest remaining validity a bucketed mint can carry. `public` is what
-    # licenses the edge worker's stored copy; a refusal or redirect never says it.
+    # A signed URL serves whoever holds it, so a cache keyed on the exact URL answers only what the
+    # signature already grants.
     "cache-control": f"public, max-age={ARTIFACT_CACHE_SECONDS}",
     # An app page — a framed site on its own origin — reads artifact bytes with fetch, which needs
     # the origin stated where a plain download does not.

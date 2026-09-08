@@ -42,8 +42,6 @@ answer, and comments on one issue for ever, a paid turn at a time. A sweep asks 
 work cannot change: an issue carrying a comment from this app has been triaged, and the comment is
 that record, readable by whoever opens the issue next and by the next sweep alike."""
 
-# The label a member puts on an issue to approve implementing it. A label rather than a word in
-# chat, because approval has to be readable on the issue itself by whoever opens it next.
 IMPLEMENT_LABEL = "ufo:implement"
 
 ISSUES_APP_PURPOSE = (
@@ -96,8 +94,6 @@ ISSUES_APP_SCHEDULE = SetupSchedule(
         "who should own it, and the plan you would follow. Post each as a comment on its issue."
     ),
     cadences=(
-        # Issues arrive through the working day, so the hourly pass is the one an app over a
-        # backlog wants; a member who would rather read one batch a morning picks a daily.
         SetupCadence(),
         SetupCadence(hour=9),
         SetupCadence(hour=9, weekdays=(1, 2, 3, 4, 5)),

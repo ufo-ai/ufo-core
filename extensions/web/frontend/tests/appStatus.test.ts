@@ -64,8 +64,6 @@ test("the read runs at the working rate while an app holds work, and at the rest
   expect(reads(calls)).toBe(3);
   expect(view.result.current.working).toBe(false);
 
-  // The resting rate holds from the read that found nothing working: the working rate passes with
-  // no read, and the ask lands at thirty seconds.
   await settle(WORKING_STATUS_MS);
   expect(reads(calls)).toBe(3);
   await settle(RESTING_STATUS_MS - WORKING_STATUS_MS);
@@ -90,7 +88,6 @@ test("the last reader to leave stops the read", async () => {
   const first = renderHook(() => useAppStatus());
   const second = renderHook(() => useAppStatus());
   await settle(0);
-  // Both readers take the one answer, so the second costs no read of its own.
   expect(reads(calls)).toBe(1);
   expect(second.result.current.working).toBe(true);
 
@@ -114,14 +111,11 @@ test("a turn started in this browser is read at once, not waited out at the rest
   expect(reads(calls)).toBe(1);
   expect(view.result.current.working).toBe(false);
 
-  // A send. The engine does not hold the turn yet, so this read still finds nothing working —
-  // which is exactly the case a resting tick would have hidden for thirty seconds.
   act(() => wakeAppStatus());
   await settle(0);
   expect(reads(calls)).toBe(2);
   expect(view.result.current.working).toBe(false);
 
-  // The stir buys one further read at the working rate, and the turn has landed by then.
   turn = "running";
   await settle(WORKING_STATUS_MS);
   expect(reads(calls)).toBe(3);
@@ -139,8 +133,6 @@ test("a stir that finds nothing working settles back to the resting rate", async
   await settle(0);
   expect(reads(calls)).toBe(2);
 
-  // The one fast read the stir bought, and then nothing until the resting tick — a send that came
-  // to nothing must not leave the store asking every four seconds for the rest of the session.
   await settle(WORKING_STATUS_MS);
   expect(reads(calls)).toBe(3);
   await settle(WORKING_STATUS_MS);
@@ -163,8 +155,6 @@ test("an answer that is not the shape it claims leaves the store asking", async 
   expect(reads(calls)).toBe(1);
   expect(view.result.current.statuses).toEqual({});
 
-  /* A read that threw would leave the store believing one was still in flight, and every later ask
-     would find it busy and do nothing — the dots would hold what they last said for the session. */
   shaped = true;
   await settle(RESTING_STATUS_MS);
   expect(reads(calls)).toBe(2);
@@ -185,7 +175,6 @@ test("a read still in flight when the store is cleared does not land on the next
   view.unmount();
   resetAppStatusStore();
 
-  // The read cannot be recalled, so it answers into a store that has moved on.
   answer(json({ statuses: [status(AGENT_ID, { turn: "running" })] }));
   await settle(0);
   expect(useAppStatusOnce()).toEqual({});

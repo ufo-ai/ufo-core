@@ -26,8 +26,6 @@ DATADOG_API_URL = "https://api.us5.datadoghq.com"
 API_KEY_ENV = "DD_API_KEY"
 APP_KEY_ENV = "DD_APP_KEY"
 METRICS_TF = Path(__file__).parent / "envs/testing/metrics.tf"
-# `datadog_metric_tag_configuration` spells `metric_name`; `datadog_metric_metadata` spells
-# `metric`, and it applies against a name Datadog has never seen, so it is not read here.
 TAG_CONFIGURATION_METRIC = re.compile(r'^\s*metric_name\s*=\s*"([^"]+)"', re.MULTILINE)
 REQUEST_TIMEOUT_SECONDS = 30.0
 INDEX_POLL_SECONDS = 5.0

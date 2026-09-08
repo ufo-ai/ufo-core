@@ -115,7 +115,6 @@ async def test_a_page_entirely_below_the_floor_stops_the_descent() -> None:
             return httpx.Response(200, json=[REPO])
         if request.url.path == "/repos/acme/repo1/events":
             calls.append(str(request.url))
-            # every record predates the floor, and GitHub offers another page below it
             return httpx.Response(
                 200,
                 json=[{"id": f"e{len(calls)}", "created_at": "2020-01-01T00:00:00Z"}],

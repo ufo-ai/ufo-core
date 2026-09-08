@@ -1,18 +1,13 @@
-# The shared hosted application: gateway, serve fleet, sandbox proxy, and observability.
 
 data "aws_caller_identity" "current" {}
 
 locals {
-  # The sandbox cache (RFC 0032). The ECR repo and the callback secret are provisioned automatically
-  # by apply, and the image builds on the next deploy once the repo exists; flip to true after that to
-  # run the daemon sidecar and route sandbox git through it.
   cache_enabled = false
 
-  # The preview service (RFC 0037): its Deployment renders every shared document to a preview PNG.
   preview_enabled = true
 
-  # https://www.cloudflare.com/ips-v4 — the edge ranges Cloudflare connects to origins from. The NLB
-  # admits only these, so the ingress is unreachable except through Cloudflare's proxy (DDoS/WAF edge).
+  # https://www.cloudflare.com/ips-v4 — the NLB admits only these, so the ingress is unreachable except
+  # through Cloudflare's proxy.
   cloudflare_ipv4_ranges = [
     "173.245.48.0/20",
     "103.21.244.0/22",
@@ -36,17 +31,13 @@ locals {
   request_shutdown_seconds  = 30
   graceful_shutdown_seconds = 600
 
-  # The Datadog organization the fleet reports to, and the tag that separates this deploy's
-  # telemetry from testing's — worn by the collector's exports, the service checks, and the
-  # portal's recordings.
   datadog_site = "us5.datadoghq.com"
   datadog_env  = "prod"
 
-  # The digest-pinned runtime image used by migration, proxy, and serve.
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
 
-  # The terminal client version this deploy serves and update-gates on, read from the crate the
-  # deploy's binaries were built from — one source for the images and both pods' env.
+  # Read from the crate the deploy's binaries were built from — one source for the images and both
+  # pods' env.
   client_version = regex("(?m)^version = \"([^\"]+)\"", file("${path.module}/../../../client/Cargo.toml"))[0]
 
   ufo_prerequisite_manifests = data.kubectl_file_documents.cluster_services.manifests
@@ -96,14 +87,12 @@ locals {
   ])
 
   dns_zone_names = ["ufo.ai"]
-  # The apex the platform serves, held here as well as passed to it: the blob bucket's CORS rule
-  # names the portal origin, and a host built from a module output and fed back into that same
-  # module is a dependency cycle terraform refuses.
+  # Held here as well as passed to the module: a host built from a module output and fed back into that
+  # same module is a dependency cycle terraform refuses.
   apex_host           = "ufo.ai"
   shared_host         = "app.${local.apex_host}"
   gateway_origin_host = "origin.${module.platform.hostname}"
 
-  # The shared fleet configuration.
   serve_config = <<-TOML
     [pack]
     name = "assistant_hosted"
@@ -122,9 +111,8 @@ locals {
 
     [flags]
     backend = "flagship"
-    # The window a flag answer stands for. Every portal boot read consults these flags, so the
-    # cost of a short window is one Cloudflare round trip on the member's first paint; the cost
-    # of a long one is how long a flag turned on takes to reach a workspace already reading it.
+    # Every portal boot read consults these flags, so a short window costs one Cloudflare round trip on
+    # the member's first paint and a long one delays a flag reaching a workspace already reading it.
     cache_ttl_seconds = 900
 
     [serve]
@@ -165,7 +153,6 @@ locals {
   TOML
 }
 
-# The shared fleet configuration and process secrets.
 resource "kubernetes_secret_v1" "ufo_serve" {
   metadata {
     name      = "ufo-serve"
@@ -182,7 +169,6 @@ resource "kubernetes_secret_v1" "ufo_serve" {
   depends_on = [kubernetes_namespace_v1.ufo_system]
 }
 
-# The shared public ingress controller.
 resource "helm_release" "ingress_nginx" {
   name             = "ingress-nginx"
   repository       = "https://kubernetes.github.io/ingress-nginx"
@@ -240,7 +226,6 @@ resource "helm_release" "ingress_nginx" {
   depends_on = [module.platform]
 }
 
-# The hosted service namespace.
 resource "kubernetes_namespace_v1" "ufo_system" {
   metadata {
     name = local.system_namespace
@@ -284,9 +269,6 @@ data "kubectl_file_documents" "hosted" {
     region        = var.region
     otlp_endpoint = "http://otel-collector.${local.system_namespace}.svc.cluster.local:4318"
 
-    # The sandbox cache (RFC 0032). `cache_enabled` gates the daemon sidecar; `cache_s3_bucket` empty
-    # runs it disk-only (cold on every pod roll). The bucket and IRSA role exist (created by the
-    # platform module); set `cache_s3_bucket = module.platform.cache_s3_bucket` to turn on durability.
     cache_enabled     = local.cache_enabled
     cache_s3_bucket   = ""
     preview_enabled   = local.preview_enabled
@@ -296,15 +278,11 @@ data "kubectl_file_documents" "hosted" {
     ses_region           = var.region
     gateway_ses_role_arn = module.platform.gateway_ses_role_arn
 
-    # The signup Slack Connect inviter, off until the operator token is populated and proven.
     slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
     slack_connect_team_id = var.slack_connect_team_id
 
-    # The join door, which writes a member their own grant once WorkOS verifies their address.
     signup_key = var.signup_key
 
-    # The portal records browser sessions into this deploy's own RUM application, which it reads
-    # from the ufo-serve Secret above.
     rum_recording = true
     rum_site      = local.datadog_site
     rum_env       = local.datadog_env
@@ -327,13 +305,10 @@ data "kubectl_file_documents" "cluster_services" {
   })
 }
 
-# Shared OpenTelemetry collection.
 data "kubectl_file_documents" "observability" {
   content = templatefile("${path.module}/../../templates/observability.yaml.tpl", {
-    namespace     = local.system_namespace
-    deployment_id = var.deployment_id
-    # 0.114.0 pinned by its amd64 digest: the :0.115.0 tag does not exist and the :0.116.0 build's
-    # binary fails to exec on the nodes; this digest is verified running the datadog exporter.
+    namespace       = local.system_namespace
+    deployment_id   = var.deployment_id
     collector_image = "otel/opentelemetry-collector-contrib@sha256:94ac10da6c15fdad4f8091c4292a8c6814b467cd3bcf575ba2279e9dc6346e63"
     dd_site         = local.datadog_site
     dd_env          = local.datadog_env
@@ -352,7 +327,6 @@ resource "kubectl_manifest" "ufo_prerequisite" {
   ]
 }
 
-# Migration and RLS bootstrap must finish before the service is ready.
 resource "kubectl_manifest" "ufo_migrate" {
   yaml_body = local.ufo_migrate_manifest
 
@@ -377,11 +351,8 @@ resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
 
-  # The workflow's await_rollout.sh is the one rollout gate: each Deployment's newest ReplicaSet
-  # fully available. Rollout-completion waits — this one or `kubectl rollout status` — also wait
-  # out the old pods' drain (up to terminationGracePeriodSeconds, 700s), and this one dies at the
-  # provider's 10m update timeout first, failing healthy rolls. maxUnavailable=0 with maxSurge 100%
-  # keeps the old pods serving until every new one is ready.
+  # Rollout-completion waits also wait out the old pods' drain (terminationGracePeriodSeconds, 700s) and
+  # die at the provider's 10m update timeout first, failing healthy rolls. `await_rollout.sh` is the gate.
   wait_for_rollout = false
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]

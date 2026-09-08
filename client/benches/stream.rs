@@ -1,6 +1,3 @@
-//! What a reply costs as it arrives. Every delta pays the hold-back that keeps a half-arrived
-//! block off the screen, and every finished block pays the commit into the transcript — many
-//! times a second while the agent is answering.
 
 use ufo::ui::markdown::StreamRenderer;
 use ufo::ui::retained::{Entry, Retained};
@@ -41,7 +38,6 @@ fn theme() -> Theme {
     Theme::for_mode(ColorMode::TrueColor, Scheme::Dark)
 }
 
-/// The reply cut into the deltas a stream delivers, ASCII so the cuts land on characters.
 fn deltas() -> Vec<&'static str> {
     let mut deltas = Vec::new();
     let mut rest = REPLY;

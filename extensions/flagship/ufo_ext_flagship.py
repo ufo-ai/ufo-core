@@ -46,7 +46,6 @@ WRITE_TIMEOUT_SECONDS = 10.0
 API_BASE_URL = "https://api.cloudflare.com/client/v4"
 ON_VARIATION = "on"
 OFF_VARIATION = "off"
-# The flag's own record of who last moved it: answered on a read, refused on a write.
 ANSWERED_ONLY_FIELDS = frozenset({"updated_at", "updated_by"})
 
 
@@ -113,8 +112,6 @@ class FlagshipAdmin:
         held = self._call("GET", "").get("result")
         if not isinstance(held, list):
             raise RuntimeError("flagship answered no readable flag list")
-        # The collection names a flag `key` alone; only the single-flag read carries `flag_key`
-        # beside it, which is the field `serve` writes back.
         return tuple(sorted(str(flag["key"]) for flag in held))
 
     def _call(

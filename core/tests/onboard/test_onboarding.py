@@ -208,21 +208,16 @@ async def test_platform_credential_is_read_live_not_seeded(
     onboarded = await _onboarding(
         database_url, tmp_path, credentials=store, manifests=(manifest,)
     ).run()
-    # Onboarding did NOT seed the env value into the workspace store.
     with pytest.raises(CredentialSlotUnset):
         await store.get(onboarded.workspace_id, "seeded_api_key")
     init_workspace_credentials(store)
     access = CredentialAccess(declared=frozenset({"seeded_api_key", "unseeded_api_key"}))
     with ws(onboarded.workspace_id):
-        # Read live from the environment.
         assert await access.get("seeded_api_key") == "platform-value"
-        # Rotation propagates with no re-onboard.
         monkeypatch.setenv("SEEDED_API_KEY", "rotated-value")
         assert await access.get("seeded_api_key") == "rotated-value"
-        # A genuine per-workspace override wins over the platform default.
         await store.put(onboarded.workspace_id, "seeded_api_key", "workspace-byok")
         assert await access.get("seeded_api_key") == "workspace-byok"
-        # Unset in both store and env fails loud.
         with pytest.raises(CredentialSlotUnset):
             await access.get("unseeded_api_key")
 

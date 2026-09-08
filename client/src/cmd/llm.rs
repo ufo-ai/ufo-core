@@ -1,15 +1,5 @@
-//! The `ufo llm` verb: the one credentialed egress a sandbox script gets.
-//!
-//! The Anthropic Messages API, reached through the egress proxy the carrier set. The sandbox holds
-//! only the sentinel key (`ANTHROPIC_API_KEY`) and dials out through `HTTPS_PROXY`, trusting the
-//! proxy CA (`SSL_CERT_FILE`, else this machine's own store); the proxy swaps the sentinel for the
-//! real key on the wire, so the raw credential never enters the sandbox. The proxy's own userinfo
-//! becomes a `Proxy-Authorization` header and leaves the request line, so the run token is never
-//! written into a URL.
-//!
-//! The request is spoken directly over rustls rather than through the client's HTTP agent, because
-//! the deploy's proxy terminates TLS itself: a `https://` proxy needs TLS to the proxy and then TLS
-//! to the host inside the tunnel, which the agent's proxy support does not offer.
+//! The proxy swaps the sentinel key for the real one on the wire. Spoken directly over rustls because
+//! a `https://` proxy needs TLS to the proxy and then TLS inside the tunnel, which the agent will not do.
 
 use std::io::Write;
 use std::time::Duration;
@@ -26,7 +16,6 @@ const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
-/// One call's argv, after the flags are read off it.
 #[derive(Debug, PartialEq)]
 pub struct Call {
     pub model: String,
@@ -34,8 +23,6 @@ pub struct Call {
     pub prompt: String,
 }
 
-/// Write the answer and answer the exit code: the response text plus one newline on stdout, a
-/// handled failure as `ufo llm: {error}` on stderr and exit 1, a usage error exit 2.
 pub fn main(args: &[String]) -> i32 {
     let call = match parse(args) {
         Ok(call) => call,
@@ -120,7 +107,6 @@ pub fn request_head(key: &str, length: usize) -> String {
     )
 }
 
-/// Every `text` block of the response, concatenated.
 pub fn anthropic_text(response: &serde_json::Value) -> Result<String, String> {
     let Some(blocks) = response.get("content").and_then(|value| value.as_array()) else {
         return Err(format!(

@@ -13,9 +13,6 @@ const DEFAULT_RANGE = "30d";
 
 type Range = (typeof RANGES)[number];
 
-/** What each range is called on its own control: the period alone, because the row of them is
- *  already named as the range. The note under a figure says the same period as a span — `rangeLabel`
- *  — so one range is never two words on one screen. */
 const RANGE_PERIODS: Record<Range, string> = {
   "1d": "24 hours",
   "7d": "7 days",
@@ -37,9 +34,6 @@ const ON_BREACH: Record<string, string> = {
   reject: "Refuse new turns",
 };
 
-/** The heads each table states, named once: they size the tracks and, at a phone width, they are the
- *  label a stacked cell draws beside its own value. A breakdown names its first column after what it
- *  breaks down. */
 const DIMENSION_COLUMNS = ["Metered", "Units", "Cost"];
 const BREAKDOWN_COLUMNS = ["Tokens", "Token Share", "Cost", "$/Mtok"];
 const CAP_COLUMNS = ["Window", "Limit", "On Breach"];
@@ -95,8 +89,6 @@ export type WorkspaceUsageReport = UsageReport & {
   } | null;
 };
 
-/** The range the screen stands at, which is the place's own `range` key. A range the codec does not
- *  carry — an older link, a hand-typed address — reads as the default rather than as no screen. */
 function rangeOf(place: Placement): Range {
   return RANGES.find((range) => range === place.range) ?? DEFAULT_RANGE;
 }
@@ -115,16 +107,10 @@ function dateLabel(value: string): string {
   );
 }
 
-/** A daily bucket's own date. The rollup states a day as a plain date, which reads in the reader's
- *  own zone unless it is anchored — a day off is a day of usage on the wrong line. */
 function dayLabel(day: string): string {
   return dateLabel(day + "T00:00:00Z");
 }
 
-/** The days the chosen period covers, which is what a daily average is an average over. The history
- *  holds a bucket per calendar date the window reaches, and a rolling window reaches one date more
- *  than it lasts — a 24-hour window stands on two dates — so the buckets are never the count to
- *  divide by. All time has no window and its period is the history itself. */
 function periodDays(details: UsageDetails, windowSeconds: number | null): number {
   if (windowSeconds === null) return Math.max(details.daily.length, 1);
   return Math.max(Math.round(windowSeconds / DAY_SECONDS), 1);
@@ -134,8 +120,6 @@ function tokenCount(value: number): string {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
-/** A metered amount that is not tokens — requests, images, videos — which are counted whole rather
- *  than compacted: the figures are small and a member reconciles them against their own bill. */
 function count(value: number): string {
   return new Intl.NumberFormat("en").format(value);
 }
@@ -191,8 +175,6 @@ function Figures({
 }) {
   const first = details.first_used_at ? "Since " + dateLabel(details.first_used_at) : "No usage";
   const days = periodDays(details, windowSeconds);
-  // A period holds no more active days than it holds days: the dates at its two ends are each a part
-  // of a day, and the usage on both of them belongs to the one period.
   const activeDays = Math.min(details.daily.filter((day) => day.tokens).length, days);
   const items = [
     { label: "Tokens", value: tokenCount(details.selected.tokens), note: changeNote(details, range) },
@@ -221,10 +203,6 @@ function Figures({
   );
 }
 
-/** The range's spend a day at a time, drawn by the kit's plot as one column per day: a day is what
- *  was billed on it, and a curve between two days would state a figure on the hours between them
- *  that no bill carries. The value of the day the pointer is on is the money itself. The two ends of
- *  the period stand under it, because the plot itself draws no axis. */
 function DailyHistory({ rows }: { rows: DailyLine[] }) {
   if (!rows.length) return <PanelBlank body="Nothing was spent in this range." />;
   const total = rows.reduce((sum, row) => sum + row.total_micro_usd, 0);
@@ -245,8 +223,6 @@ function DailyHistory({ rows }: { rows: DailyLine[] }) {
   );
 }
 
-/** The head row every table on the page draws, written once: three tables state their columns and a
- *  head spelled beside each of them is the same markup three times. */
 function Heads({ columns }: { columns: string[] }) {
   return (
     <thead>
@@ -333,18 +309,10 @@ function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   );
 }
 
-/** An agent's line of the breakdown, headed the way every screen heads that agent. The line the
- *  rollup gives no agent id is the workspace's own jobs, whose label is the report's word rather
- *  than any agent's name. */
 function named(line: BreakdownLine): BreakdownLine {
   return line.id ? { ...line, label: agentName(line.label) } : line;
 }
 
-/** The workspace's usage screen: what the reader picked as a range, the figures for it, and the
- *  breakdowns under them. An admin's read carries the workspace rollup and the screen then reports
- *  the workspace — by app, by member, by origin — where a member's own read reports themselves. The
- *  bands every reader gets are drawn once, whichever report they come from, so the two audiences
- *  read one page rather than two spellings of it. */
 export function WorkspaceUsage({
   place,
   onPlace,

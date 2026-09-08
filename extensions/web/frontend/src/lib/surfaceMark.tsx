@@ -13,19 +13,6 @@ import type { OwnedConversation } from "@/lib/types";
 
 const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-faint";
 
-/** The surface a conversation came in on, drawn at the far end of its row in a listing of them. The
- *  portal draws none: a listing of conversations is read in the portal, so a glyph on every row
- *  would state where the member already is. The words for the same fact stay in the row beside it,
- *  which is what a reader unable to see the glyph gets.
- *
- *  Since most rows carry no glyph, one drawn ahead of the title would indent that row alone and
- *  leave the list without a left edge to read down. It trails instead, where it marks the few rows
- *  that have it without moving the many that do not, and it is drawn faint: a title is what the
- *  member scans for, and the surface is the answer to a question they have already asked.
- *
- *  It is drawn at `--size-glyph`, the size every other mark beside a row takes, rather than at the
- *  row's own text size: a glyph scaled to a 13px label is read as a smudge beside a title that runs
- *  the width of the column, and a mark nobody can name states no surface. */
 export function SurfaceGlyph({ surface }: { surface: string }) {
   if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
   if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
@@ -46,16 +33,6 @@ function surfaceMark(surface: string): ReactNode {
   return null;
 }
 
-/** The surface a conversation is happening on, at the head of the pane that reads it: the mark drawn
- *  larger than a listing row's glyph, and the room the surface named beside it. Where that surface
- *  reported where the conversation opened, the pair is the way out to it — drawn the way every act
- *  that leaves the portal is, keeping the line's own colour with no resting underline and the arrow
- *  muted beside the words. Where it reported none, the same pair states the fact and goes nowhere:
- *  a terminal session is not a place a link can land.
- *
- *  A surface with no mark of its own draws nothing at all. The header already names the agent, and
- *  a conversation read here is read-only whatever holds it, which the line under the transcript
- *  says in words. */
 export function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
   const mark = surfaceMark(conversation.surface);
   if (mark === null) return null;

@@ -73,11 +73,8 @@ def test_the_shipped_books_mark_becomes_the_stack_and_comes_back(tmp_path: Path)
     command.upgrade(config, ICON)
     assert _icons(engine) == [
         ("a", "stack-2"),
-        # A mark the workspace chose stands.
         ("b", "hydria"),
-        # Another app's mark stands.
         ("c", "book"),
-        # A member's own agent is no app's row.
         ("d", "books"),
     ]
 

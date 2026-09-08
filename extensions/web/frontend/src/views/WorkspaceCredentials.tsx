@@ -52,16 +52,10 @@ type Slot = {
   header: string;
 };
 
-/** The extension that resolves a slot this workspace declared for itself, rather than one a
- *  manifest declares for the whole deploy. Those are the rows an admin may edit and remove here,
- *  through the `credential_slot` kind that holds the declaration. */
 const WORKSPACE_EXTENSION = "workspace_credentials";
 const SLOT_KIND = "credential_slot";
 const DEFAULT_HEADER = "Authorization";
 
-/** Synthetic rows the screen draws so a section stands when no row of its own does: the acts that
- *  fill a section live in the section, where a member sent here from a chat reply lands on it
- *  rather than on a bare page. */
 const WS_PLACEHOLDER = "add-workspace-key";
 const SVC_PLACEHOLDER = "add-service-key";
 
@@ -73,8 +67,6 @@ function isPlaceholder(row: Slot): row is PlaceholderRow {
 
 type CredentialsPayload = { slots: Slot[]; actions: ActionView[] };
 
-/** The prompt the credential collection's `request_credentials` mints for one slot, authored here
- *  from the slot the listing read: the action's own input, posted through the projected view. */
 function credentialRequest(row: Slot) {
   return {
     reason:
@@ -131,13 +123,8 @@ function extensionTitle(extension: string) {
     .join(" ");
 }
 
-/** The provider a slot's value authenticates with: the longest provider the portal draws, that the
- *  slot's own name starts with. A slot named for its provider (`slack`) and every slot naming a
- *  value under one (`DATADOG_API_KEY`, `DATADOG_APPLICATION_KEY`) land on that provider's one mark;
- *  a slot the portal draws nothing for keeps the name it has, and takes the connector glyph.
- *
- *  Read off the two sets that answer for a mark rather than off a table of endings — a table would
- *  be a second list to keep, and it read `SLACK_BOT_TOKEN` as a provider called `slack_bot`. */
+/** The longest provider the portal draws that the slot's own name starts with. Read off the two sets
+ *  that answer for a mark, not a table of endings: a table read `SLACK_BOT_TOKEN` as `slack_bot`. */
 const SLOT_PROVIDERS = [...BRAND_MARKS, ...Object.keys(PROVIDER_GLYPHS)].sort(
   (left, right) => right.length - left.length,
 );
@@ -149,16 +136,13 @@ function slotProvider(slot: string) {
   );
 }
 
-/** The mark over a prompt: one provider's, where every slot the request asks for is that
- *  provider's. A request spanning two providers names none of them here. */
 function askedProvider(prompts: CredentialPrompt[]) {
   const asked = new Set(prompts.map((prompt) => slotProvider(prompt.slot)));
   return asked.size === 1 ? [...asked][0] : null;
 }
 
-/** The name the `credential_slot` kind addresses a declaration by — the variable's own name as a
- *  slug, derived here the same way the kind derives it, and the same name the `credential` kind
- *  gives the slot, so the row the panel writes is the row it reads back. */
+/** Derived here the same way the `credential_slot` kind derives it, and the same name the `credential`
+ *  kind gives the slot, so the row the panel writes is the row it reads back. */
 function slotName(slot: string) {
   return slot
     .toLowerCase()
@@ -166,15 +150,11 @@ function slotName(slot: string) {
     .replace(/^-+|-+$/g, "");
 }
 
-/** The unset service rows of the read the listing last drew, held for the placeholder's act: a
- *  row's `actions` sees its own row, and the Add-service-key act chooses among the others. */
 let heldServiceSlots: Slot[] = [];
 
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   note: "Credential values are shared across the workspace.",
-  /* The coding providers stand whether or not a member holds one, above the slots and under a
-     heading of their own: a slot is the workspace's, a coding account is the member's. */
   lead: (
     <Section
       title="Coding providers"
@@ -184,9 +164,6 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     </Section>
   ),
   group: credentialSection,
-  /* Every slot draws its row, filled or not, and a section with no row of its own draws a
-     placeholder carrying the act that fills it — Workspace keys is always there to declare into,
-     and Service keys offers its unset slots where they belong rather than over the page. */
   rows: (payload) => {
     heldServiceSlots = payload.slots.filter(
       (slot) =>
@@ -194,9 +171,6 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
         credentialSection(slot) !== "Workspace keys" &&
         slot.slot !== MCP_SERVERS_SLOT,
     );
-    /* A slot with a value is a row; a slot without one is not, except a workspace declaration,
-       which names the key and stands to be edited or removed empty. The unset service slots are
-       reached through their section's act instead, so an empty section never reads as a fault. */
     const rows: Slot[] = payload.slots.filter(
       (slot) => slot.filled || slot.extension === WORKSPACE_EXTENSION,
     );
@@ -344,9 +318,6 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   ),
 };
 
-/** The head of a credential prompt: the provider's mark beside what the prompt says, so a member
- *  reading a dialog raised from chat or from a row sees whose value they are typing. A prompt with
- *  no one provider draws the words alone. */
 function PromptHeader({ provider, children }: { provider: string | null; children: ReactNode }) {
   if (provider === null) return <DialogHeader>{children}</DialogHeader>;
   return (
@@ -359,14 +330,8 @@ function PromptHeader({ provider, children }: { provider: string | null; childre
   );
 }
 
-/** The workspace's own credential slot: an admin names the variable the sandbox exports — that
- *  variable is the name the declaration is filed under, not a separate one — the host its value
- *  rides to, and the header it rides in. What it is for is optional prose.
- *
- *  The value is collected at create time: saving runs the credential collection's
- *  `request_credentials` action for the new slot, which raises the same sealed prompt a row's
- *  Replace raises, so one save lands the declaration and the value together and the secret keeps
- *  its sealed handoff. */
+/** The value is collected at create time: saving runs the credential collection's `request_credentials`
+ *  for the new slot, so one save lands the declaration and the value together under its sealed handoff. */
 function DeclareCredential({
   busy,
   onDeclared,
@@ -424,7 +389,7 @@ function DeclareCredential({
       return;
     }
     /* The value goes through the sealed prompt rather than this form: the request opens the same
-       private dialog every other slot's fill runs through, and the listing reports the store. */
+       sealed handoff a row's Replace opens. */
     act(request, credentialRequest({
       name: slotName(env),
       slot: env.trim().toLowerCase(),
@@ -525,9 +490,6 @@ function DeclareCredential({
   );
 }
 
-/** The act over the unset service slots: the section lists the values the workspace holds, so a
- *  slot with none is reached by naming it there. Picking one raises the same prompt a row's
- *  Replace raises, and the value is typed there — the prompt is what carries the seal. */
 function SetCredential({
   slots,
   busy,
@@ -603,9 +565,6 @@ function CredentialPromptDialogForm({
   const reported = useRef(false);
   const ready = pending.every((prompt) => values[prompt.slot]?.trim());
 
-  /** Reporting a stored slot re-reads the listing, which takes this dialog down with it — so a
-   *  request whose slots did not all land holds what did until the member is finished with it,
-   *  and reports on the way out however the dialog closes. */
   function report() {
     if (reported.current || !held.current.length) return;
     reported.current = true;

@@ -1,4 +1,3 @@
-# In-cluster controllers for ingress, certificates, DNS, and secret projection.
 
 resource "helm_release" "aws_load_balancer_controller" {
   name             = "aws-load-balancer-controller"
@@ -55,8 +54,6 @@ resource "helm_release" "cert_manager" {
   depends_on = [helm_release.aws_load_balancer_controller]
 }
 
-# The env's ClusterIssuer (ufo.tf) solves DNS-01 through this token (same token external-dns uses) —
-# Cloudflare proxies the origins, which breaks HTTP-01. Ordered after the release so helm owns the namespace.
 resource "kubernetes_secret" "cloudflare_api_token_cert_manager" {
   metadata {
     name      = "cloudflare-api-token"
@@ -92,12 +89,6 @@ resource "helm_release" "external_secrets" {
   depends_on = [helm_release.aws_load_balancer_controller]
 }
 
-# external-dns publishes records into the authoritative Cloudflare zone for the domain — Cloudflare
-# fronts the gateway hostname as a DDoS/WAF edge, so DNS lives there. It authenticates with a scoped
-# Cloudflare API token delivered as a Kubernetes Secret — no IRSA. Helm owns the namespace
-# (create_namespace is idempotent on an existing one); the token Secret is applied into it afterward.
-# wait=false because external-dns can't go Ready until that Secret exists, and the Secret is ordered
-# after this release — blocking on readiness here would deadlock a fresh install.
 resource "helm_release" "external_dns" {
   name             = "external-dns"
   repository       = "https://kubernetes-sigs.github.io/external-dns/"
@@ -108,11 +99,8 @@ resource "helm_release" "external_dns" {
   wait             = false
 
   values = [yamlencode({
-    provider = { name = "cloudflare" }
-    policy   = "sync"
-    # Pinned rather than left to the chart default: every browser-facing hostname — the apex, the
-    # app host, and the sites wildcard — is published from an Ingress annotation, so a chart bump
-    # that dropped `ingress` would stop publishing all three with nothing failing.
+    provider       = { name = "cloudflare" }
+    policy         = "sync"
     sources        = ["service", "ingress"]
     txtOwnerId     = module.eks.cluster_name
     domainFilters  = var.dns_zone_names

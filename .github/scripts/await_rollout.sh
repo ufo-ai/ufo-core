@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Rolled out = the deployment's newest ReplicaSet is fully available. Old pods drain for up to
-# terminationGracePeriodSeconds (700s on the turn-holding workloads) after that; the gate never
-# waits on a drain.
+# Old pods drain for up to terminationGracePeriodSeconds (700s on the turn-holding workloads) after
+# that; the gate never waits on a drain.
 set -euo pipefail
 
 NAMESPACE=$1

@@ -95,26 +95,9 @@ JOB_NAME = "usage_shipper"
 JOB_SCHEDULE = "0 * * * * *"
 MICRO_USD_PER_USD = 1_000_000
 TOPUP_CARDLESS_KEY = "topup_cardless_at"
-# How long the refill leaves a workspace alone after finding no card on it. A refill is arranged
-# against a card, but nothing holds the card there — an admin can remove it in the portal — so an
-# armed workspace can be cardless, and the tick is every minute. Without this it reads the provider
-# 1440 times a day for a workspace it can do nothing for, and cannot be told to stop: the balance
-# that made it short is the balance refusing the turn that would clear the rule.
-#
-# It is minutes and not the day a decline waits, because the two answers cost different things. A
-# decline spends an authorization against a card the issuer is already refusing. Finding no card
-# spends one read, and it stops being true the moment a card is saved, so the wait is short enough
-# that a member who saves one is served without having to come back and ask.
 TOPUP_CARDLESS_RETRY_AFTER = timedelta(minutes=5)
 TOPUP_REFUSED_AT_KEY = "topup_refused_at"
 TOPUP_ATTEMPT_KEY = "topup_attempt"
-# An off-session decline is a standing answer — an expired card, a spent limit, a block — and none
-# of that changes because five minutes passed, so a second attempt on the tick buys nothing and
-# spends another authorization against a card the issuer is already refusing, which is what card
-# networks penalise. The refill waits a day and asks again. It never stops asking: a workspace
-# short enough to need a refill is one the balance gate is about to refuse every turn of, including
-# the turn that would arrange autopay again, so a stand-down only a member act could clear would
-# strand the workspace with no way back.
 TOPUP_RETRY_AFTER = timedelta(days=1)
 TOPUP_JOB_NAME = "balance_topup"
 TOPUP_JOB_SCHEDULE = "0 * * * * *"
@@ -899,8 +882,6 @@ def _rfc3339(moment: datetime) -> str:
 
 
 BILLING_ROUTE_PATH = "billing"
-# How much of the credit history the screen states. Enough to show the rhythm of a workspace's
-# refills without becoming a ledger nobody reads to the end of.
 BILLING_PURCHASES_SHOWN = 10
 
 
@@ -948,11 +929,6 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
         try:
             card = await _card_on_file(config, record.stripe_customer_id, BILLING_TRANSPORT)
         except (StripeError, httpx.HTTPError) as error:
-            # The balance is ours and the card is the provider's, so a provider that will not answer
-            # must not take the page down with it: this is the one screen a stopped workspace can
-            # still read, and what it most needs to state — how much is left, and why turns stopped
-            # — is already in hand. The card reads as unknown rather than as absent, because
-            # "no card" invites saving one and would be a guess.
             unread = True
             warn(
                 "metronome.card_unread", workspace_id=str(ext.store.workspace_id), error=repr(error)

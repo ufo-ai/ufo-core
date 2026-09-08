@@ -1,16 +1,8 @@
 name: sandbox-image
 
-# Publish the docker-gated tests' sandbox image once per definition, so a PR pulls it instead of
-# spending ~3.3 minutes rebuilding it on the `integration` critical path. The tag is the
-# definition's cache key, so publishing is idempotent and a PR that changes the definition simply
-# misses and builds its own image.
 on:
   push:
     branches: [main]
-    # Every input the key moves with: the definition, the files its layers bake, the client crate the
-    # baked `ufo` binary is built from, and `uv.lock`, which pins the e2b SDK whose
-    # `Template.to_dockerfile` renders the text being hashed. A push that moves the key with no
-    # publish behind it makes every PR pay the build, so this list over-triggers deliberately.
     paths:
       - sandbox/build_template.py
       - client/**
@@ -23,7 +15,6 @@ on:
       - uv.lock
       - .github/scripts/sandbox_image_key.sh
       - .github/workflows/sandbox-image.yml
-  # The base is a floating `:latest` tag, so the key moves with no commit behind it.
   schedule:
     - cron: "0 5 * * 1"
   workflow_dispatch:
@@ -45,8 +36,6 @@ jobs:
       - uses: ./.github/actions/client-gh
         with:
           target: x86_64-unknown-linux-musl
-      # Same reclaim the integration job needs: the image is ~6-7 GB and its build peaks near the
-      # runner's ~14 GB free disk.
       - name: Reclaim runner disk for the sandbox image build
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -57,10 +46,6 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      # The image bakes the compiled `ufo` client in place of the deleted `sbx`/`sbxfs` scripts, so a
-      # build needs a binary for the sandbox target. This is the client's own release recipe run on
-      # the runner, never a Rust layer inside the image — that would add minutes and gigabytes to
-      # every sandbox. `build_template.py` stages what this leaves under `client/target`.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl

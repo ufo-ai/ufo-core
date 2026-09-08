@@ -28,8 +28,7 @@ function shared(files: ChatFile[]) {
   );
 }
 
-/** jsdom decodes no image, so the size a magnification is a multiple of is stated by hand and the
- *  load the viewer reads it on is fired by hand. */
+/** jsdom decodes no image, so the natural size is stated by hand and the load is fired by hand. */
 function loaded(image: HTMLElement, naturalWidth: number) {
   Object.defineProperty(image, "naturalWidth", { value: naturalWidth, configurable: true });
   fireEvent.load(image);
@@ -45,8 +44,6 @@ test("a picture opens at the size of the window and zooms to its own pixels", as
   expect(picture.getAttribute("src")).toBe(DESKTOP.preview_url);
   loaded(picture, 1280);
 
-  // Fitted, the picture is bounded by the window and the stage does not scroll: there is nothing
-  // outside the box to reach.
   expect(picture.style.width).toBe("");
   expect(picture.className).toContain("max-w-full");
   const stage = viewer.querySelector("[data-slot=lightbox-stage]");
@@ -69,10 +66,8 @@ test("a picture opens at the size of the window and zooms to its own pixels", as
 });
 
 test("a picture taller than the window is bounded by the stage", async () => {
-  // jsdom computes no layout, so the bound is read where it is written: fitted, the picture is
-  // bounded by a percentage of the button it sits in, and a percentage bounds nothing unless the
-  // button is the stage's own height. A phone shot is taller than the stage after width fitting,
-  // and the fitted stage does not scroll, so a button left at the picture's height cuts it off.
+  // jsdom computes no layout, and a percentage bounds nothing unless the button is the stage's own
+  // height — a phone shot is taller than the stage after width fitting.
   shared([PHONE]);
   await userEvent.click(screen.getByRole("button", { name: PHONE.filename }));
 
@@ -83,8 +78,6 @@ test("a picture taller than the window is bounded by the stage", async () => {
     "max-h-full",
   );
 
-  // Above `Fit` the picture is drawn at its own pixels and the stage scrolls to it, so the button
-  // is sized by the picture again.
   loaded(within(viewer).getByRole("img", { name: PHONE.filename }), 390);
   await userEvent.click(within(viewer).getByRole("button", { name: "Zoom in" }));
   const held = within(viewer).getByRole("button", { name: "Fit to window" });
@@ -141,8 +134,8 @@ test("a step to the next picture reads it at the size of the window", async () =
 });
 
 test("a picture the browser already holds still zooms to its own pixels", async () => {
-  // The second time a member opens one, the bytes are cached: the element completes before it
-  // carries a load handler, so no load event arrives and only `complete` says how wide it is.
+  // The second time a member opens one the bytes are cached: the element completes before it carries a
+  // load handler, so no load event arrives and only `complete` says how wide it is.
   Object.defineProperty(HTMLImageElement.prototype, "complete", { value: true, configurable: true });
   Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", {
     value: 1280,
@@ -164,8 +157,6 @@ test("a picture the browser already holds still zooms to its own pixels", async 
 });
 
 test("a cached picture stepped to still zooms to its own pixels", async () => {
-  // The phone shot beside the desktop one is cached too, and by the time it is stepped to the
-  // viewer is already mounted — so it attaches in the same commit whose effects reset the step.
   Object.defineProperty(HTMLImageElement.prototype, "complete", { value: true, configurable: true });
   Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", {
     get(this: HTMLImageElement) {

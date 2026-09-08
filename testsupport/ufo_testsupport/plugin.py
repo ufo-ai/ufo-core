@@ -453,7 +453,6 @@ class _Attempt:
             "setup_seconds": phases[0],
             "call_seconds": phases[1],
             "teardown_seconds": phases[2],
-            # the sum of the columns as published, so a reader's own addition matches this one
             "total_seconds": round(sum(phases), 6),
             "start": round(self.start, 6),
             "stop": round(self.stop, 6),
@@ -681,7 +680,5 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     directory = Path(value)
     if not directory.is_absolute():
-        # the invocation directory, not the rootdir: `control` roots its own pytest config, and one
-        # directory per checkout is what a CI job can name as a single upload path.
         directory = config.invocation_params.dir / directory
     config.pluginmanager.register(_TimingsRecorder(config, directory), "ufo-timings")

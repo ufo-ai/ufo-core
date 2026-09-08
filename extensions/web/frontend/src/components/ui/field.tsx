@@ -3,9 +3,6 @@ import type { ComponentProps, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** The bordered field surface. `Select` draws its trigger with this too, so a button that stands in
- *  for a field is the same object to the eye as the fields beside it. An answer beneath filled
- *  choices uses their surface so the choices and field read as one column. */
 export const CONTROL = cn(
   "rounded-panel border border-edge bg-field text-field-ink px-lg py-md font-sans",
   "text-subtitle narrow:text-ui placeholder:text-ink-faint",
@@ -18,10 +15,6 @@ export function Label({ className, ...props }: ComponentProps<typeof LabelPrimit
   return <LabelPrimitive.Root data-slot="label" className={cn("block font-strong", className)} {...props} />;
 }
 
-/** One labelled control. The label sits over the control it names, never beside it: a settings
- *  sheet holds names as long as `Internet Access Allowed` beside boxes as wide as a model id, and
- *  a label column sized for both is a column of whitespace on every other row. A checkbox is the
- *  exception the form draws itself — the box is the width of a glyph, so its label reads across. */
 export function Field({
   label,
   htmlFor,
@@ -46,9 +39,6 @@ export function Field({
   );
 }
 
-/** A form is a card the way a table is a card, and the act that commits it sits on a footer row
- *  under the card's own rule, set right where the last field ends. A submit floating loose beneath
- *  the final input belongs to nothing on the page and reads as the opening of whatever follows. */
 export function FieldGroup({
   submit,
   className,
@@ -91,13 +81,6 @@ export function Input({
   );
 }
 
-/** The one search box, in the bar that narrows a listing. It is a filled pill and not the bordered
- *  field surface: the bar's controls sit against the records they act on, and a filled box beside
- *  the filter's filled tab reads as one band belonging to the table, where a bordered field the
- *  height of a form control reads as the page asking a question. The glyph is drawn here on
- *  `currentColor`, as the chevron and the tick are. Enter submits where the read is the server's —
- *  the box is the control, and a button beside it would say the word again; a listing that narrows
- *  what it already holds passes no `onSubmit` and narrows on every keystroke. */
 export function Search({
   label,
   onSubmit,
@@ -131,9 +114,6 @@ export function Search({
       <input
         type="search"
         aria-label={label}
-        /* The box stands the height of the pill it sits in rather than the height of its own
-           line: the pill is what the member aims at, and a finger landing on it must reach the
-           field. */
         className={cn(
           "min-w-0 flex-1 self-stretch border-0 bg-transparent p-0 font-sans text-label",
           "placeholder:text-ink-faint focus-visible:outline-none",
@@ -160,21 +140,13 @@ export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
 
 const GROWING_CELL = "col-start-1 row-start-1 w-full";
 
-/** The box inside a card that is itself the field: it draws no surface of its own, because a second
- *  border and fill inside the first states a box within a box. The mirror takes the same string, so
- *  the row it sizes is the row the member is typing into. */
 const BARE = cn(
   "border-0 bg-transparent p-0 text-field-ink font-sans",
   "text-label placeholder:text-ink-faint",
 );
 
-/** A textarea exactly as tall as what is in it, to a fold. The value is drawn twice — once in a
- *  mirror that sizes the row, once in the textarea laid over it — so the box grows on the
- *  browser's own layout pass, in the same paint as the keystroke. Measuring `scrollHeight` and
- *  writing a height back is a second answer to how tall the box is, and it arrives a paint late.
- *  The mirror stops at `--size-composer`, so past the fold the row holds and the textarea scrolls.
- *  The trailing space is what gives a final newline a line of its own, since a line box ends at
- *  the break otherwise. */
+/** The value is drawn twice, so the box grows on the browser's own layout pass: measuring `scrollHeight`
+ *  and writing a height back arrives a paint late. The trailing space gives a final newline its line. */
 export function GrowingTextarea({
   className,
   value,
@@ -221,10 +193,6 @@ export function Checkbox({ className, ...props }: ComponentProps<"input">) {
   );
 }
 
-/** A setting a member turns on and off, drawn as the track it slides in. It is a checkbox
- *  underneath — the browser's own control, so it is reached by keyboard, announced as a checkbox,
- *  and submitted with the form it stands in — wearing a track and a thumb instead of a tick. The
- *  state is read from the box itself with `checked:`, so nothing has to be told twice. */
 export function Switch({ className, ...props }: ComponentProps<"input">) {
   return (
     <input

@@ -3,8 +3,6 @@ import type { ReactNode } from "react";
 import mark from "@brand/ufo-mark.svg";
 import { cn } from "@/lib/cn";
 
-/** The head of a page drawn without the shell: the workspace mark, the progress wherever a step is
- *  being counted, and the page's own acts. */
 export function Head({ actions, at, steps }: { actions?: ReactNode; at?: number; steps?: number }) {
   return (
     <div className="grid h-8xl grid-cols-3 items-center px-7xl max-narrow:px-2xl">
@@ -40,11 +38,6 @@ export function Head({ actions, at, steps }: { actions?: ReactNode; at?: number;
   );
 }
 
-/** The page a member reads when the shell is not drawn: a step of the first run, or a session that
- *  ended. It has no navigation because neither has anywhere else to go — an unset workspace would
- *  only pull the member away from finishing setup, and a signed-out one has nothing to open. The
- *  rest of the viewport centres the page's question and answer together, under whatever mark leads
- *  it. */
 export function Frame({
   title,
   note,

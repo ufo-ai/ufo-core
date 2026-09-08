@@ -5,27 +5,13 @@ import { navigate } from "@/lib/router";
 import type { Crumb } from "@/lib/title";
 import type { Agent, Member } from "@/lib/types";
 
-/** The portal shell's side of the app bridge (RFC 0039, `docs/apps-prototype-contracts.md`
- *  Contract 1). An app's homepage is a page the app's agent built, framed cross-origin from the
- *  portal, so it cannot call the portal API itself. The shell hosting the frame proxies the
- *  member's own surface to it through one generic verb — `call`, a method and a path matched
- *  against the endpoint table below — and drives portal navigation on its behalf, all over
- *  `postMessage`. The protocol never names a capability: adding one is adding an endpoint row,
- *  and the page-facing conveniences live in the client, not here.
- *
- *  Prototype trust (deferred, documented in RFC 0039's security debt): the shell acts on the
- *  frame's requests under the viewer's own session with no per-message gate, and replies are posted
- *  with a `*` target origin. The endpoint table and the route table's own frame column are the only
- *  fences, and they bound what the frame can reach, not who authored it. */
+/** Prototype trust, per RFC 0039's security debt: the shell acts on the frame's requests under the
+ *  viewer's own session with no per-message gate, and replies are posted with a `*` target origin. */
 
 type BodyKind = "json" | "multipart" | "text" | "urlencoded";
 
 type Endpoint = { method: "GET" | "POST"; template: string[]; body?: BodyKind; stream?: boolean };
 
-/** The portal endpoints the shell forwards, as method + segment templates; a `{...}` segment
- *  matches any one non-empty, non-traversing path segment, and the query string rides through
- *  untouched. `body` names the encoding a POST row takes. Extend the surface a frame can reach
- *  only by adding a row here. */
 const ENDPOINTS: Endpoint[] = (
   [
     ["GET", "api/agents"],
@@ -52,21 +38,8 @@ const ENDPOINTS: Endpoint[] = (
   ] as const
 ).map(([method, template, body]) => ({ method, template: template.split("/"), body }));
 
-/** The intent verbs a frame may post: the object mutations the kernel's own record panes speak
- *  (`apply`, `delete` — the same authority the table's direct-write rows already grant), and
- *  `connect`, which mints a consent link the member completes on the provider's own site and so
- *  authorizes nothing on its own — admitted only where the deploy's declarations present its tool
- *  to a page. A band that states a need has to carry the act that settles it, or a member reads a
- *  list of chores each of which sends them somewhere else to type.
- *
- *  Every one of them dispatches verbatim and runs no model round. That is the line, and it is the
- *  same line `POST agents/{id}/chat` is held to: a turn that runs model rounds runs with the
- *  viewer's whole authority, so a frame gets no way to start one on load. An act that wants rounds
- *  is asked for in the portal's composer, where the words are the member's own to send.
- *
- *  The intents lane reaches acts far past a page's remit — membership, credentials, deploys — and
- *  a frame speaks with the viewer's whole session, so the table names its verbs and the server
- *  checks action declarations (RFC 0039 security debt: the per-message gate is deferred). */
+/** Every admitted verb dispatches verbatim and runs no model round: a turn that runs rounds runs with
+ *  the viewer's whole authority, so a frame gets no way to start one on load. */
 const FRAME_INTENT_VERBS: ReadonlySet<string> = new Set([
   "apply",
   "delete",
@@ -75,17 +48,10 @@ const FRAME_INTENT_VERBS: ReadonlySet<string> = new Set([
 
 const INTENTS_TEMPLATE = "agents/{id}/intents";
 
-/** The mark on every call the shell forwards for a page. The surface reads it to hold a frame's
- *  post to the acts declared for a page, so a page reaching the lane by any other route than this
- *  table meets the same answer. It is written after the page's
- *  own headers, so a page cannot unset it. */
 const FRAME_HEADER = "x-ufo-frame";
 
 const CHAT_TEMPLATE = "agents/{id}/chat";
 
-/** The one server-sent-event endpoint: a turn's live frames. A `call` matching a stream row is
- *  answered with `frame` messages as events arrive and one `end` when the stream closes, instead
- *  of a single `data` reply; a `close` message with the call's id ends it early. */
 const STREAM_ENDPOINT: Endpoint = {
   method: "GET",
   template: "turns/{id}/stream".split("/"),
@@ -93,13 +59,8 @@ const STREAM_ENDPOINT: Endpoint = {
 };
 ENDPOINTS.push(STREAM_ENDPOINT);
 
-/** How many live turn streams one frame may hold open at once — a page tails the turns it is
- *  watching, not every turn it ever saw. */
 const STREAM_CAP = 8;
 
-/** How much text a page may put in front of the member at once. A composer is where a member reads
- *  what they are about to say, and a page handing over more than a screenful is handing over
- *  something they will send unread. */
 const COMPOSE_MAX_CHARS = 2000;
 
 type BridgeMessage =
@@ -111,10 +72,6 @@ type BridgeMessage =
       method: string;
       path: string;
       body?: unknown;
-      /** A multipart body as its parts: `FormData` cannot ride `postMessage`, but its entries —
-       *  strings and Files — structured-clone whole, so the page decomposes and the shell
-       *  reassembles. A `text` row takes one beside its text (the chat admit's attachments), a
-       *  `multipart` row takes one and nothing else. */
       form?: unknown;
       headers?: Record<string, string>;
     }
@@ -124,9 +81,6 @@ type BridgeMessage =
   | { ufo: "founded"; agent_id: string; conversation_id: string; title: string }
   | { ufo: "resize"; height: number };
 
-/** The one header namespace a call may carry through: the surface's own `x-ufo-*` controls — the
- *  timezone, a stop, a question's answer. Anything else a page states is dropped, so a frame
- *  cannot smuggle a header the member's own portal would never send. */
 const HEADER_PREFIX = "x-ufo-";
 
 function carriedHeaders(stated: unknown): Record<string, string> {
@@ -140,62 +94,31 @@ function carriedHeaders(stated: unknown): Record<string, string> {
 
 export type BridgeConfig = {
   iframe: HTMLIFrameElement;
-  /** The member, the workspace's agents, and the page's own step of the trail as they stand when
-   *  the page asks: read when `ready` is answered rather than held from attach, so a roster the
-   *  shell re-reads or a name a rename corrects while the frame stands reaches the page's next
+  /** Read when `ready` is answered rather than held from attach, so a re-read reaches the page's next
    *  `init` without the bridge being rebound — a rebind aborts every stream the page holds open. */
   standing: () => {
     member: Member;
     agents: Agent[];
-    /** Where the page itself stands in the portal, as the trail names it. The page draws it as the
-     *  crumb over its own band whenever that band names something the shell never read — a report,
-     *  a member's page — because the shell's trail ends at the page and the band stands one step
-     *  past it. It rides `init` and no further: the frame that outlives a place change does not
-     *  outlive the screen this crumb names. */
     crumb?: Crumb;
   };
   agentId: string;
-  /** Whether the frame stands under a lane band that already names the page and holds the way out.
-   *  Rides `init` so every header inside the page is the acts it carries: one header per lane. */
   banded: boolean;
-  /** The place the page stands at, handed to it in `init` so a sidebar or search landing opens the
-   *  tile it named. It is the whole record the address carries, not one field of it: a page holds a
-   *  place the way a portal tab does, and a frame handed one key of it could only stand the screen
-   *  the member asked for by guessing the rest. */
   place?: WorkspacePlace;
-  /** A conversation the page's own send founded, told to the shell so the rail carries the row
-   *  without waiting for its next read. The page could only have founded it through this bridge's
-   *  own chat call, so the report claims nothing the shell did not broker. */
   onCreated?: (agentId: string, conversationId: string, title: string) => void;
-  /** Where a conversation the page names opens, stated by a shell that stands the frame in a lane:
-   *  the transcript takes a lane of its own beside the page. A press inside one lane cannot spend
-   *  the member's whole track, so the permalink is navigated to only where no lane holds the
-   *  frame. */
   onConversation?: (conversationId: string) => void;
   onSessionEnded?: () => void;
-  /** Whether this frame is the chat surface — the one page whose job is speaking. Only it may
-   *  post the chat admit: a send runs a model turn with the viewer's whole authority, and every
-   *  other app's page has the shell-owned right-side chat for talking, so its frame gets no voice
-   *  of its own to abuse on load. */
   chatSurface?: boolean;
 };
 
-/** The attached bridge: `detach` releases it when the frame unmounts, and `place` follows the
- *  pane's place while the frame stays mounted — the page got its `init` once, so a place that
- *  changes afterwards is posted as its own message and carried into any `init` still to come. */
 export type BridgeHandle = {
   detach: () => void;
   place: (place: WorkspacePlace) => void;
 };
 
-/** A path as the endpoint table reads it: query dropped, leading slashes dropped, split on the
- *  separator. Every reader of a path goes through this, so a fence over one of its segments is
- *  reading the segment the table matched rather than one it derived a second way. */
 function segmentsOf(path: string): string[] {
   return path.split("?")[0].replace(/^\/+/, "").split("/");
 }
 
-/** The endpoint row a method and path resolve to, or null where the table admits neither. */
 export function endpointFor(method: string, path: string): Endpoint | null {
   const segments = segmentsOf(path);
   return (
@@ -220,10 +143,6 @@ function isBridgeMessage(data: unknown): data is BridgeMessage {
   );
 }
 
-/** The one shape a call's body may take for its row: a JSON object for a `json` row — as the
- *  object itself or as the string a page's own fetch serialized it to — a non-empty string for a
- *  `text` row, the parts alone for a `multipart` row, nothing for a row that takes none. Returns
- *  the refusal, or null. */
 function bodyFault(endpoint: Endpoint, body: unknown): string | null {
   switch (endpoint.body) {
     case "json":
@@ -249,13 +168,6 @@ function bodyFault(endpoint: Endpoint, body: unknown): string | null {
   }
 }
 
-/** Attach the shell side of the bridge to one homepage iframe. Returns a detach function; call it
- *  when the frame unmounts (a redeploy remounts it under a new key, so each frame gets its own
- *  attach/detach). The frame announces itself with `ready`; the shell replies `init`. Because the
- *  frame may post `ready` before this listener is installed, its client retries `ready` until an
- *  `init` arrives. Every `call` carrying a string `id` is answered with exactly one `data` reply —
- *  a malformed field answers `ok: false` rather than silence, so a client promise never waits
- *  forever; only a message with no usable `id` has nothing to correlate a reply to. */
 export function attachBridge({
   iframe,
   standing,
@@ -271,10 +183,6 @@ export function attachBridge({
   let placed: WorkspacePlace = place ?? {};
   let page: MessageEventSource | null = null;
 
-  /** Relay one server-sent-event response as `frame` messages, then one `end`. A minimal SSE
-   *  parse — `event:`/`data:` lines, events split on blank lines — because the consumer is the
-   *  page's own handler, not an EventSource: named events can't be wildcarded there, and the
-   *  producer is this deploy's own turn stream. */
   async function relay(
     id: string,
     path: string,
@@ -313,9 +221,6 @@ export function attachBridge({
       }
       reply({ ufo: "end", id });
     } catch {
-      // A stream this side aborted ended because the page asked to close it or because the shell
-      // let the frame go. Either way the read rejects on the abort, and there is no fault to carry
-      // back to a page that already knows.
       if (!control.signal.aborted) reply({ ufo: "end", id, error: "The stream ended." });
     } finally {
       streams.delete(id);
@@ -411,21 +316,13 @@ export function attachBridge({
             refuse("This intent is not available from an app page.");
             return;
           }
-          // A grant binds to the app the page belongs to. The shell forwards under the viewer's
-          // whole session, so a page naming another agent would bind that member's new account
-          // there, with their authority and no sign of it on the provider's consent screen.
-          //
-          // It is `connect` alone. The other verbs a page may post name the agent that owns the
-          // record they act on — the main agent for a rebuild, an object's own agent on a record
-          // sheet — and each is gated by the kind it names.
+          // A grant binds to the app the page belongs to: the shell forwards under the viewer's whole session,
+          // so a page naming another agent would bind that account there with no sign of it on the consent screen.
           const named = segmentsOf(message.path)[1];
           if (verb === "connect" && named !== agentId) {
             refuse("An app page connects an account to its own app.");
             return;
           }
-          // And it never widens one. `shared` decides whether the grant binds to the member or to
-          // the whole workspace, which that consent screen states neither way — so sharing stays
-          // the connectors screen's own act, made where it is read.
           if (verb === "connect" && (body as { spec?: { shared?: unknown } }).spec?.shared) {
             refuse("An app page connects an account to itself alone.");
             return;
@@ -484,9 +381,6 @@ export function attachBridge({
       case "close":
         if (typeof message.id === "string") streams.get(message.id)?.abort();
         return;
-      /* A page's navigation is a navigation like any other, so the router writes it: the drawer over
-         the page shuts and the arrival lands, where a bare hash write left the shell to catch up a
-         task later. */
       case "navigate": {
         if (typeof message.to !== "string" || !framedNavigation(message.to)) return;
         const asked = parseHash(message.to);
@@ -497,10 +391,6 @@ export function attachBridge({
         navigate(message.to);
         return;
       }
-      /* Words handed to the composer of a new chat with this app, unsent — the same act the
-         portal's own setup row performs, reached from inside the frame. `send` is false here and
-         nowhere passed by the page: a frame may put words in front of the member, never say them.
-         The agent is the shell's own, so a page cannot compose into another app's chat. */
       case "compose":
         if (typeof message.text === "string" && message.text.trim()) {
           setPendingAsk(agentId, message.text.slice(0, COMPOSE_MAX_CHARS), false);

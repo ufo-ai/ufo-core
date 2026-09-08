@@ -3,12 +3,6 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/cn";
 
-/** What one message is drawn in. The variant is carried by the wrapper and reaches the content
- *  through it, so a bubble that holds two blocks tints both without either naming a colour.
- *
- *  There are two tones because the conversation has two sides: `default` is the member's own words
- *  on the fill step, and `ghost` is no surface at all, which is how a reply is drawn — a document
- *  in the reading column, not a card. */
 const bubbleVariants = cva(
   cn(
     "group/bubble relative flex w-fit max-w-said min-w-0 flex-col gap-2xs",
@@ -47,8 +41,6 @@ export function Bubble({
   );
 }
 
-/** The surface itself. Focus is left to the base layer's own outline: a second declaration here
- *  would answer a question the page has already answered. */
 export function BubbleContent({ className, ...props }: ComponentProps<"div">) {
   return (
     <div

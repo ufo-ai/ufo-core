@@ -1,8 +1,3 @@
-// The issues app's page: a static site built with the portal's app kit. Edit this file and
-// redeploy to change the page.
-//
-// It ships filled in. Every row below is placeholder written to read exactly like the real thing,
-// because this file is the shape the app rebuilds against its own tracker on the first Build app.
 
 import {
   AppConversations,
@@ -50,8 +45,6 @@ const PURPOSE =
 
 const STANDING = "Last triage 08:12 · 6 triaged today · 3 approved to implement · 1 pull request open";
 
-/** The label a member puts on an issue to approve implementing it. Approval is readable on the
- *  issue itself by whoever opens it next, which is why it is a label and not a word in chat. */
 const IMPLEMENT_LABEL = "ufo:implement";
 
 const MEASURES_GRID = "grid grid-cols-4 gap-6xl max-narrow:grid-cols-1";
@@ -66,7 +59,6 @@ type Measure = {
   rule: string;
 };
 
-/** What the app's own week came to, each figure beside the move it made. */
 const MEASURES: Measure[] = [
   {
     label: "Triaged",
@@ -93,7 +85,6 @@ const MEASURES: Measure[] = [
 
 type Share = { provider: string; name: string; share: string };
 
-/** Which of the week's issues came in through each account the app reads. */
 const SOURCES: Share[] = [
   { provider: "github", name: "GitHub", share: "62.4%" },
   { provider: "sentry", name: "Sentry", share: "24.1%" },
@@ -110,8 +101,6 @@ type Triaged = {
   unsettled?: string;
 };
 
-/** Issues the app has read and answered on: what it is really asking for, who should own it, and
- *  the plan it would follow. */
 const TRIAGED: Triaged[] = [
   {
     ref: "#2040",
@@ -158,7 +147,6 @@ type Queued = {
   detail: string;
 };
 
-/** What a member has approved, and how far it has got. */
 const QUEUE: Queued[] = [
   {
     ref: "#2042",
@@ -255,7 +243,6 @@ function Home({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  // The one record a row opens stands beside the page, and closing it clears the track.
   const held = place.opens?.at(-1) ?? null;
   const at = held === null ? null : objectAt(held);
   const band = usePageHead(

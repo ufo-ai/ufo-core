@@ -411,9 +411,6 @@ fn image_kind(kind: &str) -> bool {
         .any(|(extension, _)| *extension == kind)
 }
 
-/// The same read with its path taken through the containment guard: the bytes come off the pinned
-/// parent fd, so a link planted at the target — or at any directory on the way to it — is refused
-/// rather than followed.
 #[cfg(unix)]
 pub fn run_contained(params: &serde_json::Value, root: &Path) -> OpResult {
     let path = required(params, "path")?;

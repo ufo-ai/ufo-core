@@ -495,8 +495,6 @@ async def test_resume_readmits_when_cap_raised(db: None) -> None:
     dbos = StubDbos()
     await _dispatch(dbos)
     assert dbos.enqueued == [str(parked)]
-    # the sweep only enqueues; the turn's own execution claims parked -> running, so with no
-    # worker running here the durable status stays parked (a crash pre-claim leaves it re-runnable)
     assert await _status(parked) == "parked"
 
 

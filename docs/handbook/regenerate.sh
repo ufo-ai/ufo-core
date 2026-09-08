@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Regenerate docs/handbook/*.md from the current source tree.
-#
-# Runs the Harness Handbook `handbook_generate_large` pipeline (file-as-leaf,
-# complete-by-construction) over the Python application source and rewrites the
-# committed markdown pages in place. README.md is hand-written and preserved.
-#
-# Local:  OPENAI_API_KEY=sk-... docs/handbook/regenerate.sh
-# CI:     invoked by .github/workflows/handbook.yml
-#
-# Requires: uv, git, rsync. The tool venv (Python 3.13 + tree-sitter, pyyaml,
-# requests, markdown, pygments) is built in a throwaway dir; nothing is installed
-# into the repo.
 set -euo pipefail
 
 TOOL_REPO=https://github.com/Ruhan-Wang/Harness_Handbook.git
@@ -29,8 +17,6 @@ STAGE="$SCRATCH/src"
 WORK="$SCRATCH/work"
 SOURCE_ROOTS=(core extensions servers/control sandbox packs)
 
-# A source move leaves this list stale. Say so here, before the tool install and the
-# paid pipeline, instead of failing on an rsync stat error further down.
 for d in "${SOURCE_ROOTS[@]}"; do
   [ -d "$REPO_ROOT/$d" ] || { echo "source root '$d' is missing; update SOURCE_ROOTS in ${BASH_SOURCE[0]}" >&2; exit 1; }
 done
@@ -68,9 +54,6 @@ python3 "$TOOL/handbook_generate_large/run.py" \
   --synth-mode doctor --doctor-workers 12 --doctor-llm-workers 24 \
   --organize-workers 16 --phase3-workers 16
 
-# Fail loud before the destructive refresh: a pipeline that exits 0 without the
-# always-present core pages must not wipe the committed handbook. register.md is
-# emitted only when the system has cross-stage state, so it is optional.
 pages="$(find "$WORK/handbook" -maxdepth 1 -name 'stage-*.md' | wc -l | tr -d ' ')"
 if [ ! -s "$WORK/handbook/overview.md" ] || [ ! -s "$WORK/handbook/index.md" ] || [ "$pages" -eq 0 ]; then
   echo "pipeline produced an incomplete handbook (need overview.md, index.md, stage pages); refusing to overwrite committed pages" >&2
@@ -83,8 +66,6 @@ cp "$WORK"/handbook/overview.md "$WORK"/handbook/index.md "$HANDBOOK_DIR"/
 cp "$WORK"/handbook/stage-*.md "$HANDBOOK_DIR"/
 [ -f "$WORK/handbook/register.md" ] && cp "$WORK/handbook/register.md" "$HANDBOOK_DIR"/
 
-# Empty stages are dropped (no page emitted); turn any link to a missing stage
-# page into plain text across every page so no dead link ships.
 python3 "$HANDBOOK_DIR/strip_dead_links.py" "$HANDBOOK_DIR"
 
 echo "==> done. $(find "$HANDBOOK_DIR" -maxdepth 1 -name 'stage-*.md' | wc -l | tr -d ' ') stage pages in $HANDBOOK_DIR"

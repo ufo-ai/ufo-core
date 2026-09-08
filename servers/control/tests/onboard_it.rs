@@ -1,10 +1,3 @@
-//! The onboarding RPC client: what it sends, and what it makes of every answer.
-//!
-//! Driven against a local server rather than a stub, so the request paths, the query parameters, and
-//! the bearer that gates them are the bytes core will actually receive. The workspace derivation is
-//! held to Python's own `uuid5` output by `onboard_contract.json` — a wrong namespace constant would
-//! hand one customer two workspaces, silently.
-
 mod harness;
 
 use harness::spawn_http;
@@ -78,9 +71,6 @@ async fn choices_asks_for_the_normalized_address_and_subject() {
 
 #[tokio::test]
 async fn a_personal_mail_call_states_the_exact_address_as_the_previous_identity() {
-    // A serve pod of the release being replaced declares `domain` required and reads it as the
-    // whole signup identity. The exact-address subject lets that pod derive the personal workspace;
-    // stating `gmail.com` instead would resolve the sign-in by the shared provider.
     let (base, log) = spawn_http(vec![
         (200, r#"{"choices":[]}"#.to_string()),
         (
@@ -164,8 +154,6 @@ async fn the_invitation_read_reads_back_whole_and_carries_the_next_page_cursor()
         .await
         .unwrap()
         .is_empty());
-    // The cursor is the whole ordering key: two teammates sharing an instant are separated by the
-    // pair that keys them, so neither hides behind the other at a page boundary.
     let asked = log.lock().unwrap()[1].path.clone();
     assert!(
         asked.contains("after_invited_at=2026-08-18T10%3A00%3A00"),
@@ -217,8 +205,6 @@ async fn create_sends_the_derived_workspace_and_the_intake_profile() {
 
 #[tokio::test]
 async fn create_without_a_profile_sends_none_rather_than_an_empty_one() {
-    // An empty profile would open the agent's prompt with a wall around nothing; core reads null as
-    // "the form never described this customer" and leaves the default prompt alone.
     let (base, log) = spawn_http(vec![(
         200,
         r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
@@ -303,8 +289,6 @@ async fn a_workspace_id_that_is_not_a_uuid_is_refused_before_any_call() {
 
 #[tokio::test]
 async fn cores_own_sentence_rides_a_refusal_back() {
-    // A domain mapping to two workspaces, or a member removed mid-sign-in, reads the same either
-    // side of the wire — so the flow renders one message rather than inventing a second vocabulary.
     let (base, _log) = spawn_http(vec![(
         409,
         r#"{"detail":"domain acme.com maps to 2 workspaces"}"#.to_string(),
@@ -342,8 +326,6 @@ async fn a_missing_membership_carries_cores_refusal() {
 
 #[tokio::test]
 async fn a_refused_token_is_reported_as_a_status_not_a_sentence() {
-    // The guard answers before any work, and its refusal is an operator's problem rather than a
-    // member's — so it must not reach the member as a rendered sentence.
     let (base, _log) = spawn_http(vec![(401, "{}".to_string())]).await;
     let refused = workspaces(&base).fleet().await.unwrap_err();
     assert!(
@@ -354,7 +336,6 @@ async fn a_refused_token_is_reported_as_a_status_not_a_sentence() {
 
 #[tokio::test]
 async fn an_unreachable_service_is_named_as_such() {
-    // Nothing is listening: the port is bound and immediately dropped.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);

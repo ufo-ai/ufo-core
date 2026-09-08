@@ -28,11 +28,6 @@ pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
-# The routing trigger, measured on the three queries the product actually sends and the three
-# neighbours that must not take them. The shipped wording opens on the member's intent and names
-# the screen the page lives on; the arm opens on the artifact instead, which is how a description
-# is written when nobody has asked what the member typed. Positive and negative loads both count:
-# a wording that wins the three homepage cases by taking `create-application`'s has lost.
 [[arm]]
 name = "artifact-first"
 

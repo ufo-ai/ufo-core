@@ -287,7 +287,6 @@ test("a word that has just landed carries the cell hiding each of its letters", 
   expect(cells.map((cell) => cell.getAttribute("data-glyph")).join("")).toBe(
     Array.from("gamma", (character) => brailleOf(character)).join(""),
   );
-  // One step per character along the word, so it resolves left to right.
   expect(cells.map((cell) => cell.getAttribute("style"))).toEqual([
     "--cell: 0;",
     "--cell: 1;",
@@ -296,7 +295,6 @@ test("a word that has just landed carries the cell hiding each of its letters", 
     "--cell: 4;",
   ]);
 
-  // The cell is the theme's to draw, never the document's: what a member copies is what was written.
   expect(landed.textContent).toBe("gamma");
 });
 
@@ -305,7 +303,6 @@ test("a word left behind by the head settles to plain letters", () => {
   const { container, rerender } = render(<StreamingBody text={"alpha"} />);
   expect(container.querySelector("[data-glyph]")).toBeTruthy();
 
-  // Past the trailing window a word is prose again, so a long reply is not a span per character.
   rerender(<StreamingBody text={"alpha " + tail + " " + tail} />);
   const words = Array.from(container.querySelectorAll("[data-arrive]"));
   expect(words[0].textContent).toBe("alpha ");

@@ -17,10 +17,6 @@ import {
 
 const worker = await importWorker("shared");
 
-// One public site's card, at the app host address the sites surface publishes in `og:image`: the
-// site's own token, then the digest of the card's bytes. The origin's directive is what the edge is
-// allowed to keep it for, and it is never `immutable` — a site narrowed after the fact stops being
-// previewed inside that window.
 const CARD_PATH = "/surface/sites/share/site/site-token/5f2c5f2c.jpg";
 const CARD_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
 const CARD_CACHE = "public, max-age=600";
@@ -57,8 +53,6 @@ test("curl landing renders the card with the mark, the door, and the install com
   assert.match(body, /Install: curl -fsSL https:\/\/flyingobject\.ai\/ufo \| sh/);
 });
 
-// The card is the worker's own text and reads nothing, so a door answers a curl whole while its
-// origin and its database are both down.
 test("the card is served with no call and no read of the worker's own", async () => {
   const fresh = await importWorker("card-standalone");
   const before = outbound.length;
@@ -71,8 +65,6 @@ test("the card is served with no call and no read of the worker's own", async ()
   assert.deepEqual(outbound.slice(before), []);
 });
 
-// The key that opens a join door is that door's own configuration, so the card hands every reader
-// the production address rather than the host it was fetched from.
 test("a card from another door names the production join door", async () => {
   const body = await (await request("https://testing.flyingobject.ai/")).text();
   assert.match(body, /testing\.flyingobject\.ai/);
@@ -92,8 +84,6 @@ test("browser landing over plain http is bounced to https with its query intact"
   assert.equal(reply.headers.get("location"), "https://flyingobject.ai/?ref=x");
 });
 
-// The mark has one home in this repo. The page links the worker's routes rather than carrying a
-// copy, so a mark that changes on disk changes on the tab.
 test("the browser page links the product favicon and holds no copy of it", () => {
   assert.match(
     LANDING_PAGE,
@@ -106,9 +96,6 @@ test("the browser page links the product favicon and holds no copy of it", () =>
   assert.doesNotMatch(LANDING_PAGE, /data:image\/svg\+xml/);
 });
 
-// What an unfurler reads: the tags, and then one absolute URL it fetches with no session. Every
-// value it draws is held here, because a card is invisible in the product and only ever seen in
-// somebody else's Slack.
 const SHARE_CARD = "https://ufo.ai/share/og-home.jpg";
 const SHARE_CARD_ALT =
   "The UFO wordmark in white with three ember dots beside it, centred on a black field.";
@@ -144,19 +131,14 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
       "twitter:image": SHARE_CARD,
     },
   );
-  // The `og:` names are properties and the `twitter:` ones are names; a tag written the other way
-  // is dropped by the crawler that reads it.
   for (const [name, { kind }] of Object.entries(tags)) {
     assert.equal(kind, name.startsWith("og:") ? "property" : "name", name);
   }
-  // The unfurl and the tab must say the same thing, and the page keeps one canonical home.
   assert.match(LANDING_PAGE, /<title>UFO — Build the unknown\.<\/title>/);
   assert.match(LANDING_PAGE, /<meta name="description" content="UFO\. Build the unknown\." \/>/);
   assert.match(LANDING_PAGE, /<link rel="canonical" href="https:\/\/ufo\.ai\/" \/>/);
-  // Absolute and https, because a crawler resolves it against nothing.
   const card = new URL(tags["og:image"].content);
   assert.equal(card.protocol, "https:");
-  // And it is the card this repository holds, where the gateway compiles it in from.
   const committed = await readFile(
     new URL(
       `../../..${card.pathname.replace("/share/", "/servers/control/src/assets/")}`,
@@ -166,8 +148,6 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
   assert.deepEqual(committed.subarray(0, 3), Buffer.from([0xff, 0xd8, 0xff]));
 });
 
-// A crawler is not a CLI: the text card would unfurl as a wall of ASCII, so the unfurlers get the
-// document with the tags in it.
 test("a link unfurler is served the page rather than the terminal card", async () => {
   for (const ua of [
     "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
@@ -181,8 +161,6 @@ test("a link unfurler is served the page rather than the terminal card", async (
   }
 });
 
-// The cards themselves are the gateway's, compiled in beside /login/logo.png. The worker claims no
-// path under /share/, so both fall through to the apex origin that serves them.
 test("the card paths are left to the apex origin", async () => {
   for (const path of ["/share/og-home.jpg", "/share/og-site.jpg"]) {
     const reply = await request(`https://flyingobject.ai${path}`, { ua: "Slackbot 1.0" });
@@ -191,9 +169,6 @@ test("the card paths are left to the apex origin", async () => {
   }
 });
 
-// A pasted site link is unfurled by every reader's chat app, and each unfurl fetches the card. The
-// edge answers those off one stored copy, so the app host reads the row and streams the bytes once
-// per window instead of once per request.
 test("a site card is served from the edge cache after one origin read", async () => {
   globalThis.caches = edgeCache();
   const fresh = await importWorker("site-card-hit");
@@ -206,8 +181,6 @@ test("a site card is served from the edge cache after one origin read", async ()
   for (const reply of [first, second]) {
     assert.equal(reply.status, 200);
     assert.equal(reply.headers.get("content-type"), "image/jpeg");
-    // The lifetime the edge keeps the copy for is the origin's own directive, relayed untouched:
-    // one drain window governs the browser and the colo alike.
     assert.equal(reply.headers.get("cache-control"), CARD_CACHE);
     assert.doesNotMatch(reply.headers.get("cache-control"), /immutable/);
     assert.equal(reply.headers.get("set-cookie"), null);
@@ -217,9 +190,6 @@ test("a site card is served from the edge cache after one origin read", async ()
   assert.deepEqual(outbound.slice(start), [`https://app.ufo.ai${CARD_PATH}`]);
 });
 
-// The address is public by construction and the row behind it is mutable, so the gate stays the
-// origin's answer on every window: a refusal is never stored, and the request that carries it
-// reaches the origin with no session on it to gate against.
 test("a refused card is not stored, and no session rides to the origin", async () => {
   globalThis.caches = edgeCache();
   const fresh = await importWorker("site-card-gate");
@@ -249,9 +219,6 @@ test("a refused card is not stored, and no session rides to the origin", async (
   ]);
 });
 
-// The bytes are addressed by their own digest, so the path alone identifies them: a crawler that
-// appends its own parameter is answered from the same copy rather than sending the app host another
-// read, and the origin is asked for the path it published and nothing else.
 test("the card's cache key is its path alone", async () => {
   globalThis.caches = edgeCache();
   const fresh = await importWorker("site-card-key");
@@ -266,8 +233,6 @@ test("the card's cache key is its path alone", async () => {
   assert.deepEqual(outbound.slice(start), [`https://app.ufo.ai${CARD_PATH}`]);
 });
 
-// A stored copy answers the read it was stored for and nothing else, so a write on that path is the
-// origin's to refuse.
 test("a write on the card path is passed to the origin and stores nothing", async () => {
   globalThis.caches = edgeCache();
   const fresh = await importWorker("site-card-write");
@@ -294,7 +259,6 @@ test("favicons serve the exact light and dark product marks", async () => {
   }
 });
 
-// The page names no host, so every front door serves the one document.
 test("every front door serves the embedded page to browsers", async () => {
   for (const host of ["flyingobject.ai", "testing.flyingobject.ai"]) {
     const fresh = await importWorker(`page-${host}`);
@@ -310,7 +274,6 @@ test("every front door serves the embedded page to browsers", async () => {
   }
 });
 
-// The page stands whole in itself, so a gateway that is down takes nothing away from it.
 test("the browser page is served with no call of the worker's own", async () => {
   const fresh = await importWorker("page-standalone");
   fleetReply = () => {
@@ -327,9 +290,6 @@ test("the browser page is served with no call of the worker's own", async () => 
   fleetReply = () => Response.json({ craft: 0 });
 });
 
-// A visitor reads nothing until the bytes above <body> arrive, and pays for the whole document
-// once per cache lifetime. Both are bounded here so an inlined asset cannot quietly restore the
-// weight: the payload the apex serves is the one thing on it a member cannot work around.
 const HEAD_BUDGET = 96 * 1024;
 const PAGE_BUDGET = 320 * 1024;
 
@@ -351,8 +311,6 @@ test("the served page fits the device without taking pinch zoom away", () => {
     LANDING_PAGE,
     /<meta name="viewport" content="width=device-width, initial-scale=1" \/>/,
   );
-  // Pinning the scale is the usual way to stop Safari's focus zoom. It strips zoom from every
-  // visitor and modern Safari ignores it anyway, so the controls carry 16px instead.
   assert.doesNotMatch(LANDING_PAGE, /(?:maximum|minimum)-scale|user-scalable/);
 });
 
@@ -424,9 +382,6 @@ test("apex /login 302s to the app host, the sole authenticated origin", async ()
 });
 
 test("an apex door carries the ask it was opened with to the host that reads it", async () => {
-  // The invitation mail links to the apex, and the ask is what makes the door draw the form for a
-  // recipient whose browser already holds another workspace's session. A hop that dropped it would
-  // forward them to that workspace instead.
   const invited = await request("https://ufo.ai/login?invite=1", { ua: "Mozilla/5.0" });
   assert.equal(invited.status, 302);
   assert.equal(invited.headers.get("location"), "https://app.ufo.ai/login?invite=1");
@@ -440,8 +395,6 @@ test("an apex door carries the ask it was opened with to the host that reads it"
 });
 
 test("apex /join carries the signup key to the app host that answers it", async () => {
-  // The link is shared as an apex address; the door that binds the session is on the app host, so
-  // the key has to survive the hop or the member lands on a sign-in that grants them nothing.
   const prod = await request("https://ufo.ai/join/ufo", { ua: "Mozilla/5.0" });
   assert.equal(prod.status, 302);
   assert.equal(prod.headers.get("location"), "https://app.ufo.ai/join/ufo");
@@ -544,7 +497,6 @@ test("a legal page over plain http is bounced to https with its query intact", a
   }
 });
 
-// Google's consent screen reads these pages by URL. Nothing the member sees leads to them.
 test("no public surface links to a legal page", async () => {
   const card = await (await request("https://flyingobject.ai/")).text();
   for (const { path } of LEGAL) {
@@ -553,8 +505,6 @@ test("no public surface links to a legal page", async () => {
   }
 });
 
-// Nothing links to these pages, so a search engine has the head and nothing else to work with:
-// each one says what it is, where it lives, and what an unfurler draws, as the home page does.
 test("each legal page carries its own description, canonical URL, and share tags", async () => {
   for (const legal of LEGAL) {
     const served = await (
@@ -591,11 +541,8 @@ test("each legal page carries its own description, canonical URL, and share tags
 const locations = (xml) => [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].map(([, loc]) => loc);
 const refusals = (rules) => [...rules.matchAll(/^Disallow: (\S+)$/gm)].map(([, path]) => path);
 
-// Every page the apex has: the home page and the two legal documents.
 const INDEXED = ["https://ufo.ai/", ...LEGAL.map(({ canonical }) => canonical)];
 
-// What Search Console is given to submit. The apex is written out on every door, matching the
-// canonical tag each page carries, so a crawler reading the testing door is sent to the real one.
 test("the sitemap lists the home page and each legal page at its canonical URL", async () => {
   const reply = await request("https://flyingobject.ai/sitemap.xml", { ua: "Googlebot/2.1" });
   assert.equal(reply.status, 200);
@@ -607,8 +554,6 @@ test("the sitemap lists the home page and each legal page at its canonical URL",
   assert.deepEqual(locations(served), INDEXED);
 });
 
-// A listed URL that answers with anything but a document is a crawl error Search Console reports,
-// so every entry is fetched back off the worker that published it.
 test("every page the sitemap lists is served as a document", async () => {
   for (const location of INDEXED) {
     const reply = await request(`https://flyingobject.ai${new URL(location).pathname}`, {
@@ -619,7 +564,6 @@ test("every page the sitemap lists is served as a document", async () => {
   }
 });
 
-// The zone's managed file is comments alone, so the crawl rules and the sitemap live here.
 test("robots.txt opens the pages, refuses the endpoints, and names the sitemap", async () => {
   const reply = await request("https://flyingobject.ai/robots.txt", { ua: "Googlebot/2.1" });
   assert.equal(reply.status, 200);
@@ -631,8 +575,6 @@ test("robots.txt opens the pages, refuses the endpoints, and names the sitemap",
   assert.match(served, /^Sitemap: https:\/\/ufo\.ai\/sitemap\.xml$/m);
 });
 
-// One file inviting a path the other forbids is the shape Search Console reports as a blocked
-// submitted URL, so the two are read against each other.
 test("no page the sitemap lists is a path robots.txt refuses", async () => {
   const refused = refusals(await (await request("https://flyingobject.ai/robots.txt")).text());
   for (const location of INDEXED) {
@@ -656,17 +598,9 @@ test("the crawl files over plain http are bounced to https", async () => {
 const BANNED_LEXICON =
   /!|\bwelcome\b|\boops\b|\bjust\b|\bsimply\b|\bawesome\b|\bboard(ing)?\b|\bpassengers?\b|\bshortly\b|\bsoon\b|\brecently\b|you'?re all set/i;
 
-// The product is named ufo; the copy never plays the part.
 const BANNED_METAPHOR =
   /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
 
-// Standard typography: a sentence never opens lowercase unless it opens with a literal —
-// a command, an address, a header name. Lines split into sentences on a spaced terminator, and
-// glyph-only tokens (✓, ›, art) are skipped so the word behind them is inspected. A terminator
-// fused to its next word (`Done.try`, `Sent!check`) goes unjudged: the dot form is the same
-// shape as a cased dotted literal (`Node.js`, `README.md`) and `?` rides in URLs, so with two
-// of the three terminators ambiguous, fused terminators are uniformly out of scope — the
-// accept list pins all three fused shapes as accepted.
 function assertStandardCase(surface) {
   for (const line of surface.split("\n")) {
     for (const sentence of line.split(/[.?!]\s+/)) {
@@ -714,8 +648,6 @@ test("member-facing surfaces carry no banned lexicon and no ufo metaphor", async
   assertStandardCase(card);
 });
 
-// The apex answers no form of its own. A reader is sent to the join door, and the address the
-// waitlist stood at is a page like any other the worker does not claim.
 test("the apex offers no waitlist door", async () => {
   const posted = await request("https://flyingobject.ai/waitlist", {
     method: "POST",

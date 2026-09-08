@@ -1944,7 +1944,6 @@ def test_transcript_reads_names_disclosures_newest_first_and_pages_on_the_operat
     assert "m@example.com" in listed.output
     assert str(conversation_id) in listed.output
     assert len(listed.output.strip().splitlines()) == TRANSCRIPT_READS_LIMIT
-    # Newest first, so the flood fills the default page and the earliest read falls off it.
     assert "2026-07-31 09:00" not in listed.output
 
     deeper = runner.invoke(main, ["transcript-reads", "--limit", str(TRANSCRIPT_READS_LIMIT + 1)])
@@ -2840,7 +2839,6 @@ async def test_pool_class_matches_dialect(db: None, database_url: str) -> None:
     pool = _current_engine().pool
     assert type(pool).__name__ == "AsyncAdaptedQueuePool"
     assert pool.size() == ufo.db.POOL_SIZE
-    # What the dialect decides is now the ceiling, not the class: a local file refuses nobody.
     expected = -1 if database_url.startswith("sqlite") else ufo.db.MAX_OVERFLOW
     assert pool._max_overflow == expected
 

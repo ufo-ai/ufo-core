@@ -4,7 +4,6 @@ import ufo_ext_coding.manifest as coding
 
 from ufo.host.ext.loader import skill_registry
 
-# The prompts are hard-wrapped, so a whole sentence spans a line break.
 CODING_PROMPT = " ".join(coding.CODING_PROMPT.split())
 ESCALATION_PROMPT = " ".join(coding.FABLE_ESCALATION_PROMPT.split())
 

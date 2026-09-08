@@ -21,8 +21,6 @@ import type { ChatRow } from "@/lib/rail";
 
 export const WORKSPACE_ID = "31b26b98-0000-4000-8000-000000000031";
 
-/** The shell's own providers, so a view mounted alone draws what it draws inside the app. A tooltip
- *  reads its delay from a provider above it and raises without one. */
 function Shell({ children }: { children: ReactNode }) {
   return (
     <WorkspaceId.Provider value={WORKSPACE_ID}>
@@ -77,13 +75,10 @@ export function PlacedSection({
   );
 }
 
-/** The destination's own name is the control that moves between destinations, so a test changing
- *  destination presses the name and picks out of the menu under it, exactly as a member does. */
 export async function goTo(label: string) {
   await userEvent.click(await screen.findByRole("tab", { name: label }));
 }
 
-/** The destination the shell is standing on, which its heading names. */
 export function destination(): string {
   return screen.getByRole("heading", { level: 1 }).textContent ?? "";
 }
@@ -137,9 +132,6 @@ export class StreamFake {
   }
 }
 
-/** A streaming reply is drawn word by word and, at its head, character by character, so one line of
- *  prose lives in more than one element and a word carries the space beside it. `saying` matches the
- *  innermost element whose whole text is that line. */
 export function saying(line: string | RegExp) {
   const matches = (text: string) =>
     typeof line === "string" ? text.trim() === line : line.test(text);
@@ -154,8 +146,6 @@ export function useStreamFake() {
   vi.stubGlobal("EventSource", StreamFake);
 }
 
-/** Draws as a phone does: the shell's own breakpoint answers true, and every other query a component
- *  asks — reduced motion, colour scheme — answers as it does at a desk width. */
 export function atPhoneWidth() {
   vi.stubGlobal("matchMedia", (media: string) => ({
     media,
@@ -171,16 +161,6 @@ export function atPhoneWidth() {
 
 export type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
-/** The wire every suite stubs its reads on. A pattern matches anywhere in the url, except that one
- *  ending in `$` matches only a url whose path ends there.
- *
- *  Both halves of that are load-bearing, and each is a bug the other cannot prevent. Substring
- *  matching is why the defaults are tried first: a suite stubbing `/chat` would otherwise answer
- *  `/api/chats` with it and hand the rail a payload holding no chats. And it is why the
- *  conversation index is anchored: unanchored, `/conversations` answers
- *  `/conversations/<id>/slots` and `/conversations/<id>/transcript` too, handing a chat pane an
- *  index where it expected its slots. The defaults are the reads a screen makes whatever the suite
- *  is about, so a suite states only what it is testing. */
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const table: Record<string, Route> = {
@@ -231,7 +211,6 @@ export const SECOND = {
 
 export const CHAT_APP_ID = "44444444-4444-4444-8444-444444444444";
 
-/** The shipped chat app's agent: the pane conversations are read and answered in. */
 export const CHAT_APP = {
   ...AGENT,
   id: CHAT_APP_ID,
@@ -243,8 +222,6 @@ export const CHAT_APP = {
 
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false, workspace_id: WORKSPACE_ID };
 
-/** The agent's settings as the surface states them. The tab holds the agent's connectors too, so
- *  every suite that opens it wires this beside the connection reads. */
 export const SETTINGS = {
   agent: {
     name: "assistant",
@@ -290,15 +267,11 @@ export const json = (payload: unknown) => Response.json(payload);
 
 type RailRow = ChatRow;
 
-/** One rail row as the conversation kind's index answers it: the same fields under the object
- *  row's shape, named by the conversation id. */
 export const conversationObject = ({ conversation_id, ...row }: RailRow) => ({
   name: conversation_id,
   ...row,
 });
 
-/** The two reads a seeded rail row answers: the conversation index the rail reads, and the
- *  permalink resolve that names the same rows one at a time. */
 export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
   "/objects/conversation$": () => json({ objects: rows.map(conversationObject) }),
   "/api/chats": () => json({ chats: rows }),
@@ -309,8 +282,6 @@ export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_TRIGGERS = "No source trigger is visible to you.";
 export const NO_ARTIFACTS = "A file or site an app makes in a conversation is listed here.";
 
-/** The kind as the surface states it: the fields sorted, because that is the order `PortalKind`
- *  carries them in, and the index leads with the first of them it draws a column for. */
 export const TASK_KIND = {
   kind: "scheduled_task",
   fields: [
@@ -336,8 +307,6 @@ export const TASK_KIND = {
   deletes: true,
 };
 
-/** The kind the lane only ever deletes: a trigger is created in chat, so the portal draws its rows
- *  and the act that ends one, and no act that makes one. */
 export const TRIGGER_KIND = {
   kind: "source_trigger",
   fields: ["conversation", "source", "delivery", "origin", "owner_email", "mine"],
@@ -365,7 +334,6 @@ export function objectIndex(kind: unknown, objects: unknown[], next: string | nu
   return json({ ...(kind as object), objects, next_cursor: next });
 }
 
-/** A row of the cross-agent object index, which names the agent that owns it. */
 export function owned(row: object, agent = AGENT) {
   return { ...row, agent_id: agent.id, agent_name: agent.name };
 }
@@ -393,57 +361,42 @@ export function fact(label: string): string {
   return String(said.textContent);
 }
 
-/** Open a table row's own record: the row itself is the control that reaches it. */
 export async function openRow(name: string): Promise<void> {
   await pressRow(name);
 }
 
-/** The apps index: the sidebar's own list of the workspace's apps, which stands on every screen
- *  rather than behind a flyout the caller has to raise. */
 export function agentIndex(): Promise<HTMLElement> {
   return screen.findByRole("navigation", { name: "Apps" });
 }
 
-/** Open the list past the run it draws on its own, where an app nobody pinned stands. Asked of a
- *  list already whole, it does nothing. */
 export async function expandApps(): Promise<void> {
   const more = screen.queryByRole("button", { name: "More applications" });
   if (more) await userEvent.click(more);
 }
 
-/** The store, which stands as the last row of the apps list. */
 export async function openStore(): Promise<HTMLElement> {
   await userEvent.click(await screen.findByRole("button", { name: "App Store" }));
   return screen.findByRole("region", { name: "App Store" });
 }
 
-/** The act that builds an app, which is the store's own last row. */
 export async function openNewApplication(): Promise<void> {
   const store = await openStore();
   await userEvent.click(within(store).getByRole("row", { name: /^App Creator/ }));
 }
 
-/** What the app pane's conversation half is headed by before a conversation names it. */
 export const FRESH = "New conversation";
 
-/** Following a link that names one of an app's conversations, which is how the app pane comes to
- *  stand on a conversation it is not already holding: the half picks among none of them, the
- *  address names the one it holds. */
 export function openConversation(agentId: string, conversationId: string): void {
   location.hash = "#/agents/" + agentId + "?open=" + conversationId;
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 
-/** What the band over an app pane's conversation half names, which is the conversation the half is
- *  holding — `FRESH` where it holds none yet. */
 export async function heldConversation(app = "Assistant"): Promise<string> {
   const pane = await screen.findByRole("region", { name: app });
   const band = pane.querySelector("[data-slot=header] h2");
   if (!band) throw new Error("the half draws no band");
   return String(band.textContent);
 }
-
-/** Open one agent from the index: the row is the control, named by the text it carries. */
 
 export async function openAgentRow(name: string): Promise<void> {
   const index = await agentIndex();
@@ -452,11 +405,6 @@ export async function openAgentRow(name: string): Promise<void> {
   await userEvent.click(await within(index).findByRole("button", { name: row }));
 }
 
-/** An agent's three reads, which stand in a panel over the screen rather than on a tab of the
- *  agent's page. The menu is found by its own label rather than inside a region, because which half
- *  wears it depends on the app: the homepage titlebar where one is set or building, the
- *  conversation header where the app has none. Each item names the read it opens, so `tab` is the
- *  item pressed rather than a strip inside the panel. */
 export async function openAgentSettings(
   name = "Assistant",
   tab: "Settings" | "Connectors" | "Scheduled" = "Settings",
@@ -466,14 +414,12 @@ export async function openAgentSettings(
   return await screen.findByRole("dialog");
 }
 
-/** Press a record's own row, where the row itself is the control that opens it. */
 export async function pressRow(name: string): Promise<void> {
   const row = (await screen.findAllByText(name)).map((node) => node.closest("tr")).find(Boolean);
   if (!row) throw new Error("no row named " + name);
   await userEvent.click(row);
 }
 
-/** Open a list row's own record: the row itself is the control that reaches it. */
 export async function pressItem(name: string): Promise<void> {
   const row = (await screen.findAllByText(name)).map((node) => node.closest("li")).find(Boolean);
   if (!row) throw new Error("no item named " + name);
@@ -488,8 +434,6 @@ export async function viewCard(name: string): Promise<HTMLElement> {
   return within(card).getByRole("button");
 }
 
-/** The width the portal is read at. The one number here that is not a token, because no token
- *  states what a desktop is. */
 const DESKTOP = 1280;
 
 const TOKENS = readFileSync(join(import.meta.dirname, "..", "..", "src", "theme.css"), "utf8");
@@ -500,15 +444,8 @@ function token(name: string): number {
   return Number(declared[1]);
 }
 
-/** `Page` reserves the scrollbar with `scrollbar-gutter-stable`, so the column a table is read in
- *  is always this much narrower than the gutters alone imply. Blink's thin scrollbar, measured in
- *  the running portal: a table summing to the gutter budget exactly still scrolls without it. */
 const SCROLLBAR_GUTTER = 11;
 
-/** Whether a table's declared floor clears the column a desktop leaves it. The tracks are fixed
- *  pixels, so a table whose tracks outrun its page holds its width and the column scrolls sideways —
- *  and what falls off the right is the act the row is pressed by. Every width but `DESKTOP` is read
- *  from `theme.css`, so a token change moves the assertion with it. */
 export function pageFits(minWidth: string): boolean {
   const tracks = minWidth
     .replace(/^calc\(|\)$/g, "")
@@ -521,13 +458,10 @@ export function pageFits(minWidth: string): boolean {
   return shell + tracks <= DESKTOP;
 }
 
-/** The floor one table declares. It rides a custom property rather than `min-width` itself, because
- *  a phone stacks the table into records and lifts the floor the tracks needed. */
 export function declaredFloor(table: Element): string {
   return (table as HTMLTableElement).style.getPropertyValue("--table-floor");
 }
 
-/** Every table on a screen, by the floor it declares. */
 export function tableFloors(): string[] {
   return [...document.querySelectorAll("table")].map(declaredFloor);
 }

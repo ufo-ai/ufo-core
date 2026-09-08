@@ -52,8 +52,6 @@ def test_the_shelf_lists_the_logo_sheet_the_deploy_ships() -> None:
     assert 'import LOGO_SHEET_URL from "./ufo-logo-ratio.pdf?url"' in page
     assert 'import LOGO_SHEET_COVER from "./ufo-logo-ratio-cover.png?url"' in page
     assert "sheet && !files.payload.next_cursor ? [fileCard(SHEET, viewer)] : []" in page
-    # The card is the page's own, so it never stands in for the workspace's shelf: a member who has
-    # shared nothing still reads where their own files land.
     assert "const bare = !shown.length && !files.payload.objects.length;" in page
     assert "{payload.bare ? (" in page
     sheet = SKILL_DIR / "ufo-logo-ratio.pdf"

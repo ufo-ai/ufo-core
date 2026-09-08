@@ -1,11 +1,3 @@
-//! The teammate invitation delivery: what it sends, what it refuses to send twice, and where each
-//! fault lands.
-//!
-//! Driven against a real Postgres and two local servers — one standing in for core's onboarding RPC,
-//! one for STS and SES. The invariants under test are the ones that decide whether a person gets a
-//! second copy of the same message, so the lease, the attempt marker, and the verdict split all run
-//! against the real thing.
-
 mod harness;
 
 use std::path::PathBuf;
@@ -46,10 +38,6 @@ struct Exchange {
     body: String,
 }
 
-/// One canned answer: a status, the headers that ride with it, a body, and an optional gate the
-/// server waits on before replying. The header list is what the shared harness has no room for, and
-/// `Retry-After` is exactly the header a throttle carries; the gate is what holds a send in flight
-/// long enough for a second worker to act on the same row.
 struct Answer {
     status: u16,
     headers: Vec<(String, String)>,
@@ -218,7 +206,6 @@ async fn worker(
     }
 }
 
-/// One invitation core holds.
 #[derive(Debug, Clone)]
 struct Listed {
     workspace_id: Uuid,
@@ -238,7 +225,6 @@ fn listed(workspace: Uuid, email: &str, inviter: &str, label: &str, stamp: &str)
     }
 }
 
-/// What orders the read, and what the page cursor is taken from.
 fn key(row: &Listed) -> (DateTime<Utc>, Uuid, String) {
     (row.invited_at, row.workspace_id, row.email.clone())
 }
@@ -270,10 +256,6 @@ fn parameter(query: &str, name: &str) -> Option<String> {
     })
 }
 
-/// Core's invitation read, standing in for `serve`: the invitations it holds, answered oldest first
-/// in pages of `SOURCE_PAGE` strictly after the cursor the caller sent — the contract core's SQL
-/// keeps. Rows are added to it between sweeps, which is how a seat write that commits after a
-/// later-stamped one is put in front of the poller.
 #[derive(Clone)]
 struct Source {
     rows: Arc<Mutex<Vec<Listed>>>,
@@ -410,8 +392,6 @@ fn ses_sends(log: &Arc<Mutex<Vec<Exchange>>>) -> usize {
 async fn a_stamped_invitation_materializes_one_row_carrying_the_three_facts() {
     let pool = ledger_pool().await;
     let workspace = Uuid::new_v4();
-    // No SES answer is queued, so the connection is refused: the materialization and the claim are
-    // what this asserts, and a refused connection proves nothing was accepted.
     let fleet = fleet(
         pool.clone(),
         vec![listed(
@@ -478,8 +458,6 @@ async fn a_delivery_states_who_added_them_which_workspace_and_where_to_sign_in()
         "{body}"
     );
 
-    // The HTML alternative states the same three facts and carries the sign-in page's own look:
-    // every rule inline, the card laid out in tables, and the sign-in link drawn as its button.
     let markup = payload["Content"]["Simple"]["Body"]["Html"]["Data"]
         .as_str()
         .expect("the text alternative is not the whole message");
@@ -494,15 +472,10 @@ async fn a_delivery_states_who_added_them_which_workspace_and_where_to_sign_in()
     assert!(markup.contains("border:1px solid #EBEAE9"), "{markup}");
     assert!(markup.contains(r##"bgcolor="#191A1A""##), "{markup}");
     assert!(markup.contains("system-ui,sans-serif"), "{markup}");
-    // A mail client keeps no head, resolves no custom property, and lays out no flexbox, so a body
-    // holding any of the three is a message somebody opens broken.
     assert!(!markup.contains("<style"), "{markup}");
     assert!(!markup.contains("var(--"), "{markup}");
     assert!(!markup.contains("light-dark("), "{markup}");
     assert!(!markup.contains("display:flex"), "{markup}");
-    // SVG is the one image format clients reliably refuse, so the mark is drawn from the raster the
-    // gateway serves beside it, at an absolute URL a mail client can reach, and carries its own alt
-    // text for the many clients that block the fetch until a reader asks for it.
     assert!(!markup.contains(".svg"), "{markup}");
     assert!(
         markup.contains(&format!(r##"src="https://{APEX}/login/logo.png""##)),
@@ -519,8 +492,6 @@ async fn a_delivery_states_who_added_them_which_workspace_and_where_to_sign_in()
 
 #[tokio::test]
 async fn markup_in_an_inviting_address_reaches_the_recipient_as_text() {
-    // An address's local part accepts characters that would close a tag, and the workspace label is
-    // read off a member's own domain. Both land in the HTML body, so both are escaped there.
     let pool = ledger_pool().await;
     let workspace = Uuid::new_v4();
     let fleet = fleet(
@@ -555,7 +526,6 @@ async fn markup_in_an_inviting_address_reaches_the_recipient_as_text() {
     assert!(markup.contains("a&amp;b&lt;script&gt;.com"), "{markup}");
     assert!(!markup.contains("<b>"), "{markup}");
     assert!(!markup.contains("<script>"), "{markup}");
-    // The plain-text alternative is read as text, so it carries the address as it stands.
     let body = payload["Content"]["Simple"]["Body"]["Text"]["Data"]
         .as_str()
         .unwrap();
@@ -586,8 +556,6 @@ async fn the_same_invitation_read_again_sends_nothing_more() {
     );
     assert_eq!(ses_sends(&fleet.ses), 1);
 
-    // Every sweep re-materializes the whole source, so the settled row meets its own insert once a
-    // cycle. It keeps the state, the stamp, and the attempt count it settled on.
     let again = row(&pool, workspace, "teammate@acme.com").await;
     assert_eq!(again.get::<_, String>("state"), STATE_DELIVERED);
     assert_eq!(
@@ -622,9 +590,6 @@ async fn two_workers_racing_one_row_hand_ses_one_message() {
 
 #[tokio::test]
 async fn a_row_another_transaction_holds_is_skipped_rather_than_waited_on() {
-    // `for update skip locked` is what lets both replicas poll one table. A row a transaction
-    // already holds is passed over, so a sweep that finds only that row ends at once instead of
-    // queueing behind the worker that took it.
     let pool = ledger_pool().await;
     let workspace = Uuid::new_v4();
     insert_pending(&pool, workspace, "teammate@acme.com").await;
@@ -650,9 +615,6 @@ async fn a_row_another_transaction_holds_is_skipped_rather_than_waited_on() {
 
 #[tokio::test]
 async fn a_worker_whose_lease_was_taken_mid_send_settles_nothing() {
-    // The compare-and-set on `worker_id` is what stops two workers settling one row. SES is held
-    // open until the row has been taken, so the writeback lands on a row this worker no longer
-    // owns and leaves it exactly as the second worker left it.
     let pool = ledger_pool().await;
     let workspace = Uuid::new_v4();
     insert_pending(&pool, workspace, "teammate@acme.com").await;
@@ -661,7 +623,6 @@ async fn a_worker_whose_lease_was_taken_mid_send_settles_nothing() {
     let deliveries = fleet.deliveries.clone();
     let sweeping = tokio::spawn(async move { deliveries.poll().await.unwrap() });
 
-    // The attempt marker is written before the send, so it is this worker reaching SES.
     let reached = tokio::time::timeout(Duration::from_secs(5), async {
         while row(&pool, workspace, "teammate@acme.com")
             .await
@@ -958,11 +919,6 @@ async fn a_refusal_body_is_bounded_where_it_is_stored() {
 
 #[tokio::test]
 async fn a_seat_that_commits_after_a_later_stamped_one_is_still_materialized() {
-    // `now()` is fixed when a transaction starts and the seat write then waits for the workspace
-    // row lock, so a member stamped earlier can commit after one stamped later. The sweep here
-    // lands between the two commits: it sees only the later stamp, and the earlier member reaches
-    // the source after it. Nothing else writes this ledger, so a read bounded by what the ledger
-    // already holds would never enumerate that member again — no row, no message, no failed row.
     let pool = ledger_pool().await;
     let workspace = Uuid::new_v4();
     let fleet = fleet(

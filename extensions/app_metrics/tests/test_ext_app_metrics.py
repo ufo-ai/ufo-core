@@ -208,15 +208,10 @@ def test_the_built_page_is_the_apps_own_tsx() -> None:
     assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
     source = (SKILL_DIR / "app.tsx").read_text()
     assert "mountApp(" in source
-    # A set per subject, every one of them filled in — the page is the shape the app rebuilds
-    # against its own sources.
     for subject in ("Engineering", "Revenue", "Support"):
         assert f'"{subject}"' in source
-    # And every measure states the rule it was counted by, on the page as in the prompt.
     assert "counted as pull requests merged into the default branch" in source
     assert "<AppConversations" in source
-    # Setup is a portal screen, never a band here: the acts that wire an app — a workspace install
-    # an admin makes, a model turn that authors a page — are the two a framed page cannot start.
     assert "AppSetup" not in source
 
 

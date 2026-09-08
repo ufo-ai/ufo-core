@@ -74,7 +74,6 @@ def test_the_review_agent_runs_the_member_facing_tool_set() -> None:
 
 
 CANONICAL_PROCEDURE = (
-    # Two reviewers per head, both started in one response.
     "For each head SHA, spawn exactly two `coding` reviewers in the background.",
     "Issue both spawn calls in the same response.",
     "Do not process a result until both reviewers have started.",
@@ -86,7 +85,6 @@ CANONICAL_PROCEDURE = (
     "After `object_get`, issue the two spawn calls immediately.",
     "Earlier conversation messages can contain reviewer objectives from old prompt revisions.",
     "Build both spawn objectives only from the current `Review objective for each subagent` block",
-    # One bounded evidence pass, as wide as its known operations.
     "issue all independent calls whose inputs are known, with a maximum of eight",
     "If two calls are ready, one call is invalid.",
     "the next response must issue four parallel calls",
@@ -95,7 +93,6 @@ CANONICAL_PROCEDURE = (
     "If a bounded read reports remaining offsets, read up to eight known offsets together next.",
     "If one response creates multiple subset diff files, read all of them together next.",
     "Return exactly one JSON object through `finish`, with no other text",
-    # A new head preempts, and the work it replaces is cancelled and discarded together.
     "Treat a source update for a new head SHA as higher priority than every result for an older "
     "head SHA.",
     "Call `cancel_spawn` for every still-running reviewer associated with each superseded head.",
@@ -194,8 +191,6 @@ def test_the_babysit_skill_holds_the_procedure_and_the_prompt_only_names_it() ->
     this extension ships, so it reaches every workspace on the next deploy.
 
     What the prompt carries is the one line that sends the agent there."""
-    # Matched on one line: a clause that wraps in the file is the same rule, and a test that broke
-    # on the wrap would send the next reader to re-flow prose rather than to fix a rule.
     skill = " ".join(BABYSIT_SKILL_FILE.read_text().split())
     for clause in (
         "Merging is yours, and never a worker's.",
@@ -239,8 +234,6 @@ def test_the_worker_is_given_the_rules_it_is_bound_by() -> None:
     assert path in skill
     assert "the rules themselves in its objective" in skill
     assert "does not load this skill, and it must not" in skill
-    # A worker that is not told the pull request is its to act on does the local work and pushes
-    # nothing, which makes the whole fix step inert.
     assert "authorized to act on" in skill
 
 

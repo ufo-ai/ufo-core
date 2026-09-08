@@ -147,8 +147,6 @@ fn count_matches(regex: &fancy_regex::Regex, text: &str) -> Result<usize, OpErro
     Ok(count)
 }
 
-/// What to look for, before anything is looked at: the one place the mode, the caps and the regex
-/// flags are read off the params, so both entry points scan on the same terms.
 struct Query<'a> {
     mode: &'a str,
     limit: usize,
@@ -185,8 +183,6 @@ fn query(params: &serde_json::Value) -> Result<Query<'_>, OpError> {
     })
 }
 
-/// One enumerated file's text, read off a pinned parent fd, or `None` when it is binary or the guard
-/// does not vouch for it — what a guarded scan reads its hits through.
 #[cfg(unix)]
 fn guarded_text(path: &str, workspace: &Path) -> Option<String> {
     if binary_extension(&suffix(path)) {
@@ -201,10 +197,6 @@ fn guarded_text(path: &str, workspace: &Path) -> Option<String> {
     Some(decode_lossy(&bytes))
 }
 
-/// The same scan with its own walk: the directory it starts from goes through the guard by descent,
-/// each hit through the enumeration filter and a read off a pinned parent fd, and the `glob` — which
-/// selects paths of its own — through the pattern check. A `path` naming one file is a read of that
-/// file, so a link there is refused rather than silently skipped.
 #[cfg(unix)]
 pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Path) -> OpResult {
     let query = query(params)?;
@@ -226,9 +218,6 @@ pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Pat
     scanned(&query, files, &|path| guarded_text(path, workspace))
 }
 
-/// The files a scan may read when it walks for itself: everything under the confined start
-/// directory, or the one file `path` names — whose own link, if it is one, is refused rather than
-/// skipped, because the caller named it.
 #[cfg(unix)]
 fn start_walk(
     params: &serde_json::Value,

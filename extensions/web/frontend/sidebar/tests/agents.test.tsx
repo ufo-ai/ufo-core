@@ -52,8 +52,6 @@ const RESEARCH = {
   main: false,
   icon: "aten",
 };
-/** An app whose name a member typed as two lowercase words, which is the case the drawn name and
- *  the stored name differ in most plainly. */
 const REVIEWER = {
   id: SECOND_ID,
   name: "code reviewer",
@@ -62,7 +60,6 @@ const REVIEWER = {
   icon: "code",
 };
 
-/** An app that still needs a grant before it can work, as its own settings read states it. */
 const NEEDS_SETUP = {
   ...SETTINGS,
   agent: {
@@ -71,13 +68,9 @@ const NEEDS_SETUP = {
   },
 };
 
-/** The message the portal sends on the wizard's own behalf, so the run opens with the agent's
- *  proposal instead of an empty box. */
 const OPENING = "Build me a new app.";
 const TITLE = "Finances dash";
 
-/** The phases the `create-application` skill opens a guided build's todo board with, as the
- *  conversation's `tasks` slot answers them. The progress bar reads nothing else. */
 const PHASES = [
   "Propose what the app should do",
   "Ask what the build needs",
@@ -99,7 +92,6 @@ function board(done: number, running: number | null) {
   });
 }
 
-/** What the slot answers for a conversation whose agent has opened no board. */
 const NO_BOARD = () =>
   json({ type: "tasks", title: "", tasks: [], total_count: 0, completed_count: 0, truncated: false });
 
@@ -116,9 +108,6 @@ const ASKED = {
   cost_micro_usd: 2_000_000,
 };
 
-/** The apps index with the sidebar standing open. A folded rail draws each app as its mark alone,
- *  so a row's own words — its name, the work under it, the pin act — are read only once the member
- *  has unfolded the column the index lives in. A sidebar already open is left as it stands. */
 async function shownIndex(): Promise<HTMLElement> {
   const unfold = screen.queryByRole("button", { name: "Expand sidebar" });
   if (unfold) await userEvent.click(unfold);
@@ -140,10 +129,6 @@ beforeEach(() => {
 });
 
 test("apps the workspace ships on its first turn reach the sidebar with no reload", async () => {
-  /** A workspace provisions the apps it ships on its first turn — a turn the member takes from
-   *  inside a portal that has already booted. The read that seeded the sidebar therefore predates
-   *  every one of them, and a column that waited for a reload would state one app through the whole
-   *  of a member's first session. */
   let shipped = [AGENT];
   wire({
     "/api/agents": () => boot(shipped, ADMIN),
@@ -168,8 +153,6 @@ test("apps the workspace ships on its first turn reach the sidebar with no reloa
     expect(row("Assistant")).toBeTruthy();
     expect(row("Research")).toBeNull();
 
-    // The turn lands and the workspace gains its apps. The status read answers for the new agent
-    // before any re-read of the boot payload, which is the signal the sidebar has gained one.
     shipped = [AGENT, RESEARCH];
 
     await settle(RESTING_STATUS_MS);
@@ -248,8 +231,6 @@ test("an app page draws its homepage from the boot agent, without pulling its co
   render(<Portal />);
   location.hash = "#/agents/" + SECOND_ID;
 
-  // The page rides the agent from the boot read — the frame carries boot's own url — so the pane
-  // does not pull the app's conversation index for a set page with nothing open.
   const region = await screen.findByRole("region", { name: /radar homepage/i });
   expect(region.querySelector("iframe")?.getAttribute("src")).toBe("https://ingress.test/site");
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
@@ -300,9 +281,6 @@ test("a compose screen without a shipped page opens the portal composer without 
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
 });
 
-/** The opening send is not the only send that can found the run's conversation: when it fails, the
- *  member's own next message founds one, and the wizard has to be bound to that conversation or the
- *  pane keeps reading a store key the founding send already migrated away from. */
 test("a conversation the composer founds after a failed opening send is still the run's", async () => {
   let opening = true;
   wire({
@@ -327,8 +305,6 @@ test("a conversation the composer founds after a failed opening send is still th
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(within(wizard).getByText(saying("A finances dashboard."))).toBeTruthy();
-  // The bar reads the founded conversation's own board, which a wizard that lost the conversation
-  // cannot reach.
   expect(await waitFor(progress)).toBeTruthy();
 });
 
@@ -399,9 +375,6 @@ test("an answer to the wizard's question rides the turn that asked it", async ()
 
   await openWizard();
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  // The question rides the turn's terminal, and a member can only answer in a pane that has drawn
-  // the conversation — so the emit waits for the bind the bar states, the way a real terminal can
-  // only follow a stream the page already tails.
   expect(await waitFor(progress)).toBeTruthy();
   StreamFake.last().emit("terminal", {
     ...ASKED,
@@ -450,9 +423,6 @@ test("the app the last phase creates reaches the rail when the turn settles", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-/** The rows are the section's own list, and the place that adds to it is the list's last row: the
- *  index states apps, and the store — the deploy's apps to install, and the act that builds one —
- *  is where the member goes when none of those is it. */
 test("the store stands as the apps list's last row, and holds the act that builds an app", async () => {
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
@@ -460,7 +430,6 @@ test("the store stands as the apps list's last row, and holds the act that build
 
   const index = await agentIndex();
 
-  // The band folds the section and offers nothing else, so it holds no menu to hide the act in.
   const band = screen.getByRole("button", { name: "Apps" });
   expect(band.getAttribute("aria-haspopup")).toBeNull();
   expect(screen.queryByRole("button", { name: "Apps options" })).toBeNull();
@@ -488,8 +457,6 @@ test("pressing a section's band folds it away, and the fold holds across a reloa
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   const first = render(<Portal />);
 
-  // The band is only drawn while the sidebar stands open — the glyph rail has no room for it, and
-  // a fold with no head to undo it is a dead end, so the rail ignores one.
   const index = await agentIndex();
   expect(within(index).queryByRole("button", { name: /^Research/ })).toBeTruthy();
 
@@ -499,22 +466,17 @@ test("pressing a section's band folds it away, and the fold holds across a reloa
   );
   expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false");
 
-  // A column narrowed to the part someone works from would widen again on every reload otherwise.
   first.unmount();
   render(<Portal />);
-  // The sidebar opens as this browser holds it, so the band is drawn without asking again.
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false"),
   );
   expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
 
-  // And it opens again from the same band.
   await userEvent.click(screen.getByRole("button", { name: "Apps" }));
   expect(await screen.findByRole("navigation", { name: "Apps" })).toBeTruthy();
 });
 
-/** A phone screen has no width for a column beside the page, so the nav drawer holds the index
- *  there and the app's own pane is the page — the main app's until the member picks another. */
 test("the drawer holds the apps index at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
   location.hash = "#/agents";
@@ -552,10 +514,6 @@ test("closing the wizard gives the pane back to the app", async () => {
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
 });
 
-/** The pane and its Close button stand open while the founding send is in flight, so that send's own
- *  callback can land after the member closed the run. It must not raise the run again: the pane it
- *  brought back would send the opening message a second time, and the member would hold a second
- *  app-building conversation and a second billed turn. */
 test("a close before the founding send answers keeps the pane closed and founds one conversation", async () => {
   let answer = () => {};
   const opening = new Promise<void>((resolve) => {
@@ -582,15 +540,11 @@ test("a close before the founding send answers keeps the pane closed and founds 
 
   answer();
 
-  // The conversation the closed run founded tails to its own end; nothing of it reaches the screen
-  // the member went back to.
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(sent).toEqual([OPENING]);
   expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull();
 });
 
-/** The run is the key's, not the mount's: a wizard reopened while its founding send is still in
- *  flight joins that run when it lands, instead of founding a second conversation or losing both. */
 test("a wizard reopened during its founding send binds to the run the first mount opened", async () => {
   let answer = () => {};
   const opening = new Promise<void>((resolve) => {
@@ -625,8 +579,6 @@ test("a wizard reopened during its founding send binds to the run the first moun
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 });
 
-/** The run is the key's, not the screen's: leaving for another screen unmounts every pane here,
- *  and what the member finds on coming back is the same run, not a second opening send. */
 test("the run survives leaving the screen and comes back bound, sending nothing twice", async () => {
   const sent: string[] = [];
   wire({
@@ -653,8 +605,6 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   expect(sent).toEqual([OPENING]);
 });
 
-/** An app row shows its app without ending the run: the run stands on its own key, and App Creator
- *  takes the member back to it rather than founding a second one. */
 test("an app row leaves the run standing, and App Creator returns to it", async () => {
   const sent: string[] = [];
   wire({
@@ -681,8 +631,6 @@ test("an app row leaves the run standing, and App Creator returns to it", async 
   expect(sent).toEqual([OPENING]);
 });
 
-/** The wizard founds on a key of its own, so a founding send the member has in flight on the chat
- *  screen cannot hold it busy — the failure class three review rounds circled. */
 test("a founding send from the chat screen never blocks the wizard's own", async () => {
   let answerChat = () => {};
   const chatOpening = new Promise<void>((resolve) => {
@@ -718,8 +666,6 @@ test("a founding send from the chat screen never blocks the wizard's own", async
   await waitFor(() => expect(within(wizard).queryByText("About our numbers.")).toBeNull());
 });
 
-/** A founding send the key turns away is refused to its caller and worn by the key as a fault —
- *  never a silent drop the member reads as words that went somewhere. */
 test("a second founding send on a busy key is refused and the key wears the fault", async () => {
   wire({
     "/chat": () => new Promise<Response>(() => {}),
@@ -732,8 +678,6 @@ test("a second founding send on a busy key is refused and the key wears the faul
   void first;
 });
 
-/** The act is offered to every member the screen draws, admin or not: the `agent` kind admits a
- *  create from any speaking member and stamps them the owner. */
 test("a member who is no admin is offered the act, and it opens the wizard", async () => {
   wire({
     "/api/agents": () => boot([AGENT], MEMBER),
@@ -759,9 +703,6 @@ test("each row in the index draws its own app's mark, and states nothing by it",
     .toBeTruthy();
 });
 
-/** The out-of-shortlist test walks the object's own properties, never the prototype's: a slug
- *  every object answers — `constructor` — would otherwise read as bundled, and the picker would
- *  open with the agent's own mark neither led with nor checked. */
 test("a mark named for what every object answers still leads the picker as the agent's own", async () => {
   wire({
     "/settings": () => json({ ...SETTINGS, spec: { ...SETTINGS.spec, icon: "constructor" } }),
@@ -974,15 +915,11 @@ test("scheduled task sheets close back to their settings list", async () => {
 
   const reopened = await openAgentSettings("Assistant", "Scheduled");
   expect(await within(reopened).findByText("daily-brief")).toBeTruthy();
-  // The app's own panel is the one drawer standing: no record sheet is left over it.
   const sheets = document.querySelectorAll("[data-slot=sheet-content]");
   expect(sheets).toHaveLength(1);
   expect(sheets[0]).toBe(reopened);
 });
 
-/** The workspace's own mark is reserved: the picker offers it to no app, and the main agent is the
- *  row that holds it. It appears there once and only as that row's own mark — led, checked and drawn
- *  as the brand's own mark — the way any mark from outside the offered set appears. */
 test("the main agent keeps the reserved mark, and no offered cell repeats it", async () => {
   wire({
     "/settings": () => json({ ...SETTINGS, spec: { ...SETTINGS.spec, icon: "ufo" } }),
@@ -1024,19 +961,15 @@ test("a member picks another mark, and the pick rides one intent and comes back"
   await userEvent.click(await screen.findByRole("button", { name: "Edit avatar" }));
   const marks = await screen.findAllByRole("radio");
   expect(marks.length).toBe(Object.keys(AGENT_ICONS).length);
-  // The picker draws the offered set in its own order, and the product's own mark is not in it:
-  // the workspace's mark is reserved, so no picker offers it to an app.
   expect(Object.keys(AGENT_ICONS)[0]).toBe("propylon");
   expect(marks[0].getAttribute("value")).toBe("propylon");
   expect(marks.map((mark) => mark.getAttribute("value"))).not.toContain("ufo");
   expect(screen.queryByRole("radio", { name: "ufo" })).toBeNull();
-  // Every label is the slug's words capitalized.
   expect(marks[0].getAttribute("aria-label")).toBe("Propylon");
   expect(screen.getByRole("radio", { name: "Kylix" })).toBeTruthy();
   expect((screen.getByRole("radio", { name: "Propylon" }) as HTMLInputElement).checked).toBe(
     true,
   );
-  // The schema hides `icon` the way it hides `prompt`, so the generic form draws no control for it.
   expect(screen.queryByRole("combobox", { name: "icon" })).toBeNull();
   expect(screen.queryByRole("textbox", { name: "icon" })).toBeNull();
 
@@ -1051,7 +984,6 @@ test("a member picks another mark, and the pick rides one intent and comes back"
     spec: { icon: "krepis" },
   });
   expect(await screen.findByText("Assistant saved.")).toBeTruthy();
-  // Saving closes the picker, so the mark it kept is read by opening it again.
   await userEvent.click(await screen.findByRole("button", { name: "Edit avatar" }));
   await waitFor(() =>
     expect((screen.getByRole("radio", { name: "Krepis" }) as HTMLInputElement).checked).toBe(
@@ -1101,11 +1033,8 @@ test("a working app leads the index, and a pin orders everything under it", asyn
     within(index)
       .getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ })
       .map((row) => row.querySelector(".text-label")!.textContent);
-  // Research is working, so it leads; under it the ladder stands as it was.
   await waitFor(() => expect(drawn()).toEqual(["Research", "Assistant", "Scribe"]));
 
-  // A pin moves a row up the order under the working one, and moves nothing else: Assistant keeps
-  // its place relative to Scribe, and the app doing work keeps the top.
   await userEvent.click(within(index).getByRole("button", { name: "Pin Scribe" }));
 
   await waitFor(() => expect(drawn()).toEqual(["Research", "Scribe", "Assistant"]));
@@ -1126,8 +1055,6 @@ test("a row states its name and nothing else, working or not, and opens nothing 
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
   const index = await shownIndex();
-  // Work in flight is read off the dot. It takes no line under the name — not even the activity
-  // the status names — and nothing stands in for one at the pointer.
   const working = within(index).getByRole("button", { name: /^Research/ });
   await waitFor(() => expect(working.querySelector(".bg-live")).toBeTruthy());
   expect(working.textContent).toBe("Research");
@@ -1172,7 +1099,6 @@ test("a folded rail holds each app's name at the pointer", async () => {
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  // On the folded rail the rows are marks: the name they cannot draw is held at the pointer.
   await userEvent.click(await screen.findByRole("button", { name: "Collapse sidebar" }));
   const index = await agentIndex();
   const row = within(index).getByRole("button", { name: "Research" });
@@ -1191,8 +1117,6 @@ test("an app row and a conversation row are one box, marked one way", async () =
   const chat = (await screen.findByRole("button", { name: /Pick one thread/ })).closest("li");
   expect(app?.className).toBe(chat?.className);
 
-  // The app the pane stands on takes the same fill the standing conversation takes, and takes it
-  // on the same box: a member reads one mark down the whole column.
   await openAgentRow("Research");
   const open = within(await agentIndex()).getByRole("button", { name: "Research" }).closest("li");
   expect(open?.className).toBe(chat?.className + " bg-fill");
@@ -1221,12 +1145,9 @@ test("an app installed and not set up wears the blocked dot, and work outranks i
   const dot = (name: RegExp, tone: string) =>
     within(index).getByRole("button", { name }).querySelector("." + tone);
 
-  // Owed setup is the app waiting on the member, which is what the blocked tone says.
   await waitFor(() => expect(dot(/^Research/, "bg-blocked")).toBeTruthy());
-  // An app that owes setup and is working states the work: something is happening now either way.
   expect(dot(/^Assistant/, "bg-live")).toBeTruthy();
   expect(dot(/^Assistant/, "bg-blocked")).toBeNull();
-  // An app that owes nothing and is doing nothing wears no dot at all.
   expect(dot(/^Scribe/, "bg-blocked")).toBeNull();
   expect(dot(/^Scribe/, "bg-live")).toBeNull();
 });
@@ -1253,8 +1174,6 @@ test("a row keeps the member's focus as its status gains and loses a tooltip", a
   row().focus();
   expect(document.activeElement).toBe(row());
 
-  // The work ends and the row closes its line over nothing: the row is one element across that
-  // change, so whoever was standing on it still is.
   working = false;
   await waitFor(() => expect(row().querySelector(".bg-live")).toBeNull(), {
     timeout: 2 * WORKING_STATUS_MS,
@@ -1262,8 +1181,6 @@ test("a row keeps the member's focus as its status gains and loses a tooltip", a
   expect(document.activeElement).toBe(row());
 }, 15_000);
 
-/** A presence read is nobody's errand: no member action re-runs it, so a poll that gave up on one
- *  refusal would leave the rail stating the workspace had gone quiet until the screen was left. */
 test("a status read that fails after answering keeps polling and recovers", async () => {
   let answers = 0;
   wire({
@@ -1274,8 +1191,6 @@ test("a status read that fails after answering keeps polling and recovers", asyn
     },
     "/transcript": () => json({ messages: [] }),
   });
-  // Off the apps pane, so the sidebar's index is the only reader of the status route — the poll
-  // under test is its own, not one the pane also runs.
   location.hash = "";
   vi.useFakeTimers();
   try {
@@ -1294,8 +1209,6 @@ test("a status read that fails after answering keeps polling and recovers", asyn
 
     await settle(WORKING_STATUS_MS);
     expect(answers).toBe(2);
-    // The refusal does not replace the answer before it, so the row keeps the dot it was drawn
-    // with rather than stating the app had gone quiet.
     expect(row().querySelector(".bg-live")).toBeTruthy();
 
     await settle(WORKING_STATUS_MS);
@@ -1312,7 +1225,6 @@ test("a name is drawn word by word, and only a word written wholly in lowercase 
   expect(agentName("code reviewer")).toBe("Code Reviewer");
   expect(agentName("Code reviewer")).toBe("Code Reviewer");
   expect(agentName("iOS helper")).toBe("iOS Helper");
-  // A hyphen parts words the way a space does, so an extension's slug is not left half-drawn.
   expect(agentName("daily-brief")).toBe("Daily-Brief");
   expect(agentName("release_bot")).toBe("Release_Bot");
 });
@@ -1331,9 +1243,6 @@ test("the index row and the pane header draw the app's name in Title Case", asyn
   expect(pane.queryByText("code reviewer")).toBeNull();
 });
 
-/** The drawn name is text; the stored name is the app's identity, and it is what addresses the
- *  object in the intent. A screen that raised the name it writes would rename the app on its first
- *  save. */
 test("the settings dialog reads the drawn name and the intent it posts carries the stored one", async () => {
   const posted: { name: string }[] = [];
   wire({
@@ -1362,8 +1271,6 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
 const PURPOSE = "Briefs every meeting before it starts.";
 
 test("an app the workspace has never built stands on its setup screen", async () => {
-  /** Built is the line, not wired: an app builds a thinner page from fewer sources, and a member
-   *  who wants to see it before every todo is settled gets to. */
   wire({
     "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
     "/connections": () => json({ connections: [] }),
@@ -1390,16 +1297,10 @@ test("an app the workspace has never built stands on its setup screen", async ()
   );
 
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
-  // The screen names the app it is setting up and states the app's one sentence under it — the
-  // member arrived at an app somebody else installed, and reads what it is for before the list of
-  // what it is waiting on.
   await screen.findByText(/Set up your .* app/);
   await screen.findByText(PURPOSE);
 });
 
-/** The setup screen draws no navigation, and neither does the app's own address while the app
- *  stands on that screen: the column is not drawn for one address and taken away by the move to the
- *  other, which is a sidebar the member watches appear and vanish. */
 test("an app in setup draws no sidebar, on its own address or on the setup one", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -1425,16 +1326,12 @@ test("an app in setup draws no sidebar, on its own address or on the setup one",
     />,
   );
 
-  // The first render already draws none of it: the boot read carries the fact, so no frame stands
-  // in which the column is on screen.
   expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
   await screen.findByText(/Set up your .* app/);
   expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
 });
 
-/** An app that has been built reaches the same address of its own accord — that screen is where an
- *  account is reconnected — and there the member is standing in a workspace they move around from. */
 test("a built app's setup screen keeps the sidebar", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -1460,9 +1357,6 @@ test("a built app's setup screen keeps the sidebar", async () => {
 });
 
 test("a shipped app that declares no setup stands on its page", async () => {
-  /** Chat, radar, tasks, wiki and artifacts declare none, and their page is the deploy's own.
-   *  A gate that read "no forked page" as "not set up" stranded them on a screen with no account
-   *  row, no schedule row, and nothing to press. */
   wire({
     "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
     "/connections": () => json({ connections: [] }),
@@ -1480,8 +1374,6 @@ test("a shipped app that declares no setup stands on its page", async () => {
 });
 
 test("the move to setup replaces, so Back steps past the app", async () => {
-  /** A pushed entry sends Back to the app address, which mounts the pane, reads the same answer and
-   *  pushes the setup screen over it again — the member could never step back past the app. */
   const replaced: unknown[] = [];
   const real = history.replaceState.bind(history);
   vi.spyOn(history, "replaceState").mockImplementation((...args) => {
@@ -1515,10 +1407,6 @@ test("the move to setup replaces, so Back steps past the app", async () => {
   expect(replaced).toContain("#/agents/" + AGENT_ID + "/setup");
 });
 
-/** The roster is what the page was told at boot, and a build binds the app's page long after that:
- *  the app the member has just built still wears the flag for the rest of the session. The app's own
- *  read is what says the page is there, so the member opens it, and the roster is read again — which
- *  is what puts the sidebar back. */
 test("an app built since the boot read opens at its own address", async () => {
   const roster = vi.fn();
   wire({
@@ -1550,9 +1438,6 @@ test("an app built since the boot read opens at its own address", async () => {
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
-/** A read that failed says nothing about where the app stands. Moving on it would put the member on
- *  a setup screen whose own read failed too, and the crumb back to the app would move them there
- *  again. */
 test("a setup read that failed leaves the member on the app they opened", async () => {
   const { calls } = wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -1578,9 +1463,6 @@ test("a setup read that failed leaves the member on the app they opened", async 
 });
 
 test("an agent no extension shipped keeps its conversation column, however unbuilt", async () => {
-  /** The main agent and an agent a member built have no bound site and are never meant to have
-   *  one. A gate that read "no site" as "never built" sent them to a setup screen over an empty
-   *  declaration, and their conversation column could not be reached at its own address. */
   const { calls } = wire({
     "/settings": () => json(SETTINGS),
     "/connections": () => json({ connections: [] }),
@@ -1592,7 +1474,6 @@ test("an agent no extension shipped keeps its conversation column, however unbui
 
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  // The pane asks about an app the roster says the workspace is building, and this is not one.
   expect(calls.filter((url) => url.includes("/setup"))).toEqual([]);
 });
 
@@ -1611,15 +1492,9 @@ test("an app that has been built once stands on its page, and the setup screen i
 
   expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  // And it is somewhere the member moves around from, so the column stands beside it: the setup
-  // screen is the one place it does not.
   expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
 });
 
-/** Starting a conversation with the open app is an act of its own band, standing with the acts at
- *  the far end: past the name the band leads with, and before the settings act that ends the row.
- *  It founds the conversation where the pane stands, with the app the pane shows, so the screen is
- *  not left for the chat. */
 test("the app pane's header starts a chat with the app it shows, standing with the acts at the far end", async () => {
   const sent: string[] = [];
   location.hash = "#/agents/" + SECOND_ID;
@@ -1676,7 +1551,6 @@ test("the app pane's menu opens each app setting on its matching tab", async () 
 
     await userEvent.click(menu.getByRole("menuitem", { name: tab }));
     const panel = await screen.findByRole("dialog", { name: "Research" });
-    // The band names the read showing, and the read is reached under that name alone.
     expect(within(panel).getByRole("button", { name: tab })).toBeTruthy();
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -1707,13 +1581,11 @@ test("the band's menu and the panel's own draw the three reads identically", asy
     (item) => item.outerHTML,
   );
 
-  // Same words, same marks, same set — one list stood in two places.
   expect(fromPanel.length).toBe(3);
   expect(fromPanel.map(stripIds)).toEqual(fromBand.map(stripIds));
 });
 
-/** Radix stamps each menu item with its own generated ids, which differ between two mounts of the
- *  same list and say nothing about how the item is drawn. */
+/** Radix stamps each menu item with generated ids that differ between two mounts of the same list. */
 function stripIds(markup: string): string {
   return markup.replaceAll(/(id|aria-labelledby|aria-describedby|data-radix-[a-z-]*)="[^"]*"/g, "");
 }
@@ -1730,9 +1602,7 @@ test("the app's panel switches reads from its own band, without going back to th
   render(<Portal />);
 
   const panel = within(await openAgentSettings("Research", "Settings"));
-  // The panel is the shared drawer every record on the screen opens in.
   expect(document.querySelector("[data-slot=sheet-content]")).toBeTruthy();
-  // The band names the app the read belongs to, with the read showing beside it.
   expect(await screen.findByRole("dialog", { name: "Research" })).toBeTruthy();
   expect(panel.getByRole("button", { name: "Settings" })).toBeTruthy();
 

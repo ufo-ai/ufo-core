@@ -10,9 +10,8 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
-    # The columns land first and the constraint over all three second: a batch that both adds a
-    # column and constrains it recreates the table with the constraint depending on columns the
-    # same batch is still introducing, which SQLite's copy-and-move cannot order.
+    # The columns land first and the constraint second: a batch that adds a column and constrains it
+    # depends on columns that batch is still introducing, which SQLite cannot order.
     with op.batch_alter_table("shared_artifact") as batch:
         batch.add_column(sa.Column("preview_blob_key", sa.Text(), nullable=True))
         batch.add_column(sa.Column("preview_media_type", sa.Text(), nullable=True))

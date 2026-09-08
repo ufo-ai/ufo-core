@@ -17,20 +17,13 @@ import {
 } from "@/views/ConversationSlotPane";
 
 export type ChatPaneProps = ChatProps & {
-  /** What the conversation is called — the rail row's own title. Absent for a conversation not yet
-   *  opened, which is headed by nothing: a header over an empty screen states a conversation that
-   *  does not exist yet. */
   title?: string;
   conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
-  /** The app holding the conversation, as the trail names it: the shell derives it once for the tab
-   *  title and this band alike, so the two cannot name one app two ways. */
   crumb?: Crumb;
 };
 
-/** A conversation's own named sheet — its files, diffs or sources — over the transcript it belongs
- *  to. A caller already holding the inventory hands its summary over rather than reading it twice. */
 export function ConversationSlot({
   agent,
   conversationId,
@@ -65,8 +58,6 @@ export function ConversationSlot({
   );
 }
 
-/** The chat screen for one agent's conversation: a header with the slot acts, the transcript, and
- * the composer; a conversation founded here is reported through `onCreated`. */
 export function ChatPane({
   agent,
   member,
@@ -90,8 +81,6 @@ export function ChatPane({
   const selected =
     slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
-  /** A conversation is headed by what it is called, under the agent holding it. A conversation not
-   *  yet opened is headed by nothing at all. */
   const header = conversationId ? (
     <Header
       crumb={crumb}

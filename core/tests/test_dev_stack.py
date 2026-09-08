@@ -150,8 +150,6 @@ def _check_web_reloads_from_source_against_each_slot() -> None:
         ).stdout
 
         assert f"UFO_STACK_ORIGIN=http://{host}:{front}" in command
-        # The flags go to vite bare: pnpm swallows a `--` before them and vite then serves the
-        # lanes shell on its own default port.
         assert "pnpm -C extensions/web/frontend run dev --config sidebar/vite.config.ts" in command
         assert f"--host {host} --port {web} --strictPort" in command
         assert f"http://{host}:{web}/surface/web" in command
@@ -174,7 +172,6 @@ def _check_web_reloads_from_source_against_each_slot() -> None:
     assert refused.returncode != 0
     assert "SHELL_NAME must be one of: sidebar lanes" in refused.stderr
 
-    # The dev server reads the stack through this variable, and its own suite pins the reading.
     for config in ["vite.config.ts", "sidebar/vite.config.ts"]:
         source = (REPO / "extensions/web/frontend" / config).read_text()
         assert "process.env.UFO_STACK_ORIGIN" in source

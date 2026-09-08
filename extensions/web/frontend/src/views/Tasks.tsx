@@ -5,25 +5,11 @@ import { ObjectDetail, ObjectPane, objectAt, slotOf } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { PanelEmpty } from "@/kernel/panel";
 
-/** What is armed to run an agent when nobody is typing: a clock, or a source that changed. The two
- *  are one destination because a member asking what stands ready here asks one question, and an
- *  answer split across two screens is one they have to know to look for twice.
- *
- *  They stand as two listings rather than one, because they are two kinds with almost nothing in
- *  common to put in a column — a schedule and a next run against a source and where it came in.
- *  Merged, every row would carry a column the other kind leaves empty; stacked, each keeps the
- *  columns, order, search and pager its own kind declares, and the page still answers the one
- *  question whole. Neither needs a control to reach it: they are both already on the screen.
- *
- *  What those standing orders have already done is the radar's answer, not this one: a member here
- *  is reading or changing what will happen, not what did. */
 const KINDS = [
   { kind: "scheduled_task", label: "Scheduled" },
   { kind: "source_trigger", label: "Triggers" },
 ];
 
-/** The workspace's standing orders. Both listings open their selected record in the page's one
- *  sheet. Closing it reads the listings again, so a changed or deleted row is stated as it is. */
 export function Tasks({
   place,
   onPlace,

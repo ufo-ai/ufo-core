@@ -13,8 +13,6 @@ beforeEach(() => {
 
 const CHAT_URL = "/surface/web/agents/" + AGENT.id + "/chat?conversation=" + CONVO_ID;
 
-/** The conversation as the page reads it. `turn` is the turn the read names for the page to tail,
- *  so a payload carrying one opens the log on a live turn and the composer on a turn to stop. */
 function reading(chat: Route, turn: string | null = TURN_ID) {
   return {
     ...chatsOnWire([CHAT_ROW]),

@@ -1,20 +1,5 @@
-//! Signup-email policy and the outbound mail sender.
-//!
-//! `SignupEmailPolicy` rejects disposable domains and maps a shared personal-mail domain to the
-//! exact address rather than granting that domain authority over a workspace. A malformed address
-//! is rejected up front. The sender delivers a rendered subject, a plain-text body, and the HTML
-//! alternative beside it where
-//! one is rendered, through SESv2, carrying no message shape of its own
-//! beyond `invite_email`, the grant's own invitation; the teammate invitation renders in
-//! `invite_delivery`, and WorkOS delivers the sign-in code.
-//! Signing is pure CPU (hmac/sha256) so it runs inline, and every network call is async.
 //! Credentials are the pod's IRSA web identity (`AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE`,
-//! injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation),
-//! exchanged at STS per send. Missing SES configuration fails loud.
-//!
-//! `UFO_CONTROL_EMAIL_MODE` picks the sender: `ses` (the default) is the SES delivery above;
-//! `console` logs the message instead of sending it, so a local stack reads it from the process log
-//! with no SES account. An unrecognized mode fails loud.
+//! injected by the EKS pod identity webhook from the gateway ServiceAccount's annotation).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -711,7 +696,6 @@ const STS_SESSION_NAME: &str = "ufo-gateway-email";
 const STS_SESSION_SECONDS: u32 = 900;
 const STS_TIMEOUT_SECONDS: u64 = 10;
 
-/// The email is not an acceptable signup identity.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EmailError {
     #[error("The email address is malformed.")]
@@ -720,8 +704,6 @@ pub enum EmailError {
     Disposable(String),
 }
 
-/// Lowercased (address, domain), the domain a strict hostname with its FQDN root dot dropped — so a
-/// trailing-dot domain cannot change how an address such as `someone@gmail.com.` is classified.
 pub fn normalize_email(email: &str) -> Result<(String, String), EmailError> {
     let candidate = email.trim().to_lowercase();
     let captures = EMAIL_PATTERN
@@ -776,8 +758,6 @@ impl SignupEmailPolicy {
     }
 }
 
-/// The public front-door host from a base URL, path and scheme stripped. A schemeless value has no
-/// authority to take, so it fails rather than silently reading the host out of the path.
 pub fn apex_host(base_url: &str) -> Result<String, EmailConfigError> {
     let after_scheme = base_url
         .split_once("://")
@@ -793,7 +773,6 @@ pub fn apex_host(base_url: &str) -> Result<String, EmailConfigError> {
     Ok(host.to_string())
 }
 
-/// One invitation rendered for clients that accept HTML and clients that accept only text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InviteEmail {
     pub subject: String,
@@ -801,7 +780,6 @@ pub struct InviteEmail {
     pub html: String,
 }
 
-/// The invitation delivered by `ufo-control invite`.
 pub fn invite_email(
     email: &str,
     expires_at: DateTime<Utc>,
@@ -859,8 +837,6 @@ pub enum EmailConfigError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
-    /// SES answered, so nothing was accepted. `retry_after` carries the bounded `Retry-After` a
-    /// throttle names, which is the only schedule a caller should prefer over its own.
     #[error("SES SendEmail returned {status}: {body}")]
     Ses {
         status: u16,
@@ -869,8 +845,8 @@ pub enum SendError {
     },
     #[error("STS AssumeRoleWithWebIdentity returned {status}: {body}")]
     Sts { status: u16, body: String },
-    /// The credential exchange never completed, so the SES POST was never made — which is what
-    /// tells a caller a resend cannot duplicate anything.
+    /// The credential exchange never completed, so the SES POST was never made — which is what tells a
+    /// caller a resend cannot duplicate anything.
     #[error("STS AssumeRoleWithWebIdentity could not be reached: {0}")]
     StsUnreachable(String),
     #[error("STS AssumeRoleWithWebIdentity response is missing {0}")]
@@ -882,14 +858,10 @@ pub enum SendError {
         path: PathBuf,
         source: std::io::Error,
     },
-    /// The SES POST alone: a client that would not build, a connection that never opened, or a
-    /// request that left with no answer read. Which of the three decides whether a resend is safe.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 }
 
-/// Where the two AWS calls go. Held apart from `region` so a test can point them at a local server;
-/// a deploy builds them from the region and never names them.
 #[derive(Debug, Clone)]
 pub struct AwsEndpoints {
     pub ses: String,
@@ -905,11 +877,8 @@ impl AwsEndpoints {
     }
 }
 
-/// SESv2 `SendEmail` with a local SigV4 signer. `source` is the verified From address; `region`
-/// selects the signing scope. Credentials are the pod's IRSA web identity: the projected token at
-/// `token_file` is exchanged for `role_arn` at STS on every send (`AssumeRoleWithWebIdentity` is
-/// unsigned, so no bootstrap credential exists) — onboarding email is rare enough that a credential
-/// cache would be dead weight.
+/// The projected token is exchanged for `role_arn` at STS on every send: `AssumeRoleWithWebIdentity`
+/// is unsigned, so no bootstrap credential exists.
 #[derive(Debug, Clone)]
 pub struct SesEmailSender {
     pub source: String,
@@ -1011,8 +980,8 @@ fn clipped(body: &str) -> String {
     body.chars().take(ERROR_BODY_CHARS).collect()
 }
 
-/// The `Retry-After` a throttled response names, in seconds, clamped next to the call that reads
-/// it: a header naming an hour must not park a workspace's invitations for one.
+/// Clamped next to the call that reads it: a header naming an hour must not park a workspace's
+/// invitations for one.
 fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<f64> {
     headers
         .get("retry-after")
@@ -1028,8 +997,7 @@ fn host_of(url: &str) -> String {
         .to_string()
 }
 
-/// The three credential fields STS nests under `Credentials`. Read positionally rather than by
-/// XPath: the response carries an `Expiration` and an `AssumedRoleUser` this never needs, and the
+/// Read positionally rather than by XPath: the response carries fields this never needs, and the
 /// element names inside `Credentials` are unambiguous.
 pub fn parse_assume_role_credentials(payload: &str) -> Result<SesCredentials, SendError> {
     let mut reader = Reader::from_str(payload);
@@ -1085,8 +1053,8 @@ fn local_name(qualified: &[u8]) -> String {
     text.rsplit(':').next().unwrap_or_default().to_string()
 }
 
-/// The SigV4 headers for one SES POST. Every header the signature covers is also sent, and the
-/// session token is among them — an omitted `x-amz-security-token` signs a request AWS refuses.
+/// Every header the signature covers is also sent, and the session token is among them — an omitted
+/// `x-amz-security-token` signs a request AWS refuses.
 pub fn sigv4_headers(
     host: &str,
     body: &[u8],
@@ -1146,8 +1114,6 @@ fn signing_key(secret_key: &str, date_stamp: &str, region: &str) -> Vec<u8> {
     key
 }
 
-/// The two deliveries, one closed set: SES for a deploy, and a log line for a local stack that has
-/// no SES account. A trait object would buy nothing — nothing else will ever send mail here.
 #[derive(Debug, Clone)]
 pub enum EmailSender {
     Ses(Box<SesEmailSender>),

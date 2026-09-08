@@ -35,8 +35,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The workspace column, which the shell draws at a phone width alone: the drawer the hamburger
- *  opens holds it, drawn whole. Every act that moves the page shuts the drawer. */
 async function openWorkspaceColumn(): Promise<HTMLElement> {
   await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
@@ -53,12 +51,8 @@ test("the built page names a hashed module and stylesheet under this surface", (
   expect(page).toContain("<!doctype html>");
 });
 
-/** The markdown chokepoint refuses a foreign image element, but a renderer can fetch without
- *  minting an element — mermaid's image shape prefetches `node.img` from any host during layout.
- *  The page's own policy is the boundary a library cannot go around: the browser refuses every
- *  image load off this origin, however it was asked for. The portal draws no face and no company
- *  mark — an app page does, in its own document — so this one names no host at all, and a host
- *  added here buys a picture nothing draws at the cost of that refusal. */
+/** mermaid's image shape prefetches `node.img` from any host during layout, which the markdown
+ *  chokepoint cannot catch: only the page's own policy refuses a load it never minted an element for. */
 test("the page tells the browser images load from this origin alone", () => {
   const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(builtPage());
   expect(meta?.[1]).toBe("img-src 'self' data:");
@@ -136,8 +130,6 @@ test("a live session whose email holds no member row is told that, not to sign i
 
   expect(await screen.findByText("Not a member of this workspace")).toBeTruthy();
   expect(screen.getByText(/An admin has to add the address/)).toBeTruthy();
-  // The bearer behind this refusal is live, so the sign-in door would forward it straight back to
-  // the workspace that just refused it. Another address is reached by clearing this one first.
   expect(
     screen.getByRole("link", { name: "Sign in with another email" }).getAttribute("href"),
   ).toBe(SIGN_OUT_PATH);
@@ -189,10 +181,6 @@ test("a boot whose network fails says so rather than sending a live session to s
   expect(await screen.findByText("Network error — try again.")).toBeTruthy();
 });
 
-/** The shell at a desk width is the rail on the left: the mark that leads home, the launcher, one
- *  tile per tab home stands, the act that builds an app, the act that silences the track, and the
- *  workspace at its foot. The column is a glyph's own width, so every tile is a mark alone and the
- *  word it stands for is held at the pointer. */
 test("the desk shell is a rail of marks, each holding its name at the pointer", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -221,16 +209,12 @@ test("the desk shell is a rail of marks, each holding its name at the pointer", 
   expect((await screen.findByRole("tooltip")).textContent).toBe(agentName(AGENT.name));
 });
 
-/** The workspace column keeps one section, the apps, and the drawer that holds it at a phone width
- *  draws it whole. */
 test("a section heading is the fold and states which way it stands, and carries no other act", async () => {
   atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sidebar = await openWorkspaceColumn();
-  /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
-     before it is an act, and the act it does carry is the one a member does to a heading. */
   const band = within(sidebar).getByRole("button", { name: "Apps" });
   expect(band.getAttribute("aria-haspopup")).toBeNull();
   expect(band.getAttribute("aria-expanded")).toBe("true");
@@ -248,9 +232,6 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   const sidebar = await openWorkspaceColumn();
   const apps = within(sidebar).getByRole("navigation", { name: "Apps" });
 
-  /* The nav scrolls nowhere, so a section held at its natural height would push the rows under it
-     — Connectors, Workspace, and the way out — past the bottom edge on a short screen. The squeeze
-     is spent inside the list, which caps and scrolls. */
   const section = apps.parentElement;
   if (!section) throw new Error("the apps list stands in no section");
   expect(section.className).not.toContain("shrink-0");
@@ -261,13 +242,9 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   expect(scroller.className).toContain("overflow-y-auto");
   expect(scroller.className).toContain("max-h-(--size-apps-open)");
 
-  // The foot is what must survive it.
   expect(within(sidebar).getByRole("button", { name: "Workspace" })).toBeTruthy();
 });
 
-/** Until the member pins for themselves, the chat app stands pinned at the head of the index and
- *  every other app follows it by name — the one order a member can predict before they have put a
- *  row anywhere. */
 test("until the member pins for themselves, the chat app leads and the rest stand by name", async () => {
   atPhoneWidth();
   wire({});
@@ -294,8 +271,6 @@ test("until the member pins for themselves, the chat app leads and the rest stan
   expect(at("Wiki")).toBeGreaterThan(at("Assistant"));
 });
 
-/** A stored pin no live agent answers — an app since removed, or the old fixed reads — resolves
- *  to nothing rather than a row. */
 test("a stored pin nothing answers draws no row", async () => {
   atPhoneWidth();
   localStorage.setItem("pinned-rows", "wiki\nradar");
@@ -310,8 +285,6 @@ test("a stored pin nothing answers draws no row", async () => {
   expect(names).not.toContain("Radar");
 });
 
-/** The bar's mark stands between the hamburger and the account. It is centred out of the row —
- *  absolutely placed — so the row it stands over keeps one line whatever the mark's own width. */
 test("the bar's mark stands at a phone width too, centred out of the row", () => {
   atPhoneWidth();
   wire({});
@@ -353,8 +326,6 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "New chat",
     "Create app",
     "Apps",
-    /* The drawer is always drawn whole, so the app's row states its name and the pin act every row
-       wears. */
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
     "Connectors",
@@ -376,8 +347,6 @@ test("the sidebar's foot states who is signed in and offers the way back out", a
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
   expect(within(foot).getByText("Member")).toBeTruthy();
 
-  // The sign-in door forwards a browser that already holds a session, so this is the act that
-  // reaches the form: it clears the cookies on the host that bound them and lands there.
   const went: string[] = [];
   vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
   await userEvent.click(within(foot).getByRole("button", { name: "Sign out" }));

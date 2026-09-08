@@ -80,14 +80,11 @@ test("the credit history states what was added and what it cost", async () => {
   // The table draws a stacked variant for narrow widths, so every cell renders twice.
   expect((await screen.findAllByText("Aug 20, 2026")).length).toBeGreaterThan(0);
   expect(screen.getAllByText("Aug 19, 2026").length).toBeGreaterThan(0);
-  // The $100 grant charged nothing, so a grant reads apart from a purchase.
   expect(screen.getAllByText("$100.00").length).toBeGreaterThan(0);
   expect(screen.getAllByText("$5.00").length).toBeGreaterThan(0);
 });
 
 test("a member the billing route refuses is told who may read it", async () => {
-  // The route answers a refusal with a body, exactly as the handler does. Claiming the workspace
-  // has no limit would be a guess: a refused read knows nothing about the balance.
   wire({
     "/ext/metronome/billing": () =>
       Response.json({ error: "only a workspace admin can read billing" }, { status: 403 }),
@@ -99,9 +96,6 @@ test("a member the billing route refuses is told who may read it", async () => {
 });
 
 test("a deploy carrying no billing extension says so, and claims no refusal", async () => {
-  // The tab is drawn on every deploy, but the route is mounted only for a loaded manifest, so a
-  // pack without the billing extension answers 404. Calling that an authorization refusal tells an
-  // admin they lack a permission on a deploy that has nothing to permit.
   wire({ "/ext/metronome/billing": () => Response.json({}, { status: 404 }) });
   billingTab();
 
@@ -117,8 +111,6 @@ test("a read that fails for any other reason says only that", async () => {
 });
 
 test("a card the provider would not read shows as unknown, not as absent", async () => {
-  // "No payment method" would invite saving one on a guess about the provider's own state, and the
-  // balance beside it is core's — so it still reads.
   wire({
     "/ext/metronome/billing": () => json({ ...LIMITED, card: null, card_unread: true }),
   });

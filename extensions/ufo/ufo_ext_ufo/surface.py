@@ -134,8 +134,6 @@ SURFACE_WORDS = {
 }
 READ_ONLY_MESSAGE = "This conversation is read-only here. Reply in {surface} to continue it."
 
-# Hold a live stream open just under the shell's `curl --max-time 90`, so a turn that outruns the
-# hold ends on `poll` (the shell reconnects) rather than the client's own timeout truncating it.
 HOLD_SECONDS = 85.0
 
 
@@ -257,7 +255,6 @@ def history_directives(
             lines.append(directive("you", text))
             continue
         if rolled:
-            # The web's fold states the same words.
             plural = "" if rolled == 1 else "s"
             lines.append(directive("note", f"Completed {rolled} step{plural}"))
         if text:

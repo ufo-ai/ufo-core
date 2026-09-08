@@ -16,8 +16,6 @@ concurrency:
   group: dead-code
 
 jobs:
-  # Mechanical candidates (vulture) verified by an agent: most are false positives from dynamic
-  # dispatch, and a symbol is declared dead only when its removal builds and tests green.
   symbols:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -114,8 +112,6 @@ jobs:
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
-  # Which class this run sweeps, decided once: the listing job below runs for one of them, and the
-  # audit reads the same answer rather than deriving it a second time.
   focus:
     runs-on: ubuntu-latest
     outputs:
@@ -127,17 +123,15 @@ jobs:
           focus='${{ inputs.focus }}'
           if [ -z "$focus" ]; then
             order='db-columns config-fields events-frames enum-members sdk-exports manifest-points flag-keys'
-            # Divide the day of year by the cron day step (3) to get the run ordinal: the index
-            # then advances one class per run, so all 7 classes come up inside every month.
+            # Divide the day of year by the cron day step (3) to get the run ordinal, so all 7 classes come up
+            # inside every month.
             focus=$(echo "$order" | tr ' ' '\n' | sed -n "$(( 10#$(date -u +%j) / 3 % 7 + 1 ))p")
           fi
           echo "focus=$focus" >> "$GITHUB_OUTPUT"
           echo "doctrine focus: $focus"
 
-  # A flag key's far end is a record in Cloudflare's flag service, so the sweep cannot grep for it.
-  # This lists what each app holds and hands it over as a file. It stands apart from the audit
-  # because reaching the production app needs that environment's secret, and the audit runs an
-  # agent with git and `gh` write scopes: the token is named here and reaches no step of that job.
+  # Reaching the production app needs that environment's secret, and the audit runs an agent with git
+  # and `gh` write scopes: the token is named here and reaches no step of that job.
   flagship-keys:
     needs: focus
     if: needs.focus.outputs.focus == 'flag-keys'
@@ -166,12 +160,8 @@ jobs:
           name: flagship-keys
           path: flagship-keys.json
 
-  # The "both ends or neither" audit: one declared-surface class per run, rotating; a surface
-  # missing its producer or consumer is dead weight no mechanical scanner can see.
   doctrine:
     needs: [focus, flagship-keys]
-    # The listing runs for one class and is skipped for the other six; a skip is not a reason to
-    # skip the audit, but a listing that failed leaves the flag class with nothing to read.
     if: ${{ !cancelled() && needs.focus.result == 'success' && needs.flagship-keys.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45

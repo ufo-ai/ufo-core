@@ -22,9 +22,6 @@ test("an ask meant for one composer is not taken by another founding one", () =>
   });
 });
 
-/** Every setter that passes no `meant` routes to the agent's new chat screen, so null names that
- *  screen's own key: a founding composer a lane stands for the same agent must leave the ask for
- *  the screen the member is being handed to. */
 test("an ask keyed to the agent alone is meant for the new chat screen, not a lane's own key", () => {
   setPendingAsk("agent-1", "Build it.", false);
   expect(takePendingAsk("agent-1", "history:lane-1")).toBe(null);
@@ -49,8 +46,6 @@ test("an agent with no pending ask hands the composer nothing", () => {
   expect(takePendingAsk("never-asked", "new:never-asked")).toBe(null);
 });
 
-/** Words the member committed themselves carry the send, so the composer that takes them knows to
- *  send rather than to stand them in the box. */
 test("an ask states whether the composer sends it or stands it in the box", () => {
   setPendingAsk("agent-1", "summarise last week", true);
   expect(takePendingAsk("agent-1", "new:agent-1")).toEqual({
@@ -60,7 +55,6 @@ test("an ask states whether the composer sends it or stands it in the box", () =
   });
 });
 
-/** A composer already on the screen when the ask lands never mounts again to read it. */
 test("a composer already mounted is woken when an ask lands, and stops being woken once gone", () => {
   const woken: string[] = [];
   const stop = watchPendingAsk(() => woken.push("woken"));

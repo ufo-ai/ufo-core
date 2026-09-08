@@ -112,8 +112,6 @@ ROLLOVER_EXTENSION = _extension(
     ROLLOVER_STRATEGY, ("get_context_remaining", "new_context", "search_history")
 )
 COMPACT_EXTENSION = _extension(COMPACT_STRATEGY, ("get_context_remaining",))
-# One boundary per deploy: a pack bundles one strategy's extension, so the stock set carries only
-# the default. INSTALLED lists both only to let each test select either name over one registry.
 INSTALLED = (ROLLOVER_EXTENSION, COMPACT_EXTENSION)
 
 

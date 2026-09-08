@@ -46,7 +46,7 @@ test("below the narrow breakpoint the label stands over the prose, so a phone is
   const pair = screen.getByText("Raise").parentElement!;
   expect(pair.className).toContain("max-narrow:flex-col");
   expect(pair.className).toContain("max-narrow:gap-2xs");
-  // The gutter is a text measure and does not shrink, so on a phone it is wider than the row and
-  // squeezes the prose to zero width. Releasing the width is what makes the stack fit.
+  // The gutter is a text measure and does not shrink, so on a phone it is wider than the row and squeezes
+  // the prose to zero width.
   expect(screen.getByText("Raise").className).toContain("max-narrow:w-auto");
 });

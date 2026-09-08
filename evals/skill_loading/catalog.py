@@ -508,22 +508,6 @@ REPORT_PART1_PDF = WorkspaceFile("pdfs/report-part1.pdf", PDF_STUB)
 REPORT_PART2_PDF = WorkspaceFile("pdfs/report-part2.pdf", PDF_STUB)
 SCAN_PDF = WorkspaceFile("pdfs/scan.pdf", PDF_STUB)
 LOCKED_PDF = WorkspaceFile("pdfs/statement-locked.pdf", PDF_STUB)
-# The homepage routing set the redesign turns on, and the two strings the product itself sends.
-#
-# `SEED_PROMPT` reaches `application-homepage`; its three neighbours — making the app, building a
-# site, the chat app's shipped page — never do. `BUILD_ASK` says "your page", so it is agent-
-# relative: on a shipped app it must reach that app's own page skill, and this suite runs on the
-# workspace main agent, which is the chat app. An app a member built has no shipped skill, so the
-# same press reaches `application-homepage` there — measured by `new_application` A15, not here.
-#
-# Changing a page that already exists is not measured here either: this suite seeds no bound site,
-# so the honest answer to "move the search box on your page" is that there is no page, and an agent
-# that says so has routed correctly. `app_home_change` binds a real page and asks for a second
-# change, which is where that property lives.
-#
-# The three `homepage-*-noun` cases are `ufo_app_bench`'s own queries, verbatim. Each names a noun
-# `website-building` also claims — board, notes, brief — and two of them routed there instead,
-# which cost a Docker suite run to discover. A description that takes them back fails here first.
 CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "homepage-build-verbatim-seed",
@@ -832,10 +816,6 @@ CASES: tuple[SkillLoadCase, ...] = (
         "composition, and distribution.",
         expected="design-foundations",
     ),
-    # The house style answers two shapes of query: what our own look is, and hand me its values.
-    # Neither is a build, so neither routes to a skill that would pull `ufo-style` anyway. The
-    # negative is the neighbour that shares every word: changing the portal's own theme is a code
-    # change, and a skill describing the house colours must not take that query off `coding`.
     SkillLoadCase(
         "ufostyle-our-own-look",
         "What are our own colours and fonts — the ones the product itself is painted in? I am "
@@ -1202,9 +1182,6 @@ CASES: tuple[SkillLoadCase, ...] = (
         expected="website-building",
         forbidden=("website-building/webapp",),
     ),
-    # "App" is the word two skills answer to, and the pairs below are the confusion that decides
-    # it: one sentence differing in that word alone, and an app the member will open in a browser
-    # (`webapp-inventory`, which forbids `create-application`) against an app they will talk to.
     SkillLoadCase(
         "application-world-clock",
         "lets build an app that displays the current time across pacific, eastern, and utc time.",
@@ -1269,9 +1246,6 @@ CASES: tuple[SkillLoadCase, ...] = (
         expects_no_load=True,
         forbidden=("app-code-babysit", "create-application"),
     ),
-    # The lanes shell's handoff, and the sidebar shell's — the two shapes a first run actually
-    # sends. Each one now carries its own instructions, so the turn that answers it loads nothing:
-    # a case here that expected a skill would be asserting the round trip the briefs removed.
     SkillLoadCase(
         "goal-thread-revenue-builds-nothing",
         "I just set up this workspace. My business: Ledgerloop, bookkeeping for SaaS support "

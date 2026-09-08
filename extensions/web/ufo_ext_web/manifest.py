@@ -35,10 +35,6 @@ from ufo_ext_web.surface import (
 
 NAME = EXTENSION_WEB
 VERSION = "0.1.0"
-# What the portal reads a flag to decide, stated for the operator turning one on — they are reading
-# this line, not the boot read. Every key the portal reads is declared here, and a gate holds each
-# environment's `infra/envs/*/flags.tf` to exactly this set, so no key the portal reads is one the
-# flag service was never told about.
 FLAGS = (
     FlagSpec(key=APP_FLAGS["code"], what="The Code app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["issues"], what="The Issues app is listed in the portal."),

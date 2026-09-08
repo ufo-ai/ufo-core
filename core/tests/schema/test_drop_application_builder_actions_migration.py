@@ -42,9 +42,6 @@ def _seed(database_path: Path) -> sa.Engine:
         )
         for name, tools in (
             ("builder", ["bash", *RETIRED]),
-            # An allowlist that already held one of the replacements: 20260828010853 writes
-            # `deploy_website` beside the builder, so a downgrade removing every replacement takes
-            # this agent's own grant with it and nothing records that it was its own.
             ("builder-with-deploy", ["bash", *RETIRED, "action:site:deploy_website"]),
             ("deployer", ["bash", "action:site:deploy_website"]),
             ("plain", ["bash", "read"]),

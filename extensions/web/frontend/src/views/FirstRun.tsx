@@ -30,25 +30,14 @@ type ProviderTile = { name: string; label: string; summary: string; group: strin
 
 type Connector = ProviderTile & { installed: boolean };
 
-/** The read behind the run: the catalog, the installs this deploy can make, whether iMessage is
- *  offered, and the acts the member, memory and profile collections project for this member. The
- *  run draws the Slack install and the website step from it; the Connect page reads the same
- *  catalog for the tiles it offers. */
 export type FirstRunPayload = {
   providers: ProviderTile[];
   connectors: Connector[];
   actions: { member: ActionView[]; memory: ActionView[]; enrichment_profile: ActionView[] };
   model_key_held: boolean;
-  /* The domain a work address founded the workspace under, which the website step opens on; null
-     for a personal-mail workspace, whose founder is offered no website. The gateway's sign-up
-     policy holds the one list of personal-mail providers, so this is its verdict rather than a
-     second list here. */
   workspace_domain: string | null;
 };
 
-/** One member's row of the profile kind, as the object index projects it: what the enrichment
- *  learned about the member and the company behind their confirmed website. Every field is a
- *  scalar, which is the shape an index row takes. */
 type Profile = {
   name: string;
   summary: string;
@@ -68,9 +57,6 @@ type Profile = {
 const PROFILE_READ = "/objects/enrichment_profile";
 const CONFIRM_WEBSITE_ACTION = "confirm_website";
 
-/** The step the welcome leads to: the website, first on every deploy. Where the deploy runs the
- *  enrichment, Next confirms it and the business is read back from it; where it does not, the
- *  address is written to memory with the rest and nothing is looked up. */
 const WEBSITE_STEP = "website";
 const BUSINESS_STEP = "business";
 const POSITION_STEP = "position";
@@ -98,10 +84,6 @@ type Role = (typeof ROLES)[number];
 
 const OTHER_ROLE: Role = "Other";
 
-/** The role the profile's title suggests, by the levels and the role class the enrichment reports:
- *  an owner or a chief is the founder whatever their title says, and every other class maps to the
- *  one option that names it. A class outside the map suggests the founder, the option the run
- *  opens on, and the member picks another. */
 const ROLE_BY_CLASS: Record<string, Role> = {
   design: "Designer",
   marketing: "Marketing",
@@ -118,8 +100,6 @@ const DEFAULT_ROLE: Role = "Founder";
 
 const ROLE_JOIN = " / ";
 
-/** The roles the member picked, said as one: `Founder / Designer`, with Other standing for the
- *  words the member typed for it. Empty where Other is picked and still unnamed. */
 function saidRoles(roles: Role[], otherRole: string): string {
   const named = roles.map((role) => (role === OTHER_ROLE ? otherRole.trim() : role));
   return named.every(Boolean) ? named.join(ROLE_JOIN) : "";
@@ -131,9 +111,6 @@ function suggestedRole(profile: Profile): Role {
   return ROLE_BY_CLASS[profile.job_title_role ?? ""] ?? DEFAULT_ROLE;
 }
 
-/** What the enrichment made of the company, as the business box opens on it: the summary it holds,
- *  then the one line of facts under it. A row that learned nothing describes nothing, and the
- *  member writes the box themselves. */
 function describes(profile: Profile): string {
   const industry = profile.company_industry;
   const facts = [
@@ -147,48 +124,25 @@ function describes(profile: Profile): string {
     .join("\n");
 }
 
-/** What the opening line asks for once it has said who the member is: the workspace's first task,
- *  set up by the agent in the lane the dashboard opens on. The `competitive-intel` skill routes on
- *  it and finishes the setup in chat, so the member never meets an empty dashboard. */
 const FIRST_TASK = "Set up my first task: a daily competitive analysis.";
 
-/** What the member wrote about their business, as the sentence the chat opens on: the agent hears
- *  who it works for before its first turn rather than asking. The business is the whole of it, so
- *  the thread is founded the moment that box is answered and the turn runs while the member walks
- *  the rest of the run. */
 function opening(business: string): string {
   const said = (text: string) => text.trim().replace(/[.!?]+$/, "");
   return "I just set up this workspace. My business: " + said(business) + ". " + FIRST_TASK;
 }
 
-/** The connector catalog and the workspace's installs — the read behind both selectors. The first
- *  run reads it for the Slack step, that step waiting on an install reads it again for the single
- *  fact it is waiting on, and the Connect page reads it for the tiles it offers. */
 export const FIRST_RUN_READ = "/workspace/first-run";
 
-/** The memory collection's own act, and the one write the run makes. */
 const RECORD_FIRST_RUN_ACTION = "record_first_run";
 
-/** How often a waiting selector re-reads. The install happens on the provider's own pages, so
- *  nothing here can say when it lands — the wait is the member's, and it is measured in the
- *  seconds they spend over there rather than in the half-minute a pane showing records can hold a
- *  stale answer for. */
+/** The install happens on the provider's own pages, so nothing here can say when it lands — the wait is
+ *  measured in the seconds the member spends over there. */
 export const WATCH_MS = 3_000;
 
-/** The connections this member already holds, as the pool projects them. The tools step reads it
- *  while it waits: an account is granted on the provider's own pages, so the grant landing here is
- *  the only account of it this screen gets. */
 type PoolPayload = { connections: { provider: string }[] };
 
 const POOL_READ = "/connections";
 
-/** The tools a role suggests, in the order the step offers them: what somebody in that seat works
- *  in every day, named by the catalog's own provider names. The step draws only the ones this
- *  deploy's catalog carries, so a suggestion this deploy cannot grant is never offered.
- *
- *  Slack is on none of these lists. It installs for the whole workspace rather than for one member,
- *  and the run gives it a step of its own — offering it twice would ask one member to install it
- *  twice. */
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   Founder: ["gmail", "googlecalendar", "notion", "github", "stripe", "hubspot"],
   Designer: ["figma", "notion", "googledrive", "linear"],
@@ -204,12 +158,6 @@ const TOOLS_BY_ROLE: Record<Role, string[]> = {
   Other: ["gmail", "googlecalendar", "googledrive", "notion"],
 };
 
-/** What the tools step offers this member, in the order it offers them: the tools the picked roles
- *  name, the ones more roles name first and ties in the grid's own role order, then the rest of
- *  the catalog. Each one is drawn from the catalog so it carries the label and
- *  the sentence the connectors screen gives it, and Slack is left out because the run gives it a
- *  step of its own. A deploy whose catalog carries nothing offers nothing, and the step stands
- *  down. */
 function offered(roles: Role[], providers: ProviderTile[]): ProviderTile[] {
   const votes = new Map<string, number>();
   for (const role of roles) {
@@ -225,16 +173,6 @@ function offered(roles: Role[], providers: ProviderTile[]): ProviderTile[] {
   ];
 }
 
-/** What is top of mind for a member as they start, picked from a grid rather than typed: each pick
- *  is written to memory and opens a thread of its own, so the run hands back one conversation per
- *  pick beside the first task. A member whose concern is not on the grid names it under `Other`.
- *
- *  `said` is the pick in the member's own words, which is what memory records. `asks` is the rest
- *  of the sentence that thread opens on — the first step to take, and the trap to avoid taking it
- *  into. It is stated here rather than held in a skill because the run already knows which pick
- *  was made: routing a description the wizard could name outright buys a round trip and a class
- *  of failure, and buys nothing else. Each one is written as the member's own ask, because the
- *  member is the speaker on that thread and reads it as theirs. */
 type Goal = { label: string; said: string; asks: string };
 
 const GOALS: Goal[] = [
@@ -317,19 +255,13 @@ const GOALS: Goal[] = [
 
 const OTHER_GOAL = "Other";
 
-/** The goal the step opens with picked, until the member says otherwise. */
 const DEFAULT_GOAL = GOALS[0].label;
 
-/** The rest of the sentence an `Other` thread opens on: the run knows only the member's words for
- *  it, so the first step is to read what is already in reach and say what is not. */
 const OTHER_ASKS =
   "Start by saying what you can already read about it from whatever access I have granted, and " +
   "the first step you would take. Do not guess what you could not read — say so. Ask me at most " +
   "one thing.";
 
-/** The sentence one picked goal's thread opens on: who the member is, the goal in their words, and
- *  what taking the first step on it means. Nobody is reading this thread yet — the member is on the
- *  first task — so it asks for work done rather than for a plan. */
 function goalOpening(business: string, role: string, goal: Goal): string {
   const said = (text: string) => text.trim().replace(/[.!?]+$/, "");
   return (
@@ -344,10 +276,8 @@ function goalOpening(business: string, role: string, goal: Goal): string {
   );
 }
 
-/** The one memory the run writes, before any thread opens: who the workspace is for, their website
- *  where they gave one, and what they came for. Every thread recalls it, so none of them asks what
- *  the business does. The action bounds a body, so the goals fall away before the business does — a
- *  member with no goals still has a workspace that knows them. */
+/** The action bounds a body, so the goals fall away before the business does: a member with no goals
+ *  still has a workspace that knows them. */
 export function firstRunRecorded(
   business: string,
   website: string,
@@ -365,15 +295,10 @@ export function firstRunRecorded(
   return who.slice(0, budget);
 }
 
-/** What the member has answered so far, held in this tab across a reload so the step the address
- *  names is drawn with its content intact. One record under one key per workspace, written as it
- *  changes and dropped when the run ends or is closed. */
 type Answers = {
   business: string;
   businessWritten: boolean;
   website: string;
-  /* Whether the member has typed in or cleared the website box, which is when the workspace's
-     domain stops being offered in it. */
   websiteWritten: boolean;
   profile: Profile | null;
   profilePending: boolean;
@@ -382,7 +307,6 @@ type Answers = {
   otherRole: string;
   goals: string[];
   otherGoal: string;
-  /* The tools the member picked off their role's suggestions, by provider name. */
   tools: string[];
   declined: boolean;
 };
@@ -411,8 +335,6 @@ function freshAnswers(): Answers {
   };
 }
 
-/** The answers this tab holds for the member, or a fresh record where it holds none or the browser
- *  hands back no store. */
 function readAnswers(member: Member): Answers {
   const fresh = freshAnswers();
   try {
@@ -423,8 +345,7 @@ function readAnswers(member: Member): Answers {
   }
 }
 
-/** Hold the answers, or drop them where `answers` is null. A browser that refuses the write costs
- *  the member their answers on a reload, never the run. */
+/** A browser that refuses the write costs the member their answers on a reload, never the run. */
 function holdAnswers(member: Member, answers: Answers | null): void {
   try {
     const held = globalThis.sessionStorage;
@@ -435,9 +356,6 @@ function holdAnswers(member: Member, answers: Answers | null): void {
   }
 }
 
-/** The steps the run stands, in order: the website, the business and the roles, the tools the
- *  roles suggest, the Slack install wherever this deploy offers one, and the other surfaces once
- *  Slack is declined. */
 function revealedSteps(payload: FirstRunPayload, declined: boolean, tools: boolean): string[] {
   const slack = payload.connectors.some((row) => row.name === SLACK_STEP);
   return [
@@ -451,15 +369,11 @@ function revealedSteps(payload: FirstRunPayload, declined: boolean, tools: boole
   ];
 }
 
-/** An address naming a step the run does not stand — a bad link, the Slack step on a deploy without
- *  one — is written over with the step the screen draws in its place. */
 function Land({ step, onStep }: { step: string; onStep: (step: string) => void }) {
   useEffect(() => onStep(step), [step, onStep]);
   return null;
 }
 
-/** How long each row of the building screen waits for the one before it. The rows land one at a
- *  time so the member reads what the workspace holds as it fills, rather than a list all at once. */
 export const BUILD_STEP_MS = 700;
 
 /** A local slot has no Slack app to install, so a dev host offers a way onto the success screen. */
@@ -471,7 +385,6 @@ const SLACK_POINTS = [
   "One install for the whole workspace.",
 ];
 
-/** The way out of the run: the chat, with nothing asked. */
 function Close({ onClick }: { onClick: () => void }) {
   return (
     <Button
@@ -486,13 +399,8 @@ function Close({ onClick }: { onClick: () => void }) {
   );
 }
 
-/** The column a question and its answer stand in, read down from a left edge. */
 const STEP_COLUMN = "flex w-(--container-answer) max-w-full flex-col items-start gap-6xl";
 
-/** A question and its answer, read down one column, with the way back and the way on beneath. The
- *  keys say Next too: Cmd+Enter or Ctrl+Enter anywhere on the screen moves on, so a member typing
- *  an answer never reaches for the pointer, and a Next that is disabled or busy holds against the
- *  keys the way it holds against a press. */
 function Step({
   children,
   onBack,
@@ -544,21 +452,13 @@ function Step({
   );
 }
 
-/** A read that failed, stated the one way every fault on the run is: as a toast. The screen keeps
- *  its frame and its way out, and the sentence is raised once for the message, not once per
- *  render. */
 function Failed({ message, onToast }: { message: string; onToast: (title: string) => void }) {
   useEffect(() => onToast(message), [message, onToast]);
   return null;
 }
 
-/** The grid the picks stand on: as many across as the column holds at one pick's width, so the
- *  labels never wrap and a narrow window drops a column instead. */
 const CHOICES = "grid w-full grid-cols-[repeat(auto-fit,minmax(var(--container-choice),1fr))] gap-2xs";
 
-/** One option on a grid of picks: filled until it is on, then outlined in the accent with its
- *  check drawn. The role step, the tools step and the goals step share it, so a pick reads the same
- *  on each. Focus draws no outline of its own: the on state is the whole visual difference. */
 const CHOICE = cn(
   "group flex h-10 items-center justify-between gap-sm rounded-(--radius-answer)",
   "border border-transparent bg-fill px-2xl text-start text-label whitespace-nowrap text-ink",
@@ -567,19 +467,15 @@ const CHOICE = cn(
   "data-[state=on]:hover:bg-transparent",
 );
 
-/** The filled card a written answer is typed into, holding the box and whatever stands under it.
- *  Focus draws no outline: the filled ground is the field, on this step and on every other. */
 const ANSWER_CARD = "flex w-full flex-col gap-2xl rounded-(--radius-answer) bg-fill p-lg";
 
-/** The box inside the card: it draws no surface of its own, because a second surface inside the
- *  first states a box within a box. */
 const ANSWER_BOX = cn(
   "w-full resize-none border-0 bg-transparent p-0 font-sans text-label text-field-ink",
   "placeholder:text-ink-faint focus-visible:outline-none",
 );
 
-/** Every line on the welcome is trimmed to its caps, so a gap between two lines measures from the
- *  letters rather than from the half-leading around them — which is how the comp measures it. */
+/** Every line is trimmed to its caps, so a gap between two lines measures from the letters rather than
+ *  from the half-leading around them. */
 const CAP_TRIM = "[text-box:trim-both_cap_alphabetic]";
 
 const POINTS = [
@@ -597,10 +493,6 @@ const POINTS = [
   },
 ];
 
-/** The screen the run opens on: what the product is, in a title and three points, and the one act
- *  that begins the run. Closing it opens the chat instead. The points stand on the one plane the
- *  run lays in ink, so the type on them takes the pane's tone; the plane leaves a narrow screen,
- *  which has no room beside the title for it. */
 function Welcome({ onStart, onClose }: { onStart: () => void; onClose: () => void }) {
   return (
     <main className="grid h-dvh grid-rows-[auto_1fr] overflow-y-auto border-t border-edge">
@@ -657,14 +549,8 @@ function Welcome({ onStart, onClose }: { onStart: () => void; onClose: () => voi
   );
 }
 
-/** The screen the run ends on: the workspace filling with its shipped apps, one row at a time,
- *  then the assistant, then the way in. The apps are the roster's, drawn with their own marks; the
- *  timing is the screen's own, since the workspace already holds them.
- *
- *  An app this deploy withholds is not drawn at all. `hidden` says the deploy withholds the app
- *  from every list the portal draws, never that the app is unbuilt — the workspace holds it and a
- *  member arriving on its address opens it. So naming it here and marking it `Coming soon` stated
- *  something untrue about a shipped app, and this screen lists what the workspace offers. */
+/** `hidden` says the deploy withholds the app from every list the portal draws, never that the app is
+ *  unbuilt — the workspace holds it and a member arriving on its address opens it. */
 function Building({
   company,
   apps,
@@ -707,8 +593,6 @@ function Building({
       Creating…
     </li>
   );
-  /* One row per goal the run opened a thread on. The turns are already running, so the row reports
-     a thread that exists rather than one this screen is about to make. */
   const thread = (goal: string) => (
     <li
       key={goal}
@@ -771,15 +655,6 @@ function Building({
   );
 }
 
-/** The run, drawn the same on both shells. What a shell owns is where its chat lives, so the one
- *  act that touches a conversation is the shell's: `onDone` carries the member to the thread the
- *  first task runs on, named by the conversation the run founded. Every other act here — the
- *  enrichment read, the memory write, the thread per goal, the build screen — is the same wherever
- *  the run is drawn, so it lives here once.
- *
- *  The step the run is on is the address's: `step` names it and `onStep` moves it, so a reload
- *  lands where the member was. No step is the welcome; the build screen follows the finish and is
- *  named by no address. */
 export function FirstRun({
   agent,
   agents,
@@ -799,21 +674,14 @@ export function FirstRun({
 }) {
   const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ, 0);
   const [answers, setAnswers] = useState<Answers>(() => readAnswers(member));
-  /* Whether the tools step is standing its picks to connect rather than offering them. */
   const [connecting, setConnecting] = useState(false);
-  /* The accounts this member holds, read only while the step stands the picks to connect: a grant
-     lands on the provider's pages, so the pool is the one place this screen learns of it. */
   const pool = usePanelRead<PoolPayload>(connecting ? POOL_READ : null, 0, WATCH_MS);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [building, setBuilding] = useState(false);
-  /* The goals whose threads the run actually founded, which is what the build screen reports: a
-     thread the POST never opened is not named as opened. */
   const [threads, setThreads] = useState<string[]>([]);
-  /* The first task's own thread, founded as soon as the business is known and running behind every
-     step after it. The promise is held rather than the id, so the end of the run waits on the
-     founding it started rather than founding a second one. It is founded once: a member walking
-     back to edit the business is editing a box whose thread is already answering. */
+  /* The promise is held rather than the id, so the end of the run waits on the founding it started
+     rather than founding a second one. */
   const founding = useRef<Promise<string | null> | null>(null);
   const [thread, setThread] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(SILENT);
@@ -841,8 +709,6 @@ export function FirstRun({
       };
     });
   }, []);
-  /* The website box opens on the workspace's domain once the read says what it is, until the
-     member writes in the box themselves. */
   const domain = state.phase === "ready" ? state.payload.workspace_domain : null;
   useEffect(() => {
     if (!domain) return;
@@ -891,8 +757,6 @@ export function FirstRun({
           const confirm = payload.actions.enrichment_profile.find(
             (view) => view.name === CONFIRM_WEBSITE_ACTION,
           );
-          /** What these roles work in, then the rest of the catalog. The step stands only where
-           *  the catalog carries something, so a deploy with no connectors offers no empty grid. */
           const offers = offered(roles, payload.providers);
           const revealed = revealedSteps(payload, declined, offers.length > 0);
           const at = Math.max(0, revealed.indexOf(asked));
@@ -904,22 +768,12 @@ export function FirstRun({
             (view) => view.name === RECORD_FIRST_RUN_ACTION,
           );
           const speaks = chatSurface(agents) ?? agent;
-          /** The first task, said as soon as the business box is answered rather than at the end of
-           *  the run: the brief is the slowest thing the workspace does, and every step after this
-           *  one is time it can spend working instead of waiting. Nothing here is read — the member
-           *  is still on the run — and the thread is handed to them when they land. */
           const kickOff = () => {
             founding.current ??= openConversation(speaks.id, opening(business)).then((founded) => {
               setThread(founded);
               return founded;
             });
           };
-          /** What the run leaves behind, in the order the rest depends on: the memory every thread
-           *  recalls, then a thread per picked goal, then the first task's own thread, founded back
-           *  on the business step and waited on here for the lane the member lands in. The memory is
-           *  written first because a goal thread that starts before it would ask what the business
-           *  does. A refused write holds the step — the run has nothing to hand over without it, and
-           *  the member reads why. */
           const finish = async () => {
             if (busy) return;
             if (!write) {
@@ -969,8 +823,6 @@ export function FirstRun({
           const advance = () => {
             if (step === BUSINESS_STEP) kickOff();
             if (step === POSITION_STEP) answer({ rolePicked: true });
-            /* The tools step answers twice: the picks, then connecting them. A step that picked
-               nothing has nothing to connect and moves straight on. */
             if (step === TOOLS_STEP && tools.length && !connecting) return setConnecting(true);
             return at + 1 < revealed.length ? onStep(revealed[at + 1]) : void finish();
           };
@@ -978,10 +830,6 @@ export function FirstRun({
             if (step === TOOLS_STEP && connecting) return setConnecting(false);
             return onStep(at ? revealed[at - 1] : undefined);
           };
-          /** Confirms the website where the deploy can act on it, reads back what the enrichment
-           *  made of it, and suggests the role it found where the member has not picked one. A
-           *  refusal is stated and holds the step. A deploy without the act keeps the answer for the
-           *  memory the run writes and moves on. */
           const confirmWebsite = async () => {
             if (busy) return;
             if (!confirm) return advance();
@@ -1331,9 +1179,8 @@ function ProfileWatch({
   return null;
 }
 
-/** The link a connect request mints. The broker verb ends its turn on the handoff rather than in
- *  its answer, so the link is the turn's own `connect` frame and this waits for it; a turn that
- *  ends without one granted nothing, and the row says so. */
+/** The broker verb ends its turn on the handoff rather than in its answer, so the link is the turn's
+ *  own `connect` frame and this waits for it. */
 function mintedLink(turnId: string): Promise<string | null> {
   return new Promise((resolve) => {
     const stream = new EventSource(BASE + "/turns/" + turnId + "/stream");
@@ -1349,13 +1196,8 @@ function mintedLink(turnId: string): Promise<string | null> {
 
 const CONNECT_REFUSED = "No connection request was opened. Ask in chat to connect the account.";
 
-/** One picked tool, and the press that connects it. The act is the connectors screen's own: a
- *  workspace install where the provider takes one, and the broker's connect verb for every account
- *  that is the member's. The consent window opens on the press, before the round trip that mints
- *  the link, because a window opened after it has lost the gesture the browser opens one for.
- *
- *  An account already in the pool is drawn connected and offers no press: the run asks for what is
- *  missing and never for what the member already granted. */
+/** The consent window opens on the press, before the round trip that mints the link, because a window
+ *  opened after it has lost the gesture the browser opens one for. */
 function ConnectTool({
   agent,
   tile,
@@ -1398,8 +1240,6 @@ function ConnectTool({
       return;
     }
     if (consent) consent.location.href = url;
-    // The row keeps the link only for a member whose browser refused the window, so pressing once
-    // is the whole act for everybody else.
     setLink(consent ? null : url);
   }
 

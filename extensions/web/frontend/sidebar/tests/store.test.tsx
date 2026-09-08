@@ -22,7 +22,6 @@ const RADAR_ID = "44444444-4444-4444-8444-444444444444";
 const WIKI_ID = "66666666-6666-4666-8666-666666666666";
 const MEETINGS_ID = "77777777-7777-4777-8777-777777777777";
 
-/** A shipped app the workspace holds: the store lists it as installed, and it opens from its row. */
 const RADAR = {
   id: RADAR_ID,
   name: "radar",
@@ -33,11 +32,8 @@ const RADAR = {
   purpose: "Shows what your scheduled work found.",
 };
 
-/** An agent an extension shipped that is no app — it carries no page slug — and so is not the
- *  store's to list; the sidebar lists it beside the apps. */
 const RESEARCH = { id: SECOND_ID, name: "research", model: "auto", main: false, icon: "aten" };
 
-/** A shipped app the workspace removed: the store lists it as one to install. */
 const WIKI = {
   id: WIKI_ID,
   name: "wiki",
@@ -48,7 +44,6 @@ const WIKI = {
   archived_at: "2026-08-20T12:00:00Z",
 };
 
-/** A shipped app the deploy withholds: listed nowhere, whatever state its row is in. */
 const MEETINGS = {
   id: MEETINGS_ID,
   name: "meetings",
@@ -60,7 +55,6 @@ const MEETINGS = {
   archived_at: "2026-08-21T12:00:00Z",
 };
 
-/** An app a member built and archived: the Apps tab's to restore, not the store's to install. */
 const SCRATCH = {
   id: "99999999-9999-4999-8999-999999999999",
   name: "scratch",
@@ -77,7 +71,6 @@ const RESTORE_VIEW = {
   label: "Restore",
 };
 
-/** The store's rows by the name each leads with, in the order drawn. */
 function listed(store: HTMLElement): string[] {
   return within(store)
     .getAllByRole("row")
@@ -230,9 +223,6 @@ test("the App Creator row raises the wizard from the store", async () => {
   expect(location.hash).toBe("#/agents/builder");
 });
 
-/** The store is a screen the deploy offers by flag. Withheld, the apps list ends where it did — in
- *  App Creator, raising the wizard — and the store keeps its address, as every withheld screen does,
- *  so a member holding the link still lands on it. */
 test("a deploy that withholds the store ends the apps list in App Creator, and the store keeps its address", async () => {
   wire({
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Finances dash" }),

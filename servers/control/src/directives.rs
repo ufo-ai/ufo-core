@@ -1,5 +1,3 @@
-//! The server-driven directive wire rendered by the ufo terminal client.
-
 use std::collections::HashMap;
 
 pub const PROMPT: &str = ">";
@@ -9,12 +7,8 @@ const INSTALLED_HEADER: &str = "x-ufo-installed";
 const SCRIPT_HEADER: &str = "x-ufo-script";
 const INSTALLED: &str = "1";
 
-/// One directive line: the verb, then each field, tab-separated and newline-terminated.
-///
-/// A field's own tab or newline would end the field or the line, so both are escaped, and the
-/// backslash that spells them is escaped first — otherwise a literal `\t` a member typed would
-/// decode as a tab on the client. A carriage return is dropped rather than escaped: it renders as
-/// nothing, and a `\r\n` pair would otherwise reach the client as one escape plus a stray byte.
+/// A field's own tab or newline would end the field or the line, so both are escaped and the backslash
+/// that spells them is escaped first. A carriage return is dropped: `\r\n` would leave a stray byte.
 pub fn directive(verb: &str, fields: &[&str]) -> Vec<u8> {
     let mut line = String::from(verb);
     for field in fields {
@@ -43,11 +37,8 @@ pub fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Opt
         .map(|(_, value)| value.as_str())
 }
 
-/// `install` prepended to the screen for a client that is not installed (a fresh `curl | sh`,
-/// x-ufo-installed != "1") or one whose x-ufo-script version differs from `served`, the client this
-/// deploy carries. The client installs or updates itself and reports the served version afterwards,
-/// so the trigger self-limits. `served` is read from `CLIENT_VERSION_ENV` once at startup and
-/// threaded here — empty in local dev, where no version is served and no client is asked to update.
+/// `served` is read from `CLIENT_VERSION_ENV` once at startup and threaded here — empty in local dev,
+/// where no version is served and no client is asked to update.
 pub fn client_install(headers: &HashMap<String, String>, served: &str) -> Vec<u8> {
     if header_value(headers, INSTALLED_HEADER) != Some(INSTALLED) {
         return directive("install", &[]);
@@ -85,7 +76,6 @@ mod tests {
 
     #[test]
     fn the_backslash_is_escaped_before_what_it_spells() {
-        // A member who typed a literal backslash-t must not have it decode as a tab.
         assert_eq!(directive("say", &["a\\tb"]), b"say\ta\\\\tb\n");
     }
 

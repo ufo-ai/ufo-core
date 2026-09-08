@@ -21,20 +21,10 @@ from evals.harness.scorers import (
 from ufo.harness.sandbox.preview import PREVIEW_HOST
 
 FIXTURES = Path(__file__).parents[2] / "servers" / "preview" / "tests" / "fixtures"
-# The sandbox proxy's own line for a CONNECT it would not open (`client/src/egress.rs`). The read
-# path prints the render URL in every failure text, including one the service answered with a
-# status, so the host alone does not say the request never arrived — this line does.
 RENDER_TUNNEL_REFUSED = f"refused the tunnel to {PREVIEW_HOST}"
-# `xlsx_repl` runs `python3` inside the sandbox, and `openpyxl` reaches it from the sandbox image
-# (`sandbox/build_template.py`). The local carrier runs host subprocesses instead, where that
-# interpreter is the machine's own and carries no such package, so the import fails before the
-# workbook is opened. That is an environment the case does not describe, the same as a deploy
-# running no preview service.
 REPL_PACKAGE_MISSING = "ModuleNotFoundError: No module named 'openpyxl'"
 DOCX_PATH = "/workspace/fixture-layout.docx"
 XLSX_PATH = "/workspace/fixture-print-layout.xlsx"
-# The heading each fixture prints on its second page: the answer the case asks for, and the text a
-# read has to carry back for the page to have come through the render service rather than a shell.
 DOCX_PAGE_TWO = "DOCX layout page two"
 XLSX_PAGE_TWO = "XLSX print layout page two"
 DOCX = WorkspaceFile(

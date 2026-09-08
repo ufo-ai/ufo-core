@@ -51,9 +51,7 @@ test("a card stacks its parts, each drawn as its own slot", () => {
   ]);
 });
 
-/** jsdom lays nothing out, so the class is the contract: a head without a fixed height is a band
- *  its title's line box opens, and a grid of cards then aligns title to title only while every
- *  title runs to the same length. */
+/** jsdom lays nothing out, so the class is the contract. */
 test("the head is one glyph-high line, with the act at its trailing end", () => {
   render(
     <Card>
@@ -112,8 +110,6 @@ test("the ground is the tone's, and only the default tone draws a hairline", () 
   expect(tinted).toContain("border-transparent");
   expect(tinted).not.toContain("border-edge");
   expect(tinted).not.toContain("bg-card");
-  // The tint is where the card ends, so the hairline goes and the box it measured stays: dropping
-  // the border outright would set a tinted card two pixels narrower than the plain one beside it.
   expect(tinted).toContain("border");
 });
 

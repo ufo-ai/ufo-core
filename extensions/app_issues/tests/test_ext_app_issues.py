@@ -31,7 +31,6 @@ def test_the_two_features_run_off_two_named_tasks() -> None:
     assert app_issues.ISSUES_APP_AGENT.setup.schedule.name == app_issues.TRIAGE_TASK
     assert f"`scheduled_task` named `{app_issues.IMPLEMENT_TASK}`" in app_issues.ISSUES_APP_PROMPT
     page = (SKILL_DIR / "app.tsx").read_text()
-    # The page draws both: what triage answered, and what a member approved for implementing.
     assert '"Triaged"' in page
     assert '"Approved to implement"' in page
     assert app_issues.IMPLEMENT_LABEL in page

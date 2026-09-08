@@ -9,8 +9,7 @@ const AN_HOUR_AGO = new Date(Date.now() - 3_600_000).toISOString();
 const A_WEEK_BACK = "2026-08-07T09:30:00Z";
 
 /** jsdom lays nothing out, so every width reads 0 and no line is ever cut. These stub the two a
- *  travelling line measures — the words' own width, and the measure the row leaves them — which is
- *  the whole input to how far it goes. */
+ *  travelling line measures: the words' own width, and the measure the row leaves them. */
 function laidOut(words: number, measure: number): void {
   vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(measure);
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
@@ -39,8 +38,6 @@ test("a line too long for the row travels out to its tail while the pointer is o
   await userEvent.hover(screen.getByRole("button"));
 
   await waitFor(() => expect(words.getAttribute("style")).toContain("translateX(-400px)"));
-  // The ellipsis goes with it: a mark saying there is more has nothing to say while the more is
-  // being read.
   expect(words.parentElement?.className).toContain("text-clip");
 });
 
@@ -91,9 +88,6 @@ test("the trailing note travels with the line, as the one thing the row says", a
   );
 });
 
-/** The stamp is the distance from now while that is what says a row is recent, and the day itself
- *  once the day is what matters — a few characters either way, so the words the row came to say
- *  keep the width a full date would take. */
 test("a recent row states how long ago it moved, not the date", () => {
   render(<PressRow line={TITLE} when={AN_HOUR_AGO} onPress={() => {}} />);
 

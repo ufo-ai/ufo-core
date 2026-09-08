@@ -151,9 +151,6 @@ METRICS_APP_SCHEDULE = SetupSchedule(
         "report. State the rule each measure was counted by, and what could not be counted."
     ),
     cadences=(
-        # The report is read at the start of a working week, so the weekday-morning cadence
-        # is offered first. The hourly one is absent: nobody reads how the quarter is going hourly,
-        # and a report nobody reads is a turn nobody asked for.
         SetupCadence(hour=9, weekdays=(1,)),
         SetupCadence(hour=9, weekdays=(1, 2, 3, 4, 5)),
         SetupCadence(hour=9),

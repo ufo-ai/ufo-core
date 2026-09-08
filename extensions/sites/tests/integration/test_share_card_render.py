@@ -337,8 +337,6 @@ def test_the_card_is_the_measured_composition_at_the_size_every_platform_draws(
     assert drawn.format == "JPEG"
     assert drawn.info.get("progressive") == 1
     pixels = drawn.convert("RGB")
-    # The panel's ground fills the left, and the site's own page fills the right: the card is a
-    # split, not a picture with a caption over it.
     assert _close(pixels.getpixel((PANEL_WIDTH // 2, CARD_HEIGHT - 40)), _rgb(VOID))
     assert not _close(pixels.getpixel((CARD_WIDTH - 40, 8)), _rgb(VOID))
 
@@ -358,7 +356,6 @@ def test_a_site_with_only_a_stored_page_shot_still_gets_a_card(tmp_path: Path) -
     drawn = Image.open(card).convert("RGB")
     assert drawn.size == (CARD_WIDTH, CARD_HEIGHT)
     source = Image.open(stored).convert("RGB")
-    # 1:1 from the top-left: the page's pixels land where the box starts, unscaled.
     for point in ((60, 12), (300, 120), (SHOT_WIDTH - 20, CARD_HEIGHT - 20)):
         assert _close(drawn.getpixel((PANEL_WIDTH + point[0], point[1])), source.getpixel(point))
 

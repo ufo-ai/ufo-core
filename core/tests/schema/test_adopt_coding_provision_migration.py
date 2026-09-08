@@ -95,14 +95,10 @@ def test_the_reviewer_moves_extension_and_keeps_everything_else(tmp_path: Path) 
 
     command.upgrade(config, ADOPT)
     assert _provenance(engine) == [
-        # The shipped row takes the app's name.
         ("a", "code", "app_code", "code"),
         ("b", "radar", "app_radar", "radar"),
-        # A member's own name for the row stands.
         ("c", "code-review-narrowed", "app_code", "code"),
-        # An archived row moves and stays archived under the name it was put away as.
         ("d", "~archived-d", "app_code", "code"),
-        # `code` is taken in this workspace, so the reviewer keeps the name it had.
         ("e", "code-review", "app_code", "code"),
         ("f", "code", None, None),
     ]

@@ -28,9 +28,6 @@ export function clearDraft(chatId: string): void {
   store()?.removeItem(DRAFT_PREFIX + chatId);
 }
 
-/** Carry a held draft to another chat's key. A first message opens a conversation whose key is not
- *  the one the composer was drafting under, and the composer that key remounts reads its draft on
- *  the spot — so this lands it rather than leaving it under a key nothing reads again. */
 export function moveDraft(fromChatId: string, toChatId: string): void {
   flushDrafts();
   const held = readDraft(fromChatId);

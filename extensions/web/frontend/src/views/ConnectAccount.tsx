@@ -40,8 +40,6 @@ type Account = { provider: string; label: string; connected: boolean };
 type Grant = { user_code: string; verification_uri: string; interval: number } | { error: string };
 type Claim = { status: "pending" | "connected" | "refused"; message?: string };
 
-/** Every answer these routes give, told apart from a session that ended and from a workspace that
- *  could not be reached — a member who is signed out must read that, not "try again". */
 async function ask<T>(path: string, fields?: Record<string, string>): Promise<T | string> {
   const res = await fetch(BASE + path, {
     method: fields ? "POST" : "GET",
@@ -56,9 +54,8 @@ async function ask<T>(path: string, fields?: Record<string, string>): Promise<T 
   if (!res) return NETWORK_REFUSAL;
   if (res.status === 401) return SIGN_IN_REFUSAL;
   if (!res.ok) return NETWORK_REFUSAL;
-  /** A body that will not parse is read the same as a workspace that could not be reached: a proxy
-   *  answering an error page still answers 200, and a rejection escaping here reaches nothing that
-   *  could handle it. */
+  /** A proxy answering an error page still answers 200, and a rejection escaping here reaches nothing
+   *  that could handle it. */
   const answered = await res.json().catch(() => null);
   return answered === null ? NETWORK_REFUSAL : (answered as T);
 }
@@ -88,9 +85,6 @@ function Away({ href, children }: { href: string; children: ReactNode }) {
   );
 }
 
-/** The ChatGPT asking: the grant OpenAI opens, the code the member types on its own page, and the
- *  polling that carries them on the moment they approve. Step one is the account setting the grant
- *  needs — it is off by default, and it is the most common reason the ask is refused. */
 function Chatgpt({ onConnected }: { onConnected: () => void }) {
   const [grant, setGrant] = useState<Grant | null>(null);
   const [refusal, setRefusal] = useState("");
@@ -112,9 +106,8 @@ function Chatgpt({ onConnected }: { onConnected: () => void }) {
   }, []);
 
   const code = grant && !("error" in grant) ? grant : null;
-  /** The poll is armed by the code and by nothing else. Held on the interval's own dependencies it
-   *  would be torn down and rebuilt on every render the mount above happens to do, and an interval
-   *  that never survives to its own tick never fires at all. */
+  /** Armed by the code and nothing else: held on the interval's own dependencies it would be rebuilt on
+   *  every render the mount above does, and an interval that never survives to its own tick never fires. */
   const settle = useRef(onConnected);
   settle.current = onConnected;
   useEffect(() => {
@@ -163,8 +156,6 @@ function Chatgpt({ onConnected }: { onConnected: () => void }) {
   );
 }
 
-/** The Claude asking: an authorization the member finishes at Anthropic, whose page shows them a
- *  code to carry back — nothing returns to this host, so the field is how it arrives. */
 function Claude({ onConnected }: { onConnected: () => void }) {
   const [url, setUrl] = useState("");
   const [pasted, setPasted] = useState("");
@@ -223,16 +214,6 @@ function Claude({ onConnected }: { onConnected: () => void }) {
   );
 }
 
-/** The coding accounts a member can connect, one act per provider, each opening that provider's
- *  asking in a dialog over whatever screen mounted this. The first run and the settings panel mount
- *  the same component and read the same rows, so neither can drift from the other about what a
- *  member holds. `onConnected` lets a mount react — the first run marks its step answered — while
- *  the acts here stay this component's own.
- *
- *  `stacked` is the first run's shape: one full-width act per provider, the height and pill of every
- *  other act in that flow, and a connected account standing as the completed signal rather than as
- *  something to manage — a member is connecting there, not maintaining. Settings draws the same
- *  accounts as a table row, where replacing and dropping one are the acts they came for. */
 export function ConnectAccount({
   onConnected,
   stacked,
@@ -256,13 +237,8 @@ export function ConnectAccount({
     void reread();
   }, [reread]);
 
-  /** An account that landed does not take the asking down with it. The member watched a code go
-   *  somewhere else and come back approved, so they are shown that it took and close the dialog
-   *  themselves — a screen that vanishes on its own leaves them unsure which of the two happened. */
   const settled = useCallback(() => setLanded(true), []);
 
-  /** Either way out of the asking. What landed is read back here rather than on the act that landed
-   *  it, so a member who connected and then pressed Cancel is still holding the account. */
   const close = useCallback(async () => {
     setAsking(null);
     if (!landed) return;

@@ -1,29 +1,3 @@
-//! The signup Slack Connect invitation: one operator-workspace channel per approved customer.
-//!
-//! A granted email domain — one `ufo-control invite` minted — earns one public channel in UFO's
-//! *own* Slack workspace and one Slack-generated Slack Connect invitation to the address the grant
-//! names. It lands at approval, before that customer signs up, so the channel is open by the time
-//! they read the invitation email. Approval never waits for any of it: the grant is the durable
-//! event source, so there is no enqueue transaction to lose, and this workflow polls in the
-//! background on either gateway replica. A member joining an existing workspace never earns a
-//! grant, so the same eligibility test excludes them.
-//!
-//! The domain is the key, not the grant. One domain is one customer and one channel, so re-granting
-//! a domain finds its row already there and sends nothing. Keying on the grant instead would resend
-//! on every re-grant, and would lose the row entirely when `InviteCodes::mint` clears an expired
-//! grant out of the way.
-//!
-//! The customer's channel is the idempotency boundary, and `CHANNEL_NAME_SQL` is what makes it one.
-//! The name it derives is `ext-<domain-label>-ufo` — the domain's first label only, never
-//! an email address, since the local part and the TLD both stay out of it — and it derives it where
-//! the grant lives, so materializing stays one statement and every replica reaches the same name.
-//! It is bounded to 77 characters, inside Slack's 80-character limit.
-//!
-//! Dropping the TLD means the name is *not* unique across customers: `acme.com` and `acme.io` both
-//! derive `ext-acme-ufo`. That is a deliberate readability trade. The `channel_name` unique
-//! constraint is what keeps it safe — the second customer's row is skipped rather than created, so
-//! two customers can never be pointed at one channel. A skipped customer needs a channel by hand.
-
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 
@@ -69,7 +43,6 @@ pub const DDL: &[&str] = &[
        on ufo_control.slack_connect_delivery (state, next_attempt_at)",
 ];
 
-/// The channel name derived where the grant lives, so every replica reaches the same one.
 pub fn channel_name_sql() -> String {
     format!(
         "'{CHANNEL_PREFIX}-' \
@@ -79,11 +52,6 @@ pub fn channel_name_sql() -> String {
     )
 }
 
-/// Every organization domain that earned a channel: one holding a live or spent domain grant,
-/// plus one whose domain claim actually opened a workspace. Personal-mail subjects name one
-/// address rather than a customer domain and earn no shared channel, and a subject that is the
-/// member's own address is exactly what names one — both ledgers file a row under its subject, so
-/// the key a channel is derived from is a customer domain or nothing.
 pub fn earned_sql() -> String {
     format!(
         "select email_domain, email, created_at from {INVITE_TABLE} \
@@ -109,9 +77,6 @@ pub fn materialize_sql() -> String {
     )
 }
 
-/// Take one due row under a lease. `for update skip locked` is what lets both replicas poll the
-/// same table without either waiting on the other, and a claimed row whose lease lapsed is taken
-/// again — the worker holding it did not survive.
 pub fn claim_sql() -> String {
     format!(
         "with candidate as (\
@@ -139,9 +104,6 @@ pub enum DeliveryError {
     Query(#[from] tokio_postgres::Error),
 }
 
-/// The operator recovery surface: re-arm one failed row once its cause is corrected, returning when
-/// it last changed so the verb can report how long it sat. None when nothing was re-armed — a
-/// delivered row is untouchable, and this never speaks to Slack itself.
 pub async fn rearm_failed_delivery(
     pool: &Pool,
     email_domain: &str,
@@ -200,11 +162,6 @@ pub const GREETING: &str = "This channel is shared with ufo. Anyone at {email_do
                             at https://{apex_host}/login, or from a terminal with \
                             `curl -fsSL https://{apex_host}/ufo | sh`.";
 
-/// What a Slack call answered with. `Transient` is proven external uncertainty — transport, timeout,
-/// 429, 5xx, or a documented transient Slack error — and returns the row to `pending` behind a
-/// bounded schedule. `Terminal` is authentication, scope, plan, policy, recipient, or channel state
-/// no retry can fix, plus any reconciliation Slack refuses to expose; the row lands `failed` for
-/// operator review.
 #[derive(Debug, thiserror::Error)]
 pub enum SlackError {
     #[error("{message}")]
@@ -214,8 +171,6 @@ pub enum SlackError {
     },
     #[error("{0}")]
     Terminal(String),
-    /// `conversations.create` refused the deterministic name: this customer's channel already
-    /// exists, so the exact name resolves its ID.
     #[error("{0}")]
     NameTaken(String),
 }
@@ -229,8 +184,6 @@ impl SlackError {
     }
 }
 
-/// Outbound Slack Web API calls under one bot token. Every payload is bounded next to its call, and
-/// no message this raises carries the token — `redact` is applied to everything written to a row.
 #[derive(Clone)]
 pub struct SlackConnectClient {
     bot_token: String,
@@ -238,7 +191,6 @@ pub struct SlackConnectClient {
 }
 
 impl std::fmt::Debug for SlackConnectClient {
-    /// The token never reaches a repr, so a traceback or a captured local cannot print it.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SlackConnectClient")
@@ -277,8 +229,6 @@ impl SlackConnectClient {
         text_at(&payload, &["channel", "id"])
     }
 
-    /// The exact deterministic name, archived channels included — a name-taken refusal names one of
-    /// them. Anything else is inconsistent channel state, not a retryable condition.
     pub async fn channel_id_by_name(&self, name: &str) -> Result<String, SlackError> {
         let mut cursor = String::new();
         for _ in 0..MAX_PAGES {
@@ -310,14 +260,6 @@ impl SlackConnectClient {
         )))
     }
 
-    /// The *live* Slack Connect invitation for `channel_id`, or None when this channel has none.
-    ///
-    /// Slack keeps listing an invitation after it dies — archiving a channel flips its invite to
-    /// `revoked` and leaves it in the list — so matching the channel alone would read a dead
-    /// invitation as proof one was sent and settle a customer who never got a working invite. Only
-    /// the live statuses reconcile; the dead ones mean it is safe to invite again, which is evidence
-    /// rather than a blind duplicate. A status this code does not recognize, and a walk that exceeds
-    /// its bound, are both ambiguous — they raise for operator review.
     pub async fn outgoing_invite_id(&self, channel_id: &str) -> Result<Option<String>, SlackError> {
         let mut cursor = String::new();
         let mut unrecognized: std::collections::BTreeSet<String> = Default::default();
@@ -505,7 +447,6 @@ fn text_at(payload: &serde_json::Value, path: &[&str]) -> Result<String, SlackEr
     }
 }
 
-/// One row this worker leased.
 #[derive(Debug, Clone)]
 pub struct Delivery {
     pub email_domain: String,
@@ -518,7 +459,6 @@ pub struct Delivery {
     pub attempts: i32,
 }
 
-/// Another replica owns this row now, so this worker abandons its writeback untouched.
 #[derive(Debug, thiserror::Error)]
 #[error("{0} is no longer leased by this worker")]
 pub struct LeaseLost(String);
@@ -534,14 +474,6 @@ pub struct SlackConnectInviter {
 }
 
 impl SlackConnectInviter {
-    /// The gateway's background task: sweep, and wait a whole interval only when nothing was due.
-    /// Only cancellation ends this loop. Nothing a sweep raises retires the poller — a dead poller
-    /// would strand every later signup's row behind a green `/healthz`, and gateway health stays
-    /// clear of Slack — so every fault lands in the row instead.
-    ///
-    /// A sweep that fails before any row is claimed — our own database, not Slack — is reported with
-    /// its consecutive count rather than masked: a quiet tick logs nothing at all, so one fault is a
-    /// blip and a climbing count is an internal fault to root-cause.
     pub async fn run(self) {
         let mut consecutive_failures = 0_u32;
         loop {
@@ -565,8 +497,6 @@ impl SlackConnectInviter {
         }
     }
 
-    /// Materialize every granted domain, then carry one due row as far as Slack allows. True when a
-    /// row was leased, so a busy queue drains without waiting.
     pub async fn poll(&self) -> Result<bool, DeliveryError> {
         self.materialize().await?;
         let Some(delivery) = self.claim().await? else {
@@ -588,12 +518,6 @@ impl SlackConnectInviter {
         Ok(true)
     }
 
-    /// One replica materializes at a time, and no single grant can poison the batch. The insert is
-    /// one `INSERT ... SELECT`, so any unique violation would roll back every row it was inserting
-    /// rather than only the offender — and because the select re-enumerates every grant each cycle,
-    /// one bad row would stall delivery for everyone forever. So the conflict clause arbitrates
-    /// *all* unique constraints, not only the primary key. The advisory lock stops two replicas
-    /// racing on the same insert, which the primary-key arbiter alone did not cover.
     async fn materialize(&self) -> Result<(), DeliveryError> {
         let mut connection = self.pool.get().await?;
         let transaction = connection.transaction().await?;
@@ -625,11 +549,6 @@ impl SlackConnectInviter {
         }))
     }
 
-    /// Hold the lease across an in-flight Slack call. Losing the compare-and-set is silent — the
-    /// delivery path's own writes discover it and abandon — but a renewal that cannot *reach* the
-    /// database is reported and retried on the next tick rather than ending the task. A dead renewal
-    /// would let the lease lapse mid-delivery, and a second replica claiming the row while this
-    /// one's `inviteShared` is still in flight is how a duplicate invitation gets sent.
     async fn renew_lease(&self, email_domain: String) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(LEASE_RENEW_SECONDS)).await;
@@ -705,9 +624,6 @@ impl SlackConnectInviter {
         Ok(())
     }
 
-    /// Every delivery re-proves the token's workspace before anything is mutated. A memo would buy
-    /// one Slack call per new customer and cost the guarantee: a token rotated to another workspace
-    /// would keep delivering on a replica's stale word until that replica restarted.
     async fn verify_team(&self) -> Result<(), Carried> {
         let team_id = self.slack.team_id().await?;
         if team_id != self.team_id {
@@ -734,9 +650,6 @@ impl SlackConnectInviter {
         Ok(channel_id)
     }
 
-    /// A row whose previous attempt reached Slack reconciles first: an outgoing invitation names
-    /// itself, and an externally shared channel proves one landed even where the invitation is no
-    /// longer listed. Only a fresh delivery skips these rate-limited reads.
     async fn invite(
         &self,
         delivery: &Delivery,
@@ -776,9 +689,6 @@ impl SlackConnectInviter {
         Ok(Some(invitation_id))
     }
 
-    /// One message naming where this customer signs in, posted before the row settles so a transient
-    /// failure retries it. The marker is written after Slack answers — a duplicate message costs a
-    /// reader one repeated line, while a missing one leaves a channel that names nowhere to sign in.
     async fn greet(&self, delivery: &Delivery, channel_id: &str) -> Result<(), Carried> {
         let text = GREETING
             .replace("{email_domain}", &delivery.email_domain)
@@ -840,8 +750,6 @@ impl SlackConnectInviter {
         written.map_err(carried_lease)
     }
 
-    /// Every writeback is a compare-and-set on this worker's own lease, so a row a second replica
-    /// took is left exactly as that replica left it.
     async fn write(
         &self,
         email_domain: &str,
@@ -876,12 +784,10 @@ fn carried_lease(carried: Carried) -> LeaseLost {
     }
 }
 
-/// A Postgres `interval` built from seconds, so the lease and the backoff bind as one parameter.
 fn pg_interval(seconds: i64) -> String {
     format!("{seconds} seconds")
 }
 
-/// What a delivery step can carry back: a Slack verdict, a lost lease, or our own database failing.
 #[derive(Debug, thiserror::Error)]
 enum Carried {
     #[error(transparent)]
@@ -900,9 +806,6 @@ pub enum SlackConfigError {
     NotABoolean(String),
 }
 
-/// None when the deploy has not enabled signup Slack Connect invitations. Enabled, the token and the
-/// expected operator team are required here — at gateway startup — so a half-configured deploy never
-/// reaches Slack. Garbage in the switch fails loud and never defaults to on.
 pub fn slack_connect_from_env(
     pool: Pool,
     apex_host: String,

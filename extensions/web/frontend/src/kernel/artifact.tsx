@@ -24,15 +24,9 @@ const PDF_MEDIA_TYPE = "application/pdf";
 const HTML_CSP =
   "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">";
 
-/** What a picture whose link has expired says. Both containers that draw a shared picture — the
- *  shelf's sheet and the viewer that fills the window — say it, and the answer is the same in each:
- *  the src is a signed URL a listing minted, so reading the page again mints a live one. */
 export const PICTURE_DID_NOT_LOAD =
   "The image did not load. Its link may have expired — reload the page.";
 
-/** The code and data types the store serves under `application/*` whose bytes are characters —
- *  what it names a `.json`, `.sh`, `.xsl`, `.yaml`, `.toml` or `.ts` share. It types a file by its
- *  extension, so a page reading media type alone would call these unreadable. */
 const TEXT_APPLICATION_MEDIA = new Set([
   "application/json",
   "application/toml",
@@ -42,8 +36,6 @@ const TEXT_APPLICATION_MEDIA = new Set([
   "application/yaml",
 ]);
 
-/** Whether a media type is text the page can show as text — every `text/*` type, and the code and
- *  data types `application/*` carries. */
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || TEXT_APPLICATION_MEDIA.has(mediaType);
 }
@@ -57,12 +49,6 @@ const SPREADSHEET_MEDIA_TYPES = new Set([
 const OFFICE_MEDIA_PREFIX = "application/vnd.openxmlformats-officedocument";
 const WORD_MEDIA_TYPE = "application/msword";
 
-/** What a file with no picture of its own is drawn as: one glyph for the family its media type
- *  falls in. The families are the ones the listing narrows by — image, document, everything else —
- *  so a member who filters to Documents sees the glyph they filtered on, and a spreadsheet and a
- *  page are told apart inside that family rather than sharing one mark. A document is anything
- *  readable as text, an office file, or a Word file, the same answer the listing files by. A file
- *  the map does not place takes the plain sheet, which claims nothing about what is in it. */
 export function MediaIcon({ mediaType }: { mediaType: string }) {
   if (mediaType.startsWith("image/")) return <IconPhoto className="size-icon" aria-hidden />;
   if (mediaType === PDF_MEDIA_TYPE) return <IconFileTypePdf className="size-icon" aria-hidden />;
@@ -79,35 +65,23 @@ export function MediaIcon({ mediaType }: { mediaType: string }) {
   );
 }
 
-/** A file shared into a conversation, as every screen that reads one names it. The shelf carries
- *  more about it and a run's own sheet carries less; what is here is what drawing the file itself
- *  takes. */
 export type SharedFile = {
   filename: string;
   subject: string | null;
   media_type: string;
   size_bytes?: number;
   url: string | null;
-  /** The picture the store rendered for a file that is not itself one — a document's first page. */
   preview_url: string | null;
 };
 
 type FilePages = {
-  /** The pages rendered so far as `data:` URLs, in page order. */
   pages: string[];
-  /** How many pages the whole file has — 0 until a render lands. */
   pageCount: number;
-  /** A later batch the member asked for is still rendering. */
   loadingMore: boolean;
 };
 
 const NO_PAGES: FilePages = { pages: [], pageCount: 0, loadingMore: false };
 
-/** What an opened file is drawn as its own pages rather than as the one picture the store rendered:
- *  the media the preview route paginates and the sheet has no other way to read. A picture or a
- *  video renders as a single frame however many pages are asked of it, and text is drawn as its
- *  characters, so sending those bytes to the route would spend a render on the cover already in
- *  hand. */
 const PAGED_MEDIA_TYPES = new Set([
   PDF_MEDIA_TYPE,
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -115,9 +89,8 @@ const PAGED_MEDIA_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]);
 
-/** One batch of a file's pages from the page asked for, rendered by the preview service. The page
- *  draws the PNGs it returns as `data:` URLs — the page's policy admits those and no `blob:` at
- *  all — so it never draws the document's own bytes. */
+/** The page draws the PNGs the service returns as `data:` URLs — the page's policy admits those and no
+ *  `blob:` at all — so it never draws the document's own bytes. */
 async function renderPages(
   bytes: Blob,
   filename: string,
@@ -140,17 +113,8 @@ async function renderPages(
   };
 }
 
-/** The pages of an opened document, a batch at a time — the route answers with a batch of its own
- *  size (`PREVIEW_PAGE_BATCH`), so opening a 200-page report costs eight pages rather than two
- *  hundred. The file's own bytes are fetched once and held for as long as it is open, because the
- *  render route is stateless: every batch carries the bytes again. A file the store rendered no
- *  preview for is one the service will not render either, so nothing is fetched for it. A batch the
- *  service refuses leaves the pages already drawn and ends the asking, rather than offering an act
- *  that fails the same way again.
- *
- *  The bytes in hand are the open file's identity: a batch commits only while they are still the
- *  ones held, so pressing another file drops the batch the last one was still rendering rather than
- *  drawing it under the new file's name. */
+/** The route answers with a batch of its own size (`PREVIEW_PAGE_BATCH`). The render route is stateless,
+ *  so every batch carries the bytes again, and they are the open file's identity. */
 function useFilePages(file: SharedFile): FilePages & { loadMore: () => void } {
   const [state, setState] = useState<FilePages>(NO_PAGES);
   const held = useRef<Blob | null>(null);
@@ -198,10 +162,6 @@ function useFilePages(file: SharedFile): FilePages & { loadMore: () => void } {
   return { ...state, loadMore };
 }
 
-/** The file itself, drawn once for every screen that reads one: its own picture where it has one,
- *  its characters where it is text, and a plain statement where it is neither — the download is
- *  then the whole of what a member can do with it, and a page that drew nothing there would leave
- *  them waiting on a preview that is never coming. */
 function FileBody({ file }: { file: SharedFile }) {
   if (isTextMedia(file.media_type)) {
     return (
@@ -216,14 +176,6 @@ function FileBody({ file }: { file: SharedFile }) {
   return <FilePicture file={file} />;
 }
 
-/** A picture at the size the sheet gives it, and a document as the pages it is: the sheet is where
- *  a member reads the file rather than recognizes it, so a document longer than one page stands
- *  here as its pages, head to foot down the sheet's own scroll, with the act that renders the next
- *  batch under the last of them. A file of one page is drawn as the one picture the store already
- *  rendered, so nothing changes for a cover.
- *
- *  A picture whose link has expired states that, because the src is a signed URL the listing minted
- *  and the member's answer is to read the listing again. */
 function FilePicture({ file }: { file: SharedFile }) {
   const [failed, setFailed] = useState(false);
   const { pages, pageCount, loadingMore, loadMore } = useFilePages(file);
@@ -275,17 +227,6 @@ function FilePicture({ file }: { file: SharedFile }) {
   );
 }
 
-/** What the file's own bytes are fetched by, held at the top right of the sheet's own body. The
- *  drawer opens over a page that wears its acts in that same corner — the artifacts screen puts a
- *  menu and an edit there — and the topmost of two controls at one corner is the only one a member
- *  can press. A row below the title the act is the drawer's own and reaches nothing else.
- *
- *  It floats rather than taking a row, so what the file is flows up beside it instead of starting
- *  under it: the button is one line tall and the facts are two, and a column that spent a whole row
- *  on a control would push the words the member came to read below the fold of a narrow drawer.
- *
- *  It is drawn only where the file answers a url: a link to nothing is a control the member presses
- *  once and learns nothing from. */
 function FileDownload({ file }: { file: SharedFile }) {
   if (!file.url) return null;
   return (
@@ -299,8 +240,6 @@ function FileDownload({ file }: { file: SharedFile }) {
   );
 }
 
-/** A shared file opened in a Sheet: its name, subject, type and size, a download act, and the
- * file's body drawn by its media type. */
 export function FileSheet({
   file,
   onClose,
@@ -319,8 +258,6 @@ export function FileSheet({
     .join(" · ");
   return (
     <Sheet open onClose={onClose} title={file.filename}>
-      {/* `flow-root` so the float is contained here: left to the body's own column it would reach
-          past these facts and over the preview under them. */}
       <div className="flow-root">
         <FileDownload file={file} />
         <div className="font-mono text-small text-ink-soft">{meta}</div>
@@ -335,9 +272,7 @@ function FileNote({ children }: { children: ReactNode }) {
   return <div className="font-mono text-small text-ink-soft">{children}</div>;
 }
 
-/** The fetched slice as RFC 4180 rows: a quoted field holds commas and newlines, a doubled quote
- *  is a literal one. A row the byte cut ends mid-field still renders — the reader sees the table's
- *  shape, and the cap notice under it names the truncation. */
+/** RFC 4180 rows: a quoted field holds commas and newlines, and a doubled quote is a literal one. */
 function csvRows(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -373,10 +308,6 @@ function csvRows(text: string): string[][] {
   return rows;
 }
 
-/** A shared text file's characters, read to the byte the fold is cut at: the read stops there and
- *  `bounded` states that the file goes on past it, so a view can say what it is showing. A view
- *  that draws the text itself — because it reads the document's own title off the first line —
- *  takes the read from here rather than fetching the file a second way. */
 export function useTextArtifact(
   url: string | null,
   byteLimit: number = ARTIFACT_TEXT_BYTES,
@@ -429,9 +360,6 @@ export function useTextArtifact(
   return { body, bounded, message };
 }
 
-/** A shared text file, read to the fold. Markdown renders as the document it is — the same
- *  renderer that draws an agent's reply — and every other text type stays preformatted, since a
- *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
 export function ArtifactText({
   url,
   name,
@@ -500,8 +428,6 @@ export function ArtifactText({
   );
 }
 
-/** A csv as the table it encodes: the first row heads the columns, every later row is a record.
- *  The `typeset` register draws it as the document tables markdown renders to. */
 function CsvTable({ text }: { text: string }) {
   const [head, ...records] = csvRows(text);
   return (

@@ -26,18 +26,12 @@ REASON_LIMIT = 240
 NOT_RECORDED = "Not recorded"
 MEMORY_STATE_ROOT = Path("state")
 MEMORY_PRODUCER_STATE_ROOT = Path("producer-state")
-# A fully excluded case the cohort requires, on every arm of a full sweep.
 EXPECTED_FULL_EXCLUSIONS = frozenset(
     {
         ("skill_loading_member", "bias-ach-explainer-block-off"),
         ("skill_loading_member", "bias-deploy-pdf-merge-block-off"),
     }
 )
-# A fully excluded case the cohort accepts without requiring it. A document-read page excludes
-# only when the sweep's own shape refused the render — the stack boots the egress proxy with no
-# `UFO_EGRESS_PREVIEW_DAEMON`, so the preview host is never admitted — and the target model asked
-# for that page. A model that answers the question from another tool leaves the case scored, which
-# is a finding the suite records, not a night without a trend point.
 TOLERATED_FULL_EXCLUSIONS = frozenset(
     {
         ("document_read", "docx-second-page"),

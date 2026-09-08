@@ -1,19 +1,4 @@
-// Shared by every integration binary; each uses the part it needs, so the unused rest is not
-// dead code but another binary's.
 #![allow(dead_code)]
-
-//! A real Postgres for the ledger suites.
-//!
-//! Control's ledgers hold their invariants in partial unique indexes, row locks, and
-//! `for update skip locked` — none of which a fake reproduces — so every one of these tests runs
-//! against the database itself. `UFO_CONTROL_TEST_POSTGRES` names it; CI starts the service and
-//! points this at it, and a developer runs `make test-control-pg` for the same container.
-//!
-//! Each test gets its own database rather than a truncate between tests. Cargo runs the tests in a
-//! binary concurrently and the binaries concurrently with each other, so a shared schema would let
-//! one test's truncate land inside another's transaction — and the invariants under test here are
-//! exactly the ones that show up as cross-test interference. A fresh database costs about a tenth
-//! of a second and removes the whole class.
 
 use deadpool_postgres::Pool;
 use ufo_control::db;
@@ -32,17 +17,12 @@ fn with_database(dsn: &str, database: &str) -> String {
     format!("{head}/{database}")
 }
 
-/// One request a local server captured, and what it answered.
 pub struct Exchange {
     pub path: String,
     pub body: String,
     pub authorization: Option<String>,
 }
 
-/// A local HTTP server answering each connection with the next canned response, and recording what
-/// it was asked. Every outbound call in this crate is tested against one of these rather than a
-/// stubbed client: the bytes on the wire are what the far side accepts or refuses, so they are what
-/// the test asserts.
 pub async fn spawn_http(
     responses: Vec<(u16, String)>,
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Exchange>>>) {
@@ -111,22 +91,15 @@ pub async fn spawn_http(
     (base, log)
 }
 
-/// A Postgres role is cluster-wide while a database is not, so every test in this binary that
-/// creates or alters `ufo_serve` / `ufo_control` is writing the same rows. Cargo runs them
-/// concurrently, so they take this in turn — the shared object is real, and serializing the tests
-/// that touch it is the honest fix rather than hoping the writes interleave harmlessly.
 pub static ROLE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// A database of this test's own, with no schema shaped in it. The RLS suite needs one: it creates
-/// its own tenant-shaped tables and roles, and `create database` cannot run inside a transaction.
 pub struct FreshDatabase {
     pub name: String,
     pub dsn: String,
 }
 
 impl FreshDatabase {
-    /// A connection as the owning superuser — what the deploy's migrate Job holds.
     pub async fn client(&self) -> tokio_postgres::Client {
         db::client(&self.dsn, None)
             .await
@@ -135,10 +108,6 @@ impl FreshDatabase {
 }
 
 impl FreshDatabase {
-    /// The owner role the deploy's DSN names. A Postgres role is cluster-wide while a database is
-    /// not, so every test in this binary reaches the same `ufo_owner` — creating it unconditionally
-    /// would fail whichever test lost the race. The role's state is identical either way, so the
-    /// winner creating it is enough.
     pub async fn ensure_owner_role(&self, client: &tokio_postgres::Client) {
         client
             .batch_execute(
@@ -163,10 +132,6 @@ pub async fn fresh_database() -> FreshDatabase {
     FreshDatabase { name, dsn }
 }
 
-/// A pool over a database of this test's own, freshly brought to head.
-///
-/// The schema is shaped rather than assumed: `shape_control_schema` is the verb the deploy runs, so
-/// exercising it here is what proves a fresh database lands on the columns the build declares.
 pub async fn ledger_pool() -> Pool {
     let admin = admin_dsn();
     let name = format!("ufo_ctl_{}", Uuid::new_v4().simple());

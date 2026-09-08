@@ -39,9 +39,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The main agent carrying its homepage the way the boot read does, for the pane's instant paint;
- *  the wire answers the live `/homepage` poll that keeps it current. `open` sets both to the same
- *  page unless a route overrides the poll — a redeploy drives the poll past what boot carried. */
 function withHome(homepage: unknown): Agent {
   return { ...AGENT, homepage: homepage as Agent["homepage"] };
 }
@@ -67,13 +64,11 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   );
   expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
   expect(frame.getAttribute("allow")).toBe("fullscreen");
-  // What shows through a frame whose page is still arriving is the pane's own background, in the
-  // portal's inherited color-scheme — never the system scheme or a browser's default white canvas.
+  // A frame whose page is still arriving shows the pane's own background in the portal's inherited
+  // color-scheme — never the system scheme or a browser's default white canvas.
   expect(frame.className).toContain("bg-surface");
   expect(frame.className).toContain("[color-scheme:inherit]");
   expect(frame.parentElement!.className).toContain("bg-surface");
-  // The page heads itself, so the pane draws no band and no title of its own over it — only the
-  // shell's two acts, floating in the page's gutter.
   expect(screen.queryByRole("heading", { name: "Assistant" })).toBeNull();
   expect(screen.getByRole("button", { name: "Menu for Assistant" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Edit Assistant" })).toBeTruthy();
@@ -112,11 +107,6 @@ test("focusing the tab refreshes an ended homepage session", async () => {
   hasFocus.mockRestore();
 });
 
-/** A redeploy remounts the page at the same URL, and the swap must never show the arriving copy's
- *  blank document: the standing frame holds the screen until the fresh one has loaded, the two
- *  cross-fade, and the replaced copy leaves once the fade is over. The bridge is the arriving
- *  frame's from the moment it mounts, so the page's own ready reaches the shell before the fade
- *  finishes. */
 test("a redeploy keeps the standing page until the fresh frame loads, then swaps", async () => {
   let generation = 1;
   location.hash = "#/agents/" + AGENT_ID;
@@ -174,8 +164,6 @@ test("a redeploy keeps the standing page until the fresh frame loads, then swaps
   }
 });
 
-/** Two redeploys racing: a load from the copy already being replaced promotes nothing, so the
- *  member never watches superseded bytes fade in over the page they had. */
 test("a load from a frame already being replaced does not resurrect it", async () => {
   let generation = 1;
   location.hash = "#/agents/" + AGENT_ID;
@@ -216,9 +204,6 @@ test("a load from a frame already being replaced does not resurrect it", async (
   }
 });
 
-/** The conversation stands in a lane of the screen's own track, and a lane is headed by its own
- *  band: the name of what it holds and the way out of it. The conversation draws no band of its own
- *  there, or the name and the way out would each be stated twice. */
 test("the conversation beside a page is headed by the lane it stands in", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({}, SET);
@@ -231,10 +216,6 @@ test("the conversation beside a page is headed by the lane it stands in", async 
   expect(conversation.querySelector('[data-slot="header"]')).toBeNull();
 });
 
-/** The band carries the one act the member cannot reach from the page — starting another
- *  conversation with this app — and no menu to switch between them: the toggle opens the one there
- *  is, and the sidebar is the list of the rest. The act is the band's own, so the full-width chat's
- *  own New pill is not drawn beside it. */
 test("the right-side chat's band starts another conversation, and carries no menu", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open(
@@ -256,13 +237,6 @@ test("the right-side chat's band starts another conversation, and carries no men
   expect(screen.queryByRole("button", { name: "Conversations with Assistant" })).toBeNull();
 });
 
-/** The toggle states the act it will perform. Shut, it is the mark of a chat; open, it is the mark
- *  of the lane it would close. It carries no word in either state — the mark alone stands in the
- *  page's gutter, and the act is named to a screen reader. It stays one control across both, so
- *  the press that opened the lane keeps the focus that opened it.
- *
- *  The band's own act founds another conversation, and is spent where the lane already stands on
- *  one nobody has spoken in: a second empty conversation is not a thing the member can want. */
 test("the chat toggle states the act it will perform, and the band's act is spent when it is new", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({}, SET);
@@ -279,7 +253,6 @@ test("the chat toggle states the act it will perform, and the band's act is spen
   expect(open_.getAttribute("aria-pressed")).toBe("true");
   expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
 
-  // The lane stands on a conversation nobody has spoken in, so there is nothing to start.
   const founds = screen.getByRole("button", { name: "New conversation with Assistant" });
   expect(founds.hasAttribute("disabled")).toBe(true);
 
@@ -287,8 +260,6 @@ test("the chat toggle states the act it will perform, and the band's act is spen
   expect(screen.getByRole("button", { name: "Edit Assistant" })).toBeTruthy();
 });
 
-/** The toggle opens the editing conversation: the newest the rail carries for this app, whatever
- *  order the app's own index answers in. */
 test("the chat toggle opens the newest directive conversation", async () => {
   const newer = "66666666-6666-4666-8666-666666666666";
   location.hash = "#/agents/" + AGENT_ID;
@@ -317,8 +288,6 @@ test("the chat toggle opens the newest directive conversation", async () => {
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + newer);
 });
 
-/** An app nobody has directed yet has no editing conversation, so the toggle opens the composer —
- *  and the send that founds one makes it the editing chat from then on. */
 test("the chat toggle opens the composer when no directive conversation exists", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({}, SET);
@@ -330,12 +299,8 @@ test("the chat toggle opens the composer when no directive conversation exists",
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
 });
 
-/** The state the reporter's app is in: it stands on its page, the rail carries the member's chat
- *  with it, and the app's own conversation index does not answer that chat. An app accumulates
- *  conversations no member opened — every page build, every portal intent — and the index answers
- *  one bounded page over all of them, so on an app holding many hundreds the member's own chat falls
- *  outside that page while the rail still carries it under its own bound. The rail is what says
- *  which conversations this half can open, so the half opens the row it carries. */
+/** An app accumulates conversations no member opened, and the index answers one bounded page over all
+ *  of them, so a member's own chat can fall outside it while the rail still carries it. */
 function openApp(routes: Parameters<typeof wire>[0] = {}) {
   const wired = wire({
     "/transcript": () => json({ messages: [] }),
@@ -388,7 +353,6 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
     expect(calls.some((url) => url.includes("/transcript?conversation=" + CONVO_ID))).toBe(true),
   );
 
-  // The lane holds the conversation, so the page is not handed an id it cannot stand on.
   const sent: unknown[] = [];
   vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
     postMessage: (message: unknown) => void sent.push(message),
@@ -403,9 +367,6 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
   expect(init.place.opens).toBeUndefined();
 });
 
-/** The chat app is the main agent, and its page is the conversation screen itself. So a chat the
- *  member picks in the sidebar is that page's own target: it stands in the page's column, and no
- *  lane over the page draws it a second time. */
 test("a sidebar chat on the chat app stands in the page's column alone", async () => {
   location.hash = "#/";
   const { calls } = wire({
@@ -425,7 +386,6 @@ test("a sidebar chat on the chat app stands in the page's column alone", async (
   const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
   expect(screen.queryByRole("region", { name: "Pick one thread" })).toBeNull();
   expect(screen.queryByLabelText("Ask UFO")).toBeNull();
-  // The page is the chat, so the act that opens a chat beside a page names nothing here.
   expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Close edit of Assistant" })).toBeNull();
   expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
@@ -444,9 +404,6 @@ test("a sidebar chat on the chat app stands in the page's column alone", async (
   expect(init.place.opens).toEqual([CONVO_ID]);
 });
 
-/** An app whose page has not been built yet has none, and the pane draws its conversation — never a
- *  build placeholder. When the first page registers, the poll lands it and the frame appears on its
- *  own, without the member reloading. */
 test("an app whose first page arrives shows it without a reload", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   let answer: unknown = { state: "none" };
@@ -458,7 +415,6 @@ test("an app whose first page arrives shows it without a reload", async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    // No page yet: the app's conversation stands, and there is no frame.
     expect(screen.getByRole("region", { name: "Assistant" })).toBeTruthy();
     expect(document.querySelector("iframe")).toBeNull();
 
@@ -493,7 +449,6 @@ test("the bare agents hash shows the main agent without navigating", async () =>
   expect(location.hash).toBe("#/agents");
 });
 
-/** The chat app, carrying the page every deploy ships it and its own conversation on the rail. */
 function openChatApp(hash: string, homepage: unknown = SET) {
   location.hash = hash;
   wire({
@@ -502,14 +457,10 @@ function openChatApp(hash: string, homepage: unknown = SET) {
     "/homepage": () => json(homepage),
     "/conversations$": () => json({ conversations: [LISTED], more: false }),
   });
-  // The shipped chat app is the main agent, so the bare apps hash stands this same pane.
   const main = { ...CHAT_APP, main: true, homepage } as Agent;
   render(<App agents={[main]} member={MEMBER} onAgents={() => {}} />);
 }
 
-/** The chat app's page lists the conversations it holds and opens them itself, so the shell puts no
- *  act of its own over it: neither the Chat toggle every other app wears nor a History act beside
- *  it. */
 test("the chat app's page wears no shell act", async () => {
   openChatApp("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
   await screen.findByTitle("Chat homepage");
@@ -517,12 +468,9 @@ test("the chat app's page wears no shell act", async () => {
   expect(screen.queryByRole("button", { name: "History for Chat" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Edit Chat" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Menu for Chat" })).toBeNull();
-  // One column still: the list is the page's, never a panel the portal draws beside it.
   expect(screen.queryByRole("region", { name: CHAT_ROW.title })).toBeNull();
 });
 
-/** The page is what makes it the chat app. An install serving none falls back to the conversation
- *  column every other page-less app draws. */
 test("a chat app with no page draws the conversation column", async () => {
   openChatApp("#/agents/" + CHAT_APP_ID, { state: "none" });
 

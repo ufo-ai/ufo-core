@@ -1,9 +1,3 @@
-//! The signup-email policy, the SigV4 signer, and the two AWS calls a send makes.
-//!
-//! The SES and STS halves run against a local server rather than a stubbed client: the signed
-//! headers and the form body are what AWS refuses or accepts, so the test asserts the bytes that
-//! actually leave the process.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -200,9 +194,7 @@ fn a_work_domain_passes_with_its_root_dot_normalized() {
     for (email, domain) in [
         ("founder@acme.io", "acme.io"),
         ("founder@sub.acme.io", "sub.acme.io"),
-        // root dot dropped, still a work domain
         ("founder@acme.io.", "acme.io"),
-        // punycode is a valid LDH label
         ("founder@xn--80ak6aa92e.com", "xn--80ak6aa92e.com"),
     ] {
         let signup = policy.validate(email).unwrap();
@@ -212,15 +204,12 @@ fn a_work_domain_passes_with_its_root_dot_normalized() {
     }
 }
 
-/// One request the local server captured, and the canned reply it gave back.
 struct Exchange {
     path: String,
     body: String,
     authorization: Option<String>,
 }
 
-/// A one-shot HTTP server answering each connection with the next canned response. Returns its
-/// base URL and the log every request lands in.
 async fn serve(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Exchange>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -332,7 +321,6 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
         "{}",
         sts.body
     );
-    // The projected file is read with its whitespace trimmed, or STS refuses the assertion.
     assert!(
         sts.body
             .contains("WebIdentityToken=projected-web-identity-token"),
@@ -354,12 +342,10 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
         payload["Content"]["Simple"]["Body"]["Text"]["Data"],
         "body text"
     );
-    // Both alternatives ride in one message: a client that refuses HTML has the text to render.
     assert_eq!(
         payload["Content"]["Simple"]["Body"]["Html"]["Data"],
         "<p>body markup</p>"
     );
-    // The send is signed with the credentials STS just returned, not with anything ambient.
     let authorization = ses.authorization.as_deref().unwrap_or_default();
     assert!(
         authorization.contains("Credential=ASIAEXAMPLE/"),
@@ -440,8 +426,6 @@ async fn an_unreadable_token_file_fails_loud_before_any_call() {
     assert!(log.lock().unwrap().is_empty(), "nothing was sent");
 }
 
-/// `email_sender_from_env` reads process-wide state, so these four serialize against each other.
-/// Every one restores what it set, so ordering between them cannot matter either.
 static ENV: Mutex<()> = Mutex::new(());
 
 fn with_env<T>(pairs: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
@@ -569,8 +553,6 @@ fn a_shared_consumer_domain_never_becomes_the_workspace_subject() {
         "someone@bigpond.com",
         "someone@rediffmail.com",
         "someone@tutanota.com",
-        // A brand already on the list, under a country domain the first pass missed. The sweep is
-        // by brand and country now, so a listed provider is listed wherever it operates.
         "someone@protonmail.ch",
         "someone@gmx.co.uk",
         "someone@aol.co.uk",
@@ -585,7 +567,6 @@ fn a_shared_consumer_domain_never_becomes_the_workspace_subject() {
 
 #[test]
 fn the_domain_lists_name_each_domain_once() {
-    // A name in both reads as a disagreement about what it is.
     let mut seen = std::collections::HashSet::new();
     for domain in FREE_EMAIL_DOMAINS.iter().chain(DISPOSABLE_EMAIL_DOMAINS) {
         assert!(seen.insert(*domain), "{domain} is listed twice");

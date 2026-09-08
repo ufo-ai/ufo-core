@@ -9,12 +9,8 @@ import { MainAgentProvider } from "@/lib/mainAgent";
 
 import { AGENT, AGENT_ID, CONVO_ID, MEMBER, json, useStreamFake, wire } from "./harness";
 
-/** The pane commits a typed field a moment after the keystrokes stop, so a read that waits for the
- *  apply waits longer than the settle it is waiting out. */
 const AFTER_SETTLE = { timeout: 3000 };
 
-/** An expiry a moment ahead of the runner's clock, so the tests that type one past the guard type
- *  a moment the kind could still act on. */
 const FUTURE_EXPIRY = new Date(Date.now() + 24 * 3_600_000)
   .toISOString()
   .slice(0, "YYYY-MM-DDTHH:MM".length);
@@ -56,7 +52,6 @@ const TASK = {
   updated_at: "2026-07-02T09:00:00Z",
 };
 
-/** The record read back after every apply, so the pane states what the workspace now holds. */
 function taskOnWire(): { posted: Record<string, unknown>[]; task: () => typeof TASK } {
   const posted: Record<string, unknown>[] = [];
   let held = TASK;
@@ -88,7 +83,6 @@ function mount(agents = [AGENT]) {
   );
 }
 
-/** A pill's own menu, raised by the pill that names it. */
 async function raise(name: string): Promise<HTMLElement> {
   await userEvent.click(await screen.findByRole("button", { name }));
   return screen.findByRole("menu");
@@ -137,7 +131,6 @@ test("the schedule pill names the cadence and writes the cron the pick stands fo
   const { posted } = taskOnWire();
   mount();
 
-  // The record's cron is 03:30 UTC, which is 09:00 on the clock the suite runs under.
   expect(await screen.findByRole("button", { name: "Schedule" })).toHaveProperty(
     "textContent",
     "Daily at 9:00 AM",
@@ -161,9 +154,6 @@ test("the schedule pill names the cadence and writes the cron the pick stands fo
   expect(posted[0]).toMatchObject({ spec: { schedule: "30 3 * * 1,2,3,4,5" } });
 });
 
-/** A `time` box answers one change per completed segment, so the hours a member types through are
- *  not times they chose. The box commits on the settle, and the task keeps firing at the time it
- *  was typed to — not at one of the times it was typed past. */
 test("the time box applies the hour the typing settles on, not every hour typed through", async () => {
   const { posted } = taskOnWire();
   mount();
@@ -174,7 +164,6 @@ test("the time box applies the hour the typing settles on, not every hour typed 
   fireEvent.change(time, { target: { value: "14:00" } });
 
   await waitFor(() => expect(posted.length).toBe(1), AFTER_SETTLE);
-  // 14:00 on the clock the suite runs under is 08:30 UTC.
   expect(posted[0]).toMatchObject({ spec: { schedule: "30 8 * * *" } });
 });
 
@@ -204,8 +193,6 @@ test("an interval cadence offers the hours it fires on, and nothing that divides
   expect(posted[1]).toMatchObject({ spec: { schedule: "0 */6 * * *" } });
 });
 
-/** The Custom pick is the one cadence no cron stands for: a recognized cron reads back as its own
- *  offer, so a pick that applied the stored cron would snap the pill back and never open the box. */
 test("the Custom pick opens the cron box, and the cron typed there is what changes the schedule", async () => {
   const { posted } = taskOnWire();
   mount();
@@ -229,9 +216,6 @@ test("the Custom pick opens the cron box, and the cron typed there is what chang
   expect(posted[0]).toMatchObject({ spec: { schedule: "15 2,14 * * *" } });
 });
 
-/** The Custom pick is held on the pane and stores nothing, so it names no clock of its own. A pick
- *  back to a timed cadence keeps the clock the stored cron holds: the default hour would move every
- *  later fire to a time the member never typed. */
 test("a pick to Custom and back keeps the time the task already fires at", async () => {
   const posted: Record<string, unknown>[] = [];
   wire({
@@ -244,7 +228,6 @@ test("a pick to Custom and back keeps the time the task already fires at", async
   });
   mount();
 
-  // 06:00 UTC is 11:30 on the clock the suite runs under.
   expect(await screen.findByRole("button", { name: "Schedule" })).toHaveProperty(
     "textContent",
     "Daily at 11:30 AM",
@@ -287,9 +270,6 @@ test("a cron no offer stands for reads as custom, and is typed as the cron itsel
   expect(posted[0]).toMatchObject({ spec: { schedule: "0 5 * * 1" } });
 });
 
-/** Where a task reports is bound to the conversation it was written in, and no apply moves it. The
- *  pane states that binding and presses through to it, rather than offering a choice the kind
- *  would refuse. */
 test("the chat the task reports into is stated and pressed through, never picked", async () => {
   const opened: unknown[] = [];
   taskOnWire();
@@ -312,8 +292,6 @@ test("the chat the task reports into is stated and pressed through, never picked
   expect(screen.queryByRole("button", { name: "Notifications" })).toBeNull();
 });
 
-/** The pane states the record's own facts, so it carries the conversation the way every other
- *  record does: the id is the address the router reads, not a fact the pane restates in words. */
 test("the conversation the task belongs to stands in the pane as its own address", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () =>
@@ -339,8 +317,6 @@ test("the runs the task has had stand beside the acts that fire and stop it", as
   expect(await screen.findByRole("button", { name: "Resume" })).toBeTruthy();
 });
 
-/** A paused row is never claimed, so a fire asked for now has to carry the resume with it. The
- *  button states both acts rather than reporting a save for a run that never happens. */
 test("run now on a paused task resumes it, so the fire it asks for can be claimed", async () => {
   const posted: Record<string, unknown>[] = [];
   wire({
@@ -408,9 +384,6 @@ test("an expiry typed on the member's clock is applied as an instant", async () 
   });
 });
 
-/** A `datetime-local` box answers one change per typed digit, and a past expiry on a paused task is
- *  swept with the task itself — so the moment a member types their way to is the one that applies,
- *  and the years they passed through on the way there apply nothing. */
 test("the expires box applies the moment the typing settles on, not every value passed through", async () => {
   const { posted } = taskOnWire();
   mount();
@@ -426,12 +399,6 @@ test("the expires box applies the moment the typing settles on, not every value 
   });
 });
 
-/** An empty box is the task that runs until it is deleted, and the kind clears the expiry on null.
- *  An emptied box that applied nothing left the pane stating no expiry for a task that still held
- *  one and still stopped firing at it. */
-/** A past moment is one the runner would act on the instant it is stored — and on a paused task
- *  that act is the delete — so the box answers it the way the sibling time box answers a clock it
- *  cannot read: with the quiet that leaves the stored value standing. */
 test("an expires box that holds a past moment applies nothing", async () => {
   const { posted } = taskOnWire();
   mount();

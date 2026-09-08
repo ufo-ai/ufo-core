@@ -1,10 +1,5 @@
 name: Corpus drift
 
-# The hosted onboarding corpus states this deploy's own facts to paying customers, in prose, from a
-# package the code it describes never touches. core/tests/test_onboarding_corpus_claims.py pins every
-# claim a pattern can hold; this sweep reads the rest — the customer-facing wording, the
-# troubleshooting remedies, the states and refusals a customer actually sees — against the code that
-# produces them, daily. Never merges: a correction is a proposal for review.
 on:
   schedule:
     - cron: '17 6 * * *'

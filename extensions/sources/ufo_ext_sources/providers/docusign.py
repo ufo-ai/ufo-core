@@ -43,7 +43,6 @@ EPOCH_FROM_DATE = "2000-01-01T00:00:00Z"
 _REFUSAL_STATUS = frozenset({401, 403})
 _ENVELOPE_INCLUDE = "recipients,custom_fields"
 
-# Stream-name → (path under the account base, response envelope key).
 _LIST_PATHS: dict[str, tuple[str, str]] = {
     "envelopes": ("envelopes", "envelopes"),
     "templates": ("templates", "envelopeTemplates"),

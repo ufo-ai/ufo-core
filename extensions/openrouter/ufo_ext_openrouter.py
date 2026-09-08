@@ -980,9 +980,6 @@ OPENROUTER_MODEL_SPECS = (
         reasoning=_REQUIRED_REASONS,
         accepts_image_input=False,
     ),
-    # Every route but Cloudflare's serves 1,048,576 tokens, so the listing's 1,310,720 is one
-    # route's window and not this id's. The listing halves these rates under a 0.5 promotional
-    # discount that no route is held to. The listing publishes no cutoff; the family's holds.
     _openrouter(
         "z-ai/glm-5.3-flash",
         ModelPrice(150_000, 500_000, 30_000, 0, 0),
@@ -1014,9 +1011,6 @@ OPENROUTER_MODEL_SPECS = (
         context_window=1_000_000,
         reasoning=_REQUIRED_REASONS,
     ),
-    # The route accepts 1,050,000 tokens, and past 272,000 input tokens it bills 2x input and 1.5x
-    # output for the whole request, so the window is the one this rate is true at. The listing shows
-    # half of these rates under a 0.5 promotional discount that no route is held to.
     _openrouter(
         "openai/gpt-5.6-sol",
         ModelPrice(4_000_000, 20_000_000, 400_000, 0, 0, 5_000_000),

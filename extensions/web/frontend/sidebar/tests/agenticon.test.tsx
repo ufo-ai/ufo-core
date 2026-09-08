@@ -7,14 +7,11 @@ import { expect, test, vi } from "vitest";
 import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
 import { ELEMENT_ICONS } from "@/lib/elementIcons";
 
-/** The sprites `vite.config.ts` cut, at the URLs it resolved them to. */
 declare const __MARK_SPRITES__: Record<string, string>;
 
 const SPRITE_A = new RegExp(`^${import.meta.env.BASE_URL}assets/tabler-a-[0-9a-f]{8}\\.svg$`);
 
 const STATIC = join(import.meta.dirname, "..", "..", "..", "ufo_ext_web", "static");
-/** The brand's own artwork, where the brand keeps it: the portal wears these files rather than a
- *  copy of what they draw. */
 const BRAND = join(import.meta.dirname, "..", "..", "..", "..", "..", "assets", "brand");
 const BRAND_MARK = "ufo-mark.svg";
 const OUTLINE: Record<string, [string, Record<string, string>][]> = JSON.parse(
@@ -31,9 +28,6 @@ const entry = () => {
   return readFileSync(join(STATIC, asset[1]), "utf8");
 };
 
-/** The surface, answering a sprite request with the file this build emitted. The marks a test
- *  reads back are tabler's own paths, carried the whole way: cut into a sprite by the build,
- *  served under the hashed name the bundle holds, parsed by the module under test. */
 function servesSprites(): string[] {
   const asked: string[] = [];
   vi.stubGlobal(
@@ -73,7 +67,6 @@ test("the mark takes the ink around it, and states no colour of its own", async 
   const svg = container.querySelector("svg")!;
   expect(svg.getAttribute("stroke")).toBe("currentColor");
   expect(svg.getAttribute("fill")).toBe("none");
-  // The one node tabler fills is filled with the same ink, not with a colour of its own.
   expect(
     [...svg.querySelectorAll("path")].map((path) => path.getAttribute("fill")),
   ).toContain("currentColor");
@@ -112,11 +105,6 @@ test("a name no sprite answers is reported and drawn as the unknown mark, and it
   expect(faults.mock.calls.map(String)).toContain("no app mark is drawn for zzz-no-such-mark");
 });
 
-/** A sprite the page cannot read is the other case, and it is not data: the URL is one this bundle
- *  resolved for a file it emitted, so nothing but a build that lost the file answers it. That raises
- *  where the mark was asked for. It hid here before, behind a caught fetch and a console line, as
- *  every mark under the letter drawn from no paths at all — which is what a build whose marks were
- *  unreachable looked like from the outside. */
 test("a sprite the page cannot read draws no mark, and the row around it stands", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", { status: 404 })));
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -148,8 +136,6 @@ test("the picker's marks are the bundle's own, in the order it draws them", () =
   const slugs = Object.keys(AGENT_ICONS);
   expect(slugs).toHaveLength(40);
   expect(slugs.slice(0, 4)).toEqual(["propylon", "nabatu", "gibil", "adyton"]);
-  // The set is the element pack, whole and in the pack module's own order, so the picker offers no
-  // mark the pack does not draw and holds no mark of tabler's own.
   expect(slugs).toEqual(Object.keys(ELEMENT_ICONS));
 
   const { container } = render(
@@ -165,9 +151,6 @@ test("the picker's marks are the bundle's own, in the order it draws them", () =
   expect(asked).toEqual([]);
 });
 
-/** The product's own mark is reserved: the picker offers it to nobody, while the main agent's row
- *  goes on holding it. That row draws the brand's own three-dot mark — the glyph the wordmark opens
- *  with, worn as a mask so it takes the ink around it — and asks for no sprite. */
 test("the reserved product mark is offered nowhere and draws the brand's own mark", () => {
   const asked = servesSprites();
   const faults = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -186,26 +169,20 @@ test("the reserved product mark is offered nowhere and draws the brand's own mar
   expect(faults.mock.calls).toHaveLength(0);
 });
 
-/** The artwork is the brand's own file, read from where the brand keeps it: the favicon links are
- *  cut from the same file, so the mark a row draws cannot drift from the mark on the tab. The saucer
- *  the portal drew for the main agent before is gone from the bundle with it. */
 test("the reserved mark wears the brand file the tab icons are cut from, and no saucer", () => {
   const { container } = render(<AgentIcon name="ufo" />);
   const mask = container.querySelector<HTMLElement>(".brand-mark")!.style.mask;
 
   expect(mask).toContain("assets/brand/" + BRAND_MARK);
   expect(existsSync(join(BRAND, BRAND_MARK))).toBe(true);
-  // The build emits one file for both readers: the favicon link and the drawn mark name it.
   const favicon = /assets\/ufo-mark-[A-Za-z0-9_-]+\.svg/.exec(
     readFileSync(join(STATIC, "sidebar.html"), "utf8"),
   )![0];
   expect(entry().includes(favicon)).toBe(true);
-  // `includes` rather than a matcher on the whole bundle: a failure should name the mark, not print
-  // a megabyte of minified module.
+  // `includes` rather than a matcher: a failure should name the mark, not print a megabyte of minified module.
   expect(entry().includes(OUTLINE.ufo[0][1].d)).toBe(false);
 });
 
-/** The mark sizes like every other: the glyph size unless its caller sets another. */
 test("the reserved mark draws at the glyph size unless its caller sets another", () => {
   const bundled = render(<AgentIcon name="ufo" />);
   const sized = render(<AgentIcon name="ufo" className="size-8" />);
@@ -217,9 +194,6 @@ test("the reserved mark draws at the glyph size unless its caller sets another",
   expect(classes(sized.container)).not.toContain("size-(--size-glyph)");
 });
 
-/** A mark whose paths were copied short or dropped still draws, so nothing but reading the paths
- *  back off what each one renders catches it. The floor on length holds only for the pack's own
- *  marks: tabler draws a mark from short segments as readily as from one long outline. */
 test("every mark the picker offers draws paths of its own", () => {
   const asked = servesSprites();
 
@@ -247,12 +221,8 @@ test("an element mark fills itself with the ink around it, and states no colour 
   expect(container.innerHTML).not.toMatch(/#[0-9a-fA-F]{3}|rgba?\(|hsla?\(|oklch\(/);
 });
 
-/** The pack's art fills only part of the 64-unit canvas it was drawn on, and a different part per
- *  mark, so every mark drawn on the whole canvas reads lighter than the tabler marks beside it and
- *  no two read alike. Each mark instead carries a square window cropped to its own glyph. The
- *  window is the only thing that crops — the path data is the source's own, so nothing is lost.
- *  Two marks sharing a window would draw at least one of them at the wrong weight, and nothing
- *  else in the tree would say so. */
+/** The pack's art fills a different part of its 64-unit canvas per mark, so each carries its own square
+ *  window. Two marks sharing a window would draw one of them at the wrong weight, silently. */
 test("each element mark carries its own square window inside the pack's canvas", () => {
   const windows = new Set<string>();
   const slugs = Object.keys(ELEMENT_ICONS);
@@ -280,8 +250,6 @@ test("the bundle carries the marks the picker offers and none of the rest", () =
   const drawn = container.querySelector("path")!.getAttribute("d")!;
 
   expect(bundle.includes(drawn)).toBe(true);
-  // `rocket` is a mark the picker offered before the element pack and offers no longer, so its
-  // paths belong to the sprite now and not to the bundle.
   expect(bundle.includes(OUTLINE.rocket[0][1].d)).toBe(false);
   expect(bundle.includes(OUTLINE.anchor[0][1].d)).toBe(false);
   expect(bundle.includes(OUTLINE.zeppelin[0][1].d)).toBe(false);

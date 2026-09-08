@@ -40,7 +40,6 @@ WEBSITE_BUILDING_TOOL_NAMES = (
     ),
     "js_repl",
     "xlsx_repl",
-    # Web reference-gathering (source website_building set); resolves if research is installed.
     "search_web",
     "search_vertical",
     "fetch_url",

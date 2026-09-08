@@ -23,10 +23,6 @@ from ufo.schema.records import DBOS_SYSTEM_DATABASE_POOL_SIZE
 
 ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
-# Terraform template directive lines, stripped before a template parses as YAML. Every condition
-# is stripped rather than a named few: a deploy knob added to the template is not a change to what
-# these tests read, and an allowlist made it one — three copies of it, each failing on the next
-# knob.
 TEMPLATE_DIRECTIVE = r"(?m)^%\{ [^}]*\}\n?"
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 AWAIT_ROLLOUT = ".github/scripts/await_rollout.sh"
@@ -49,7 +45,6 @@ STORAGE_QUERY = (
     "${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space"
     "{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 0.05"
 )
-# A Datadog notification handle in a monitor message: a Slack channel or an email address.
 HANDLE = r"@(?:slack-[\w-]+|[\w.-]+@[\w.-]+)"
 
 
@@ -653,8 +648,6 @@ def _check_testing_deploy_writes_provider_credentials_before_apply() -> None:
         },
         "run": "uv run python infra/testing_secrets.py",
     }
-    # Every input the script requires is passed here, or the step fails on the first deploy after it
-    # is declared.
     assert set(SECRET_INPUTS.values()) <= set(write["env"])
     assert names.index("Terraform init") < names.index("Write testing runtime secrets")
     assert names.index("Write testing runtime secrets") < names.index("Terraform apply")
@@ -674,9 +667,6 @@ def _check_testing_deploy_writes_provider_credentials_before_apply() -> None:
             '  "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
         ),
     }
-    # The write publishes a new Secrets Manager version; the projection carries the previous one
-    # until the controller republishes it. Force the sync and compare bytes before the apply rolls
-    # pods, or they read the superseded value (outage 0002).
     assert names.index("Write testing runtime secrets") < names.index(
         "Refresh testing runtime secrets"
     )
@@ -775,20 +765,16 @@ _EXPANSION_BLOCK_GROUP_AUTH_DIFF = (
 
 def _check_authorization_expansions_co_deploy_but_contractions_split() -> None:
     gate = _deploy_change_gate()
-    # Authorization alone, or a runtime change alone, is always fine.
     gate.validate_deploy_change(("infra/modules/platform/iam.tf",), _ADDITIVE_AUTH_DIFF)
     gate.validate_deploy_change(("core/src/ufo/serve.py",))
     gate.validate_deploy_change(
         ("infra/modules/platform/iam.tf", "core/tests/test_deploy_workflow.py"),
         _ADDITIVE_AUTH_DIFF,
     )
-    # A whole new role, its policy and the attachment that binds them co-deploy: no live principal
-    # holds the new grant, so the roll cannot break on it.
     gate.validate_deploy_change(
         ("infra/modules/platform/iam.tf", "core/src/ufo/serve.py"),
         _EXPANSION_BLOCK_GROUP_AUTH_DIFF,
     )
-    # A new grant (expansion) co-deploys with its consumer — terraform creates it before the roll.
     for runtime_path in (
         "infra/envs/testing/ufo.tf",
         "infra/templates/hosted.yaml.tpl",
@@ -797,20 +783,14 @@ def _check_authorization_expansions_co_deploy_but_contractions_split() -> None:
         gate.validate_deploy_change(
             ("infra/modules/platform/iam.tf", runtime_path), _ADDITIVE_AUTH_DIFF
         )
-    # Removing a grant (contraction) must split from its consumers.
     with pytest.raises(ValueError, match="contract IAM only after"):
         gate.validate_deploy_change(
             ("infra/modules/platform/iam.tf", "infra/templates/hosted.yaml.tpl"),
             _CONTRACTION_AUTH_DIFF,
         )
-    # A comment/blank-only removal changes no grant, so it is not a contraction.
     gate.validate_deploy_change(
         ("infra/modules/platform/iam.tf", "infra/envs/prod/ufo.tf"), _COMMENT_ONLY_AUTH_DIFF
     )
-    # Added lines narrow an existing grant as surely as removed lines drop it: an argument added
-    # to a live role, or a condition added to a live statement, is a contraction too.
-    # Whole new blocks narrow too: a Deny denies whoever holds the policy, and an attachment onto a
-    # role the diff does not create rewrites the authorization of a principal already live.
     for narrowing_diff in (
         _NARROWING_ARGUMENT_AUTH_DIFF,
         _NARROWING_BLOCK_AUTH_DIFF,
@@ -821,7 +801,6 @@ def _check_authorization_expansions_co_deploy_but_contractions_split() -> None:
             gate.validate_deploy_change(
                 ("infra/modules/platform/iam.tf", "core/src/ufo/serve.py"), narrowing_diff
             )
-    # Fail closed: no diff supplied means expand-vs-contract is unknown, so enforce the split.
     with pytest.raises(ValueError, match="contract IAM only after"):
         gate.validate_deploy_change(
             ("infra/modules/platform/ses.tf", "servers/control/src/email.rs")
@@ -922,7 +901,6 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     assert code == 0, stderr
     assert "deploy=true" in output
 
-    # Put existing grants on main so a later diff can add beside them, narrow one, or remove one.
     git("checkout", "main")
     keep_grant = 'module "keep" {\n  role_policy_arns = { s3 = "arn" }\n}\n'
     drop_grant = 'module "drop" {\n  role_policy_arns = { s3 = "arn" }\n}\n'
@@ -931,7 +909,6 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     )
     git("update-ref", "refs/remotes/origin/main", iam_base)
 
-    # Expansion: a new grant added to iam.tf beside a runtime change co-deploys — gate allows it.
     git("checkout", "-b", "expand")
     expand_head = commit_content(
         {
@@ -946,7 +923,6 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     assert code == 0, stderr
     assert "deploy=true" in output
 
-    # Contraction: removing a grant beside a runtime change must split across deploys — rejected.
     git("checkout", "main")
     git("checkout", "-b", "contract")
     contract_head = commit_content(
@@ -961,7 +937,6 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     assert "contract IAM only after" in stderr
     assert "deploy=" not in output
 
-    # Contraction by addition: one line added inside a live role narrows it — also rejected.
     git("checkout", "main")
     git("checkout", "-b", "narrow")
     narrow_head = commit_content(
@@ -978,8 +953,6 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     assert "contract IAM only after" in stderr
     assert "deploy=" not in output
 
-    # Contraction by whole new blocks: a Deny bound to a role that already exists narrows that
-    # live role while its consumer rolls — rejected even though the diff only adds.
     git("checkout", "main")
     git("checkout", "-b", "deny")
     deny_head = commit_content(
@@ -1006,14 +979,12 @@ def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: P
     gate = ROOT / ".github" / "scripts" / "deploy_change_gate.py"
     paths = tmp_path / "deploy-paths"
     paths.write_text("infra/modules/platform/iam.tf\ncore/src/ufo/serve.py\n")
-    # No auth diff supplied: expand-vs-contract is unknown, so the gate fails closed.
     rejected = subprocess.run(
         [sys.executable, str(gate), str(paths)], capture_output=True, text=True
     )
     assert rejected.returncode == 1
     assert "contract IAM only after" in rejected.stderr
 
-    # A contraction diff is rejected even with the diff present.
     auth_diff = tmp_path / "auth-diff"
     auth_diff.write_text(
         "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
@@ -1025,7 +996,6 @@ def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: P
     assert contracted.returncode == 1
     assert "contract IAM only after" in contracted.stderr
 
-    # An additive diff (a new grant) co-deploys with its consumer.
     auth_diff.write_text(
         "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
         '@@ -0,0 +1,1 @@\n+resource "aws_iam_policy" "cache_s3" {}\n'
@@ -1088,9 +1058,6 @@ def _check_plans_run_only_for_selected_deployment_inputs() -> None:
     edge = jobs["edge"]
     assert isinstance(edge, dict)
     assert edge["needs"] == ["changes", "rollout"]
-    # `client` skips whenever the client tree already built, and GitHub skips a descendant of a
-    # skipped job unless it opts out. Without `!cancelled()` the edge plan skips on every such run
-    # and the deployment gate, which demands it succeeded, fails the whole deploy.
     assert edge["if"] == (
         "${{ !cancelled() && needs.changes.outputs.deploy == 'true' && "
         "needs.rollout.result == 'success' }}"
@@ -1110,11 +1077,6 @@ def _check_plans_run_only_for_selected_deployment_inputs() -> None:
     )
     assert "production_review" not in jobs
     assert "production_deploy" not in jobs
-    # No job here declares an environment, so every `secrets.*` this workflow reads resolves to the
-    # repository value — testing's. `ANTHROPIC_API_KEY` is one name holding two credentials: the
-    # repository secret keys the testing fleet and the nightly evals, and the `production`
-    # environment secret shadows it for the production deploy alone. An environment declared on any
-    # job here would hand production's key to the testing fleet.
     assert not any(isinstance(job, dict) and "environment" in job for job in jobs.values())
     source = (WORKFLOWS / "deploy.yml").read_text()
     for secret in (
@@ -1469,9 +1431,6 @@ def test_edge_deploys_are_isolated(
     assert plan["working-directory"] == "infra/envs/edge"
     assert guard["working-directory"] == "infra/envs/edge"
     assert apply["working-directory"] == "infra/envs/edge"
-    # One deploy carries one environment's flag credential. The other environment's token is not in
-    # this step at all, so a testing deploy — and every pull request, which reaches no environment
-    # secret — cannot move a production feature whatever it targets.
     assert plan["env"] == {
         "TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
         f"TF_VAR_{flag_token}": "${{ secrets." + flag_token.upper() + " }}",
@@ -1484,11 +1443,6 @@ def test_edge_deploys_are_isolated(
         'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
     )
     assert apply["run"] == f'terraform apply -input=false "{plan_path}"'
-    # Cloudflare refuses to delete a queue or a database a Worker still binds, and a release that
-    # drops the binding and the resource together leaves the graph no reference to order on, so the
-    # module's plan schedules that delete against the live script. The script settles in an apply of
-    # its own first, carrying the resources it binds with it, and on the account token alone: the
-    # plan reaches no flag, so neither environment's Flagship token is in the step.
     bindings_plan = _step(job_name, bindings_step_names[0], workflow)
     bindings_guard = _step(job_name, bindings_step_names[1], workflow)
     bindings_apply = _step(job_name, bindings_step_names[2], workflow)
@@ -2798,7 +2752,6 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     gate.parent.mkdir(parents=True)
     shutil.copy(ROOT / ".github" / "scripts" / "deploy_change_gate.py", gate)
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    # Seed an existing grant on base so the target commit can remove one (a contraction).
     authorization = repo / "infra" / "modules" / "platform" / "iam.tf"
     authorization.parent.mkdir(parents=True)
     authorization.write_text('policy "keep" {}\npolicy "drop" {}\n')
@@ -2833,7 +2786,6 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     base_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
-    # Contraction: drop the "drop" grant, landing beside a runtime (workflow) change.
     authorization.write_text('policy "keep" {}\n')
     workflow = repo / ".github" / "workflows" / "deploy-production.yml"
     workflow.parent.mkdir(parents=True)
@@ -3473,7 +3425,6 @@ def _check_runtime_rollout_drains_before_the_proxy_gate() -> None:
             "$NAMESPACE": rollout_resources,
         }
         assert os.access(ROOT / AWAIT_ROLLOUT, os.X_OK)
-        # The 15m wall the per-Deployment `rollout status` calls carried now lives in the script.
         assert "DEADLINE=$((SECONDS + 900))" in (ROOT / AWAIT_ROLLOUT).read_text()
 
 
@@ -3914,8 +3865,6 @@ def _check_the_cache_sidecar_keeps_the_proxy_probes_on_the_proxy_container() -> 
     assert set(containers) == {"proxy", "cache"}
     assert containers["proxy"]["readinessProbe"]["tcpSocket"]["port"] == "proxy"
     assert containers["proxy"]["livenessProbe"]["tcpSocket"]["port"] == "proxy"
-    # The cache has liveness (restart a wedged daemon) but NO readiness — a cache blip must never
-    # take the healthy egress proxy out of the sandbox-proxy Service.
     assert "livenessProbe" in containers["cache"]
     assert "readinessProbe" not in containers["cache"]
 

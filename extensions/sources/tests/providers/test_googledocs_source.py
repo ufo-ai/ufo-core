@@ -92,9 +92,7 @@ async def test_lists_documents_and_render_walks_body_paragraphs_into_prose() -> 
     assert page.updated_at == "2026-02-01T00:00:00.000000+00:00"
     assert "Q3 Plan" in page.body
     assert "Ship the launch by Friday." in page.body
-    # non-paragraph structural elements (tables) carry no paragraph runs → they fall through
     assert "Owner" not in page.body
-    # the raw Docs structure never leaks into the recallable body
     assert "textRun" not in page.body
     assert "tableRows" not in page.body
 

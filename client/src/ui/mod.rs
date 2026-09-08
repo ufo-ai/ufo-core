@@ -1,7 +1,3 @@
-//! The terminal app: a scrollback transcript over a repainted dock — activity row, rule, queued
-//! sends, the composer (or a picker, a masked secret entry, or the hotkey sheet), rule, footer.
-//! The dock states what is happening now; what happened is the transcript's.
-//! Every member-visible string renders through the theme's roles.
 
 pub mod conversations;
 pub mod editor;
@@ -53,8 +49,6 @@ use crate::ui::toolrender::OpView;
 use crate::wire::{ConversationRow, OpRequest, Target};
 
 pub const PROMPT_IDLE: &str = "›";
-/// The caret on the input that holds the cursor — the composer, a list row, the page's search or
-/// entry line; `PROMPT_IDLE` marks the same lines when the cursor is elsewhere.
 pub const FOCUS_CARET: &str = "❯";
 const SERVER_PROMPT: &str = ">";
 const READ_ONLY_MESSAGE: &str =
@@ -69,9 +63,6 @@ const KEY_COL: usize = 26;
 const FLASH_SECONDS: u64 = 2;
 const EARLY_ABSORBED_MAX: usize = 64;
 
-/// Whether a server note narrates the agent's work: a call or a skill load, the agent's own or one
-/// a subagent made under its label. Such a note is a step of the turn; a note the client writes
-/// about itself, and the line a rolled-up turn states, are not.
 pub fn narrates_activity(text: &str) -> bool {
     let under_a_label = text.split_once(": ").map_or(text, |(_, rest)| rest);
     [text, under_a_label]
@@ -79,14 +70,11 @@ pub fn narrates_activity(text: &str) -> bool {
         .any(|said| said.starts_with("running ") || said.starts_with("loading skill"))
 }
 
-/// The run a note narrates under: a subagent's dispatch states the run's name before the call it
-/// made, and the agent's own dispatch states no name.
 pub fn run_label(text: &str) -> Option<&str> {
     let (label, made) = text.split_once(": ")?;
     narrates_activity(made).then_some(label)
 }
 
-/// Whether the fancy renderer runs: a TTY, a real TERM, and no `UFO_PLAIN`.
 pub fn wants_fx() -> bool {
     let term = std::env::var("TERM").unwrap_or_default();
     io::stdout().is_tty()
@@ -102,12 +90,6 @@ pub struct RawGuard {
 }
 
 impl RawGuard {
-    /// Take the terminal, and ask it what it is while nothing else is reading it: raw mode first,
-    /// or the reply is line-buffered; the probe next, holding the tty alone; then the modes whose
-    /// own events would otherwise land in the probe's read, and the flags the probe asked about.
-    ///
-    /// The probe's scheme and the keys the member typed into it come back to the caller, which is
-    /// the only reader of either.
     pub fn enter() -> (RawGuard, Probe) {
         #[cfg(unix)]
         crate::interrupt::hold_modes();
@@ -146,8 +128,6 @@ impl Drop for RawGuard {
     }
 }
 
-/// The entry a Ctrl+V was pressed in. The read runs off the loop, so the result names the entry
-/// it was meant for and lands only there — never in whichever entry holds focus when it returns.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClipEntry {
     Compose,
@@ -155,7 +135,6 @@ pub enum ClipEntry {
     Path,
 }
 
-/// What a key did, for the loop to route.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     None,
@@ -171,14 +150,9 @@ pub enum Reply {
     Secret(String),
     Stop,
     Detach,
-    /// The member asked for the conversation page.
     OpenConversations,
-    /// The member left the page for the conversation underneath it.
     CloseConversations,
-    /// The member picked a conversation to open.
     Open(ConversationRow),
-    /// The member typed into the page's entry bar: a fresh terminal conversation opening with
-    /// these words.
     NewChat(String),
     Exit,
 }
@@ -203,9 +177,6 @@ struct SecretEntry {
     value: String,
 }
 
-/// One message waiting under the composer: typed; named by the arrival id the turn will fold
-/// once its instant send is acknowledged; and marked while a recall is in flight so a second Up
-/// never retracts it twice.
 struct QueuedSend {
     text: String,
     arrival: Option<String>,
@@ -217,7 +188,6 @@ struct PathPick {
     token_start: usize,
 }
 
-/// The dock and everything drawn in it.
 pub struct App<W: Write = io::Stdout> {
     pub theme: Theme,
     pub caps: Caps,
@@ -347,20 +317,14 @@ impl<W: Write> App<W> {
         self.channel = channel;
     }
 
-    /// Name the conversation on the wire — what the page tells apart from the rest, so a reply
-    /// landing in it while the page is up is drawn as news.
     pub fn set_live_target(&mut self, target: Target) {
         self.live_target = Some(target);
     }
 
-    /// The member opened `row` from the page: it stands seen where it is.
     pub fn mark_seen(&mut self, row: &ConversationRow) {
         self.seen.insert(row.id.clone(), row.last_at);
     }
 
-    /// Start over on another conversation: the transcript, the composer, and every mark of the
-    /// turn that was running are dropped, and the mark heads the new transcript. `read_only` names
-    /// the surface to reply in where this one takes no message from here.
     pub fn reset_conversation(
         &mut self,
         target: &Target,
@@ -403,9 +367,6 @@ impl<W: Write> App<W> {
         self.screen.invalidate();
     }
 
-    /// Open the conversation page over whatever is showing — on the list as it last stood, so
-    /// it reads at once — and name the fetch it opens with. `back` says whether Esc has a
-    /// conversation to return to.
     pub fn open_conversations(&mut self, back: bool) -> Fetch {
         let page = Conversations::new(back, self.cached.clone(), &self.seen);
         let fetch = page.first_fetch();
@@ -419,9 +380,6 @@ impl<W: Write> App<W> {
         fetch
     }
 
-    /// Leave the page for the conversation underneath it, in whatever state its stream left it
-    /// while the page was up — the prompt, a chooser, a secret entry — with the draft the member
-    /// had been typing there back in the entry.
     pub fn close_conversations(&mut self) {
         self.conversations = None;
         self.page_hit = None;
@@ -433,9 +391,6 @@ impl<W: Write> App<W> {
         self.screen.invalidate();
     }
 
-    /// Where the stream puts the member's input next. While the page is up it waits behind the
-    /// page rather than taking it down: a reply landing in the conversation is news the page
-    /// draws, never a reason to leave it.
     fn take_focus(&mut self, focus: Focus) {
         if self.focus == Focus::Conversations {
             self.behind = focus;
@@ -444,9 +399,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// One conversation fetch answered — dropped when the page has since closed. The whole list,
-    /// when that is what landed and it changed, is what the page opens on next time, here and in
-    /// the next process of this sign-in.
     pub fn conversations_loaded(
         &mut self,
         generation: u32,
@@ -467,14 +419,10 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// The fetch the page's typed words call for now, if any.
     pub fn conversations_due_fetch(&mut self, now: Instant) -> Option<Fetch> {
         self.conversations.as_mut()?.due_fetch(now)
     }
 
-    /// One key on the page. Esc and Ctrl+K close it; Up, Down, PageUp and PageDown walk the
-    /// column; Enter opens the highlighted row from the search line or the list and starts a new
-    /// chat from the entry bar; every other key writes where the cursor stands.
     fn conversations_key(&mut self, key: KeyEvent) -> Reply {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let Some(page) = self.conversations.as_mut() else {
@@ -555,12 +503,9 @@ impl<W: Write> App<W> {
         self.pr = pr;
     }
 
-    /// The mark, at the head of the transcript.
     pub fn masthead(&mut self) {
         self.retained.push(Entry::Masthead);
     }
-
-    // ── directives ────────────────────────────────────────────────────────────────────────────
 
     pub fn say(&mut self, text: &str) {
         self.flush_stream();
@@ -575,8 +520,6 @@ impl<W: Write> App<W> {
         self.commit_reply(source);
     }
 
-    /// Committed reply source joins the transcript: growing the open reply entry, or opening one
-    /// on the first non-blank commit — so one streamed reply re-wraps as one document.
     fn commit_reply(&mut self, source: String) {
         if source.is_empty() {
             return;
@@ -589,12 +532,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// A server note. Tool narration — the activity the client also states for its own ops —
-    /// states the current step in the activity row and is a step of the turn's rollup, ranked with
-    /// the thoughts written between the calls. A run the turn already counted narrates its further
-    /// dispatches as rows of that one step, so a run counts once however much it did. A note the
-    /// client writes about itself is no step of the agent's work and joins the transcript on its
-    /// own.
     pub fn note(&mut self, text: &str) {
         if text.starts_with("running ") {
             self.narrate(text);
@@ -652,8 +589,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// The call a narration names, held for the op that answers it: the client states one call
-    /// once, under the words the agent wrote for it, whichever directive carried them.
     fn narrate(&mut self, text: &str) {
         if let Some((tool, detail)) = text
             .strip_prefix("running ")
@@ -664,12 +599,8 @@ impl<W: Write> App<W> {
         self.status_text(text);
     }
 
-    /// One step of the running turn, `own` for a dispatch the turn made itself. Its own dispatch
-    /// stands the open reply before it as the thought it is — text a round wrote before it
-    /// dispatched work is intermediate by definition — so the reply the turn closes on is the
-    /// answer, and the steps behind it are what its end rolls up. A run narrates at its own pace: a
-    /// background run states its calls while the parent writes that closing answer, so a row of the
-    /// run says nothing about where the parent's words end and takes none of them.
+    /// A run narrates at its own pace: a background run states its calls while the parent writes that
+    /// closing answer, so a row of the run says nothing about where the parent's words end.
     fn step(&mut self, step: Step, own: bool) {
         self.flush_stream();
         if own && self.reply_open {
@@ -702,7 +633,6 @@ impl<W: Write> App<W> {
             .push(Entry::Raw(vec![Line::styled(line, self.theme.muted)]));
     }
 
-    /// The op's header throbs in the activity row while it runs.
     pub fn op_started(&mut self, op: &OpRequest) {
         self.running_desc = match self.narration.take() {
             Some((tool, detail)) if tool == op.name || tool == op.kind => Some(detail),
@@ -711,10 +641,6 @@ impl<W: Write> App<W> {
         self.running_op = Some(OpView::from_request(op));
     }
 
-    /// The answered op joins the turn's steps, its header over the rows its result showed —
-    /// the work stands in the transcript where it happened, and the turn's end rolls it up with
-    /// every other step. A call the agent narrated restates that narration's row rather than
-    /// adding one of its own.
     pub fn op_finished(&mut self, op: &OpRequest, result: &Result<Vec<u8>, String>) {
         self.running_op = None;
         let narrated = self.running_desc.take();
@@ -762,8 +688,6 @@ impl<W: Write> App<W> {
         );
         self.retained.push(Entry::Note(said));
     }
-
-    // ── turn state ────────────────────────────────────────────────────────────────────────────
 
     pub fn begin_turn(&mut self) {
         self.working = true;
@@ -839,8 +763,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    // ── member input states ───────────────────────────────────────────────────────────────────
-
     pub fn ask_prompt(&mut self, prompt: &str) {
         self.prompt = if prompt.is_empty() || prompt == SERVER_PROMPT {
             PROMPT_IDLE.to_string()
@@ -880,9 +802,6 @@ impl<W: Write> App<W> {
         });
     }
 
-    /// Up on an empty composer recalls the newest queued message: the recall the reply names is
-    /// posted to the server, and the row waits marked until the server answers whose the words
-    /// are. A row still awaiting its send ack cannot be recalled yet.
     fn recall_queued(&mut self) -> Reply {
         let Some(row) = self.queued.iter_mut().rev().find(|row| !row.retracting) else {
             return Reply::None;
@@ -898,9 +817,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// The server answered a recall: the words are the member's again (the row leaves the queue
-    /// and fills the composer), or the turn already took them up (the row stays and settles the
-    /// way every absorbed message does).
     pub fn retracted(&mut self, text: &str, arrival_id: &str, retracted: bool) {
         let Some(at) = self
             .queued
@@ -924,9 +840,6 @@ impl<W: Write> App<W> {
         self.ask.cursor = self.ask.text.len();
     }
 
-    /// The server admitted an instant send into the running turn: the row it acknowledged now
-    /// waits under its arrival id for the turn to fold it in. An `absorbed` that outran this ack
-    /// settles the row at once.
     pub fn sent_ack(&mut self, text: &str, arrival_id: &str) {
         if let Some(at) = self.early_absorbed.iter().position(|id| id == arrival_id) {
             self.early_absorbed.remove(at);
@@ -942,8 +855,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// The turn took up these arrivals; the queued rows they name settle into the transcript. An
-    /// id with no acknowledged row yet is held for the ack racing it.
     pub fn absorbed(&mut self, arrival_ids: &[String]) {
         for id in arrival_ids {
             match self
@@ -966,10 +877,8 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// The ack named a turn but no pending arrival: the message already lives in that turn — a
-    /// retried delivery whose first answer was lost, or a send a spend gate parked whole. The row
-    /// settles now, and there is nothing left to recall; a row an absorb already settled stays
-    /// settled.
+    /// The ack named a turn but no pending arrival: the message already lives in that turn — a retried
+    /// delivery whose first answer was lost, or a send a spend gate parked whole.
     pub fn settle_queued(&mut self, text: &str) {
         if let Some(at) = self.queued.iter().position(|row| row.text == text) {
             self.queued.remove(at);
@@ -977,7 +886,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// A queued message the wire has now posted: it leaves the queue and joins the transcript.
     pub fn queued_sent(&mut self, text: &str) {
         if let Some(at) = self.queued.iter().position(|row| row.text == text) {
             self.queued.remove(at);
@@ -985,8 +893,6 @@ impl<W: Write> App<W> {
         self.member_echo(text);
     }
 
-    /// A member message replayed from the durable transcript: drawn as the member's own, but
-    /// never re-entered into the input history — it was typed once.
     pub fn member_replay(&mut self, text: &str) {
         self.draw_member(text);
     }
@@ -1001,8 +907,6 @@ impl<W: Write> App<W> {
         self.retained.push(Entry::Member(text.to_string()));
         self.reply_open = false;
     }
-
-    // ── keys ──────────────────────────────────────────────────────────────────────────────────
 
     pub fn on_key(&mut self, key: KeyEvent) -> Reply {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1049,8 +953,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// Whether the entry a Ctrl+V was pressed in still holds input, so its clipboard result may
-    /// land.
     pub fn entry_still(&self, entry: ClipEntry) -> bool {
         match entry {
             ClipEntry::Compose => {
@@ -1065,18 +967,14 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// A clipboard image lands in the ask as an `[Image #N]` marker; the send expands it to the
-    /// stashed workspace-relative path.
     pub fn paste_image(&mut self, path: &str) {
         let width = self.entry_width();
         self.ask
             .apply(Key::Image(path.to_string()), &self.history.entries, width);
     }
 
-    /// Pasted text reaches whichever entry holds input. Where a terminal brackets a paste the
-    /// member never types the characters, so an entry that ignored the event took nothing at all —
-    /// a masked entry above all, whose prompt is what asks for a pasted value. That entry holds one
-    /// value, so the newline a copied value carries, and every other control character, is dropped.
+    /// Where a terminal brackets a paste the member never types the characters, so an entry that ignored
+    /// the event took nothing at all. A masked entry holds one value, so control characters are dropped.
     pub fn on_paste(&mut self, text: String) -> Reply {
         match self.focus {
             Focus::Compose => {
@@ -1230,8 +1128,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// Whether an `@` typed here starts a path mention: only at the start of a word, so an address
-    /// like `member@example.com` — what a sign-in prompt asks for — types straight through.
     fn opens_a_mention(&self) -> bool {
         self.ask.text[..self.ask.cursor]
             .chars()
@@ -1281,7 +1177,6 @@ impl<W: Write> App<W> {
                         self.ask.text.replace_range(token_start..end, &path);
                         self.ask.cursor = token_start + path.len();
                     }
-                    // Nothing is left to complete, so the key is the composer's: Enter still sends.
                     None => return self.compose_key(key),
                 }
             }
@@ -1323,10 +1218,6 @@ impl<W: Write> App<W> {
         self.note("Copied the last reply.");
     }
 
-    // ── painting ──────────────────────────────────────────────────────────────────────────────
-
-    /// The alternate screen owns every row, so a resize is one clean repaint at the new size,
-    /// and every retained entry re-wraps to the new width.
     pub fn resize(&mut self) {
         let (cols, rows) = sane_size();
         self.cols = cols;
@@ -1335,11 +1226,6 @@ impl<W: Write> App<W> {
         self.screen.invalidate();
     }
 
-    /// Every mouse event: the wheel scrolls; a press flips the fold it lands on, or anchors a
-    /// selection at the grain repeated clicks cycle to; a drag extends it, scrolling at the
-    /// window's edges; releasing a drag or a widened grain copies it. A plain click opens the URL
-    /// under it, or clears the selection. Motion is held for the fold affordance the paint draws.
-    /// On the conversation page the wheel moves the selection and a click opens the row under it.
     pub fn on_mouse(&mut self, mouse: MouseEvent) -> Reply {
         if let (MouseEventKind::Down(MouseButton::Left), Some((row, columns))) =
             (mouse.kind, self.list_hit.as_ref())
@@ -1446,8 +1332,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// Scroll the transcript: positive is up into history, negative back toward the live end.
-    /// Reaching the end resumes following.
     pub fn scroll(&mut self, up: isize) {
         self.retained.scroll(up);
     }
@@ -1531,9 +1415,6 @@ impl<W: Write> App<W> {
         self.present(frame, cursor);
     }
 
-    /// Hand the frame to the screen with every row cut at the screen's edge: the terminal
-    /// soft-wraps a wider row and shifts every row below it, the entry bar included. Width is
-    /// counted in painted units, so a link's escape costs nothing.
     fn present(&mut self, mut frame: Vec<Line<'static>>, cursor: Option<(u16, u16)>) {
         let cols = self.cols as usize;
         for line in frame.iter_mut() {
@@ -1544,8 +1425,6 @@ impl<W: Write> App<W> {
         let _ = self.screen.frame(&frame, cursor);
     }
 
-    /// The reply as it stands, rendered live while it streams — a block does not wait for its
-    /// close to be readable. Scrolled away from the end, the live tail yields to history.
     fn live_tail(&self) -> Vec<Line<'static>> {
         let tail = self.stream.open_tail();
         if tail.trim().is_empty() || self.retained.scrolled() > 0 {
@@ -1599,9 +1478,6 @@ impl<W: Write> App<W> {
         }
     }
 
-    /// The page: the mark, the heading and the list in the transcript area, and the dock below
-    /// with the search line over the entry bar — the activity line and the footer still those of
-    /// the conversation behind. The cursor stands where the page's column puts it.
     fn paint_conversations(&mut self) {
         let cols = self.cols as usize;
         let rule = || Line::styled("─".repeat(cols.saturating_sub(1)), self.theme.prompt);
@@ -1678,7 +1554,6 @@ impl<W: Write> App<W> {
         self.compose_rows_with(&self.prompt)
     }
 
-    /// The entry bar under `prompt`: the draft's rows, at most `ENTRY_ROWS_MAX`, with the cursor.
     fn compose_rows_with(&self, prompt: &str) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
         let prompt = if prompt == PROMPT_IDLE {
             FOCUS_CARET
@@ -1785,8 +1660,6 @@ impl<W: Write> App<W> {
         rows
     }
 
-    /// Anything the stream still holds commits now: a transcript element that is not part of the
-    /// reply is about to land, and the held block stands before it.
     fn flush_stream(&mut self) {
         let source = self.stream.finish();
         self.commit_reply(source);
@@ -1799,9 +1672,6 @@ impl<W: Write> App<W> {
         self.screen.splice(bytes);
     }
 
-    /// Leave the alternate screen and print the whole conversation into the terminal's own
-    /// scrollback, images last — the session ends, the transcript stays at its final width. The
-    /// session's end caps its last turn, so a rollup the member never saw settle rolls up here.
     pub fn close(&mut self) {
         self.flush_stream();
         self.retained.roll_up_steps();
@@ -1815,8 +1685,6 @@ impl<W: Write> App<W> {
     }
 }
 
-/// `line` underlined whole — the affordance a hovered fold row takes.
-/// The columns a row paints: an OSC escape is a zero-width unit, every other char at least one.
 fn painted_width(line: &Line<'static>) -> usize {
     line.spans
         .iter()
@@ -1825,8 +1693,6 @@ fn painted_width(line: &Line<'static>) -> usize {
         .sum()
 }
 
-/// A row cut to `width` painted columns. Visible units stop at the first that does not fit; every
-/// zero-width unit still ships, so a link opened before the cut is closed after it.
 fn clip_line(line: &Line<'static>, width: usize) -> Line<'static> {
     let mut left = width;
     let mut full = false;
@@ -1864,7 +1730,6 @@ fn underline_line(line: Line<'static>) -> Line<'static> {
     Line::from(spans).style(line.style.add_modifier(Modifier::UNDERLINED))
 }
 
-/// `line` with the span between two display columns drawn in reverse video.
 fn highlight_columns(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
     let base = line.style;
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1916,8 +1781,6 @@ fn highlight_columns(line: Line<'static>, from: usize, to: usize) -> Line<'stati
     Line::from(spans)
 }
 
-/// The terminal's size, floored to something drawable — a pty that reports no size gets the
-/// classic 80×24.
 fn sane_size() -> (u16, u16) {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     (
@@ -1926,7 +1789,6 @@ fn sane_size() -> (u16, u16) {
     )
 }
 
-/// Decode one key event to a picker key.
 pub fn pick_key(key: KeyEvent) -> Option<PickKey> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     Some(match key.code {
@@ -1945,7 +1807,6 @@ pub fn pick_key(key: KeyEvent) -> Option<PickKey> {
     })
 }
 
-/// Decode one key event to an editor key.
 pub fn decode_key(key: KeyEvent) -> Option<Key> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -2002,14 +1863,10 @@ mod tests {
             .collect()
     }
 
-    /// An app whose screen writes into memory: no terminal is touched, and what it would have
-    /// painted is readable. Each one gets a home of its own, because the composer's history is a
-    /// file — a shared one would let a recall in a later test read what an earlier test typed.
     fn app_on_memory() -> App<Vec<u8>> {
         app_at(scratch_home(), "ufo.test", "host.1")
     }
 
-    /// A home no other test writes into.
     fn scratch_home() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let home = std::env::temp_dir().join(format!(
@@ -2022,7 +1879,6 @@ mod tests {
         home
     }
 
-    /// An app on `home` whose screen writes into memory, signed in at `host` under `session`.
     fn app_at(home: PathBuf, host: &str, session: &str) -> App<Vec<u8>> {
         App::new(
             Vec::new(),
@@ -2046,7 +1902,6 @@ mod tests {
         }
     }
 
-    /// The whole transcript as one string, for asserting what a member can read back.
     fn transcript(app: &mut App<Vec<u8>>) -> String {
         let theme = app.theme.clone();
         app.retained
@@ -2067,7 +1922,6 @@ mod tests {
         )
     }
 
-    /// Every member message the transcript holds, in order — the caret marks them.
     fn members(app: &mut App<Vec<u8>>) -> Vec<String> {
         let theme = app.theme.clone();
         app.retained
@@ -2263,8 +2117,6 @@ mod tests {
         );
     }
 
-    /// The dock draws the open tail on every delta and on every tick. Whatever it draws there is a
-    /// different string each time, so the renderer it reaches for must not be the holding one.
     #[test]
     fn a_streaming_reply_leaves_nothing_held_until_it_commits() {
         let mut app = app_on_memory();
@@ -2797,7 +2649,6 @@ mod tests {
         );
     }
 
-    /// The page as it renders into the transcript area, one string.
     fn page_text(app: &App<Vec<u8>>) -> String {
         let page = app.conversations.as_ref().expect("the page is up");
         page.render(&app.theme, 80, 24)
@@ -2835,8 +2686,6 @@ mod tests {
         );
     }
 
-    /// Whether the first list row is drawn bold; the cursor rests in the entry, so no row carries
-    /// the highlight's own bold.
     fn first_row_bold(app: &mut App<Vec<u8>>) -> bool {
         let page = app.conversations.as_ref().expect("the page is up");
         let lines = page.render(&app.theme, 80, 24);

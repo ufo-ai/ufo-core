@@ -7824,9 +7824,6 @@ async def test_an_interrupt_after_a_denied_founding_never_records_the_refused_bo
         ),
     )
 
-    # A cancel lands while the denial branch builds its context — before the founding window is
-    # seeded — so the interrupt persists from the empty-window fallback, the one path that could
-    # re-derive the founding from the raw inbound.
     real_prior = TranscriptRepair._prior_messages
     calls = {"n": 0}
 

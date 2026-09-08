@@ -2673,7 +2673,6 @@ async def test_a_task_on_an_archived_app_keeps_its_occurrence_and_fails_no_tick(
                 .values(name=tables.agent.c.archived_name, archived_name=None, archived_at=None)
                 .where(tables.agent.c.id == agent_id)
             )
-            # The refused fire left the claim it took, which the lease clears in its own time.
             await connection.execute(
                 sa.update(schedule_table).values(claimed_by=None, claim_expires_at=None)
             )

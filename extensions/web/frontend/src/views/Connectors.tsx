@@ -65,8 +65,6 @@ import type { Agent } from "@/lib/types";
 import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
 import { CONNECT_INSTALLS } from "@/views/Surfaces";
 
-/** One stream of one connection, hanging off it by `connection_id`. A stream carries no act: what
- *  a member does, they do to the connection, and the stream states what that account is syncing. */
 type Stream = {
   id: string;
   connection_id: string;
@@ -108,23 +106,15 @@ const AGENT_COLUMNS = [PROVIDER, "Account", ACCESS];
 const ATTACH_AGENT = "attach-agent";
 const TENANT_URL = "connection-base-url";
 const BACKFILL_DAYS = "connection-backfill-days";
-/** What a press that never became a request states. Both connector screens draw it, so it is said
- *  once: a member reads one sentence for one outcome wherever they pressed. */
 export const CONNECT_REFUSED =
   "No connection request was opened. Ask in chat to connect the account.";
 
-/** The account a connection stands on, or the empty string where it stands on none. A workspace
- *  connection — a keyed provider, a configured folder — has no account and carries the empty
- *  string as its `account_id`, which is why every fall through here is `||` and not `??`. The
- *  broker's own id for the account is tried last: `ca_9x2QpLm4` is wiring, not a name a member
- *  would recognise, so the address that consented reads better than it does. */
+/** A workspace connection has no account and carries the empty string as its `account_id`, which is
+ *  why every fall through here is `||` and not `??`. */
 function accountHeld(entry: Connection): string {
   return entry.account_label || entry.owner_email || entry.account_id;
 }
 
-/** What every surface calls the account — a row, the attach picker, and the record's own title.
- *  One connection has one name: a title that reached for the broker's id while the row beside it
- *  named the member who consented is the same account reading as two. */
 function accountName(entry: Connection): string {
   return accountHeld(entry) || entry.provider;
 }
@@ -133,8 +123,6 @@ function dayCount(days: number): string {
   return days === 1 ? "1 day" : days + " days";
 }
 
-/** What the sync settings read as to a member who cannot change them. An empty field is what the
- *  provider's own defaults answer, and the row says so rather than standing blank. */
 function syncFacts(entry: Connection): Fact[] {
   return [
     { label: "Tenant URL", value: entry.base_url || "The provider's own host" },
@@ -146,9 +134,6 @@ function syncFacts(entry: Connection): Fact[] {
   ];
 }
 
-/** What one stream states beside its next sync: the errors it has run into with no success between
- *  them, and the reason the driver parked it. A stream the provider has stopped answering states
- *  the park rather than reading as healthy. */
 function streamMeta(one: Stream): ReactNode[] {
   return [
     one.consecutive_errors === 0
@@ -160,12 +145,8 @@ function streamMeta(one: Stream): ReactNode[] {
   ];
 }
 
-/** One prepared intent against the `connection` kind, carrying the whole spec with the one field
- *  the act changes written over it. The kind forbids an unknown field and takes every known one at
- *  its declared default, so a spec naming less than the whole record is not a partial edit — it is
- *  an edit that also unshares the account and forgets its tenant. Every act on a connection is
- *  built here for that reason. `provider` and `account_id` are its identity and ride back
- *  unchanged; the verb refuses a spec that moves either. */
+/** The kind forbids an unknown field and takes every known one at its declared default, so a spec
+ *  naming less than the whole record is an edit that also unshares the account and forgets its tenant. */
 function connectionSpec(
   entry: Connection,
   change: { shared?: boolean; base_url?: string; backfill_days?: number | null },
@@ -185,8 +166,6 @@ function connectionSpec(
   };
 }
 
-/** What the record states about the account itself, before what it syncs and before the acts on
- *  it: who reaches it, whose it is, when it landed, and which apps hold it. */
 function connectionFacts(
   entry: Connection,
   viewer: string | null,
@@ -213,20 +192,12 @@ function matches(entry: Connection | PoolConnection, query: string): boolean {
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
-/** What a connected row says under the tool's name: the account it stands on, and who reaches it.
- *  A member holding the account alone reads a different sentence from one the whole workspace
- *  shares, and that difference is the fact worth stating on a row they scan rather than open. A
- *  workspace connection stands on no account, so the row states the access alone — the tool's
- *  own name is already above it and would otherwise be said twice. */
 function accountLine(entry: Connection): string {
   const access = entry.shared ? "Workspace" : "Only you";
   const named = accountHeld(entry);
   return named ? named + " \u00b7 " + access : access;
 }
 
-/** One tool already reachable: a connection this member can see, or a workspace install. An install
- *  carries no connection row, so it holds no connection and opens no record — what it states is
- *  already true, and the acts on a connection belong to the connection. */
 type Standing = {
   key: string;
   name: string;
@@ -237,13 +208,8 @@ type Standing = {
   entry: PoolConnection | null;
 };
 
-/** One tool the catalog still offers. */
 type Offer = { name: string; label: string; summary: string; group: string };
 
-/** Everything already standing: each workspace install the workspace holds, then every connection
- *  in the pool. The pool is listed whole rather than folded onto the catalog — the brokers reach
- *  further than the catalog names, and a member holding two accounts on one provider holds two
- *  rows. */
 function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
   const tiles = new Map(catalog.providers.map((tile) => [tile.name, tile]));
   const installs = catalog.connectors
@@ -288,14 +254,6 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
   ];
 }
 
-/** What the catalog still offers: a tool the workspace has not installed, and one this member has
- *  not connected an account of their own on. A connection another member shares with the workspace
- *  does not fill that: a member's turns run on their own account first, so the tool stays offered
- *  beside the shared row until they connect theirs. Whose an account is, is the owner address
- *  against the viewer, never `own` — that flag is whether the viewer may manage the account, which
- *  a workspace admin may on every member's. An install reads its own flag and never the pool — the
- *  press installs the workspace leg, and a member's own account on the same provider does not fill
- *  what the workspace still lacks. */
 function offers(catalog: FirstRunPayload, pool: PoolPayload, viewer: string | null): Offer[] {
   const installs = new Map(catalog.connectors.map((row) => [row.name, row.installed]));
   const connected = new Set(
@@ -309,17 +267,12 @@ function offers(catalog: FirstRunPayload, pool: PoolPayload, viewer: string | nu
   });
 }
 
-/** Whose a standing row is: the owner address against the viewer, never `own` — that flag is
- *  whether the viewer may manage the account, which a workspace admin may on every member's. A
- *  workspace install carries no connection row, and a workspace connection carries no owner; both
- *  stand with what the workspace holds, not with what the member connected. */
+/** Whose a row is, is the owner address against the viewer, never `own` — that flag is whether the
+ *  viewer may manage the account, which a workspace admin may on every member's. */
 function ownHeld(row: Standing, viewer: string | null): boolean {
   return row.entry !== null && row.entry.owner_email !== null && row.entry.owner_email === viewer;
 }
 
-/** The two headed zones a connected row falls into. A shared account another member holds reads on
- *  a row exactly like an own one, and a remove pressed on it disconnects that member — so the two
- *  stand apart, under headings that say whose the accounts under them are. */
 const HELD_ZONES: [string, string, (row: Standing, viewer: string | null) => boolean][] = [
   ["Your connections", "Accounts you connected, and the apps that can use them.", ownHeld],
   [
@@ -329,8 +282,6 @@ const HELD_ZONES: [string, string, (row: Standing, viewer: string | null) => boo
   ],
 ];
 
-/** The catalog's own order carried into headed runs, so a group's tools arrive together and no page
- *  sorts what the read already ordered. */
 function grouped(rows: Offer[]): [string, Offer[]][] {
   const groups: [string, Offer[]][] = [];
   for (const row of rows) {
@@ -341,14 +292,11 @@ function grouped(rows: Offer[]): [string, Offer[]][] {
   return groups;
 }
 
-/** Every category the catalog carries, in the order it carries them, so the picker lists them the
- *  way the page stacks them. */
 function categories(catalog: FirstRunPayload): string[] {
   return [...new Set(catalog.providers.map((tile) => tile.group))];
 }
 
-/** What the picker stands at when no category is picked. Radix names an option by a value, and an
- *  empty one is how it says nothing is selected — so the whole catalog is a named choice. */
+/** Radix names an option by a value, and an empty one is how it says nothing is selected. */
 const EVERY_CATEGORY = "all";
 
 const COVERAGE = "github-coverage";
@@ -357,8 +305,6 @@ const CONNECTION = "connection/";
 
 const GITHUB = "github";
 
-/** The link left standing when the browser refused the consent window — the one case with nothing
- *  else to carry the member over. */
 type Handoff = { url: string; text: string };
 const CONNECTOR_BATCH_MIN = 25;
 const CONNECTOR_BATCH_CURSOR_LIMIT = 25;
@@ -479,20 +425,11 @@ function joined(
   };
 }
 
-/** The connect a forwarded tab arrived carrying, said the way an outcome whose own surface has gone
- *  is said. The callback page took itself away to bring the member here, so the sentence they read
- *  there is the sentence that stands here — one wording for one outcome, wherever it is read.
- *
- *  Read while the screen first draws, before the router has taken the arrival off the address, and
- *  held in state from there: a member who walks back onto this screen is not arriving from a
- *  provider. A member who pressed that page's own button reads nothing either — the button carries
- *  no account, because they were looking at the outcome when they chose to come. */
 function arrivedToast(): ToastState {
   const named = connectArrival();
   return named ? { title: named + " connected." } : SILENT;
 }
 
-/** The available and connected accounts. */
 export function Connectors({
   place,
   onPlace,
@@ -569,8 +506,8 @@ export function Connectors({
     setBusy(name);
     setHandoff(null);
     setNotice(QUIET);
-    // Opened on the press, before the round trip that mints the link: a window opened afterwards
-    // has lost the gesture the browser opens one for.
+    // Opened on the press, before the round trip that mints the link: a window opened afterwards has lost
+    // the gesture the browser opens one for.
     consent.current = openConsentWindow();
     const install = CONNECT_INSTALLS[name];
     const outcome = install
@@ -724,9 +661,6 @@ export function Connectors({
                               current={opens.includes(held ? CONNECTION + held.grant : COVERAGE)}
                               act={
                                 <>
-                                  {/* The word gives way to the act on a phone: a row under a
-                                      connected heading already says it is connected, and the
-                                      remove needs the width the chip was taking. */}
                                   <span
                                     className={cn(
                                       "flex items-center gap-xs text-label text-ink-soft",
@@ -835,11 +769,6 @@ export function Connectors({
   );
 }
 
-/** What a per-account remove commits, and the step it stands behind. The provider and the account
- *  are named here rather than on the row, because a row states one line and a member about to
- *  disconnect an account is owed the whole sentence. The act ends that one connection — every other
- *  account the workspace holds keeps its own — and a refusal stands in the dialog that asked for it
- *  rather than behind a closed one, so the member reads the answer where they pressed. */
 function RemoveConnection({
   agentId,
   entry,
@@ -935,15 +864,8 @@ function CoverageRecord({ legs, onClose }: { legs: Fact[]; onClose: () => void }
   );
 }
 
-/** The account this connection stands on, and the streams that hang off it. The account is the
- *  record: it is what a member shares, points at a tenant, backfills and disconnects. A stream
- *  under it is status alone — one row per canonical stream of the connection, with the sync it is
- *  waiting on and whatever the driver has run into — so the pane draws them inert.
- *
- *  Sharing rides the `connector_grant` kind and the tenant window rides the `connection` kind,
- *  which is where each is stored. A workspace connection is owned by nobody and shared by
- *  construction, so it draws no make-private control: the act would reach a connection with no
- *  owner to hand it back to and be refused. */
+/** A workspace connection is owned by nobody and shared by construction, so it draws no make-private
+ *  control: the act would reach a connection with no owner to hand it back to and be refused. */
 function ConnectionRecord({
   entry,
   viewer,
@@ -964,8 +886,8 @@ function ConnectionRecord({
   const [targetAgent, setTargetAgent] = useState("");
   const holder = holders[0];
   const streams = usePanelRead<SourcesPayload>("/workspace/sources");
-  // Sharing an account is the owner's alone; making it private is theirs or an admin's, which is
-  // what `own` already answers. A row that offered an admin the share would be refused at the gate.
+  // Sharing an account is the owner's alone; making it private is theirs or an admin's, which is what
+  // `own` answers. A row that offered an admin the share would be refused at the gate.
   const mine = entry.owner_email !== null && entry.owner_email === viewer;
 
   async function act(agentId: string, envelope: unknown) {
@@ -1072,16 +994,6 @@ function ConnectionRecord({
   );
 }
 
-/** What every stream of this connection syncs against: the tenant host they dial, and how far back
- *  their first sync reads. Both are the account's rather than any one stream's, so both are set on
- *  the `connection` kind and land as one prepared intent — the same verb a member reaches by asking
- *  in chat, so the turn is the record of the change either way.
- *
- *  A provider that is not per-tenant takes no URL, and the fields say so instead of the screen
- *  guessing which providers those are: an account pointed at the wrong tenant parks on its first
- *  sync carrying what the provider answered, which is a better answer than a list of hosts kept in
- *  step by hand. `provider` and `account_id` ride the spec unchanged because they are the
- *  connection's identity, and the verb refuses a spec that moves either. */
 function SyncForm({
   entry,
   lane,
@@ -1149,8 +1061,6 @@ function SyncForm({
   );
 }
 
-/** What this agent can reach, read as a section of the agent's settings: a grant the member kept
- *  private is theirs, not the agent's, so the agent's own section does not list it. */
 export function AgentConnectors({ agent }: { agent: Agent }) {
   return <ConnectorList agent={agent} picker={null} sharedOnly={false} />;
 }
@@ -1189,9 +1099,6 @@ function ConnectorList({
       : undefined;
   if (state.phase === "ready" && standing && !record) setStanding("");
   const source = useRef<EventSource | null>(null);
-  // Opened on the press and pointed at the provider when the frame carrying the URL lands. The
-  // press is the whole act: the wait between them is the typed verb and the broker's own call, no
-  // model round, and nothing appears under the button for the member to find and press again.
   const consent = useRef<Window | null>(null);
 
   useEffect(() => {
@@ -1202,21 +1109,16 @@ function ConnectorList({
       stream.close();
       source.current = null;
     };
-    // The request stands once the turn commits it; the address below is what mints the consent URL,
-    // so the window this press opened is pointed at our own surface and redirected from there.
     let asked = false;
     stream.addEventListener("connect", () => {
       asked = true;
       const url = BASE + "/turns/" + watching + "/connect";
       if (consent.current) consent.current.location.href = url;
-      // The link stands only for a member whose browser refused the window.
       setConsentUrl(consent.current ? null : url);
       consent.current = null;
       setHandoff(QUIET);
       done();
     });
-    // A turn that ended without asking is a refusal the member is still waiting on, and the window
-    // they pressed for has nowhere to go.
     stream.addEventListener("terminal", () => {
       if (!asked) {
         consent.current?.close();
@@ -1313,8 +1215,6 @@ function ConnectorList({
       entry={record}
       viewer={viewer}
       lane={agent.id}
-      /* The bar over the table is where this screen attaches a connection, so the record does not
-         say the same act a second time under another name. */
       attachTo={[]}
       holders={[{ id: agent.id, name: agent.name }]}
       onDone={(notice) => {

@@ -685,7 +685,6 @@ def _check_source_row_id_ignores_the_fields_a_config_model_declares_non_identity
         )
         != expected
     )
-    # a model that declares no non-identity fields — the default — hashes every one of them
     assert (
         source_row_id(
             workspace_id,
@@ -781,8 +780,6 @@ async def test_a_losing_racer_on_one_stream_set_creates_no_row_at_all(db: None) 
                 )
             )
         ).all()
-    # the loser was refused on 'conversations', the first in sorted order, so it never reached
-    # 'messages' — both rows are the winner's and the binding is on one window
     assert len(rows) == 2
     assert {row.config["backfill_days"] for row in rows} == {7}
 
@@ -828,7 +825,6 @@ async def test_rewindow_sources_breaks_the_claim_of_a_sync_already_in_flight(db:
         )
         await ctx.rewindow_sources({source_id: widened}, refetch=frozenset({source_id}))
 
-        # the in-flight run now completes, writing its cursor under the claim it still holds
         async with workspace_tx() as connection:
             landed = await connection.execute(
                 sa.update(tables.source)
@@ -3234,7 +3230,6 @@ async def test_a_refused_stream_parks_on_the_threshold_run_and_records_it_withou
     assert parked["parked_at"] is not None
     assert parked["parked_reason"] == PARK_REASON
     assert parked["cursor"] == "held-cursor"
-    # the loop is slowed to the park retry, not the interval it was on for the two runs before
     assert parked["next_sync_at"] - under["next_sync_at"] >= timedelta(
         seconds=SOURCE_PARK_RETRY_SECONDS - SOURCE_SYNC_INTERVAL_SECONDS
     )
@@ -3345,7 +3340,6 @@ async def test_the_run_that_finally_succeeds_releases_a_parked_source(
     state = await _source_state(source_id)
     assert (state["parked_at"], state["parked_reason"]) == (None, None)
     assert state["consecutive_refusals"] == 0
-    # the only two values this writer can leave are the interval and the park retry
     ahead = state["next_sync_at"] - due
     assert timedelta(0) < ahead < timedelta(seconds=SOURCE_PARK_RETRY_SECONDS)
 

@@ -1,5 +1,3 @@
-//! The line printer behind pipes, `TERM=dumb`, and `UFO_PLAIN`: every directive is plain lines
-//! on stdout, prompts read stdin, nothing repaints.
 
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
@@ -7,9 +5,6 @@ use std::io::{self, BufRead, Write};
 use crate::ui::retained::rollup_line;
 use crate::ui::{narrates_activity, run_label};
 
-/// Plain output state: whether a streamed line is still open, and the steps the running turn has
-/// taken — a piped session is a log, so every step prints where it happened and the turn's end
-/// states the count rather than collapsing anything.
 pub struct Plain {
     open: bool,
     steps: usize,
@@ -32,11 +27,6 @@ impl Plain {
         println!("{text}");
     }
 
-    /// A note the agent's work narrates counts as a step. Text the turn wrote before its own
-    /// dispatch counts as the thought it was; a run narrates at its own pace, and a background run
-    /// states its calls while the parent writes its closing answer, so a run's note leaves that
-    /// text as the answer it is. A run counts once however many dispatches it narrates, which is
-    /// the count the web states.
     pub fn note(&mut self, text: &str) {
         if narrates_activity(text) {
             match run_label(text) {
@@ -65,7 +55,6 @@ impl Plain {
         self.say(text);
     }
 
-    /// A member message replayed from the transcript.
     pub fn member(&mut self, text: &str) {
         self.line_break();
         for (index, row) in text.lines().enumerate() {
@@ -109,7 +98,6 @@ impl Plain {
         }
     }
 
-    /// Read one line under `prompt`; None on EOF.
     pub fn ask(&mut self, prompt: &str) -> Option<String> {
         self.line_break();
         eprint!("{prompt} ");
@@ -121,7 +109,6 @@ impl Plain {
         }
     }
 
-    /// Numbered menu; a reply outside 1..=n passes through as free text.
     pub fn menu(&mut self, prompt: &str, options: &[String]) -> Option<String> {
         self.line_break();
         println!("{prompt}");
@@ -140,10 +127,6 @@ impl Plain {
         }
     }
 
-    /// Read one secret without echo; `None` on EOF, `Some("")` when skipped. Any reachable
-    /// terminal goes through the raw-mode reader — crossterm falls back to the tty when stdin is
-    /// a pipe, which is what a `curl | sh` install leaves behind — so the typed value never
-    /// echoes; only a fully headless run reads a line from stdin, where no terminal echoes.
     pub fn secret(&mut self, prompt: &str) -> Option<String> {
         use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
         use crossterm::tty::IsTty;

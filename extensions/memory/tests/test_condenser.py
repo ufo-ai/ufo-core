@@ -746,9 +746,6 @@ async def _index_pages(
     ).apply((change,))
 
 
-# --- fact derivation ---------------------------------------------------------
-
-
 async def test_derive_facts_writes_each_source_supported_fact_through_page_change(
     db: None, tmp_path: object
 ) -> None:
@@ -1255,9 +1252,6 @@ async def test_a_tombstoned_pages_facts_are_retired_by_the_derivation_that_settl
         )
 
 
-# --- index publication -------------------------------------------------------
-
-
 async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None) -> None:
     """Recall asks the index for exactly its candidate window and fences page-derived rows only
     afterwards, so a fact bound to a revision the page has left must never occupy a slot: the index
@@ -1300,9 +1294,6 @@ async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None
     assert [hit.text for hit in published] == ["the acquisition codename is meridian"]
     assert [item.body for item in recalled] == ["the acquisition codename is meridian"]
     assert len(await _page_facts(page_id)) == 6
-
-
-# --- consolidation -----------------------------------------------------------
 
 
 OVERVIEW_PARAGRAPH = " ".join(
@@ -1405,9 +1396,6 @@ async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_ba
         if job.name == memory_manifest.CONSOLIDATE_JOB
     )
     assert await consolidate.candidates() == (clusterable,)
-
-
-# --- dedup -------------------------------------------------------------------
 
 
 LEDGER_COPIES = (
@@ -1775,9 +1763,6 @@ async def test_a_cursor_the_sweep_did_not_write_fails_loud(db: None, stored: Jso
             await _deduper(workspace_id, StubEmbed(vec((40, 1.0)))).run()
 
 
-# --- seam --------------------------------------------------------------------
-
-
 def _same_named_handler() -> Callable[[HookContext], Awaitable[HookOutcome]]:
     async def _handler(ctx: HookContext) -> HookOutcome:
         return None
@@ -1968,9 +1953,6 @@ def _rebuild_ctx(workspace_id: UUID, member_id: UUID | None) -> ToolContext:
         artifact_token_secret="",
         ext=context_for(memory_manifest.NAME, frozenset()),
     )
-
-
-# --- sections ----------------------------------------------------------------
 
 
 SECTION_MODEL_JOB = f"memory:{memory_manifest.SECTION_JOB}"
@@ -2220,9 +2202,6 @@ async def test_a_members_band_is_written_under_the_heading_they_read(db: None) -
     assert {row.subject for row in await _sections(workspace_id)} == {SHARED_SUBJECT, subject}
 
 
-# --- overview ----------------------------------------------------------------
-
-
 OVERVIEW_MODEL_JOB = f"memory:{memory_manifest.OVERVIEW_JOB}"
 PAGE_OVERVIEW = (
     "Acme Corp runs its billing on Postgres and is moving the last of it across on 4 March, with"
@@ -2348,9 +2327,6 @@ async def test_overview_candidates_name_only_workspaces_holding_a_shared_page(db
     assert _daily_time(memory_manifest.OVERVIEW_SCHEDULE) > _daily_time(
         memory_manifest.PAGE_PASS_SCHEDULE
     )
-
-
-# --- people ------------------------------------------------------------------
 
 
 PROFILE_MODEL_JOB = f"memory:{memory_manifest.PROFILE_JOB}"
@@ -2507,9 +2483,6 @@ async def test_people_candidates_name_only_workspaces_with_a_shared_fact(db: Non
     assert _daily_time(memory_manifest.PROFILE_SCHEDULE) > _daily_time(
         memory_manifest.PAGE_PASS_SCHEDULE
     )
-
-
-# --- page pass ---------------------------------------------------------------
 
 
 PAGE_PASS_MODEL_JOB = f"memory:{memory_manifest.PAGE_PASS_JOB}"

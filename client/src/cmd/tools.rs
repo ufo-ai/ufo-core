@@ -1,4 +1,3 @@
-//! The `ufo tool` JSON bridge to object and connector tools.
 
 use std::io::{IsTerminal, Read, Write};
 use std::time::Duration;

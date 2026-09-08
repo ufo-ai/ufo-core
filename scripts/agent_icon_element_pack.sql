@@ -1,14 +1,3 @@
--- Re-stamp every agent.icon still holding a tabler slug with the element mark that replaced it.
---
--- Revision 0112 moves the column default only; it deliberately leaves rows alone, because the
--- portal still draws a tabler mark for any name outside its own pack. Run this when the rows
--- should carry the new marks too.
---
---   psql "$UFO_DATABASE_URL" -f scripts/agent_icon_element_pack.sql
---
--- It is idempotent: the new slugs are not keys of the map, so a second run changes nothing. It
--- touches only rows holding one of the 40 old slugs — 'ufo' and any name outside the map are left
--- exactly as they are.
 
 update agent
 set icon = case icon

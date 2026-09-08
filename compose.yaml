@@ -1,31 +1,10 @@
-# The whole local stack, one command: `make stack`.
-#
-#   postgres ─┐
-#   redis ────┤
-#   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap + egress CA (one-shot)
-#   gateway ──┤  ufo-control gateway   :8080   onboarding/login (WorkOS sign-in)
-#   serve ────┤  ufoctl serve          :8710   surfaces + DBOS workers + the egress-control RPC
-#   front ────┤  nginx                 :8080   the one browser origin: /login, /logout, /join,
-#             │                                /v1/onboard and /ufo to the gateway, the rest to
-#             │                                serve — the split the hosted ingress makes
-#   ingress ──┤  ufoctl ingress        :8100   hosted sites, in serve's netns
-#   egress ───┘  ufo-egress            :8888   the Rust egress data plane, in serve's netns
-#
-# Postgres keeps the ufo:ufo credentials the test/eval matrix expects; init creates the ufo_owner
-# and (via rls-bootstrap) ufo_serve roles the hosted topology uses. WorkOS emails the sign-in
-# code to the address you type; invites log to the console (UFO_CONTROL_EMAIL_MODE=console) —
-# read those from `docker compose logs gateway`.
 
 x-dev-env: &dev-env
   UFO_CONTROL_POSTGRES_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
-  # Both ends of the onboarding RPC hold this: the gateway presents it, serve gates on it.
   UFO_ONBOARD_CONTROL_TOKEN: ufo-local-dev-onboard-token
   UFO_CONTROL_PG_ROLE_SEED: ufo-local-dev
   PG_HOST: postgres:5432
   APP_DB: ufo
-  # Which pack the rendered serve config names. `assistant` is the local default;
-  # `assistant_billing` adds Metronome so the billing chain can be driven locally. init renders the
-  # same value so migrations and serve agree on the active bundle.
   UFO_DEV_PACK: ${UFO_DEV_PACK:-assistant}
 
 services:
@@ -36,8 +15,8 @@ services:
       POSTGRES_PASSWORD: ufo
       POSTGRES_DB: ufo
     ports:
-      # Host publish is only for host tooling/tests (the stack talks over the compose network);
-      # override UFO_PG_PORT if 5541 is taken by another local Postgres.
+      # Host publish is only for host tooling and tests; override `UFO_PG_PORT` if 5541 is taken by another
+      # local Postgres.
       - "127.0.0.1:${UFO_PG_PORT:-5541}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -80,25 +59,18 @@ services:
       <<: *dev-env
       UFO_CONTROL_EMAIL_MODE: console
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
-      # The gateway reads its own ledgers and nothing else. Locally that is the owner role for
-      # convenience; a deploy hands it the `ufo_control` role, which holds no privilege on any table
-      # in `public`. Either way core's tables are reached over the onboarding RPC below.
+      # Locally the owner role, for convenience; a deploy hands the gateway the `ufo_control` role, which
+      # holds no privilege on any table in `public`. Either way core's tables are reached over the RPC.
       UFO_CONTROL_GATEWAY_DSN: postgresql://ufo:ufo@postgres:5432/ufo
       UFO_CONTROL_SERVE_INTERNAL_URL: http://serve:8710
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_WORKSPACE_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
-      # WorkOS is off locally: WORKOS_MODE=console runs a credential-free dev verifier, so
-      # `make stack` needs no WorkOS secret. Browser and terminal both collect the email on the
-      # gateway's own pages; in console mode the Continue-with-Google hop lands on a local form
-      # standing in for the WorkOS page, and codes are logged to `make stack-logs` (the dev code is
-      # 000000). To exercise the real path (Magic Auth + Google OAuth), set WORKOS_MODE=workos,
-      # WORKOS_API_KEY, and WORKOS_CLIENT_ID in `.env`; the redirect is the gateway's own origin,
-      # since locally nothing routes /v1/onboard from serve's port to this container.
+      # `WORKOS_MODE=console` runs a credential-free dev verifier, so `make stack` needs no WorkOS secret
+      # and codes are logged (the dev code is 000000). `workos` plus an API key and client id exercises the real path.
       WORKOS_MODE: ${WORKOS_MODE:-console}
       WORKOS_API_KEY: ${WORKOS_API_KEY:-}
       WORKOS_CLIENT_ID: ${WORKOS_CLIENT_ID:-}
       WORKOS_REDIRECT_URI: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}/v1/onboard/auth/callback
-      # Local signup opens without an invite; the hosted gateway leaves this unset (required).
       UFO_INVITE_REQUIRED: "false"
       UFO_GATEWAY_PORT: "8080"
     volumes:
@@ -106,7 +78,6 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       init: {condition: service_completed_successfully}
-      # Sign-in seats a member through serve's onboarding RPC, so the gateway starts behind it.
       serve: {condition: service_started}
     restart: unless-stopped
 
@@ -121,34 +92,24 @@ services:
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
       AWS_REGION: us-east-1
-      # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
-      # A model provider key is REQUIRED for serve to boot — the egress-control RPC's model base
-      # needs one. `make stack` loads the repository `.env` as the authoritative local source.
       UFO_ANTHROPIC_API_KEY: ${UFO_ANTHROPIC_API_KEY:-}
-      # The base-pinned embed backend reads this on every embed call, so memory indexing and recall
-      # raise without it while the rest of the deploy runs. `ufoctl init` names it when it is unset.
+      # The base-pinned embed backend reads this on every embed call, so memory indexing and recall raise
+      # without it while the rest of the deploy runs.
       UFO_OPENAI_API_KEY: ${UFO_OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      # Sign-up enrichment replays recorded People Data Labs bodies locally, so a checkout needs no
-      # key. Set `pdl` and the key to call the API; name a recordings file outside the extension
-      # package to record what it fetches, because the package's own digest pins the deploy.
+      # Name a recordings file outside the extension package to record what it fetches, because the
+      # package's own digest pins the deploy.
       UFO_ENRICHMENT_PROVIDER: ${UFO_ENRICHMENT_PROVIDER:-recorded}
       UFO_ENRICHMENT_RECORDINGS: ${UFO_ENRICHMENT_RECORDINGS:-/app/extensions/enrichment/ufo_ext_enrichment/recordings.json}
       UFO_PEOPLE_DATA_LABS_API_KEY: ${UFO_PEOPLE_DATA_LABS_API_KEY:-}
-      # The broker is what makes a connector grant possible at all, so without it a first session
-      # can record what a team uses and connect none of it. Read from the environment in-process,
-      # never per workspace. The search backend is a per-workspace key instead
-      # (`ufoctl credential set perplexity_api_key`), so it takes no variable here.
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-}
       PIPEDREAM_PROJECT_ID: ${PIPEDREAM_PROJECT_ID:-}
       PIPEDREAM_CLIENT_ID: ${PIPEDREAM_CLIENT_ID:-}
       PIPEDREAM_CLIENT_SECRET: ${PIPEDREAM_CLIENT_SECRET:-}
       PIPEDREAM_GITHUB_OAUTH_APP_ID: ${PIPEDREAM_GITHUB_OAUTH_APP_ID:-}
-      # Billing is opt-in locally: UFO_DEV_PACK=assistant_billing adds the metronome extension, and
-      # these three settings are what its tool and shippers read. Point them at a Metronome SANDBOX
-      # token and a Stripe TEST-MODE key — the flow creates real objects in the accounts they name.
-      # Leave the pack unset and none of this loads (the default `assistant` bundle has no billing).
+      # Point these at a Metronome SANDBOX token and a Stripe TEST-MODE key: the flow creates real objects
+      # in the accounts they name.
       METRONOME_BEARER_TOKEN: ${METRONOME_BEARER_TOKEN:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_BILLING_PORTAL_CONFIGURATION_ID: ${STRIPE_BILLING_PORTAL_CONFIGURATION_ID:-}
@@ -196,11 +157,6 @@ services:
       serve: {condition: service_started}
     restart: unless-stopped
 
-  # The egress data plane (RFC 0035): a standalone Rust MITM proxy that holds no keys and no DB — it
-  # resolves, authorizes, forwards, and meters through serve's egress-control RPC. It shares serve's
-  # network namespace, so the local carrier reaches it at 127.0.0.1:8888 (the address the carrier
-  # already forms) and it reaches serve's RPC at 127.0.0.1:8710. `ufoctl serve` alone gives no
-  # sandbox egress; this service is what makes an in-sandbox CONNECT land somewhere.
   egress:
     build: {context: ./servers/egress, dockerfile: Dockerfile}
     image: ${UFO_EGRESS_DEV_IMAGE:-ufo-egress-dev}

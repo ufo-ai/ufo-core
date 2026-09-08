@@ -19,15 +19,8 @@ import { Moment } from "@/lib/moments";
 import type { Agent, SchemaProperty } from "@/lib/types";
 
 
-/** The one mark whose label is not derived from its slug. Every other label is the slug's words
- *  with a capital on the first; the product is named ufo, and its name is written as it is
- *  written wherever it is read. The picker offers this mark to no app — it reaches the grid only as
- *  the main agent's own mark, led and checked like any mark from outside the offered set. */
 const UFO_ICON = "ufo";
 
-/** The act that keeps what a section was opened to change. The word on it is Save, and what it
- *  saves is the section it stands on — said in full to a reader who cannot see which section that
- *  is, and to any two of these standing at once. */
 function SaveAction({
   what,
   busy,
@@ -51,11 +44,6 @@ function SaveAction({
   );
 }
 
-/** The way into changing what a section states, and the act that commits it — one corner, two
- *  states. Reading is the default: the pencil is all a member sees until they choose to change
- *  something, and while they are changing it the same corner is the way to keep it. A section
- *  whose subject is itself the way in — the avatar, which a member presses directly — carries the
- *  save alone and no second pencil over it. */
 function EditAction({
   editing,
   what,
@@ -100,10 +88,6 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
   const [values, setValues] = useState<Record<string, SpecValue>>({});
   const [prompt, setPrompt] = useState("");
   const [icon, setIcon] = useState("");
-  // What the member has edited and what they have sent, held outside state on purpose: the seeding
-  // effect below has to read them as they are when it runs, not as they were when the render that
-  // scheduled it closed over them. An effect already scheduled when the member's first keystroke
-  // commits would otherwise re-seed the field from the payload and swallow that keystroke.
   const settingsDirty = useRef(false);
   const settingsSaved = useRef<Record<string, SpecValue> | null>(null);
   const promptDirty = useRef(false);
@@ -112,20 +96,10 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
   const iconSaved = useRef<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
-  // Which sections the member has opened for editing. A section is read until they say otherwise,
-  // and saving closes it again, so the panel returns to stating what is true.
-  // A preference is kept the moment it is changed, so a member can change a second one while the
-  // first is still in flight. Both carry the whole spec, so two answers racing would let the older
-  // one land last and undo the newer choice. The intent is held here and sent one at a time: a save
-  // already running picks the newest up when it comes back, so exactly one more request follows and
-  // what becomes durable is always the member's last answer.
   const intended = useRef<Record<string, SpecValue> | null>(null);
   const saving = useRef(false);
   const [editingIcon, setEditingIcon] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState(false);
-  // What a save says once it has landed. It names the app rather than the act, because the act is
-  // the button the member just pressed and the app is the thing that changed. A refusal is not
-  // reported here: it stays on the panel, where it can be read back and answered.
   const [toast, setToast] = useState<ToastState>(SILENT);
 
   const payload = state.phase === "ready" ? state.payload : null;
@@ -191,10 +165,6 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
                 spec: sent,
               });
               if (!outcome.applied) {
-                // A refusal ends the run: every spec still queued carries the value that was just
-                // refused, so sending it would only be refused again. What the member changed
-                // afterwards is still drawn on the controls, though, and nothing has kept it — so
-                // the read is taken again and the whole column goes back to stating what is stored.
                 intended.current = null;
                 settingsDirty.current = false;
                 settingsSaved.current = null;
@@ -313,11 +283,6 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
                 ]}
               />
               {editingIcon ? (
-                // The shortlist is drawn whole, so the member picks by eye rather than opening a
-                // list of names, and the app's own mark leads it when the agent carries one from
-                // outside — a mark the picker did not offer is still the mark it has, and a set
-                // with nothing selected would state otherwise. A mark carries no name the member
-                // reads; what a screen reader is given is the mark's own word.
                 <fieldset
                   className={cn(
                     "m-0 mt-lg grid min-w-0 gap-xs border-0 p-0",
@@ -380,9 +345,6 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
                 ) : undefined
               }
             >
-              {/* The prompt is a passage rather than a row, so it is set in from the rule above it
-                  and the section under it by the same measure — a paragraph run flush to a hairline
-                  reads as the rule's caption instead of as the section's body. */}
               <div className="py-2xl">
                 {writable && editingPrompt ? (
                   <Textarea

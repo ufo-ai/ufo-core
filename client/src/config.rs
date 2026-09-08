@@ -1,5 +1,3 @@
-//! `$UFO_HOME` state: credentials, onboarding session id, workspace URL — file-compatible with
-//! what the shell client wrote.
 
 use std::env;
 use std::fs;
@@ -23,7 +21,6 @@ pub struct Home {
 }
 
 impl Home {
-    /// `$UFO_HOME`, defaulting to `~/.ufo`.
     pub fn resolve() -> Home {
         let root = env::var_os("UFO_HOME")
             .filter(|value| !value.is_empty())
@@ -68,8 +65,6 @@ impl Home {
         self.write(GATEWAY_FILE, url, false);
     }
 
-    /// Forget the sign-in: the credential, the session it minted, the workspace it named, and
-    /// the conversation list read under it — the next member of this machine sees none of it.
     pub fn clear_signin(&self) {
         for name in [
             CREDENTIALS_FILE,
@@ -122,7 +117,6 @@ fn home_dir() -> PathBuf {
     PathBuf::from(env::var_os(name).unwrap_or_else(|| panic!("{name} is unset")))
 }
 
-/// The release target this binary was built for, for the platforms the deploy serves.
 pub fn client_target() -> Option<&'static str> {
     target_for(env::consts::OS, env::consts::ARCH)
 }
@@ -138,11 +132,6 @@ fn target_for(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
-/// Ensure `$UFO_HOME/bin/ufo` is current and on PATH: download the served binary for this build's
-/// target through `download`, then wire PATH via the shell profile the way the installer script
-/// did. A failed download falls back to copying the running binary only where that copy installs
-/// something — a binary already running from the bin directory has nothing to copy, so its failed
-/// update surfaces instead of reporting an install that never happened.
 pub fn install_self(
     home: &Home,
     download: impl FnOnce(&str, &Path) -> Result<(), String>,
@@ -211,13 +200,12 @@ fn running_from(bin_dir: &Path) -> bool {
     }
 }
 
-/// Whether this process runs the installed binary, resolved through symlinks on both sides.
 pub fn installed(home: &Home) -> bool {
     running_from(&home.bin())
 }
 
-/// Sweep the retired binaries Windows updates left beside the live one — each deletable once no
-/// old process runs it; best effort until then.
+/// The retired binaries Windows updates left beside the live one, each deletable once no old process
+/// runs it; best effort until then.
 pub fn sweep_retired(home: &Home) {
     let Ok(entries) = fs::read_dir(home.bin()) else {
         return;
@@ -245,8 +233,6 @@ fn copy_self(bin_dir: &Path, staged: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// What the shell says about itself, read once so every decision below is a function of its
-/// arguments.
 #[cfg(unix)]
 struct ShellEnv {
     path: String,

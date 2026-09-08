@@ -329,15 +329,12 @@ async def _check_partition_map_decoder_rejects_extra_window_keys() -> None:
 
 def test_partition_map_decoder_reads_plain_watermark_cursors_but_fails_loud_on_corruption() -> None:
     decode = PartitionWalk._decode
-    # a cursor that is not a JSON object is a plain watermark another shape wrote — re-walk absorbs
     assert decode("2026-01-01T00:00:00Z") == {}
     assert decode("not json at all") == {}
-    # the walk's own map decodes to watermark strings and window entries
     assert decode(json.dumps({"p": "w"})) == {"p": "w"}
     assert decode(json.dumps({"p": {"high": "h", "until": "u"}})) == {
         "p": connector_module._Window(high="h", until="u")
     }
-    # a JSON object with a value the walk never writes is corruption — fail loud like its sibling
     with pytest.raises(RuntimeError, match="malformed partition cursor"):
         decode(json.dumps({"p": 5}))
     with pytest.raises(RuntimeError, match="malformed partition cursor"):
@@ -460,8 +457,6 @@ async def test_capped_newest_first_backfill_loses_no_record_at_a_tied_boundary(
     stream = StreamSpec(
         name="feed", source_object="feed", cursor_field="v", ordering=Ordering.newest_first
     )
-    # "b" and "c" tie at value "7"; a cap of 3 lands a1/a2/b and splits the tie, leaving "c"
-    # unlanded — the inclusive resume boundary must re-reach it rather than skip past it.
     records = [("a1", "9"), ("a2", "9"), ("b", "7"), ("c", "7"), ("d", "5")]
     connector = _WalkConnector(stream, records, page_size=1)
     landed, _ = await _drive(connector)

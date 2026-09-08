@@ -95,7 +95,6 @@ def test_bm25_query_is_empty_for_text_holding_no_term_to_match() -> None:
     assert tpuf.bm25_query("   ") == ""
     assert tpuf.bm25_query("!!! ??? ...") == ""
 
-    # A token carrying two or more of its own characters is a term, however odd it looks.
     assert tpuf.bm25_query("401k") == "401k"
     assert tpuf.bm25_query("G64 build") == "G64 build"
     assert tpuf.bm25_query("what is a sandbox?") == "what is sandbox?"

@@ -51,8 +51,6 @@ variable "owns_account_resources" {
   description = "Whether this environment owns the account-wide ECR repositories and SES domain identity."
 }
 
-# ---- Networking ----
-
 variable "vpc_cidr" {
   type        = string
   default     = "10.0.0.0/16"
@@ -70,8 +68,6 @@ variable "single_nat_gateway" {
   default     = false
   description = "One NAT gateway (cheap, non-HA) vs one per-AZ. Set true for testing."
 }
-
-# ---- EKS ----
 
 variable "kubernetes_version" {
   type        = string
@@ -118,8 +114,6 @@ variable "cluster_admin_principal_arns" {
   description = "IAM principal ARNs granted EKS cluster-admin via access entries. One entry matches one exact principal and never a role assumed through it, so every principal that needs kubectl — the CI deploy role, an operator's Identity Center role — is named here in its own right."
 }
 
-# ---- RDS (PostgreSQL 16) ----
-
 variable "postgres_version" {
   type    = string
   default = "16"
@@ -159,8 +153,6 @@ variable "app_database_name" {
   default     = "ufo"
   description = "The shared application database (RFC 0011 §2: one DB, RLS on workspace_id)."
 }
-
-# ---- ElastiCache (Redis live-frame hub) ----
 
 variable "redis_node_type" {
   type    = string

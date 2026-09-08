@@ -1,16 +1,6 @@
-# The local serve fleet's config — the dev mirror of the hosted `ufo.toml` (infra/envs/*/ufo.tf),
-# with every cloud backend swapped for a local one: filesystem blobs, the in-process hub, the local
-# sandbox carrier. Sandbox egress runs through the `egress` compose service (the ufo-egress data
-# plane), which serve points the carrier at on `proxy_port`. `__SERVE_DSN__` is rendered at
-# container start by dev/entrypoint.sh from UFO_CONTROL_PG_ROLE_SEED — the RLS-subject ufo_serve
-# role that rls-bootstrap creates.
-# Rendered by dev/entrypoint.sh from UFO_DEV_PACK (default `assistant`). Set
-# UFO_DEV_PACK=assistant_billing to add Metronome and drive the billing chain locally.
 [pack]
 name = "__PACK__"
 
-# The assistant pack's extensions that require a named seam (the provider must be registered; the
-# API key itself is a per-workspace BYOK credential, fetched lazily, so serve boots without it).
 [research]
 search_provider = "perplexity"
 
@@ -28,24 +18,14 @@ url = "__SERVE_DSN__"
 backend = "filesystem"
 root = "/data/blobs"
 
-# The assistant pack has no Redis hub (that lives in assistant_hosted); the in-process hub fits a
-# single local serve. Running more than one serve replica would need the redis_hub extension — which
-# also carries the terminal transport, so `terminal.backend` defaults to in_process here beside it.
 [hub]
 backend = "in_process"
 
-# The built-in `local` carrier ships in every pack (the `docker` carrier is a separate extension not
-# in the assistant pack). Local means in-process sandboxes whose egress routes through the `egress`
-# compose service at 127.0.0.1:proxy_port (that container shares serve's network namespace); each
-# conversation's /workspace is a directory under the numbered stack's workspace_root, shared by
-# every worktree that runs that stack.
 [sandbox]
 backend = "local"
 workspace_root = "/data/workspaces"
 ingress_public_url = "__INGRESS_PUBLIC_URL__"
 
-# Where a provider sends the member's browser back after consent. The browser is on the host, which
-# reaches this container's serve on the published port.
 [connect]
 public_base_url = "__PUBLIC_BASE_URL__"
 

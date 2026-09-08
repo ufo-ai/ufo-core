@@ -1,6 +1,3 @@
-# GitHub Actions → AWS via OIDC (no static keys). Account-global, so it lives in bootstrap alongside
-# the state bucket. The deploy workflow assumes `github_deploy` to push images to ECR and run
-# `terraform apply`. Trust is scoped to this repo's main branch (apply) and pull requests (plan).
 
 variable "github_repo" {
   type        = string
@@ -61,9 +58,8 @@ resource "aws_iam_role" "github_deploy" {
   description        = "Assumed by GitHub Actions (${var.github_repo}) to build/push images and terraform apply."
 }
 
-# terraform apply manages the whole stack (EKS, RDS, IAM/IRSA, S3, ECR, Secrets Manager),
-# so the deploy role needs broad access. Trust is the control surface (one repo, main + PRs); tighten
-# to a least-privilege policy as a follow-up if the account is shared more widely.
+# terraform apply manages the whole stack (EKS, RDS, IAM/IRSA, S3, ECR, Secrets Manager), so the
+# deploy role needs broad access. Trust is the control surface: one repo, main plus PRs.
 resource "aws_iam_role_policy_attachment" "github_deploy_admin" {
   role       = aws_iam_role.github_deploy.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"

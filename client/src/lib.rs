@@ -1,5 +1,3 @@
-//! The ufo client's parts: the wire it speaks, the terminal it draws, the ops it runs, and
-//! the `$UFO_HOME` state it keeps.
 
 pub mod clipboard;
 pub mod cmd;

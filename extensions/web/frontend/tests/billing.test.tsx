@@ -9,8 +9,6 @@ import { AGENT, AGENT_ID, PlacedWorkspace, type Route, json, wire } from "./harn
 
 const WORKSPACE = "7a1e1b2c-0000-4000-8000-000000000042";
 
-/** The billing action as the workspace object projects it to an admin: the one action both of the
- *  screen's controls address, pre-bound to the workspace row the detail read answered. */
 const MANAGE_BILLING = {
   name: "manage_billing",
   description: "Read or change how this workspace pays.",
@@ -26,15 +24,12 @@ const MANAGE_BILLING = {
   label: "Manage billing",
 };
 
-/** The read the screen draws its acts from: the acts projected for the workspace's own row. */
 const WORKSPACE_READ = "/actions/workspace/" + WORKSPACE + "$";
 
 const WORKSPACE_ACTIONS: Record<string, Route> = {
   [WORKSPACE_READ]: () => json({ actions: [MANAGE_BILLING] }),
 };
 
-/** Where both of the screen's acts post: the workspace row's `manage_billing` on the main agent's
- *  lane, with the operation and its figures as the whole body. */
 const BILLING_LANE =
   "/surface/web/agents/" + AGENT_ID + "/actions/workspace/" + WORKSPACE + "/manage_billing";
 
@@ -100,14 +95,11 @@ test("the credit history states what was added and what it cost", async () => {
   // The table draws a stacked variant for narrow widths, so every cell renders twice.
   expect((await screen.findAllByText("Aug 20, 2026")).length).toBeGreaterThan(0);
   expect(screen.getAllByText("Aug 19, 2026").length).toBeGreaterThan(0);
-  // The $100 grant charged nothing, so a grant reads apart from a purchase.
   expect(screen.getAllByText("$100.00").length).toBeGreaterThan(0);
   expect(screen.getAllByText("$5.00").length).toBeGreaterThan(0);
 });
 
 test("a member the billing route refuses is told who may read it", async () => {
-  // The route answers a refusal with a body, exactly as the handler does. Claiming the workspace
-  // has no limit would be a guess: a refused read knows nothing about the balance.
   billingTab({
     "/ext/metronome/billing": () =>
       Response.json({ error: "only a workspace admin can read billing" }, { status: 403 }),
@@ -118,9 +110,6 @@ test("a member the billing route refuses is told who may read it", async () => {
 });
 
 test("a deploy carrying no billing extension says so, and claims no refusal", async () => {
-  // The tab is drawn on every deploy, but the route is mounted only for a loaded manifest, so a
-  // pack without the billing extension answers 404. Calling that an authorization refusal tells an
-  // admin they lack a permission on a deploy that has nothing to permit.
   billingTab({ "/ext/metronome/billing": () => Response.json({}, { status: 404 }) });
 
   expect(await screen.findByText("This deploy does not carry billing.")).toBeTruthy();
@@ -134,8 +123,6 @@ test("a read that fails for any other reason says only that", async () => {
 });
 
 test("a card the provider would not read shows as unknown, not as absent", async () => {
-  // "No payment method" would invite saving one on a guess about the provider's own state, and the
-  // balance beside it is core's — so it still reads.
   billingTab({
     "/ext/metronome/billing": () => json({ ...LIMITED, card: null, card_unread: true }),
   });

@@ -35,17 +35,11 @@ import { cn } from "@/lib/cn";
 import { ConversationLink } from "@/lib/conversationLink";
 import { Moment } from "@/lib/moments";
 
-/** How long after the last keystroke the pane commits what was typed. The pane carries no submit,
- *  so this is what saving is: long enough that a word being typed is one apply rather than six,
- *  short enough that a member who looks away has already saved. */
 const SETTLE_MS = 800;
 
 const SAVING = "Saving…";
 const SAVED = "Saved";
 
-/** What a member who did not write the task reads instead of an editable prompt. An admin may
- *  change when a task fires, never what it says, so the box states the prompt and offers no edit
- *  the kind would refuse. */
 const CONTENT_IS_THE_CREATORS = "Only the member who wrote this task can change what it says.";
 const PRIVATE_CONTENT = "This task's prompt is not visible to you.";
 const NO_EXPIRY = "Leave this empty to let the task run until it is deleted.";
@@ -56,16 +50,8 @@ const WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
 
 type Save = "rest" | "saving" | "saved";
 
-/** One mutation of the record this pane stands on, as the record's own apply answers it. */
 export type ApplySpec = (spec: Record<string, SpecValue>) => Promise<NoticeState>;
 
-/** What saving is in a pane with no submit: the box holds what the member types, commits it a
- *  moment after the keystrokes stop, and commits again on the way out of the box — a save the
- *  member has to ask for is a save this pane has no control for. While the box is being typed in it
- *  holds its own text: the record is read again after every apply, and that read landing
- *  mid-keystroke would type over the member. The settle is also what holds a box that answers one
- *  change per typed digit to a single apply, rather than storing every value the member passed
- *  through on the way to the one they meant. */
 function useSettled(value: string, onSave: (value: string) => Promise<NoticeState>) {
   const [held, setHeld] = useState(value);
   const [state, setState] = useState<Save>("rest");
@@ -101,9 +87,6 @@ function useSettled(value: string, onSave: (value: string) => Promise<NoticeStat
   return { held, state, typed, commit };
 }
 
-/** A field that saves itself, on the settle every box in this pane commits by. `type` names the box
- *  the browser draws its own editor for — a moment on the member's own clock — which is as wide as
- *  the value it holds rather than as wide as the column. */
 function SelfSaving({
   label,
   value,
@@ -162,9 +145,6 @@ function SelfSaving({
   );
 }
 
-/** A compact dropdown of one closed set, with a tick against what is picked. It is the pane's one
- *  shape for a choice: what is chosen is the control's own words, so a member reads the schedule
- *  off the pill rather than out of a form. */
 function Pill({
   label,
   said,
@@ -200,9 +180,6 @@ function Pill({
   );
 }
 
-/** The chip that says where the task reports, and presses through to it. Where a task fires is
- *  fixed when it is created — the kind binds the applying turn's conversation and every update
- *  preserves it — so this states that binding rather than offering a choice of it. */
 function ReportsTo({ said, onOpen }: { said: string; onOpen: ((aside: boolean) => void) | null }) {
   const worn = `${REPORTS_TO} ${said}`;
   if (onOpen === null) {
@@ -227,11 +204,6 @@ function ReportsTo({ said, onOpen }: { said: string; onOpen: ((aside: boolean) =
   );
 }
 
-/** The cadence pills: which shape the schedule takes, and the one detail that shape asks for. A
- *  pick off a menu is one deliberate choice, so it applies at once; the time is typed, and a `time`
- *  box answers one change per completed segment, so it commits on the settle every typed box in
- *  this pane commits by — 09:00 retyped as 14:00 through 01:00 stores 14:00 alone. Cron is written
- *  in UTC off the clock in front of the member. */
 function CadencePills({
   cadence,
   cron,
@@ -296,14 +268,6 @@ function intervalLabel(hours: number): string {
   return hours === 1 ? "Every hour" : `Every ${hours} hours`;
 }
 
-/** The scheduled task's own pane: what the task says, when it fires, and where it reports — each
- *  one the control that changes it rather than a fact beside a form. Nothing here has a submit: a
- *  prompt commits itself once typing settles, and a pill applies on the pick, so the pane a member
- *  reads and the pane they change are one screen.
- *
- *  Two choices this shape offers elsewhere are not the kind's to make. Where a task reports is
- *  bound to the conversation that created it and no update moves it, so the chat is stated and not
- *  picked; and the kind holds no notification preference at all, so nothing here claims one. */
 export function ScheduledTaskPane({
   agentId,
   spec,
@@ -329,11 +293,6 @@ export function ScheduledTaskPane({
   const reports = links.find((link) => link.relation === "reports_to") ?? null;
   const schedule = typeof spec?.schedule === "string" ? spec.schedule : "";
   const offset = new Date().getTimezoneOffset();
-  /** Whether the schedule is being read as the cron itself. Every other shape is derived from the
-   *  stored cron, but `custom` is no cron of its own: `cronOf` writes back exactly what `cadenceOf`
-   *  read, so applying the pick would store the schedule the task already has and the pill would
-   *  state its old cadence again. So the pick is held here, it opens the cron box, and the box is
-   *  what changes the schedule. */
   const [asCron, setAsCron] = useState(false);
   const cadence: Cadence = asCron
     ? { mode: "custom", cron: schedule }
@@ -402,11 +361,6 @@ export function ScheduledTaskPane({
                 value={typeof spec.expires_at === "string" ? localMoment(spec.expires_at) : ""}
                 note={NO_EXPIRY}
                 onSave={(local) => {
-                  // The moment the box holds has to be one the runner could act on, or the box
-                  // holds nothing the kind should store: an empty box is the clear every other
-                  // value is typed on the way to, and a past instant is swept with the task
-                  // itself. Either answers the quiet that leaves the stored value standing, as
-                  // the sibling time box does for a half-typed clock.
                   if (local !== "" && new Date(local).getTime() <= Date.now()) {
                     return Promise.resolve(QUIET);
                   }
@@ -425,8 +379,6 @@ export function ScheduledTaskPane({
             busy={firing}
             onClick={async () => {
               setFiring(true);
-              // A paused row is never claimed, so the fire has to carry the resume with it or it is
-              // stated as saved and never happens. The button says both acts for that reason.
               await onApply(paused ? { run_now: true, paused: false } : { run_now: true });
               setFiring(false);
             }}
@@ -450,8 +402,6 @@ function moment(value: ObjectValue | undefined): ReactNode {
   return typeof value === "string" && value ? <Moment at={value} /> : "—";
 }
 
-/** The run a member reads together with how it went. A task that has never fired states no ending,
- *  and one whose turn the workspace no longer holds states the moment alone. */
 function lastRun(status: Record<string, ObjectValue>): ReactNode {
   const at = status.last_run_at;
   if (typeof at !== "string" || !at) return "—";

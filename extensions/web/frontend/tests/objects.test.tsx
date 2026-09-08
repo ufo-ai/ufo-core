@@ -56,7 +56,6 @@ const TASK_ROW = owned({
   owner_email: "mel@example.com",
 });
 
-/** A prompt of the length a member actually writes one: several steps over several lines. */
 const LONG_PROMPT = [
   "1. Read every pull request merged in the last 24 hours.",
   "2. Group them by the surface each one lands on.",
@@ -95,9 +94,6 @@ const TASK_DETAIL = {
   updated_at: "2026-07-02T09:00:00Z",
 };
 
-/** The record the shared spec-and-status shape is read off. A scheduled task draws a pane of its
- *  own — an editable prompt and a pill per choice — so the record every other kind takes is read
- *  here off the other kind this same screen lists. */
 const TRIGGER_ROW = owned({
   name: "github-issues",
   summary: "github-30847ee4 — issues",
@@ -131,8 +127,6 @@ const TRIGGER_DETAIL = {
   updated_at: "2026-07-02T09:00:00Z",
 };
 
-/** A record whose spec really does carry prose: a memory item's body runs to several lines, which
- *  is the value no row can hold. */
 const MEMORY_KIND = {
   kind: "memory",
   fields: ["item_class", "memory_kind", "subject"],
@@ -198,7 +192,6 @@ function headings(): string[] {
   return screen.getAllByRole("columnheader").map((head) => String(head.textContent));
 }
 
-/** The one object sheet currently visible. */
 function standing(): (string | null)[] {
   return screen
     .queryAllByRole("dialog")
@@ -209,8 +202,6 @@ function standing(): (string | null)[] {
     });
 }
 
-/** One fact of the detail's `Spec` group, scoped to that group: `Status` states some of the same
- *  fields, so a label alone names two rows on the page. */
 function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
   const group = [...document.querySelectorAll("h2")]
     .find((heading) => heading.textContent === "Spec")
@@ -224,9 +215,6 @@ function specFact(label: string): { row: HTMLElement; said: HTMLElement } {
   return { row: term.parentElement, said: term.nextElementSibling as HTMLElement };
 }
 
-/** The pane inside the one thing that owns its track. Every screen holding an object index does
- *  this — the radar off its address, the settings dialog off local state — so the pane is never
- *  mounted here in a shape no screen mounts it in. */
 function PlacedPane({ agentId, kind }: { agentId: string | null; kind: string }) {
   const [place, setPlace] = useState<Placement>({});
   return (
@@ -259,8 +247,6 @@ function mountAgent() {
   );
 }
 
-/** The record reached from two links, so a record standing to the right of another can be shut by
- *  following a second link out of the one on its left. */
 const LINKED_TRIGGER = {
   ...TRIGGER_DETAIL,
   links: [
@@ -271,8 +257,6 @@ const LINKED_TRIGGER = {
 
 const PULLS_DETAIL = { ...TRIGGER_DETAIL, name: "github-pulls", links: [] };
 
-/** The wire every path test reads: one index of two triggers, one record carrying two links, and
- *  the record each link names. */
 function triggers() {
   return wire({
     ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
@@ -289,9 +273,8 @@ function link(said: string): HTMLElement {
 
 const FOLLOWS = "follows source trigger github-pulls";
 
-/** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
- *  instance holds the key down over the click — the module's own verbs each set up a fresh one and
- *  would let go of it in between. */
+/** One `userEvent` instance holds the key down across the click; the module's own verbs each set up a
+ *  fresh one and would let go of it in between. */
 async function besidePress(target: HTMLElement): Promise<void> {
   const user = userEvent.setup();
   await user.keyboard("{Meta>}");
@@ -317,9 +300,6 @@ test("the whole stamp behind a friendly one names the day and the time it fell o
   expect(fullMoment("2026-08-01T09:05:00Z")).toBe("Aug 1 2026 at 09:05 UTC");
 });
 
-/** The prompt is not a column: every row cut it mid-word, so the kind carries no prose at all and
- *  the width goes to the two runs instead — the one behind the task with how it ended, and the one
- *  ahead of it. */
 test("an index carries the name and the two facts a prose-less kind leads with", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount();
@@ -344,9 +324,6 @@ test("an index carries the name and the two facts a prose-less kind leads with",
   expect(rowCells[3].querySelector("span")?.className).toContain("block truncate");
 });
 
-/** Paused once stood as a filter above the table, so "what is up with this one" took a press into
- *  every row. It reads on the row now — a chip beside the name — and no column or filter tab
- *  repeats it. */
 test("whether a task is stopped reads beside its own name", async () => {
   wire({
     "/objects/scheduled_task": () =>
@@ -365,14 +342,8 @@ test("whether a task is stopped reads beside its own name", async () => {
   expect(screen.queryByRole("tab", { name: "Paused" })).toBeNull();
 });
 
-/** The tracks are fixed pixels, so a table whose tracks outrun the page it is read on holds its
- *  width and scrolls the column sideways — and what falls off the right is the act the row is
- *  pressed by. The desktop the portal is read at has to clear the sum, sidebar and gutters included,
- *  or every member scrolls to reach `Open`. It measures the pane a list has to itself; a record
- *  opened beside one takes its own column out of that width, and a list read under one is narrower
- *  than any floor. */
-/** The column is read to tell what is recent, so it says the distance from now rather than a
- *  date every row of a busy day repeats. The exact day and minute is one hover away. */
+/** The tracks are fixed pixels, so a table whose tracks outrun its page scrolls the column sideways and
+ *  what falls off the right is the act the row is pressed by. The desktop has to clear the sum. */
 test("a record's time reads as its distance from now and keeps the whole stamp on hover", async () => {
   wire({ "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]) });
   mount();
@@ -433,8 +404,6 @@ test("the record's own page stays one press away once its name leads elsewhere",
   expect(await screen.findByText("write the daily brief")).toBeTruthy();
 });
 
-/** The row keeps `last_run_status`, so the ending is proven to read only with the run it belongs
- *  to: alone in the cell, `done` names a run the task has never had. */
 test("a field the record lacks takes a dash rather than an empty cell", async () => {
   wire({
     "/objects/scheduled_task": () =>
@@ -649,8 +618,6 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(screen.getByText("Created").textContent).toBe("Created Jul 1 2026");
 });
 
-/** A record's header act applies part of the spec and reads the record again, so the screen states
- *  what the workspace now holds rather than what the press asked for. */
 test("a record header action applies a partial spec and reads back its next state", async () => {
   const posted: unknown[] = [];
   let delivery = "current";
@@ -744,9 +711,6 @@ test("a spec value with no space to break on wraps in its own block rather than 
   expect(body.row.className).toContain("flex-col");
 });
 
-/** One agent's index states who made each row, because the pane names the agent and nothing else on
- *  the row answers whose it is. The index read across the audience states the agent instead: two
- *  columns for one question is what pushed the row's act off the table. */
 test("a creator reads as You to its own member, the address to another, Workspace to none", async () => {
   wire({
     "/objects/scheduled_task": () =>
@@ -783,9 +747,6 @@ test("the index read across the audience names the agent and leaves the creator 
   expect(screen.queryByText("mel@example.com")).toBeNull();
 });
 
-/** A link inside a record opens what it names immediately to the right of the record it was
- *  followed from, and shuts whatever stood there: the path is what the member walked, so a record
- *  reached from a branch they have left does not stay standing. */
 test("an object link replaces the visible sheet and closing returns to its source", async () => {
   triggers();
   mount([AGENT], "source_trigger");
@@ -855,8 +816,6 @@ test("a modifier press retains the source behind the one visible sheet", async (
   await waitFor(() => expect(standing()).toEqual(["github-issues"]));
 });
 
-/** The index is the root of the path, so a row pressed there leaves one record standing however
- *  far the member had walked from the last one. */
 test("a row of the index shuts every record standing and opens the one it names", async () => {
   triggers();
   mount([AGENT], "source_trigger");
@@ -883,18 +842,6 @@ test("closing the current record returns to the record opened from it", async ()
   await waitFor(() => expect(standing()).toEqual(["github-issues"]));
 });
 
-/** The screen owns the track and the pane reads it, so the record the address opened and the record
- *  a row opens are the same lane: pressing the row it already stands on changes nothing, and two
- *  nodes never portal into the one host that id names. */
-/** A link a member was sent carries the track whole, and the address may name what the pane cannot
- *  draw: an id that is no record at all. The lane stands anyway and says so, because the close
- *  belongs to the lane — drawing nothing leaves the address holding a record the member can neither
- *  read nor get rid of. */
-/** The index is the root wherever the record standing beside it came from. A pane keeping a track
- *  of its own leaves the address's record standing while it opens the row that was pressed, and the
- *  member reads two tasks where they asked for one. */
-/** Every index marks the row whose record stands beside it, which is what makes the path readable
- *  and what makes a lane closing under a press read as navigation rather than loss. */
 test("the index row whose record is standing is marked, and no other", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
@@ -912,8 +859,6 @@ test("the index row whose record is standing is marked, and no other", async () 
   expect(marked[0].textContent).toContain("daily-brief");
 });
 
-/** An outcome is the record's own, so it stays in the slot the act was taken in. The record opened
- *  beside it reports what happened to itself and nothing else. */
 test("an outcome does not leak into the sheet that replaces its record", async () => {
   wire({
     "/objects/source_trigger/github-issues": () => json(LINKED_TRIGGER),
@@ -1011,9 +956,6 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
   expect(dialog).toBeTruthy();
 });
 
-/** A task is written on the workspace's tasks screen, which asks which app runs it. The app's own
- *  panel names one app already, so it reads and opens that app's tasks and offers no act that
- *  writes another. */
 test("an app's Scheduled tab offers no act that writes a task", async () => {
   wire({
     "/settings": () => json(SETTINGS),
@@ -1029,10 +971,6 @@ test("an app's Scheduled tab offers no act that writes a task", async () => {
   expect(within(dialog).queryByRole("button", { name: "New scheduled task" })).toBeNull();
 });
 
-/** The form that writes a record is a lane of the track like any other, so it stands beside the
- *  record the route named rather than taking its place: the address still holds that record, and
- *  the member writes the new one with the old one still readable beside it. */
-/** What search hands over: the record named in the route, under the agent that owns it. */
 test("the act that writes an object opens over the index, and a refusal keeps it open", async () => {
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),

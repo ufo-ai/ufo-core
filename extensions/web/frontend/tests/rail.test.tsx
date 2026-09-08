@@ -15,9 +15,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The workspace column, opened: the apps index and the destinations under it are read inside the
- *  drawer, which the shell draws at a phone width alone. Every act that moves the page shuts it, so
- *  a test that navigates and then reads the column again opens it again. */
 async function openRail() {
   await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
@@ -109,8 +106,6 @@ test("pinned apps stand in the order the member pinned them, whatever their name
 
 test("the apps under the pins stand by name, whatever they have been doing", () => {
   const apps = [app("zed", "Zed"), app("radar", "Radar"), app("apollo", "Apollo")];
-  /* The column below the pins is the one order a member can predict: they know an app's name before
-     they know when it last ran. */
   expect(ids(appOrder(apps, []))).toEqual(["apollo", "radar", "zed"]);
   expect(ids(appOrder(apps, ["zed"]))).toEqual(["zed", "apollo", "radar"]);
 });
@@ -136,8 +131,6 @@ test("a pin moves an app to the top and hides nothing", () => {
     "h",
     "j",
   ]);
-  /* Unpinning puts it back among the names and drops no row, so the member can pin it again. An app
-     the list refused to draw is one they have no way to reach. */
   expect(ids(appOrder(many, []))).toEqual(ids(many));
 });
 
@@ -178,7 +171,6 @@ test("a rail read that fails states so and keeps the rows it has", async () => {
   wire({ "/objects/conversation$": () => new Response("nope", { status: 503 }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  // The primitive stands its own live region beside the card, so the card is what is read here.
   await screen.findByText("Conversations did not refresh.");
   const toast = document.querySelector("[data-slot=toast]") as HTMLElement;
   expect(toast.textContent).toContain("Conversations did not refresh.");
@@ -243,9 +235,8 @@ test("a second message sent before the first is answered opens no second convers
   await userEvent.type(screen.getByLabelText("Ask UFO"), "first half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  // Until that POST answers, nothing here knows which conversation it opened, and a second send to
-  // the `new` sentinel opens another one: the two halves would end up in separate conversations,
-  // each answered without the other. So the composer holds the words rather than founding again.
+  // Until that POST answers nothing knows which conversation it opened, and a second send to the `new`
+  // sentinel opens another one, so the composer holds the words rather than founding again.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "second half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -255,7 +246,6 @@ test("a second message sent before the first is answered opens no second convers
   found({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half", opened_run: true });
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
 
-  // The conversation exists now, so the second message joins it mid-turn instead of founding.
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
   );
@@ -278,8 +268,6 @@ test("two submits the page could not re-render between still open one conversati
   await userEvent.type(screen.getByLabelText("Ask UFO"), "one thought");
   const form = screen.getByLabelText("Ask UFO").closest("form");
 
-  // Both submits read the composer of one render, so a held form cannot be what keeps the second
-  // from founding — the send is, which is where the `new` sentinel is spent.
   await act(async () => {
     form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -369,8 +357,6 @@ test("a private extension conversation opens the live chat", async () => {
   expect(await screen.findByText("Work to finish")).toBeTruthy();
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Daily brief")).toBeTruthy();
-  // The agent holds the conversation but is not one this member can open, so it is named and not
-  // linked.
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("link")).toBeNull();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
@@ -461,9 +447,6 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
   ).toBeTruthy();
 });
 
-/** The pane a conversation another surface holds is read in is headed the way a portal chat's is:
- *  the agent holding it and what it is called — never a list of conversations
- *  standing over the transcript in place of a header. */
 test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
@@ -496,8 +479,6 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
   expect(header.queryByRole("button", { name: "Back to Agents" })).toBeNull();
 });
 
-/** A terminal session is not a place a link can land, so the same mark states the surface and goes
- *  nowhere. */
 test("a terminal conversation is marked with its surface and no way out", async () => {
   location.hash = "#/c/" + CONVO_ID;
   const terminal = slackConversation({
@@ -525,7 +506,6 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
-/** A conversation another surface holds shares files through the same attachment sheet. */
 test("a markdown file in a Slack conversation opens the attachment sheet", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
@@ -632,8 +612,6 @@ test("the ask control targets the main agent, and offers no other", async () => 
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
-  // A conversation that does not exist yet is headed by nothing: the address names the app that
-  // would hold it, and a crumb back to a conversation nobody has founded leads nowhere.
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
@@ -657,9 +635,6 @@ test("the apps list opens the agent's page, and the sidebar starts the conversat
 });
 
 test("an app with nothing in flight states nothing under its name", async () => {
-  /** The second line is for work in flight. A column of apps that each printed a standing line
-   *  would state the ones doing something and the ones doing nothing in the same weight, and the
-   *  row that matters would stop being the one that catches the eye. */
   atPhoneWidth();
   location.hash = "#/";
   wire({
@@ -677,7 +652,6 @@ test("an app with nothing in flight states nothing under its name", async () => 
   const row = await index.findByRole("button", { name: /^Assistant/ });
   expect(within(row).queryByText("Answers from what this workspace has recorded.")).toBeNull();
   expect(index.queryByText(/Idle|Active/)).toBeNull();
-  // The name is all the row states, so it is the whole of what the row reads as.
   expect(row.textContent).toBe("Assistant");
 });
 
@@ -797,8 +771,6 @@ test("the sidebar marks the destination the member is in and leaves the others o
   expect(index.getByRole("button", { name: "Second" })).toBeTruthy();
 });
 
-/** The sounds the track makes belong to the browser, not to a screen, so the mark states the act a
- *  press does and the pick outlives the page that took it. */
 test("the rail's sound mark names the act it does, and this browser holds the pick", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

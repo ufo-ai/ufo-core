@@ -89,10 +89,6 @@ fn permitted(params: &serde_json::Value) -> bool {
     params.get("allow_existing") == Some(&serde_json::Value::Bool(true))
 }
 
-/// The same write with both paths taken through the containment guard: the target's parent and the
-/// staged file's parent are each pinned by the descent, and the bytes land by a rename between the
-/// two pinned fds, so a directory swapped for a link after the check cannot redirect them.
-///
 /// The read-before-write check and the rename run under the target's cross-process lock, so a second
 /// writer in another process waits rather than landing between them.
 #[cfg(unix)]
@@ -246,10 +242,8 @@ mod tests {
         }
     }
 
-    /// `test_tools.py`'s `test_sbxfs_write_waits_for_the_shared_filesystem_lock`, at the op: one
-    /// writer holds the target's lock, and the write that arrives next lands its bytes only after
-    /// that lock is released. `flock` is held per open file description, so a second `exclusive`
-    /// call in this process contends exactly as a second process does.
+    /// `flock` is held per open file description, so a second `exclusive` call in this process contends
+    /// exactly as a second process does.
     #[cfg(unix)]
     #[test]
     fn a_write_waits_for_the_shared_filesystem_lock() {

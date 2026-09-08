@@ -17,8 +17,6 @@ export const FAULTS: Record<
     cause:
       "This workspace has no member with your email address, so signing in with it again opens nothing. An admin has to add the address, or sign in with one already on the team.",
     action: "Sign in with another email",
-    // The bearer behind this refusal is live, and the sign-in door forwards a live bearer to the
-    // portal that just refused it. Another address is reached by clearing this one first.
     door: SIGN_OUT_PATH,
   },
   "no-seat": {

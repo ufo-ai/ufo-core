@@ -8,8 +8,8 @@ import { cn } from "@/lib/cn";
 const SHEET = readFileSync(join(import.meta.dirname, "../src/theme.css"), "utf8");
 const MERGE = readFileSync(join(import.meta.dirname, "../src/lib/cn.ts"), "utf8");
 
-/** The palette's own names are spelled `--text-primary` / `--text-secondary` / `--text-tertiary`
- *  but are colours, not sizes, and `--text-…--line-height` is a pairing rather than a step. */
+/** The palette spells colours `--text-primary`/`-secondary`/`-tertiary`, which are not size steps, and
+ *  `--text-…--line-height` is a pairing rather than a step. */
 const NOT_A_SIZE = new Set(["primary", "secondary", "tertiary"]);
 
 const declared = (scale: string) =>

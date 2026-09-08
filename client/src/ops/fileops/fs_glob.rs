@@ -166,7 +166,6 @@ fn measured(workdir: &Path, name: &str) -> Result<Vec<Measured>, OpError> {
         .collect()
 }
 
-/// The measurement of one walked hit, taken with an `lstat` that never follows a final link.
 #[cfg(unix)]
 fn measure(path: &Path) -> Option<Measured> {
     let found = std::fs::symlink_metadata(path).ok()?;
@@ -183,9 +182,6 @@ fn measure(path: &Path) -> Option<Measured> {
     })
 }
 
-/// The directory a walk starts from and the pattern to run there, both confined to the workspace:
-/// an absolute pattern names its own location, so it re-roots at the workspace rather than at the
-/// filesystem anchor, and a relative one walks from `path`.
 #[cfg(unix)]
 fn contained_glob<'a>(
     params: &'a serde_json::Value,
@@ -202,9 +198,6 @@ fn contained_glob<'a>(
     Ok((walked, pattern))
 }
 
-/// The same glob with the walk it needs run in process: the pattern and the start directory both go
-/// through the guard, and every hit passes the enumeration filter, so a file reached through a
-/// planted link is left out of the listing.
 #[cfg(unix)]
 pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Path) -> OpResult {
     let names = excluded(params)?;
@@ -413,8 +406,7 @@ mod tests {
         assert_eq!(result["count"], 0);
     }
 
-    /// The exclusion runs before the cap, so a pruned tree cannot crowd the answer out: 1001 hits
-    /// with an excluded tree among them still answer 1000 files, none of them excluded.
+    /// The exclusion runs before the cap, so a pruned tree cannot crowd the answer out.
     #[test]
     fn exclude_names_prune_before_the_cap() {
         let entries: Vec<Measured> = (0..GLOB_MAX_RESULTS + 1)
@@ -443,7 +435,6 @@ mod tests {
         assert_eq!(result["files"][0]["path"], "/ws/src/file-999.rs");
     }
 
-    /// Newest first, and the cap says how many of how many.
     #[test]
     fn the_cap_names_the_total_it_cut() {
         let entries: Vec<Measured> = (0..GLOB_MAX_RESULTS + 2)

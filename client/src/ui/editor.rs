@@ -1,5 +1,3 @@
-//! The ask editor as a pure state machine over decoded keys: multiline text, visual-line motion,
-//! a kill ring, coalescing undo, prefix-filtered history, and collapsed paste markers.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,7 +9,6 @@ const KILL_MAX: usize = 32;
 const PASTE_LINES: usize = 10;
 const PASTE_CHARS: usize = 1000;
 
-/// One decoded editing key.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Key {
     Char(char),
@@ -41,7 +38,6 @@ pub enum Key {
     Eof,
 }
 
-/// What a key did to the ask.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Outcome {
     Continue,
@@ -49,7 +45,6 @@ pub enum Outcome {
     Cancel,
 }
 
-/// The ask as drawn at one wrap width: the text rows, and the cursor's row and display column.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditorLayout {
     pub rows: Vec<String>,
@@ -73,8 +68,6 @@ struct Snapshot {
     images: BTreeMap<usize, Arc<str>>,
 }
 
-/// The in-flight ask: the text, the byte cursor, and where history browsing stands. The draft the
-/// walk began from is also the prefix it visits entries under.
 #[derive(Default)]
 pub struct AskState {
     pub text: String,
@@ -91,7 +84,6 @@ pub struct AskState {
 }
 
 impl AskState {
-    /// Apply one key, wrapping at `width` display columns for vertical motion.
     pub fn apply(&mut self, key: Key, history: &[String], width: usize) -> Outcome {
         let unit = self.unit;
         self.unit = Unit::None;
@@ -202,7 +194,6 @@ impl AskState {
         Outcome::Continue
     }
 
-    /// The text as drawn at `width` display columns, with the cursor's row and column in cells.
     pub fn render(&self, width: usize) -> EditorLayout {
         let rows = self.rows(width);
         let (cursor_row, cursor_col) = wrap::cursor_pos(&self.text, &rows, self.cursor);
@@ -216,7 +207,6 @@ impl AskState {
         }
     }
 
-    /// The text with every collapsed paste marker substituted back — what a submit sends.
     pub fn expand(&self) -> String {
         self.expanded(&self.text)
     }

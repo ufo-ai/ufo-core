@@ -182,12 +182,6 @@ fn result(path: &str, text: &str, total: usize, marker: &str) -> serde_json::Val
     })
 }
 
-/// The same edit with its path taken through the containment guard: the text is read off the pinned
-/// parent fd and written back to a staged sibling that is renamed onto the name, so neither a link
-/// at the target nor a directory swapped under it takes the edit.
-///
-/// The whole read-modify-write runs under the target's cross-process lock, so a second editor in
-/// another process reads this edit's text rather than the text it replaced.
 #[cfg(unix)]
 pub fn run_contained(params: &serde_json::Value, root: &Path) -> OpResult {
     let path = required(params, "path")?;

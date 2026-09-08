@@ -1,27 +1,3 @@
-//! The teammate invitation email: one message to each person an admin adds to a workspace.
-//!
-//! An admin adds a teammate from the portal, core stamps `member.invited_at`, and that stamp is the
-//! durable event source. There is no enqueue transaction to lose: this workflow reads the fact back
-//! over the onboarding RPC on either gateway replica and materializes what it finds. The admin's
-//! own action never waits on mail, and a member who signs in by themselves was never invited, so
-//! they carry no stamp and earn no message.
-//!
-//! `(workspace_id, email)` is the key, because that pair is the person being invited. One row per
-//! pair means the fact can be re-enumerated forever, and a sweep does exactly that: it walks every
-//! invitation core holds, every cycle, and re-reading a row already materialized costs an
-//! `on conflict do nothing`. No mark is carried between sweeps. A stamp is taken when its
-//! transaction starts and the seat write then waits for the workspace row lock, so members commit
-//! out of stamp order, and a sweep landing between two commits would carry a mark past the one that
-//! committed late. Nothing else writes this ledger, so that person would get no message and leave
-//! no failed row.
-//!
-//! SES answers no read: nothing can be asked whether a message was accepted after the fact. So the
-//! ledger records the attempt *before* the call — `sent_at` under the same lease as every other
-//! write — and a claim that finds it already set treats the row as ambiguous and lands it `failed`
-//! for an operator. Only a verdict that proves SES never accepted the message (a status it
-//! answered, or a connection that never opened) clears the marker and returns the row to `pending`.
-//! A resend is a person's decision, taken with `ufo-control invite-delivery-retry`.
-
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
@@ -71,8 +47,6 @@ pub const MAX_ATTEMPTS: i32 = 8;
 pub const RETRY_BACKOFF_SECONDS: i64 = 30;
 pub const RETRY_BACKOFF_MAX_SECONDS: i64 = 3600;
 
-/// One workspace's day of invitations. An admin staffing a company reaches a few dozen; a hundred
-/// in a day is somebody's script, and the rows over the line wait for a person to look at them.
 pub const INVITATIONS_PER_WORKSPACE_PER_DAY: i64 = 100;
 
 pub const ERROR_CHARS: usize = 500;
@@ -83,16 +57,6 @@ pub const INVITATION_SUBJECT: &str = "You were added to a ufo workspace";
 pub const INVITATION_BODY: &str = "{invited_by} added you to the {workspace_label} workspace \
                                    on ufo.\n\nSign in as {email} at https://{apex_host}{sign_in_path}\n";
 
-/// The same message with the sign-in page's own look: its surface, its card, its button.
-///
-/// Every rule is an inline `style` attribute and every layout is a table, because a mail client is
-/// not a browser — Gmail drops a `<style>` block, Outlook renders no flexbox, and neither resolves
-/// a custom property or a `light-dark()` pair, so the page's tokens are written here as the literal
-/// light values they hold. The mark is set as text rather than drawn: an SVG is the one image
-/// format clients reliably refuse, and a message whose only mark is blocked opens with a hole.
-/// The button is an anchor over a coloured cell, and the card carries its width twice — the
-/// attribute Outlook reads and the rule everything else does — which is the shape that survives
-/// Outlook's engine without a second, Outlook-only card beside this one.
 pub const INVITATION_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <body style="margin:0;padding:0;background:#FAF9F7;">
@@ -121,8 +85,6 @@ pub const INVITATION_HTML: &str = r##"<!doctype html>
 const AMBIGUOUS_SEND: &str = "a previous attempt reached SES and no answer was recorded; re-arm \
                               this row only once it is known the message never landed";
 
-/// SES error names that name a throttle rather than a refusal. Everything else in the 4xx band —
-/// a suspended account, an unverified sender, a rejected message — is a condition no retry fixes.
 const TRANSIENT_SES_ERRORS: &[&str] = &["TooManyRequestsException", "ThrottlingException"];
 
 #[derive(Debug, thiserror::Error)]
@@ -133,8 +95,6 @@ pub enum LedgerError {
     Query(#[from] tokio_postgres::Error),
 }
 
-/// A sweep ended before any row was carried. Our own ledger and core's answer fail differently: one
-/// is an internal fault to root-cause, the other is a service this replica does not own.
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
     #[error(transparent)]
@@ -143,13 +103,6 @@ pub enum SweepError {
     Core(#[from] SeatError),
 }
 
-/// The operator recovery surface: re-arm one failed row once its cause is corrected, returning when
-/// it last changed so the verb can report how long it sat. None when nothing was re-armed — a
-/// delivered row is untouchable, and this never sends anything itself.
-///
-/// `sent_at` clears with the rest. An ambiguous row is exactly the one an operator re-arms, and
-/// they re-arm it having decided the message never landed; leaving the marker would fail the row
-/// again on its next claim for the reason they just settled.
 pub async fn rearm_failed_delivery(
     pool: &Pool,
     workspace_id: Uuid,
@@ -176,14 +129,6 @@ pub async fn rearm_failed_delivery(
     Ok(row.map(|row| row.get("updated_at")))
 }
 
-/// What SES answered, and what that licenses.
-///
-/// `Transient` is proven external uncertainty *and* proof the message was not accepted — a status
-/// SES or STS answered, or a connection that never opened — so the row returns to `pending` behind
-/// a bounded schedule with its attempt marker cleared. `Terminal` is authentication, policy,
-/// verification, or a recipient no retry fixes. `Unanswered` is a request that left with no answer
-/// read: the message may be in flight, so the row lands `failed` with its marker standing rather
-/// than risking a second copy.
 #[derive(Debug, thiserror::Error)]
 pub enum SendVerdict {
     #[error("{message}")]
@@ -197,7 +142,6 @@ pub enum SendVerdict {
     Unanswered(String),
 }
 
-/// The verdict one `SesEmailSender::send` failure carries.
 pub fn verdict(error: SendError) -> SendVerdict {
     match error {
         SendError::Ses {
@@ -222,7 +166,6 @@ pub fn verdict(error: SendError) -> SendVerdict {
                 false => SendVerdict::Terminal(message),
             }
         }
-        // Every STS fault precedes the SES POST, so none of them can have sent anything.
         SendError::Sts { status, body } if status == 429 || status >= 500 => {
             SendVerdict::Transient {
                 message: format!("STS AssumeRoleWithWebIdentity returned {status}: {body}"),
@@ -236,8 +179,6 @@ pub fn verdict(error: SendError) -> SendVerdict {
             message: format!("STS AssumeRoleWithWebIdentity: {message}"),
             retry_after: None,
         },
-        // The projected web identity token is rewritten in place as it rotates, so a read that
-        // misses it is a moment of the platform's plumbing rather than a decision.
         SendError::TokenFile { path, source } => SendVerdict::Transient {
             message: format!(
                 "the projected web identity token at {path:?} is unreadable: {source}"
@@ -262,7 +203,6 @@ pub fn verdict(error: SendError) -> SendVerdict {
     }
 }
 
-/// One row this worker leased.
 #[derive(Debug, Clone)]
 pub struct Delivery {
     pub workspace_id: Uuid,
@@ -273,7 +213,6 @@ pub struct Delivery {
     pub attempts: i32,
 }
 
-/// Another replica owns this row now, so this worker abandons its writeback untouched.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct LeaseLost(String);
@@ -296,11 +235,6 @@ pub struct InviteDeliveries {
 }
 
 impl InviteDeliveries {
-    /// The gateway's background task: sweep, and wait a whole interval only when nothing was due.
-    /// Only cancellation ends this loop. Nothing a sweep raises retires the poller — a dead poller
-    /// would strand every later invitation behind a green `/healthz` — so every fault that belongs
-    /// to a row lands in that row, and the rest is reported with its consecutive count. A quiet
-    /// tick logs nothing, so one fault is a blip and a climbing count is a fault to root-cause.
     pub async fn run(self) {
         let mut consecutive_failures = 0_u32;
         loop {
@@ -324,12 +258,6 @@ impl InviteDeliveries {
         }
     }
 
-    /// Materialize every invitation core holds, then carry one due row as far as SES allows. True
-    /// when a row was leased, so a busy queue drains without waiting.
-    ///
-    /// A core that will not answer ends the sweep before any row is claimed. Holding delivery while
-    /// the fact's own source is unreachable is the honest reading: every row here exists because
-    /// core said so, and the next tick asks again.
     pub async fn poll(&self) -> Result<bool, SweepError> {
         self.materialize().await?;
         let Some(delivery) = self.claim().await? else {
@@ -351,14 +279,6 @@ impl InviteDeliveries {
         Ok(true)
     }
 
-    /// Every invitation core holds, page by page, inserted where this ledger has none.
-    ///
-    /// The read is O(every invited member) each cycle. Bounding it would take a mark this ledger
-    /// carries forward, and no mark over a stamp assigned before its transaction commits is safe to
-    /// carry — the row that commits late falls behind it and is never enumerated again. Bounding it
-    /// exactly instead would take core knowing which invitations were delivered, which is a
-    /// control-to-core write that does not exist. So the whole source is read, and the cursor here
-    /// walks one sweep's pages rather than resuming the next one.
     async fn materialize(&self) -> Result<(), SweepError> {
         let mut after: Option<Invitation> = None;
         loop {
@@ -371,9 +291,6 @@ impl InviteDeliveries {
         }
     }
 
-    /// One statement for the whole page. Core orders it, so both replicas insert the same rows in
-    /// the same order and two concurrent sweeps queue rather than deadlock on each other. A row
-    /// already here keeps every field it holds, so a delivered invitation is never re-armed.
     async fn insert(&self, invitations: &[Invitation]) -> Result<(), LedgerError> {
         let workspaces: Vec<Uuid> = invitations.iter().map(|row| row.workspace_id).collect();
         let emails: Vec<String> = invitations.iter().map(|row| row.email.clone()).collect();
@@ -405,9 +322,6 @@ impl InviteDeliveries {
         Ok(())
     }
 
-    /// Take one due row under a lease. `for update skip locked` is what lets both replicas poll the
-    /// same table without either waiting on the other, and a claimed row whose lease lapsed is
-    /// taken again — the worker holding it did not survive.
     async fn claim(&self) -> Result<Option<Delivery>, LedgerError> {
         let connection = self.pool.get().await?;
         let row = connection
@@ -442,11 +356,6 @@ impl InviteDeliveries {
         }))
     }
 
-    /// Hold the lease across an in-flight send. Losing the compare-and-set is silent — the delivery
-    /// path's own writes discover it and abandon — but a renewal that cannot *reach* the database
-    /// is reported and retried on the next tick rather than ending the task. A dead renewal would
-    /// let the lease lapse mid-send, and a second replica claiming the row while this one's SES
-    /// POST is still in flight is how one person gets two copies.
     async fn renew_lease(&self, delivery: Delivery) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(LEASE_RENEW_SECONDS)).await;
@@ -528,13 +437,6 @@ impl InviteDeliveries {
         Ok(())
     }
 
-    /// Three facts and nothing else: who added them, which workspace, and where to sign in. Each
-    /// field is bounded here, next to the only call that puts them on a wire.
-    ///
-    /// Both bodies carry them. The plain-text one is what a client refusing HTML renders and what
-    /// a spam filter reads for a message that has an HTML part; the HTML one is the same three
-    /// facts under the sign-in page's look. A local part may hold any character an address allows,
-    /// so every value crosses `escaped` on its way into the markup.
     fn message(&self, delivery: &Delivery) -> Result<(String, String), Carried> {
         for (what, value, bound) in [
             ("recipient email", &delivery.email, MAX_EMAIL_CHARS),
@@ -567,13 +469,6 @@ impl InviteDeliveries {
         Ok((text, html))
     }
 
-    /// The day's cap and this row's attempt marker, written together under one workspace lock.
-    ///
-    /// Both replicas count the same rows, so counting outside a lock would let each read ninety-nine
-    /// and each send. The lock is held across two statements and no network call, and it is keyed on
-    /// the workspace, so one busy workspace never serializes the fleet. What it counts is what was
-    /// handed to SES rather than what SES accepted: a message in flight is spent whether or not its
-    /// answer came back.
     async fn mark_sending(&self, delivery: &Delivery) -> Result<(), Carried> {
         let mut connection = self.pool.get().await.map_err(LedgerError::from)?;
         let transaction = connection.transaction().await.map_err(LedgerError::from)?;
@@ -619,8 +514,6 @@ impl InviteDeliveries {
         Ok(())
     }
 
-    /// The attempt marker clears with the reschedule: this verdict is proof SES never took the
-    /// message, so the next claim is a first send rather than an ambiguous one.
     async fn reschedule(
         &self,
         delivery: &Delivery,
@@ -671,8 +564,6 @@ impl InviteDeliveries {
         written.map_err(carried_lease)
     }
 
-    /// Every writeback is a compare-and-set on this worker's own lease, so a row a second replica
-    /// took is left exactly as that replica left it.
     async fn write(
         &self,
         delivery: &Delivery,
@@ -707,9 +598,6 @@ fn carried_lease(carried: Carried) -> LeaseLost {
     }
 }
 
-/// The five characters that would otherwise close a tag or an attribute early. An address's local
-/// part accepts almost anything, so a member could carry one into the markup and the recipient
-/// would read whatever it opened.
 fn escaped(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -723,12 +611,10 @@ fn clipped(message: &str) -> String {
     message.chars().take(ERROR_CHARS).collect()
 }
 
-/// A Postgres `interval` built from seconds, so the lease and the backoff bind as one parameter.
 fn pg_interval(seconds: i64) -> String {
     format!("{seconds} seconds")
 }
 
-/// What a delivery step can carry back: a send verdict, a lost lease, or our own database failing.
 #[derive(Debug, thiserror::Error)]
 enum Carried {
     #[error(transparent)]

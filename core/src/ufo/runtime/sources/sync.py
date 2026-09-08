@@ -80,8 +80,6 @@ has never landed a page at all falls back to a daily look after `SOURCE_EMPTY_ID
 them. The first page it ever lands clears the counter and it never idles again, so a populated
 stream that happens to be quiet keeps the interval — being quiet is not being unused."""
 SOURCE_PARK_RETRY_SECONDS = 3600
-# A park nothing but a grant event can lift still carries a date, not an infinity: every release
-# path writes `next_sync_at = now()`, and a year out is the backstop for the day they all miss one.
 SOURCE_PARK_HOLD_SECONDS = 365 * 24 * 3600
 CLAIM_LEASE_SECONDS = 300
 CLAIM_REFRESH_SECONDS = 60
@@ -967,10 +965,6 @@ class SyncDriver:
                     result.snapshot,
                 )
             except asyncio.CancelledError:
-                # `_opened` runs the commit to completion under `asyncio.shield` and re-raises the
-                # cancellation, so rows naming these bodies may stand committed. A body no row
-                # names is garbage the next write replaces; a body a row names and the store lacks
-                # stops that source's page feed for every consumer.
                 written.clear()
                 raise
         except BaseException as error:

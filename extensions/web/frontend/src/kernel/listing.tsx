@@ -21,9 +21,6 @@ import { useViewer } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionInput, ActionView, CredentialRequest } from "@/lib/types";
 
-/** What a row's acts are drawn with: the lane to post on — `act` for an object mutation's envelope,
- *  `action` for one of the acts the read projected for the listing's kind, posted with the call its
- *  view carries — whether one is in flight, who is reading, and those projected acts. */
 export type RowContext = {
   act: (envelope: unknown) => void;
   action: (view: ActionView, input: ActionInput) => void;
@@ -48,13 +45,10 @@ export type Column<Row> = Part<Row> & { label: string };
 export type Chip<Row> = { label: string; has?: (row: Row) => boolean };
 
 export type RowLine<Row> = {
-  /** What the row leads with, for records whose class is worth a glance before its name. */
   mark?: (row: Row) => ReactNode;
   primary: Part<Row>;
   meta: Part<Row>[];
   when?: Part<Row>;
-  /** A record with no screen of its own: its sentence runs to the end rather than to the row's
-   *  width, because the row is all there is to read it on. */
   whole?: true;
 };
 
@@ -75,9 +69,6 @@ type Presentation<Row> =
 export type ListingSpec<Payload, Row> = {
   read: string;
   note?: string;
-  /** What the screen draws above its table, for a page whose subject is not only its rows. It sits
-   *  under the bar and carries no heading of its own, so the groups below stay the page's only
-   *  headings and a reader meets the rows where every other listing puts them. */
   lead?: ReactNode;
   rows: (payload: Payload) => Row[];
   rowKey: (row: Row) => string;
@@ -90,10 +81,7 @@ export type ListingSpec<Payload, Row> = {
   search?: (row: Row) => string;
   chips?: Chip<Row>[];
   actions?: (row: Row, context: RowContext) => ReactNode;
-  /** Where the payload carries the acts the read projected for the listing's kind. */
   views?: (payload: Payload) => ActionView[];
-  /** The act the screen offers over its rows, for a record the rows do not reach. It is drawn
-   *  above them and inside the read, so what it offers is read off the payload. */
   offer?: (payload: Payload, context: RowContext) => ReactNode;
   credentials?: (
     request: CredentialRequest,
@@ -322,9 +310,6 @@ export function Listing<Payload, Row>({
   );
 }
 
-/** The gap between two families of one listing, wider than the gap a `Section` leaves between its
- *  own heading and its records. Stacked at the band gap the two distances are equal, and a family
- *  name sits as far from the records it heads as from the family above it — so it heads neither. */
 const FAMILIES = "flex flex-col gap-8xl";
 
 function groupRows<Row>(rows: Row[], group: (row: Row) => string) {

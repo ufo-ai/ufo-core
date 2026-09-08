@@ -1,4 +1,3 @@
-//! The wire's line parser, over every directive shape the fixture holds.
 
 use ufo::wire::parse_line;
 

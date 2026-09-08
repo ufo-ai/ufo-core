@@ -35,8 +35,6 @@ const HOST_SLOT = {
   filled: true,
 };
 
-/** A slot nobody has filled. Its own section, `coding`, is drawn nowhere: a section stands on the
- *  rows it heads, and this slot is not one of them. */
 const EMPTY_SLOT = { ...HOST_SLOT, name: "apollo", slot: "APOLLO_API_KEY", filled: false };
 
 const WORKSPACE_SLOT = {
@@ -50,7 +48,6 @@ const WORKSPACE_SLOT = {
   header: "Authorization",
 };
 
-/** The credential collection's projected act, which the listing's Set and Replace address. */
 const CREDENTIAL_ACTIONS = [
   {
     name: "request_credentials",
@@ -67,7 +64,6 @@ const CREDENTIAL_ACTIONS = [
   },
 ];
 
-/** Two slots of one provider, and a provider with no vendored mark. */
 const DATADOG_HOST = { ...HOST_SLOT, name: "datadog-api-host", slot: "DATADOG_API_HOST" };
 const BEDROCK_SLOT = {
   name: "bedrock-api-key",
@@ -77,8 +73,6 @@ const BEDROCK_SLOT = {
   filled: true,
 };
 
-/** Two slots of one provider, each named for a value under it rather than for the provider: the
- *  mark is Slack's, and not a mark for a provider called `slack_bot`. */
 const SLACK_TOKEN = {
   name: "slack-bot-token",
   slot: "slack_bot_token",
@@ -168,8 +162,6 @@ test("a credential intent that answers with a request renders the prompt carryin
   expect(sent.get("value")).toBe("sk-live");
 });
 
-/** The coding accounts a member holds are theirs, not the workspace's, so they stand under their
- *  own heading above the workspace slots — where a member comes back to replace one. */
 test("the credentials screen offers the member their own coding accounts", async () => {
   location.hash = "#/workspace/credentials";
   wire({
@@ -302,8 +294,6 @@ test("workspace credential slots are visible and editable through prepared inten
   });
 });
 
-/** Every row on this screen leads with a mark, the way a connector row does, so the names beside
- *  them start on one line whether the row is a coding account or a workspace slot. */
 test("a coding provider row and a credential row each lead with their provider's mark", async () => {
   location.hash = "#/workspace/credentials";
   wire({
@@ -325,8 +315,6 @@ test("a coding provider row and a credential row each lead with their provider's
     expect(mark.getAttribute("style")).toContain("--brand-openai");
   }
 
-  /* One provider keyed off the slot name, so both datadog slots stand under the one logo, and a
-     provider with no vendored mark takes its glyph rather than another company's picture. */
   const host = screen.getByText("DATADOG_API_HOST").closest("li")!;
   expect(host.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
     "--brand-datadog",
@@ -334,16 +322,12 @@ test("a coding provider row and a credential row each lead with their provider's
   const bedrock = screen.getByText("BEDROCK_API_KEY").closest("li")!;
   expect(bedrock.querySelector("[data-slot=mark] svg")).toBeTruthy();
 
-  /* A slot named for a value under its provider stands under that provider's mark: the name is
-     read for the longest provider the portal draws, not stripped of an ending. */
   const slack = screen.getByText("slack_bot_token").closest("li")!;
   expect(slack.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
     "--brand-slack",
   );
 });
 
-/** A family name has to bind down to the cards it heads. Stacked at the band gap it stood the same
- *  distance from them as from the family above, and headed neither. */
 test("a credential family stands further from the family above it than from its own cards", async () => {
   location.hash = "#/workspace/credentials";
   wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, HOST_SLOT, EMPTY_SLOT] }) });
@@ -359,9 +343,6 @@ test("a credential family stands further from the family above it than from its 
   expect(families[0].className).toContain("gap-6xl");
 });
 
-/** A row's acts are a cluster, and the cluster holds one line. Three screens still draw one on a
- *  row — a set that wraps takes the row past the table's own pitch, which is the fault the
- *  connector and agent tables were carrying. */
 test("a row's acts stand on one line, so the row keeps its pitch", async () => {
   location.hash = "#/workspace/credentials";
   wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }) });
@@ -555,9 +536,6 @@ test("a workspace with no credential set says so", async () => {
   ).toBeTruthy();
 });
 
-/** The screen a Slack reply names when a turn asks for a credential — "set it in Workspace →
- *  Credentials; secrets never pass through chat". No unset slot has a row, so the act that reaches
- *  one stands over the rows, and it raises the same sealed prompt a row's Replace raises. */
 test("an unset slot is set from the act over the rows", async () => {
   location.hash = "#/workspace/credentials";
   const intents: unknown[] = [];
@@ -595,8 +573,6 @@ test("an unset slot is set from the act over the rows", async () => {
   expect(await screen.findByLabelText("the key")).toBeTruthy();
 });
 
-/** A workspace holding no value at all still offers the act: the empty screen is where a member
- *  sent here to fill the first slot lands. */
 test("a workspace with no credential set still offers the act", async () => {
   location.hash = "#/workspace/credentials";
   wire({
@@ -610,9 +586,6 @@ test("a workspace with no credential set still offers the act", async () => {
   expect(screen.getByRole("button", { name: "Add service key" })).toBeTruthy();
 });
 
-/** A prompt is raised from a row here and from a chat reply elsewhere, so it says whose value a
- *  member is about to type: the provider's mark stands beside the words, and a request spanning
- *  two providers draws the words alone. */
 test("a credential prompt is headed by the one provider every slot it asks for belongs to", async () => {
   location.hash = "#/workspace/credentials";
   wire({

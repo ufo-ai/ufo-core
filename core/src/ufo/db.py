@@ -42,37 +42,7 @@ MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 STATEMENT_LOG_MAX_CHARS = 2_000
 WORKSPACE_GUC = "app.workspace_id"
-# Every pool below is a ceiling one event loop can reach, and the fleet's total is what has to fit.
-# Measured on the testing instance 2026-07-31: `max_connections` 400, `superuser_reserved` 3, so 397
-# are the fleet's to spend. The two runtime fleets each run 2 replicas; every other
-# `hosted.yaml.tpl` deployment is the literal `replicas: 2`, and nothing autoscales, so the count
-# has no user term. Every `init_db` root is counted, not just serve's:
-#
-#   ufo-serve           2 pods x 3 loops (uvicorn, DBOS, heartbeat) x (5 + 5)    =  60 app
-#                       2 pods x 3 loops x (2 + 3)                               =  30 owner
-#   ufo-jobs            2 pods x 3 loops (uvicorn, DBOS, heartbeat) x (5 + 5)    =  60 app
-#                       2 pods x 3 loops x (2 + 3)                               =  30 owner
-#   ufo-ingress         2 pods x 1 loop x (5 + 5)                                =  20
-#   ufo-sandbox-proxy   2 pods x 1 loop x (5 + 5)                                =  20
-#   ufo-gateway         2 pods x 1 loop x (5 + 5) through this module            =  20
-#                       2 pods x asyncpg `max_size` 4 (its own control-plane pool) =   8
-#   DBOS executor       4 pods x 20 on `*_dbos`, same instance (`max_overflow` 0) =  80
-#   DBOS client         4 pods x 5 on `*_dbos`                                    =  20
-#                                                                       ceiling  = 348 of 397
-#
-# The owner registry is sized apart because its consumers are serial — the background sweeps'
-# enumeration and the heartbeat, never a fan-out — and a pod with no owner DSN spends nothing on
-# it at all: `owner_tx` resolves the app pool's engine rather than a second pool for one URL.
-# 5 + 5 is not a bound on concurrent demand — turns fan out parallel tool calls, spawned children
-# and prepared intents run on the express queue, and job workers share the loop. It is sized to
-# how the pool is actually used: every checkout here is transaction-scoped and no transaction
-# spans a non-database await (a scan the review gate keeps true), so a demand burst queues for
-# milliseconds and drains. What the pool cannot absorb is a starved event loop stretching
-# checkout-to-release cycles, and the turns queue's `TURN_WORKER_CONCURRENCY` in
-# `ufo.runtime.queue` bounds that at its source by capping what one process claims to run at once.
-#
-# `db_connections_high` brackets these two numbers: it warns above what the fleet is entitled to and
-# alerts below where Postgres refuses.
+# Every pool is a ceiling one event loop can reach and the fleet's total has to fit.
 POOL_SIZE = 5
 MAX_OVERFLOW = 5
 OWNER_POOL_SIZE = 2

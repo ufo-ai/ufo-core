@@ -30,14 +30,10 @@ test("the bar answers once, as its shares out of its whole", () => {
   expect(bar.getAttribute("aria-valuemax")).toBe("100");
   expect(bar.getAttribute("aria-valuenow")).toBe("75");
   expect(bar.getAttribute("aria-valuetext")).toBe("Committed 40%, Forecast 35%");
-  // The shares themselves say nothing, so a reader is not told the same division twice.
   expect(parts().every((part) => part.getAttribute("aria-hidden") === "true")).toBe(true);
   expect(bar.textContent).toBe("");
 });
 
-/** A caller counts in whatever it counts in — this one in the cents behind "$31.40 of 10000" — so
- *  reading its values out states a figure that is on no screen. The share is what the bar draws and
- *  what holds in any unit. */
 test("a share is announced as its share, not as the units the caller counts in", () => {
   render(
     <Meter
@@ -96,8 +92,6 @@ test("the bar shrinks for whatever stands at the end of its row", () => {
 test("a whole of nothing does not divide by zero, and never states more than all of it", () => {
   render(<Meter label="Nothing counted yet" parts={PARTS} of={0} />);
   expect(parts().map(width).every((each) => each !== "NaN%")).toBe(true);
-  // A bar cannot be further through a whole than the whole: read aloud, `now` over `max` is the
-  // answer, and 1 of 0 is not one a member can take anything from.
   const bar = screen.getByRole("meter");
   const now = Number(bar.getAttribute("aria-valuenow"));
   const most = Number(bar.getAttribute("aria-valuemax"));

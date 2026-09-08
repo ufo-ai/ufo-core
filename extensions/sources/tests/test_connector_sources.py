@@ -79,9 +79,6 @@ async def _fetch(
     )
 
 
-# --- the shared pagination strategies (a probe connector over a mock transport) ------------------
-
-
 class _ProbeConnector(RestConnector):
     """A real RestConnector whose one stream and canned handler drive the strategy loops against
     mock HTTP — a real consumer of the framework, so the loops are exercised, never faked."""
@@ -451,9 +448,6 @@ async def test_a_jittered_wait_stays_under_the_bound_that_governs_it(
     assert waits == [rest.RETRY_AFTER_MAX_SECONDS, rest.RETRY_AFTER_MAX_SECONDS]
 
 
-# --- the adapter: connector pages → SyncResult ---------------------------------------------------
-
-
 class _CannedConnector(RestConnector):
     """A connector whose `paginate` yields pre-canned pages, so the adapter's collapse — snapshot vs
     delta, checkpoint, deletes → source refs — is what's under test, not an HTTP loop. It owns its
@@ -509,9 +503,6 @@ async def test_connector_backend_fails_loud_without_an_auth_proxy() -> None:
         )
 
 
-# --- per-tenant base_url carried by the connection -----------------------------------------------
-
-
 class _PerTenantConnector(RestConnector):
     """A per-tenant connector whose class `base_url` is empty (like Freshdesk/Zendesk): the host
     must come from the connection's own tenant URL on `SourceAuth`, not a class default."""
@@ -534,9 +525,6 @@ async def test_per_tenant_fetch_without_a_base_url_fails_loud() -> None:
     run naming the connector, rather than dialing an empty host."""
     with pytest.raises(RuntimeError, match=r"pertenant.*resolved no base_url"):
         await _fetch(_PerTenantConnector(), "rows", _ok)
-
-
-# --- GitHub: fan-out + Link pagination + ?since --------------------------------------------------
 
 
 def _github_handler(
@@ -598,9 +586,6 @@ async def test_github_skips_when_org_enumeration_is_refused() -> None:
         await _fetch(GitHubConnector(), "repositories", handler)
 
 
-# --- asana ---
-
-
 def _asana_handler(
     page_by_offset: dict[str | None, dict[str, object]],
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -610,9 +595,6 @@ def _asana_handler(
         return httpx.Response(200, json=page_by_offset[request.url.params.get("offset")])
 
     return handle
-
-
-# --- direct BYOK backend -------------------------------------------------------------------------
 
 
 async def test_direct_backend_returns_a_bearer_read_from_the_credential_store(db: None) -> None:
@@ -636,9 +618,6 @@ async def test_direct_backend_refuses_a_provider_slot_it_never_declared() -> Non
         await DirectAuthProxy(credentials=access).credential(uuid4(), "github")
 
 
-# --- credential shapes at the REST client --------------------------------------------------------
-
-
 def test_rest_client_sends_a_bearer_credential() -> None:
     probe = _ProbeConnector(StreamSpec(name="x", source_object="x"), _ok)
     client = RestConnector._make_client(probe, "https://api.probe.test", Credential(bearer="tok"))
@@ -658,9 +637,6 @@ def test_rest_client_fails_loud_on_an_empty_credential() -> None:
     probe = _ProbeConnector(StreamSpec(name="x", source_object="x"), _ok)
     with pytest.raises(RuntimeError, match="no auth"):
         RestConnector._make_client(probe, "https://api.probe.test", Credential())
-
-
-# --- the full chain: driver → memory recall ------------------------------------------------------
 
 
 def _vec(*axes: tuple[int, float]) -> tuple[float, ...]:

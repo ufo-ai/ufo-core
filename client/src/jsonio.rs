@@ -1,7 +1,3 @@
-//! Structured I/O: the directive wire restated as one JSON object per line, so a native app can
-//! embed this client as a subprocess — the pattern of Claude Code's stream-json, pi's RPC mode,
-//! and codex proto. Events go to stdout; commands arrive on stdin. Framing is LF only: a payload
-//! may carry U+2028, so a reader splits on `\n` and never on the Unicode separators.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,9 +8,6 @@ use crate::wire::{Directive, OpRequest, RuntimeAttestation};
 
 const PROTOCOL_VERSION: u32 = 1;
 
-/// One event the client emits, tagged by `type`. `session_start` opens the stream and states the
-/// protocol version it speaks; `turn_start`/`turn_end` bracket each exchange with the agent;
-/// `input_request` and `secret_request` carry the id their answering command quotes back.
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -95,8 +88,6 @@ pub enum Event {
     },
 }
 
-/// One command an embedding app sends, tagged by `type`. `answer` quotes an `input_request` id and
-/// `secret` a `secret_request` id.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
@@ -107,7 +98,6 @@ pub enum Command {
     Shutdown,
 }
 
-/// What the main loop does with an accepted command.
 #[derive(Debug, PartialEq)]
 pub enum AnswerRouting {
     Post(String),
@@ -125,8 +115,6 @@ struct PendingSecret {
     slot: String,
 }
 
-/// The protocol's stateful half: the id counter behind every request the client raises, and the
-/// requests still outstanding, so an answer arriving on stdin reaches the directive that asked.
 #[derive(Default)]
 pub struct Driver {
     next_id: u64,
@@ -139,7 +127,6 @@ impl Driver {
         Driver::default()
     }
 
-    /// The first event of the stream: what protocol this speaks and where it is speaking.
     pub fn session_start(&self, channel: &str, workspace_url: Option<&str>) -> Event {
         Event::SessionStart {
             v: PROTOCOL_VERSION,
@@ -153,8 +140,6 @@ impl Driver {
         Event::TurnStart
     }
 
-    /// Map one directive to the events it publishes. Session plumbing — the poll interval, the
-    /// since cursor, the ops, and the credential verbs — publishes none.
     pub fn on_directive(&mut self, directive: &Directive) -> Vec<Event> {
         match directive {
             Directive::Txt(text) => vec![Event::TextDelta { text: text.clone() }],
@@ -235,8 +220,6 @@ impl Driver {
         self.next_id
     }
 
-    /// A `run` directive publishes nothing until the op actually starts, so the loop announces it
-    /// here and closes it with `on_op_finished`.
     pub fn on_op_started(&self, op: &OpRequest) -> Event {
         Event::OpStart {
             op_id: op.op_id.clone(),
@@ -259,8 +242,6 @@ impl Driver {
         Event::TurnEnd
     }
 
-    /// Sign-in completed: the workspace this session now talks to, and the conversation channel —
-    /// re-minted when onboarding hands the session its workspace.
     pub fn message_sent(&self, ack: &crate::wire::SentAck) -> Event {
         Event::MessageSent {
             turn_id: ack.turn_id.clone(),
@@ -283,8 +264,6 @@ impl Driver {
         }
     }
 
-    /// Route one accepted command, consuming the request it answers. A command quoting an id with
-    /// no request outstanding under it answers with the error event to emit instead.
     pub fn answer_body(&mut self, command: Command) -> Result<AnswerRouting, Event> {
         match command {
             Command::Send { text } => Ok(AnswerRouting::Post(text)),
@@ -309,8 +288,6 @@ impl Driver {
     }
 }
 
-/// Parse one stdin line into a command. A line that is not JSON, and one naming a command that
-/// does not exist, both answer with the error event to emit; the stream carries on either way.
 pub fn parse_command(line: &str) -> Result<Command, Event> {
     serde_json::from_str(line).map_err(|error| refused(format!("bad command: {error}")))
 }
@@ -322,7 +299,6 @@ fn refused(message: String) -> Event {
     }
 }
 
-/// Render one event as its stdout line.
 pub fn emit(event: &Event) -> String {
     let mut line = serde_json::to_string(event).expect("events serialize");
     line.push('\n');

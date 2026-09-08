@@ -1,16 +1,8 @@
-# The database, from both sides at once. CloudWatch says what Postgres was doing; it cannot say
-# whether a turn reached it, because a connection that never arrives is not a connection Postgres
-# ever sees. `ufo.db_tx_unavailable_total` is that other side, and it sits on this board next to the
-# instance's own health so the pair is read together — the failure in #834 was invisible on every
-# database-side graph while a turn died waiting on a connect.
-#
-# One board for both fleets, in the root the deploy pipeline applies.
 
 resource "datadog_dashboard" "database" {
   title       = "ufo database"
   layout_type = "ordered"
 
-  # Every `ufo.*` query scopes to `$env` rather than a literal, so the board reads either fleet.
   template_variable {
     name             = "env"
     prefix           = "env"
@@ -18,10 +10,8 @@ resource "datadog_dashboard" "database" {
     available_values = ["testing", "prod"]
   }
 
-  # The CloudWatch half cannot ride `$env`: the AWS integration carries the instance's own tags,
-  # where the environment reads `ufo-testing` on one fleet and `prod` on the other, so nothing there
-  # matches the `env` tag the OTLP pipeline stamps. The RDS queries key on the instance identifier
-  # instead, as every monitor does, and the presets below move both selectors as one.
+  # The CloudWatch half cannot ride `$env`: the AWS integration carries the instance's own tags, where
+  # the environment reads `ufo-testing` on one fleet and `prod` on the other. RDS keys on the identifier.
   template_variable {
     name             = "dbinstance"
     prefix           = "dbinstanceidentifier"
@@ -86,9 +76,6 @@ resource "datadog_dashboard" "database" {
     }
   }
 
-  # The wait that precedes both of the graphs around it. A pool filling shows here as a rising tail
-  # long before it shows anywhere else, and a wait that ends at `pool_timeout` is what the exhaustion
-  # count is the other end of.
   widget {
     timeseries_definition {
       title = "how long a transaction waited for a connection"
@@ -103,9 +90,6 @@ resource "datadog_dashboard" "database" {
     }
   }
 
-  # The half of the unavailable count that is ours rather than the network's: both raise a
-  # `TimeoutError`, so this is the only thing that separates the fleet at its own ceiling from a lost
-  # packet.
   widget {
     timeseries_definition {
       title = "pools exhausted at their ceiling (client side)"
@@ -133,9 +117,6 @@ resource "datadog_dashboard" "database" {
     }
   }
 
-  # The graph that arrives before the charge, by a wide margin: the balance drains while CPU holds
-  # above the baseline. Burstable classes only, so it reports for the testing `db.t4g.medium` and
-  # reads empty under the prod preset, where the instance is a `db.m6g.large`.
   widget {
     timeseries_definition {
       title = "cpu credit balance"
@@ -195,7 +176,6 @@ resource "datadog_dashboard" "model_latency" {
   title       = "ufo model latency"
   layout_type = "ordered"
 
-  # Every query scopes to `$env` rather than a literal, so the board reads either fleet.
   template_variable {
     name             = "env"
     prefix           = "env"
@@ -353,16 +333,8 @@ resource "datadog_dashboard" "model_latency" {
 
 }
 
-# Every model round, read as a failure question: how often a provider fails a round, on which
-# class, for which model and profile. The latency board beside it holds the same population by
-# duration; this one holds it by outcome, with the three data sources that see a round laid in the
-# order of their coverage. The metrics see every round on every provider and are the numbers. The
-# APM spans are sampled and keep the failure under its own class name, where the metric folds an
-# unlisted class onto `other`; a span is the drill-down into one failed round's trace. The LLM
-# Observability stream is OpenRouter's own record of the generations it relayed — the upstream it
-# picked, the status it got back, the fallbacks it tried — and sees no other provider.
-#
-# One board for both fleets, in the root the deploy pipeline applies.
+# The APM spans are sampled and keep the failure under its own class name, where the metric folds an
+# unlisted class onto `other`; a span is the drill-down into one failed round's trace.
 
 resource "datadog_dashboard" "model_rounds" {
   title       = "ufo model rounds"
@@ -394,8 +366,7 @@ resource "datadog_dashboard" "model_rounds" {
   }
 
   # OpenRouter labels its generations with the API key that made them, not the fleet: the key named
-  # `ufo-testing` serves the prod fleet and `dev` serves testing. The presets move both selectors
-  # as one, so the stream at the foot reads the same fleet as the graphs above it.
+  # `ufo-testing` serves the prod fleet and `dev` serves testing.
   template_variable {
     name             = "api_key"
     defaults         = ["ufo-testing"]
@@ -636,9 +607,6 @@ resource "datadog_dashboard" "model_rounds" {
     }
   }
 
-  # The failures under their own class names. The metric folds a class the registry does not list
-  # onto `other` so an unlisted exception cannot mint a series; a span is one event and pays no such
-  # cost, so this is where `other` is opened. Sampled: read the shape, not the count.
   widget {
     timeseries_definition {
       title = "failed rounds in traces, by error class (sampled)"
@@ -755,13 +723,8 @@ resource "datadog_dashboard" "model_rounds" {
   }
 }
 
-# The count behind the two `report_problem` widgets at the foot of the turns board.
-# `report_problem` emits one log record per report and nothing else, so the class and the cost of a
-# report are log fields; this derives a counter from them, because a log widget columns and groups
-# only by a Datadog-side facet and no terraform resource creates one. Grouping a log-based metric
-# needs no facet, so the board's shape is provisioned here rather than made by hand in the UI and
-# kept alive there. Only the three dimensions the board reads are grouped: `category` and `impact`
-# by their widgets, `env` by the board's template variable.
+# A log widget columns and groups only by a Datadog-side facet and no terraform resource creates one;
+# grouping a log-based metric needs no facet, so the board's shape is provisioned here.
 
 resource "datadog_logs_metric" "problem_reported" {
   name = "ufo.problem_reported"
@@ -785,17 +748,10 @@ resource "datadog_logs_metric" "problem_reported" {
   }
 }
 
-# Where a turn spends its wall clock, and what it spent it on. The latency distributions arrive as
-# sketches and answer percentiles because `metrics.tf` enables them.
-#
-# The board is ordered as the question is asked: the turn first, then the model rounds inside it, then
-# the tool calls between them.
-
 resource "datadog_dashboard" "turns" {
   title       = "ufo turns"
   layout_type = "ordered"
 
-  # Every query scopes to `$env` rather than a literal, so the board reads either fleet.
   template_variable {
     name     = "env"
     prefix   = "env"
@@ -819,8 +775,6 @@ resource "datadog_dashboard" "turns" {
     }
   }
 
-  # The only once-per-turn producer on the board: committed terminals, counted behind the transition
-  # guard, so a park or a re-dispatch never adds a second one.
   widget {
     timeseries_definition {
       title = "turns by terminal status"
@@ -911,8 +865,6 @@ resource "datadog_dashboard" "turns" {
     }
   }
 
-  # A round that returned carries no `error_class` at all, so the filter is what keeps the healthy
-  # population out of a graph about failures rather than under an `N/A` bar that dwarfs them.
   widget {
     timeseries_definition {
       title = "model round failures by error class"
@@ -973,14 +925,6 @@ resource "datadog_dashboard" "turns" {
     }
   }
 
-  # An agent's own report of a problem it could not repair, from `report_problem`. It sits on this
-  # board because a report is produced inside a turn and read while watching the fleet, and because
-  # nothing else counts one: `tool_call_total{tool:report_problem}` says a call happened, never that
-  # a workspace is broken — a refusal and a landed report are the same count there.
-  #
-  # By category, because that is what a reader routes on: which subsystem is generating reports this
-  # week decides who picks them up.
-
   widget {
     timeseries_definition {
       title = "problems reported by category"
@@ -990,9 +934,6 @@ resource "datadog_dashboard" "turns" {
       }
     }
   }
-
-  # And by what it cost the member, which is a different question from how many: one critical report
-  # outranks a week of minor ones, and the two series move independently.
 
   widget {
     timeseries_definition {
@@ -1004,13 +945,8 @@ resource "datadog_dashboard" "turns" {
     }
   }
 
-  # The reports themselves, because the counts alone cannot be acted on. Each row carries the
-  # workspace, the agent's own account of the problem, its category and impact, the origin (`fault`,
-  # or `member_request` where a member asked us to be told), and a debugger link scoped to the
-  # reporting turn — a click on the row opens the transcript. It carries no columns and no grouping:
-  # a log widget columns and groups only by a Datadog-side facet, and no terraform resource creates
-  # one, so the board reads the whole fleet's reports as one list and the counts above carry the
-  # grouping.
+  # A log widget columns and groups only by a Datadog-side facet and no terraform resource creates one;
+  # grouping a log-based metric needs no facet, so the board's shape is provisioned here.
   widget {
     log_stream_definition {
       title               = "what they reported"
@@ -1026,14 +962,6 @@ resource "datadog_dashboard" "turns" {
     }
   }
 }
-
-# How well the coding agent executes, as distinct from how fast: the turns board answers throughput
-# and latency, this one answers completion, tool-call correctness, and effort spent per result.
-#
-# Every number here is a process proxy. Nothing in `ufo.*` records whether the code the agent wrote
-# was correct — no eval score, test result, or review verdict is emitted — so this board catches an
-# agent that gives up, loops, or misuses a tool, and is blind to one that confidently ships wrong
-# code. That gap is the note's first paragraph because a reader who misses it over-trusts the board.
 
 resource "datadog_dashboard" "coding_quality" {
   title       = "ufo coding agent quality"
@@ -1154,13 +1082,8 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # The one number here drawn from the agent's own work rather than from the machinery around it:
-  # `bash_handler` marks any non-zero exit an error, so this is the share of commands the agent ran
-  # that came back red — a test, a build, a lint it invoked on the code it had just written.
-  #
-  # Uncoloured deliberately. Low is not good: an agent that never sees a failing command is an agent
-  # that never ran its own tests, and the healthy shape is a rate that exists and then falls within a
-  # turn as failures get fixed. A `grep` with no match exits non-zero too, so read this as a ceiling.
+  # `bash_handler` marks any non-zero exit an error, so this is the share of the agent's own commands
+  # that came back red. A `grep` with no match exits non-zero too, so read this as a ceiling.
   widget {
     query_value_definition {
       title       = "failed commands"
@@ -1174,14 +1097,6 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # Every way an edit gets refused, in one number: the read-before-edit precondition in
-  # `edit_handler`, plus everything `ufo fs` rejects — an `old_string` matching nothing, an anchor
-  # matching more than once, a missing file, a path leaving the workspace. `run_ufo_fs` turns each of
-  # those into the same `ValueError`, so this cannot separate the agent misremembering a file's
-  # contents from the agent skipping the read that would have shown them. Splitting them needs a
-  # distinct error class on the precondition; until then read the total, not a cause.
-  #
-  # All of it is the agent's doing rather than the tool failing, which is why it sits here.
   widget {
     query_value_definition {
       title       = "edits the tool refused"
@@ -1210,8 +1125,6 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # Rounds and tokens are per execution, terminals are per turn, so both ratios read high wherever a
-  # turn parked and resumed. They are trend series, not absolute counts.
   widget {
     query_value_definition {
       title     = "rounds per completed turn"
@@ -1299,7 +1212,6 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # `ok` outruns every failure by three orders of magnitude and flattens them off the axis.
   widget {
     timeseries_definition {
       title = "failed tool calls by outcome"
@@ -1334,11 +1246,6 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # Split from the rate below because that one folds infrastructure faults in with these: a tool the
-  # agent drove into a wall reads the same there as one that fell over on its own.
-  #
-  # The `ValueError` arm is not decoration. `edit` never returns a failing result — it raises — so an
-  # `outcome:handler_error` filter alone reports zero for the tool the agent gets wrong most often.
   widget {
     toplist_definition {
       title = "the agent's own actions that failed, by tool"
@@ -1381,8 +1288,6 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # Rising against a flat success rate is the earliest read on a prompt or tool regression: the same
-  # result bought with more work.
   widget {
     timeseries_definition {
       title = "rounds per completed turn over time"
@@ -1449,8 +1354,6 @@ resource "datadog_dashboard" "coding_quality" {
     }
   }
 
-  # What share of the fleet the profile filter can see. Every rate above is drawn from the tagged
-  # slice alone, and untagged turns currently outnumber `coding` ones by more than thirty to one.
   widget {
     toplist_definition {
       title = "turns by profile tag"
@@ -1601,19 +1504,10 @@ resource "datadog_dashboard" "prompt_cache" {
   }
 }
 
-# The nightly eval sweep's scores over time. The sweep submits counts, not rates, so every query
-# here divides: averaging per-suite rates would weight a one-case suite like a sixty-nine-case one.
-# The points arrive once a night from `.github/workflows/evals-nightly.yml`, which is sparse enough
-# that a line joins two points a day apart — read a step as one night's result, never as a trend
-# between them, and read the digest events below before reading a drop as a regression, since a
-# suite whose cases changed is a different test under the same name.
-
 resource "datadog_dashboard" "evals" {
   title       = "ufo evals"
   layout_type = "ordered"
 
-  # `sweep` is the nightly run of every suite; `smoke` is the proving subset a dispatch asks for.
-  # They are different populations, so nothing here mixes them.
   template_variable {
     name             = "mode"
     prefix           = "mode"
@@ -1665,24 +1559,10 @@ resource "datadog_dashboard" "evals" {
   }
 }
 
-# The sandbox layer, by failure rather than by resource. A container fails in four distinguishable
-# ways and each has its own counter, so this board's job is to say which one happened — the
-# signatures are close enough that reading the wrong one sends the next hour in the wrong direction.
-# A container that stopped answering returns nothing and every later command pays its whole
-# deadline, which arrives as `exec timeouts` rather than as an error, and a filesystem with no room
-# left produces that same silence for an entirely different reason.
-#
-# What this board cannot show: nothing emits a gauge for a container's memory or disk. Every series
-# here is an event counter, so a container filling up is visible only once it starts failing. e2b's
-# own API holds the resource curves and keeps roughly fifteen minutes of them.
-#
-# One board for both fleets, in the root the deploy pipeline applies.
-
 resource "datadog_dashboard" "sandbox_health" {
   title       = "ufo sandbox health"
   layout_type = "ordered"
 
-  # Every query scopes to `$env` rather than a literal, so the board reads either fleet.
   template_variable {
     name             = "env"
     prefix           = "env"
@@ -1844,26 +1724,7 @@ resource "datadog_dashboard" "sandbox_health" {
   }
 }
 
-# The product funnel, derived rather than captured. Every number here comes off rows the product
-# already writes — a connector grant, an invited member, a charged purchase — so a stage redefined
-# next month re-derives itself over the whole history rather than starting from the day it shipped.
-#
-# `product_census` fires once per workspace per period and increments each stage that workspace has
-# reached, so the count of workspaces at a stage is one tick's worth of increments. Every workspace
-# count therefore counts with `.as_count()` like the rest of this file and pins the rollup to that
-# period, so one bucket holds exactly one tick and reads as the count the census recorded; a bucket
-# Datadog sizes for itself holds as many ticks as it is wide, which multiplies the number. `max`
-# then picks a whole bucket over the one still filling at the right-hand edge, and every card, the
-# funnel and the toplists take that same `max` so a stage reads the same in the big number and in the
-# funnel.
-#
-# One board for both fleets, in the root the deploy pipeline applies.
-
 locals {
-  # `PRODUCT_CENSUS_SECONDS` in `core/src/ufo/product.py`, and held equal to it by
-  # `_census_period_failures` in the gates: the census period is the bucket every workspace count on
-  # this board is read out of, so a bucket wider than the census fires counts one workspace once per
-  # tick it holds and inflates every number here at once.
   product_census_seconds = 600
 }
 
@@ -1871,8 +1732,6 @@ resource "datadog_dashboard" "product" {
   title       = "ufo product"
   layout_type = "ordered"
 
-  # Opens on prod: this is the board somebody reads to know how the product is doing, and that
-  # question is about customers rather than about the fleet we test on. Testing is a click away.
   template_variable {
     name             = "env"
     prefix           = "env"
@@ -2031,9 +1890,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # What is attached, by the name the row carries rather than a name core holds: the connector's
-  # provider, the surface, the credential slot, the app. A connector added to the catalogue appears
-  # here with no change to this board.
   widget {
     toplist_definition {
       title = "workspaces holding a connector, by provider"
@@ -2052,9 +1908,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # An installation routes nothing until a member has proved an address against it, so this is the
-  # number that says a workspace can actually be reached on that surface. Read it against the
-  # installation count above: the difference is claims nobody finished.
   widget {
     toplist_definition {
       title = "workspaces reachable on a surface"
@@ -2064,8 +1917,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # Where GitHub and every bring-your-own-key connector appear: they are credential slots, not
-  # connector grants, so they are counted by slot rather than by provider.
   widget {
     toplist_definition {
       title = "workspaces holding a credential, by slot"
@@ -2075,10 +1926,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # A pack provisions its apps into every workspace it covers, so this counts how far each shipped
-  # app reached and never what a member adopted: a name standing below the workspace count is a
-  # provision that did not land everywhere. The funnel's `app` step answers the other question — an
-  # app the workspace made for itself.
   widget {
     toplist_definition {
       title = "workspaces each shipped app reached"
@@ -2088,8 +1935,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # Counted at admission, so one row is one turn: a message that folds into a turn already running
-  # adds neither.
   widget {
     timeseries_definition {
       title = "member chats by surface"
@@ -2100,8 +1945,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # `member` and `intent` are a person acting; `scheduled` and `internal` are the fleet acting on
-  # their behalf. Reading the two together is what says whether volume is demand or our own work.
   widget {
     timeseries_definition {
       title = "turns admitted by source"
@@ -2112,9 +1955,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # Money in, off the purchase the ledger kept rather than the call that asked for it and only once
-  # its transaction committed, so a rolled-back or redelivered payment is not counted. A signup grant
-  # charges nothing and never appears here, and neither does an operator's correction — see the note.
   widget {
     timeseries_definition {
       title = "dollars the fleet charged"

@@ -1,7 +1,3 @@
-//! The retained transcript: entries hold their sources, rendered lines are a per-width cache, so
-//! a resize re-wraps every screen the member can reach and the exit document prints at the final
-//! width. Scroll state, the member-message jump index, and the link under a click all live here,
-//! because they are all questions about the same rendered rows.
 
 use ratatui::text::{Line, Span};
 
@@ -18,51 +14,32 @@ const STEP_INDENT: &str = "  ";
 const CALL_MARKER: &str = "⏺ ";
 const RUN_INDENT: &str = "  ";
 
-/// One retained transcript element, held as its source.
 pub enum Entry {
-    /// A member message: caret + bold, in member coordinates for the jump index.
     Member(String),
-    /// A committed markdown block of the agent's reply.
     Markdown(String),
-    /// A muted single line.
     Note(String),
-    /// One turn's steps, ranked as they happened.
     Steps { steps: Vec<Step>, fold: Fold },
-    /// Pre-rendered lines that re-wrap by clipping only (image markers, raw spans).
     Raw(Vec<Line<'static>>),
-    /// The mark at the head of the transcript, drawn to the width it is read at.
     Masthead,
 }
 
 impl Entry {
-    /// Whether a run of blank rows inside this entry reads as one. Prose collapses; the mark is
-    /// a drawing that stands in its own air.
     fn keeps_its_blanks(&self) -> bool {
         matches!(self, Entry::Masthead)
     }
 
-    /// Whether the blank this entry opens on stands even under the entry above it. Only the
-    /// mark's air is its own; every other entry lets its leading blank meet the row above.
     fn keeps_its_leading_blank(&self) -> bool {
         matches!(self, Entry::Masthead)
     }
 }
 
-/// One step of a turn: a thought the agent wrote between its calls, the one line a call or a
-/// skill load narrated, a call this terminal ran, or a subagent run.
 pub enum Step {
     Thought(String),
     Note(String),
-    /// One call this terminal ran: the header naming it over the rows its result showed. Held
-    /// rendered, because the reply they read is gone once the wire has it, and clipped to the
-    /// width each paint asks for.
     Op {
         header: Line<'static>,
         body: Vec<Line<'static>>,
     },
-    /// One subagent run: its name, the rows it narrated, and whether the member opened it. A run
-    /// is one step however much it did — the count the web states — and its rows stand behind
-    /// its own fold, like the web's run row.
     Run {
         label: String,
         rows: Vec<String>,
@@ -70,8 +47,6 @@ pub enum Step {
     },
 }
 
-/// How a turn's steps stand: written into while the turn runs, rolled up behind
-/// `Completed N steps` once the answer lands, or opened again by the member.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Fold {
     Live,
@@ -79,7 +54,6 @@ pub enum Fold {
     Opened,
 }
 
-/// The line a rolled-up turn states. The web's fold states the same words.
 pub fn rollup_line(steps: usize) -> String {
     match steps {
         1 => "Completed 1 step".to_string(),
@@ -87,22 +61,17 @@ pub fn rollup_line(steps: usize) -> String {
     }
 }
 
-/// What a click on one rendered row of a steps entry toggles.
 #[derive(Clone, Copy)]
 enum Toggle {
     Fold,
     Run(usize),
 }
 
-/// What one paint of the transcript region shows.
 pub struct Window {
-    /// Exactly the rows asked for, blank-padded at the bottom when content is short.
     pub lines: Vec<Line<'static>>,
-    /// Absolute line index of `lines[0]`, for translating screen rows to content lines.
     pub start: usize,
 }
 
-/// One entry's rendered extent, kept for every entry so the line arithmetic never re-renders.
 #[derive(Clone, Copy)]
 struct Shape {
     lines: usize,
@@ -120,15 +89,12 @@ impl Shape {
     }
 }
 
-/// Where one entry lands in the collapsed transcript: its first absolute line, and the offset of
-/// the first of its own lines that survives — 1 where its leading blank met the entry above it.
 #[derive(Clone, Copy)]
 struct Place {
     start: usize,
     from: usize,
 }
 
-/// The transcript, its scroll state, and the caches that make a resize a re-render.
 pub struct Retained {
     entries: Vec<Entry>,
     drawn: Vec<Option<Vec<Line<'static>>>>,
@@ -180,13 +146,10 @@ impl Retained {
         self.dirty = true;
     }
 
-    /// The next entries belong to a new turn.
     pub fn begin_turn(&mut self) {
         self.turn_start = self.entries.len();
     }
 
-    /// One step of the running turn joins its rollup, opening one where the turn has none yet. A
-    /// live rollup stands open, so the steps are read where they happened.
     pub fn push_step(&mut self, step: Step) {
         let Some(at) = self.live_steps else {
             let reply = if self.entries.len() > self.turn_start
@@ -215,9 +178,6 @@ impl Retained {
         self.grew = true;
     }
 
-    /// The client's own account of a call stands where the note that narrated it did, so one
-    /// call is one step whichever end of the wire stated it. A call the agent narrated nothing
-    /// for has no row to stand in and joins the steps as its own.
     pub fn restate_step(&mut self, narrated: &str, step: Step) {
         let found = self.live_steps.and_then(|at| match &self.entries[at] {
             Entry::Steps { steps, .. } => steps
@@ -237,8 +197,6 @@ impl Retained {
         self.grew = true;
     }
 
-    /// A row a counted run narrated: it joins that run's step, or opens a fresh run where the
-    /// rollup that counted it already settled.
     pub fn push_under(&mut self, label: &str, row: String) {
         if let Some(at) = self.live_steps {
             if let Entry::Steps { steps, .. } = &mut self.entries[at] {
@@ -263,8 +221,6 @@ impl Retained {
         });
     }
 
-    /// The open reply's source, taken off the transcript with the entry it grew in — so words the
-    /// turn wrote before a call can be held as the step they are.
     pub fn take_reply(&mut self) -> Option<String> {
         if !matches!(self.entries.last(), Some(Entry::Markdown(_))) {
             return None;
@@ -278,8 +234,6 @@ impl Retained {
         Some(source)
     }
 
-    /// The turn ended: its steps roll up behind the one line that counts them, and the next turn
-    /// opens a rollup of its own.
     pub fn roll_up_steps(&mut self) {
         let Some(at) = self.live_steps.take() else {
             return;
@@ -290,8 +244,6 @@ impl Retained {
         self.invalidate(at);
     }
 
-    /// Open or close the newest rolled-up turn — the member's own toggle, which is the only thing
-    /// that opens a settled rollup. The turn still writing into its steps keeps them open.
     pub fn toggle_steps(&mut self) {
         let found = self
             .entries
@@ -309,8 +261,6 @@ impl Retained {
         self.invalidate(at);
     }
 
-    /// Flip the fold a click landed on: the rollup line opens or closes its turn, a run's row
-    /// opens or closes the run. True where the click was such a toggle.
     pub fn toggle(&mut self, line: usize, col: usize, theme: &Theme) -> bool {
         let Some((index, toggle)) = self.toggle_target(line, col, theme) else {
             return false;
@@ -334,13 +284,10 @@ impl Retained {
         true
     }
 
-    /// Whether a toggle stands under this position — the hover query behind the affordance.
     pub fn is_toggle(&mut self, line: usize, col: usize, theme: &Theme) -> bool {
         self.toggle_target(line, col, theme).is_some()
     }
 
-    /// The toggle one absolute rendered line carries at a display column: the rollup line and a
-    /// run's row toggle, and only within their visible text.
     fn toggle_target(&mut self, line: usize, col: usize, theme: &Theme) -> Option<(usize, Toggle)> {
         self.layout(theme);
         if line >= self.total {
@@ -366,9 +313,6 @@ impl Retained {
         self.dirty = true;
     }
 
-    /// Grow the reply the last entry holds, or start one. A streamed reply is one markdown
-    /// document: its blocks arrive apart but re-wrap together, and the blank between two of them
-    /// is the source's own rather than something a commit inserts.
     pub fn extend_markdown(&mut self, source: &str) {
         let Some(Entry::Markdown(held)) = self.entries.last_mut() else {
             self.push(Entry::Markdown(source.to_string()));
@@ -382,7 +326,6 @@ impl Retained {
         self.dirty = true;
     }
 
-    /// A width change: every cached rendering is invalid.
     pub fn set_width(&mut self, width: u16) {
         if width == self.width {
             return;
@@ -394,14 +337,11 @@ impl Retained {
         self.dirty = true;
     }
 
-    /// Scroll by `up` lines (positive is into history); clamped at the first line of the
-    /// transcript, and reaching the end resumes following.
     pub fn scroll(&mut self, up: isize) {
         let max = self.top() as isize;
         self.scroll_back = (self.scroll_back as isize + up).clamp(0, max) as usize;
     }
 
-    /// The scroll that puts the transcript's first line at the top of the window.
     fn top(&self) -> usize {
         self.total.saturating_sub(self.rows)
     }
@@ -414,7 +354,6 @@ impl Retained {
         self.scroll_back
     }
 
-    /// Jump the window to the previous / next member message relative to the top of the window.
     pub fn jump_member(&mut self, theme: &Theme, back: bool) {
         self.layout(theme);
         let top = self.total.saturating_sub(self.scroll_back + self.rows);
@@ -438,7 +377,6 @@ impl Retained {
         self.scroll_back = self.total.saturating_sub(self.rows + said);
     }
 
-    /// The visible rows at the current scroll, plus the live tail lines appended when following.
     pub fn window(&mut self, rows: usize, live: &[Line<'static>], theme: &Theme) -> Window {
         let rows = rows.max(1);
         self.rows = rows;
@@ -462,7 +400,6 @@ impl Retained {
         Window { lines, start }
     }
 
-    /// The plain text of one absolute rendered line, for selection extraction and word bounds.
     pub fn text_of(&mut self, line: usize, theme: &Theme) -> String {
         self.layout(theme);
         if line >= self.total {
@@ -477,8 +414,6 @@ impl Retained {
             .unwrap_or_default()
     }
 
-    /// The URL under a display column of one absolute line: an OSC 8 link's label, or a URL
-    /// written in the line's visible text.
     pub fn link_at(&mut self, line: usize, col: usize, theme: &Theme) -> Option<String> {
         self.layout(theme);
         if line >= self.total {
@@ -496,14 +431,11 @@ impl Retained {
             .map(|(_, _, url)| url)
     }
 
-    /// Every entry rendered at the current width, for the exit document.
     pub fn document(&mut self, theme: &Theme) -> Vec<Line<'static>> {
         self.layout(theme);
         self.between(0, self.total, theme)
     }
 
-    /// Where every entry lands, from the cached shapes: one blank of two adjacent ones is dropped,
-    /// and lines a push added below a reader carry that reader's window with them.
     fn layout(&mut self, theme: &Theme) {
         if !self.dirty {
             return;
@@ -533,7 +465,6 @@ impl Retained {
         self.scroll_back = (self.scroll_back + added).min(self.top());
     }
 
-    /// One entry's lines: prose with its adjacent blanks collapsed, the mark with its air kept.
     fn rendered(&self, at: usize, theme: &Theme) -> Vec<Line<'static>> {
         let entry = &self.entries[at];
         let lines = render(entry, theme, self.width);
@@ -562,8 +493,6 @@ impl Retained {
         self.drawn[at].as_deref().expect("the entry is drawn")
     }
 
-    /// The entry holding an absolute line: the last one that starts at or before it, so an entry
-    /// the collapse emptied is stepped over rather than answered with.
     fn entry_at(&self, line: usize) -> usize {
         self.places
             .partition_point(|place| place.start <= line)
@@ -595,8 +524,6 @@ impl Retained {
         out
     }
 
-    /// Rendered lines are held only around the window; every entry keeps its shape, which is what
-    /// the arithmetic reads.
     fn forget_outside(&mut self, first: usize, last: usize) {
         let low = first.saturating_sub(KEEP_DRAWN);
         let high = last + KEEP_DRAWN;
@@ -619,8 +546,6 @@ fn render(entry: &Entry, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     }
 }
 
-/// A turn's steps: the rows alone while the turn writes them, the count alone once it rolled up,
-/// and the count over the rows the member opened again.
 fn steps_lines(steps: &[Step], fold: Fold, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     steps_rows(steps, fold, theme, width)
         .into_iter()
@@ -628,11 +553,6 @@ fn steps_lines(steps: &[Step], fold: Fold, theme: &Theme, width: u16) -> Vec<Lin
         .collect()
 }
 
-/// The same rows with the toggle each carries, so a click and the rendering read one traversal.
-/// A live turn's rows read as the narration they were; the rows a member opened again are past
-/// work, so they stand indented under the count and state each call's work without the
-/// `running <tool>:` lead — the words the web's settled disclosure shows. A settled block ends
-/// in a blank line, standing the reply apart from it.
 fn steps_rows(
     steps: &[Step],
     fold: Fold,
@@ -712,16 +632,12 @@ fn steps_rows(
     rows
 }
 
-/// The work a call states. The wire carries two shapes — a model's own sentence, and a
-/// `running <tool>: ` lead over one — and only the second has anything to strip.
 fn described(text: &str) -> &str {
     text.strip_prefix("running ")
         .and_then(|rest| rest.split_once(": "))
         .map_or(text, |(_, description)| description)
 }
 
-/// One held row at the width the paint asks for: spans are kept whole until one runs past the
-/// room left, and that one is cut where it stops fitting.
 fn clipped(line: &Line<'static>, width: u16) -> Line<'static> {
     let mut used = 0;
     let mut kept = Vec::new();
@@ -741,8 +657,6 @@ fn clipped(line: &Line<'static>, width: u16) -> Line<'static> {
     Line::from(kept)
 }
 
-/// A run's own row: its name before a fold mark and — closed while the turn still runs — the
-/// latest thing it narrated, the way the web's run row states what it is doing.
 fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
     match (opened, fold, rows.last()) {
         (false, Fold::Live, Some(latest)) => {
@@ -753,10 +667,6 @@ fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
     }
 }
 
-/// A member message: the caret over what they wrote, held clear of the turn beneath it — the
-/// work a turn narrates starts far enough below the ask to be read as the answer to it.
-/// A member's words under their caret, each row wrapped to the width like a reply: a row wider
-/// than the screen would soft-wrap in the terminal and shift every row below it.
 fn member_lines(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let cap = (width as usize)
         .saturating_sub(wrap::width(ECHO_INDENT))
@@ -804,7 +714,6 @@ fn is_blank(line: &Line) -> bool {
     line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
-/// The visible text of a rendered line: escapes carried in span text take no columns and drop.
 fn plain_text(line: &Line) -> String {
     line.spans
         .iter()
@@ -814,8 +723,6 @@ fn plain_text(line: &Line) -> String {
         .collect()
 }
 
-/// Every OSC 8 link in one line as `(first column, column past the end, url)`, the columns those
-/// of its visible label.
 fn osc_links(line: &Line) -> Vec<(usize, usize, String)> {
     let mut found = Vec::new();
     let mut open: Option<(usize, String)> = None;
@@ -836,9 +743,6 @@ fn osc_links(line: &Line) -> Vec<(usize, usize, String)> {
     found
 }
 
-/// Every URL in one line's text as `(first column, column past the end, url)`. A token runs to the
-/// next space; a closing paren ends it only where one was opened before it, which is how a
-/// markdown link states its destination.
 fn urls(text: &str) -> Vec<(usize, usize, String)> {
     let mut found = Vec::new();
     let mut at = 0;
@@ -1168,8 +1072,6 @@ mod tests {
         assert_eq!(retained.link_at(0, 22, &theme), None);
     }
 
-    /// The mark holds its source, not its pixels, so the width the member is at reaches it on
-    /// every read — not only the one the conversation opened at.
     #[test]
     fn the_mark_is_drawn_at_the_width_it_is_read_at() {
         let theme = theme();

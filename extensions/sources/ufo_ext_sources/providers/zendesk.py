@@ -66,10 +66,6 @@ class _Hop:
     stamp: str = ""
 
 
-# The Help Center and community collections Zendesk publishes only beneath a parent. Each stream is
-# the chain of collections leading to it, the last hop being its own rows: `article_comments` is
-# every article's comments, `article_comment_votes` every comment's votes. Only `articles`, `posts`
-# and the flat admin collections answer at a path of their own.
 _ARTICLES = _Hop("help_center/articles", "articles", "article_id")
 _POSTS = _Hop("community/posts", "posts", "post_id")
 _COMMENTS = _Hop("comments", "comments", "comment_id")
@@ -84,9 +80,6 @@ _CHILD_COLLECTIONS: dict[str, tuple[_Hop, ...]] = {
     "post_comment_votes": (_POSTS, _COMMENTS, _Hop("votes", "votes")),
 }
 
-# `routing/attributes/definitions` answers with the one nested body on this surface: two lists of
-# the same shape under `definitions`, holding the conditions an attribute may be matched by. Both
-# can name one attribute, so the condition it was listed under is part of which record this is.
 _DEFINITION_CONDITIONS = {"conditions_all": "all", "conditions_any": "any"}
 
 

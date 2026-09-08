@@ -184,16 +184,10 @@ import { ConversationDetail } from "@/views/Conversations";
 
 import "@/theme.css";
 
-/* The JSX runtime a page's build compiles against, so the kit is a page's one dependency and the
-   React its JSX lands on is the React inside the kit rather than a second copy beside the page.
-   `JSX` rides with it: `jsxImportSource` names this module for the element types too, and a page
-   whose tags resolve to nothing typechecks as `any`. */
+/* `jsxImportSource` names this module for the element types too, and a page whose tags resolve to
+   nothing typechecks as `any`. */
 export { Fragment, jsx, jsxs } from "react/jsx-runtime";
 export type { JSX } from "react/jsx-runtime";
-
-/** The platform surface an app page composes — the frontend's `ufo.sdk`. A page is TSX in its own
- *  extension, built against this kit as its only dependency, so app code lives entirely in the
- *  extension and stays editable as the source the member's agent deploys. */
 
 export type {
   Agent,
@@ -221,13 +215,6 @@ export type {
 };
 
 export {
-  /* What the app has done, as page API. An app's own work is the app's own page to draw, so the
-     kit publishes the one band every app shares and no more.
-
-     Setup is not among them and cannot be. An app the workspace has never built a page for stands
-     on its setup screen in the portal instead, because the acts that wire it — a workspace install
-     an admin makes, a model turn that authors a page — are exactly the two a framed page is never
-     given a way to start. */
   AppConversations,
   compose,
   React,
@@ -339,8 +326,6 @@ export {
   PanelBlank,
   PanelEmpty,
   Section,
-  /* The loading line as page API: one mark, drawn on the theme's delay, so a page states what a
-     portal screen states and a read that answers first leaves no trace on the way past. */
   Loading,
   usePanelRead,
   RebuildDialog,
@@ -363,7 +348,6 @@ export {
   isPortalChat,
   ownerLabel,
   slackLink,
-  /* The surface a conversation came in on, as the mark a listing row trails it with. */
   SurfaceGlyph,
   surfaceWord,
   useViewer,
@@ -373,9 +357,6 @@ export {
   Markdown,
   Moment,
   day,
-  /* The route table as page API: every builder it declares, the read that answers an address, and
-     the test that says which kind a route is. A page is built against this surface, so a builder it
-     cannot reach is an address it spells by hand instead. */
   agentHash,
   agentSetupHash,
   chatHash,
@@ -389,8 +370,6 @@ export {
   workspaceHash,
   formatSize,
   ChatPane,
-  /* The chat screen's own shape around a caller's content: the box that founds a conversation
-     holds the bottom, and what the page draws scrolls above it. */
   FoundingChat,
   ConversationDetail,
 };

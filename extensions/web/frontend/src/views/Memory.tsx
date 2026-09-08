@@ -28,8 +28,6 @@ type MemoryPayload = {
   available: boolean;
   kinds: string[];
   matches: Match[];
-  /** The acts the memory collection projects for this reader — the correction's write among them,
-   *  whose own schema bounds the body a correction may run to. */
   actions: ActionView[];
   newer?: string | null;
   older?: string | null;
@@ -37,7 +35,6 @@ type MemoryPayload = {
 
 const RECORD_CORRECTION_ACTION = "record_correction";
 
-/** How a search hit names its row: the kind and the item's id, which is what a correction names. */
 const MEMORY_REF_PREFIX = "memory/";
 
 const COLUMNS: Column[] = [
@@ -85,10 +82,6 @@ export function Memory({
   useEffect(() => setCorrecting(null), [submitted]);
 
   const kinds = state.phase === "ready" ? state.payload.kinds : [];
-  // A search is over every memory the workspace holds, so it supersedes the class the member had
-  // narrowed to and that filter stands down while a term is submitted. The box itself does not: it
-  // is what the member clears the term with, and a bar that took it away with the filter would
-  // leave the search they typed with no way back out of it.
   const box = usePageSearch();
   const narrowing = !submitted && kinds.length > 0;
 
@@ -180,11 +173,6 @@ export function Memory({
   );
 }
 
-/** One memory restated through the memory collection's projected correction: the body is the one
- *  field the member types, bounded by the action's own schema, and the corrected item rides
- *  `corrects` pinned. A correction is a new statement and never an edit of the row it names, so a row past the
- *  bound — the Overview paragraph is one — opens the field empty with its current text above it to
- *  write against, rather than seeding a body the action would refuse. */
 function CorrectionSheet({
   match,
   view,

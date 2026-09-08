@@ -78,8 +78,6 @@ MEETINGS_APP_SCHEDULE = SetupSchedule(
         "from it. That window is the whole of it — one fire per meeting, and no meeting twice."
     ),
     cadences=(
-        # A meeting is booked and moved through the day, so the hourly pass is what an app over a
-        # calendar wants: a once-a-day pass leaves whatever was booked after it until tomorrow.
         SetupCadence(),
         SetupCadence(hour=7),
         SetupCadence(hour=7, weekdays=(1, 2, 3, 4, 5)),
@@ -98,8 +96,6 @@ MEETINGS_APP_AGENT = AgentProvision(
     ),
     icon="calendar",
     setup=AgentSetup(
-        # The calendar alone. The account follows the feature: the notes account is asked for when
-        # a member turns on follow-ups or notes, not at setup by an app that may only ever brief.
         connectors=(CALENDAR_CONNECTOR,),
         standing=(SCHEDULE_KIND,),
         schedule=MEETINGS_APP_SCHEDULE,

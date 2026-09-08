@@ -252,10 +252,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      # The sandbox image bakes the compiled `ufo` client. This workflow promotes a tested commit
-      # rather than running the client job, so it builds that binary for the sandbox target here:
-      # the client's own release recipe on the runner, never a Rust layer inside the image. The musl
-      # build is static, so it needs nothing from the base image's libc.
+      # The musl build is static, so it needs nothing from the base image's libc.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
@@ -267,8 +264,6 @@ jobs:
       - working-directory: client
         run: cargo build --release --target x86_64-unknown-linux-musl
 
-      # The production e2b project holds no ufo-sbx templates, so the promoted commit publishes its
-      # own under the production key instead of naming the testing project's tested build.
       - name: Select sandbox template
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
@@ -380,7 +375,6 @@ jobs:
             certificate/ufo-ingress-tls \
             certificate/ufo-serve-tls
           .github/scripts/await_rollout.sh "$NAMESPACE" ufo-gateway ufo-sandbox-proxy ufo-ingress ufo-serve ufo-jobs
-          # Only when the env enables it: preview_enabled=false renders no Deployment to wait on.
           if kubectl --namespace "$NAMESPACE" get deployment/ufo-preview >/dev/null 2>&1; then
             .github/scripts/await_rollout.sh "$NAMESPACE" ufo-preview
           fi
@@ -409,13 +403,8 @@ jobs:
         working-directory: infra/envs/edge
         run: terraform init -input=false
 
-      # Cloudflare refuses to delete a queue or a database a Worker still binds, and Terraform plans
-      # that delete against the live script: a release that drops a binding and the resource behind
-      # it in one change leaves no reference for the graph to order on, so the destroy runs first and
-      # the API rejects it. The script settles in its own apply ahead of the module's. A plan
-      # targeting the script carries the resources it binds, so a new binding's resource is created
-      # before the script names it, and a retired one is unbound before the module's apply destroys
-      # it. The plan reaches no flag, so it carries neither environment's Flagship credential.
+      # Cloudflare refuses to delete a queue or a database a Worker still binds, and a release that drops
+      # both in one change leaves no reference for the graph to order on. The script settles in its own apply.
       - name: Terraform production bindings plan
         working-directory: infra/envs/edge
         env:

@@ -3,15 +3,12 @@ import { expect, test, vi } from "vitest";
 
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command";
 
-/** The runs the launcher lists with an empty box, in the order it stands them. */
 const RUNS = [
   { heading: "Applications", rows: ["Chat", "Radar", "Artifacts"] },
   { heading: "Threads", rows: ["Rename the deploy job"] },
   { heading: "Places", rows: ["Home", "Apps"] },
 ];
 
-/** How tall the list is, and where each run starts inside it: a list holding one screen of rows and
- *  two runs standing under the fold. */
 const FOLD = 100;
 const HEADING = 20;
 const TOPS = [0, 200, 400];
@@ -32,8 +29,7 @@ function Palette() {
   );
 }
 
-/** jsdom lays nothing out, so the list's fold and the place each run starts at are stated here. A
- *  run's own top moves with the scroll, as it does in a browser. */
+/** jsdom lays nothing out, so the list's fold and the place each run starts at are stated here. */
 function laid() {
   const list = document.querySelector<HTMLElement>("[cmdk-list]");
   if (!list) throw new Error("no list");
@@ -48,8 +44,8 @@ function laid() {
   return list;
 }
 
-/** The headings drawn at the foot of the list. The stack is out of the reading order — cmdk names
- *  every run to a screen reader already — so it is read off the DOM rather than by role. */
+/** The stack is out of the reading order — cmdk names every run to a screen reader already — so it is
+ *  read off the DOM rather than by role. */
 function stack(): HTMLButtonElement[] {
   const foot = document.querySelector("[data-slot='command-stack']");
   return [...(foot?.querySelectorAll("button") ?? [])];

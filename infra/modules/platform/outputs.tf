@@ -31,10 +31,7 @@ output "blob_bucket" {
 
 output "cache_s3_bucket" {
   description = "The S3 bucket backing the sandbox cache daemon's durable tier (RFC 0032)."
-  # Built from plan-known inputs, not aws_s3_bucket.cache.id: this name renders into the hosted
-  # manifest, whose keys feed a for_each that must be known at plan time — the same reason the IRSA
-  # ARNs above are hand-built. `.id` is unknown until apply on a fresh bucket and breaks the plan.
-  value = "${local.name}-ufo-cache-${data.aws_caller_identity.current.account_id}"
+  value       = "${local.name}-ufo-cache-${data.aws_caller_identity.current.account_id}"
 }
 
 output "cache_s3_role_arn" {
@@ -67,9 +64,6 @@ output "gateway_ses_role_arn" {
   value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}"
 }
 
-# The shared serve fleet's identity and platform keys. Sensitive: the DSN carries
-# the ufo_serve password and the keys seal credentials and artifacts. The env's ufo.tf renders
-# them into the ufo-serve Secret (config ufo.toml + the two key env vars).
 output "serve_dsn" {
   value     = local.serve_dsn
   sensitive = true

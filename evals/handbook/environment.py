@@ -29,8 +29,6 @@ MCP_SERVERS_SLOT = "mcp_servers"
 SERVER_NAME = "workplace"
 PROXY_COMMAND = ("bash", "/app/scripts/start.sh", "--method", "http", "--port", str(CONTAINER_PORT))
 WORKDIR = "/workdir"
-# Where the sandbox serves the conversation workspace; the services mount it at the same path so an
-# attachment path the agent writes resolves identically on both sides.
 SANDBOX_WORKSPACE = "/workspace"
 TESTS_DIR = "/tests"
 RESULTS = "/tests/results.json"

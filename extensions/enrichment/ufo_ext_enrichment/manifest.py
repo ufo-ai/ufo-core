@@ -84,9 +84,6 @@ INJECT_MAX_CHARS = 400
 NO_MATCH_SUMMARY = "No match"
 SKIPPED_REPLY = "Skipped: nothing was looked up."
 BUILDING_REPLY = "Confirmed. The profile is being built and appears within a minute."
-# The domains a member signs up from that are their mail provider and never their company. A
-# lookup on one of these stores the mail provider as the workspace's company and states it to
-# every turn, so the job looks up no company at all for them.
 FREE_MAIL_DOMAINS = frozenset(
     {
         "aol.com",

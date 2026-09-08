@@ -1,4 +1,3 @@
-// The same substitution main.tf applies at deploy, so the tested worker is the shipped artifact.
 import { readFile } from "node:fs/promises";
 
 const moduleDir = new URL(".", import.meta.url);
@@ -37,7 +36,6 @@ export const TERMS_PAGE = await legalPage({
   body: "terms.html",
 });
 
-// Each tag is a distinct module, so a test gets its own isolate-level caches.
 export async function importWorker(tag) {
   const source = sourceTemplate
     .replace('"__LANDING_HTML__"', JSON.stringify(LANDING_PAGE))
@@ -50,9 +48,6 @@ export async function importWorker(tag) {
     .default;
 }
 
-// Stands in for the colo's shared cache: `match` and `put` alone, keyed by the request URL the
-// worker builds. It stores bytes and headers rather than a live Response, so one stored card can be
-// served over and over.
 export function edgeCache() {
   const stored = new Map();
   return {

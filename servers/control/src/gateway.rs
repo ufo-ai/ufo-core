@@ -1,12 +1,3 @@
-//! The hosted onboarding server and shared-workspace resolver.
-//!
-//! One state machine serves every surface. `Onboarding::advance` reads the claim a session holds and
-//! answers with directive lines: no claim collects the email, an unverified claim grades the
-//! code WorkOS mailed, and a verified claim resolves a workspace and mints the bearer. The terminal
-//! renders those lines as a screen and the browser renders them as a transcript — two renderers,
-//! never two machines, so nothing outside this file ever collects an address and the signup-email
-//! policy runs before any code is sent.
-
 use std::collections::HashMap;
 
 use axum::body::Body;
@@ -45,22 +36,16 @@ pub const LOGOUT_PATH: &str = "/logout";
 pub const PORTAL_SURFACE_PATH: &str = "/surface/web";
 pub const DEBUG_SURFACE_PATH: &str = "/surface/debug";
 
-/// The sign-in door under the one ask an invitation carries, the address the mail names being one
-/// the browser's own session may not prove.
 pub const INVITATION_LOGIN_PATH: &str = "/login?invite=1";
 
-/// The operator session cookie, core's `ufo.runtime.ext.operator.OPERATOR_COOKIE` under the name it binds.
-/// The operator surfaces are served on this host, so a sign-out here is what clears it.
+/// The operator session cookie, core's `ufo.runtime.ext.operator.OPERATOR_COOKIE` under the name it
+/// binds. The operator surfaces are served on this host, so a sign-out here clears it.
 pub const OPERATOR_COOKIE: &str = "ufo_debug";
 
-/// The route the signup key is presented on. Nothing outside this file names it: the apex hop is the
-/// edge worker's own, and the ingress reserves the prefix.
 const JOIN_PATH: &str = "/join/{key}";
 
-/// Where the join door sends the browser. The ask is load-bearing: `/login` forwards a browser
-/// holding a live bearer straight to its portal, which would spend the marked session on nothing.
-/// The link names an authority the session it arrives with does not carry, exactly as an invitation
-/// does, so the door draws the form.
+/// The ask is load-bearing: `/login` forwards a browser holding a live bearer straight to its portal,
+/// which would spend the marked session on nothing.
 pub const JOIN_LOGIN_PATH: &str = "/login?join=1";
 pub const FIRST_MOVE_PROMPT: &str = "What first?";
 pub const SLACK_CHOICE: &str = "Connect Slack";
@@ -86,8 +71,6 @@ pub const MAX_BODY_BYTES: usize = 4096;
 
 const CLIENT_SCRIPT: &str = include_str!("client/ufo");
 
-/// The served installer, with this deploy's own base URL written into it. The default in the script
-/// is what a local checkout runs against, so the stamp is a replacement rather than an append.
 pub fn stamped_script(public_base_url: &str) -> String {
     CLIENT_SCRIPT.replacen(
         SCRIPT_URL_DEFAULT,
@@ -96,7 +79,6 @@ pub fn stamped_script(public_base_url: &str) -> String {
     )
 }
 
-/// A body the request could not carry: too long, or not the shape a turn takes.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct RequestInputError(String);
@@ -115,11 +97,6 @@ pub struct Onboarding {
 }
 
 impl Onboarding {
-    /// One machine for every surface. A session with no claim collects the email and the code
-    /// WorkOS mailed for it — the browser on our own `/login` page, exactly as the terminal does — a
-    /// verified claim resolves a workspace and mints the bearer. The browser reaches a verified claim
-    /// either that way or from the Google hop the callback stamps; nothing outside this machine ever
-    /// collects the address, so the signup-email policy runs before any code.
     pub async fn advance(
         &self,
         channel: &str,
@@ -140,9 +117,6 @@ impl Onboarding {
         }
     }
 
-    /// The email step both surfaces share: an empty turn asks for the address, a submitted one
-    /// validates the signup-email policy through `ClaimWorkflow::start` and, only once it passes, has
-    /// WorkOS mail the code — so a refused address causes no code send.
     async fn collect_email(
         &self,
         channel: &str,
@@ -177,8 +151,6 @@ impl Onboarding {
         ])
     }
 
-    /// Grade the code. A refusal that lost a race to another attempt re-reads the claim: if that
-    /// attempt already verified it, this turn resolves rather than reporting a stale refusal.
     async fn verify_code(&self, claim: &OnboardClaim, body: &str, install: &[u8]) -> Vec<u8> {
         let Err(error) = self.claims.verify(claim, body).await else {
             return self.resolve(claim, "", install).await;
@@ -208,9 +180,6 @@ impl Onboarding {
         ])
     }
 
-    /// A verified claim, resolved to one workspace. With no candidate the signup subject founds its
-    /// own (behind the invite gate); with candidates the member picks, and the create option appears
-    /// only where a grant would actually admit it.
     async fn resolve(&self, claim: &OnboardClaim, body: &str, install: &[u8]) -> Vec<u8> {
         let choices = match self
             .workspaces
@@ -249,8 +218,6 @@ impl Onboarding {
         self.signed_in(claim, &ensured, install)
     }
 
-    /// Which workspace this turn lands on, or the menu that asks. A single candidate the member could
-    /// not have founded instead is entered without a prompt; anything else is a choice.
     async fn choose(
         &self,
         claim: &OnboardClaim,
@@ -305,8 +272,6 @@ impl Onboarding {
         Ok(Chosen::Ensured(ensured, false))
     }
 
-    /// Whether this session still carries the join door's authority. Every turn asks again, so a
-    /// key the deploy has emptied or rotated stops admitting the sessions it opened.
     fn keyed(&self, session: &str) -> bool {
         session_is_keyed(
             session,
@@ -316,20 +281,8 @@ impl Onboarding {
         )
     }
 
-    /// The grant a member who came through the join door writes for themselves. The address is
-    /// verified by now, so its signup subject names exactly the
-    /// workspace this turn is about to open and the ordinary redemption spends it: the same row,
-    /// the same burn, the same `invite_id` on the claim as a grant an operator wrote — so the
-    /// ledger, the Slack Connect delivery, and the audit read no differently.
-    ///
-    /// It answers a subject with no grant and one whose grant expired unspent alike, because
-    /// the member holds the same authority either way and the refusal an expired row draws — reply
-    /// to your invite email — names something they never had. `mint` is the only thing that clears
-    /// an expired unconsumed row, so a gate that skipped it would refuse that subject for good.
-    ///
-    /// A subject that already holds a grant is not an error here. Both shapes — one still live,
-    /// one already spent on a workspace that exists — are answered by the redemption that follows,
-    /// so a member who joins twice and two turns that race land on one grant rather than two.
+    /// `mint` is the only thing that clears an expired unconsumed row, so a gate that skipped it would
+    /// refuse that subject for good. A subject that already holds a grant is not an error here.
     async fn self_grant(&self, claim: &OnboardClaim) -> Result<Redemption, InviteError> {
         match self.invites.mint(None, &claim.email, None).await {
             Ok(_) => tracing::info!(
@@ -343,8 +296,6 @@ impl Onboarding {
         self.invites.redeem(&claim.email, claim.claim_id).await
     }
 
-    /// Open this signup subject's workspace with whatever the intake form recorded about the
-    /// customer, so their agent opens knowing who it works for.
     async fn create(&self, claim: &OnboardClaim) -> Result<EnsuredWorkspace, SeatError> {
         let profile: Option<SignupProfile> =
             self.invites.profile(&claim.email).await.unwrap_or(None);
@@ -357,13 +308,6 @@ impl Onboarding {
             .await
     }
 
-    /// A refusal screen, or `None` when the flow may open the workspace. The verified signup subject
-    /// is the whole answer: a live grant for it opens the workspace with nothing to type, and every
-    /// refusal ends the session rather than prompting, because the member holds no secret that could
-    /// change the outcome. The claim keeps its verified email, so re-running the installer once a
-    /// grant lands resolves the same claim. A session the join door marked writes its own grant
-    /// here rather than being refused, so a member who holds the signup key needs nobody to approve
-    /// them.
     async fn invite_gate(&self, claim: &OnboardClaim, install: &[u8]) -> Option<Vec<u8>> {
         if claim.invite_id.is_some() {
             return None;
@@ -423,13 +367,6 @@ impl Onboarding {
         }
     }
 
-    /// The signed-in cap: token and workspace for every member, plus the operator debugger target
-    /// only when the verified email domain is the operator's. That target states a capability, not
-    /// a destination: the page posts the token to the member portal unless it was asked for the
-    /// debug surface by name. A terminal owner caps on `choose` rather than `ask`, so setting up
-    /// billing costs one selection. A joined teammate caps on the ordinary prompt. The web channel
-    /// caps on nothing: the page posts the token to its target as soon as both values arrive, and a
-    /// prompt it cannot drive would sit on screen as a ghost step while the handoff runs.
     fn signed_in(
         &self,
         claim: &OnboardClaim,
@@ -478,8 +415,6 @@ impl Onboarding {
         ])
     }
 
-    /// The workspace service could not answer. A member cannot act on which hop failed, so they read
-    /// one sentence and the detail goes to the log.
     fn unreachable(&self, install: &[u8], error: &SeatError) -> Vec<u8> {
         match error {
             SeatError::Refused(message) => render(&[
@@ -504,7 +439,6 @@ impl Onboarding {
     }
 }
 
-/// Either the screen this turn answers with, or the workspace it landed on.
 enum Chosen {
     Screen(Vec<u8>),
     Ensured(EnsuredWorkspace, bool),
@@ -566,8 +500,6 @@ async fn serve_script(State(state): State<GatewayState>) -> Response {
         .into_response()
 }
 
-/// The native terminal client for one build target, from the deploy's binary directory — an
-/// unconfigured deploy answers the same 404 an unknown target does.
 async fn client_binary(State(state): State<GatewayState>, Path(target): Path<String>) -> Response {
     let refusal = (
         StatusCode::NOT_FOUND,
@@ -615,9 +547,6 @@ async fn fleet(State(state): State<GatewayState>) -> Response {
     }
 }
 
-/// The sign-in page, or the portal itself for a browser that already holds a session: `/login` is
-/// served on the product's own host, so the cookie the portal binds arrives here, and a member who is
-/// already signed in is forwarded rather than asked for an address they have already proved.
 async fn login(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -639,24 +568,10 @@ async fn login(
         .into_response()
 }
 
-/// The asks the page alone can answer, so the form is drawn for a browser already holding a session
-/// whenever the query names one. Each reaches this door from exactly one caller — so its presence,
-/// not its value, is the whole signal — and each is a caller a forward would send straight back to.
-///
-/// `debug` comes from `ufo.runtime.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read
-/// `ufo_debug`, which only the page's POST binds. `a` comes from `ufo.runtime.surfaces.artifacts._refusal`,
-/// which refused this very session the artifact, so it would refuse the forward too. `invite` comes
-/// from `INVITATION_LOGIN_PATH`, and the mail names an address this session may not prove, whose
-/// seat is claimed in the walk the page runs. `error` comes from `auth_callback`, and the sentence it
-/// carries is one the page alone states, so a forward would drop a refusal the member is owed.
-/// `join` comes from `JOIN_LOGIN_PATH`, and the door has just bound a session carrying an authority
-/// this browser's live bearer knows nothing about, so a forward would spend it on nothing.
+/// Each reaches this door from exactly one caller — so its presence, not its value, is the whole signal
+/// — and each is a caller a forward would send straight back to.
 const FORM_ONLY_ASKS: [&str; 5] = ["debug", "a", "invite", "error", "join"];
 
-/// Where a browser holding a live bearer is sent, or None when the page is the answer — it holds no
-/// session, or the query names an ask only the page can answer. A forward is the destination the
-/// page's own handoff posts to, read off the same query the page reads it from, so a link naming a
-/// conversation or the first run lands where it named.
 fn signed_in_landing(
     token_secret: &str,
     workspace_url: &str,
@@ -682,11 +597,6 @@ fn signed_in_landing(
     Some(format!("{workspace_url}{PORTAL_SURFACE_PATH}{carried}"))
 }
 
-/// The way out of a session, and the way to another one: it expires every cookie this host binds and
-/// sends the browser to the sign-in door, which draws the form for a browser holding none of them. So
-/// a member signs in as somebody else, or into another workspace, without waiting out an expiry. The
-/// route reads nothing: a browser holding no session is answered the same way, so a stale tab and a
-/// second click land on the form rather than on a refusal.
 async fn logout() -> Response {
     let mut response = Redirect::to(LOGIN_PATH).into_response();
     for name in BOUND_COOKIES {
@@ -695,18 +605,12 @@ async fn logout() -> Response {
     response
 }
 
-/// Every cookie bound on this host, and so every cookie a sign-out clears: the member bearer the
-/// portal reads, the operator session the debug surfaces read, and the onboarding session standing
-/// behind a half-finished claim, which would otherwise resume the previous member's address at the
-/// next submit.
 const BOUND_COOKIES: [&str; 3] = [
     token::SESSION_COOKIE,
     OPERATOR_COOKIE,
     ONBOARD_SESSION_COOKIE,
 ];
 
-/// The member bearer the request carries in the cookie the portal binds, or None when no cookie of
-/// that name arrives.
 fn session_bearer(headers: &HeaderMap) -> Option<&str> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     cookies.split(';').find_map(|part| {
@@ -715,8 +619,6 @@ fn session_bearer(headers: &HeaderMap) -> Option<&str> {
     })
 }
 
-/// The mark both sign-in pages draw. It is the one thing they fetch, on the connection already open
-/// and cached for good after that.
 async fn logo() -> Response {
     (
         [
@@ -728,7 +630,6 @@ async fn logo() -> Response {
         .into_response()
 }
 
-/// The mark alone, which the sign-in page leads with.
 async fn mark() -> Response {
     (
         [
@@ -740,8 +641,7 @@ async fn mark() -> Response {
         .into_response()
 }
 
-/// The same mark a mail client can draw. An invitation is read where SVG is blocked, so it fetches
-/// this one; nothing in a browser does.
+/// An invitation is read where SVG is blocked, so it fetches this one; nothing in a browser does.
 async fn logo_png() -> Response {
     (
         [
@@ -753,8 +653,6 @@ async fn logo_png() -> Response {
         .into_response()
 }
 
-/// The artwork the sign-in page draws beside its form, compiled in beside the mark and served the
-/// same way.
 async fn illustration() -> Response {
     (
         [
@@ -766,14 +664,12 @@ async fn illustration() -> Response {
         .into_response()
 }
 
-/// The card a link unfurler draws for the marketing page. Nothing on this deploy fetches it: an
-/// unfurler reads the page's `og:image` and comes here anonymously, so the route takes no session and
-/// answers the same bytes to everyone.
+/// Nothing on this deploy fetches it: an unfurler reads the page's `og:image` and comes here
+/// anonymously, so the route takes no session and answers the same bytes to everyone.
 async fn share_home() -> Response {
     share(SHARE_HOME_BYTES)
 }
 
-/// The same card for a hosted site's frame page, which names this absolute URL from the app host.
 async fn share_site() -> Response {
     share(SHARE_SITE_BYTES)
 }
@@ -789,16 +685,8 @@ fn share(card: &'static [u8]) -> Response {
         .into_response()
 }
 
-/// The signup key's door. A member who holds the link founds their subject's workspace with nobody to
-/// approve them: the door binds a session marked with that authority and sends them to the ordinary
-/// sign-in page, and the gate mints the grant once WorkOS says the address is theirs. So the key
-/// authorizes founding the workspace the member's verified address names, and nothing else — it
-/// mails no invitation and names no signup subject of its own.
-///
-/// A key that does not match is answered exactly as an unrouted path is, and so is every request
-/// when the deploy configures none, because a 403 would tell a caller the door is there. The key
-/// rides one request and the redirect names none, so the address the member ends on carries no
-/// secret; `no-referrer` keeps this URL out of the next request's `Referer`.
+/// A key that does not match is answered exactly as an unrouted path is, because a 403 would tell a
+/// caller the door is there. `no-referrer` keeps this URL out of the next request's `Referer`.
 async fn join(State(state): State<GatewayState>, Path(key): Path<String>) -> Response {
     let Some(configured) = state.onboarding.signup_key.as_deref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -823,12 +711,8 @@ async fn join(State(state): State<GatewayState>, Path(key): Path<String>) -> Res
     response
 }
 
-/// The `Continue with Google` button's target: it mints the onboarding session, binds it to this
-/// browser as the cookie the page cannot read (never taken from the query), and 302s to WorkOS with
-/// `provider=GoogleOAuth`, so WorkOS goes straight to Google with no hosted page. Packing the carry
-/// and unpacking it again is the validation: a conversation or artifact the query invented is dropped
-/// here, under the same rules the callback reads it back by, so the state carries only what will be
-/// honored.
+/// 302s to WorkOS with `provider=GoogleOAuth`, so WorkOS goes straight to Google with no hosted page.
+/// Packing the carry and unpacking it again is the validation.
 async fn auth_start(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -862,9 +746,6 @@ async fn auth_start(
     response
 }
 
-/// The local stand-in for the Google hop, mounted only under `WORKOS_MODE=console`: the dev enters an
-/// email that the callback reads as the code. The cookie the start path set still binds the
-/// return, so the walk past this page is a real return's own.
 async fn auth_console(Query(query): Query<HashMap<String, String>>) -> Response {
     let state = query.get("state").cloned().unwrap_or_default();
     (
@@ -874,12 +755,8 @@ async fn auth_console(Query(query): Query<HashMap<String, String>>) -> Response 
         .into_response()
 }
 
-/// The Google hop's return, honored only in the browser that left: the state has to be one this
-/// gateway signed, and the session it names has to be the one the start path bound as the cookie, so
-/// a state a caller wrote — or one of ours replayed anywhere else — verifies nothing and writes no
-/// claim under a session someone chose. The email the Google account carries passes the same
-/// signup-email policy a typed address does. A callback for a session that
-/// already holds a claim resolves that claim, so a repeated return signs the same member in.
+/// Honored only in the browser that left: the state has to be one this gateway signed, and the session
+/// it names has to be the one the start path bound as the cookie.
 async fn auth_callback(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -939,15 +816,8 @@ async fn auth_callback(
     Redirect::to(&target).into_response()
 }
 
-/// The page's session is the `__Host-ufo_onboard` cookie the gateway mints and seals server-side.
-/// Two things keep a verified email bound to the browser that earned it, so a planted value can never
-/// key its claim. The `__Host-` prefix is host-only by the cookie the browser enforces: it refuses to
-/// set such a cookie with a `Domain`, and no sibling host can write the app host's copy. And a
-/// presented cookie is trusted only to *continue* a claim it already keys: a claim is only ever
-/// started under a session freshly minted here, so even a validly sealed value a caller obtained by
-/// asking is discarded and re-minted unless it already stands behind a live claim. The re-mint
-/// carries the join door's marker, so arriving under the signup key survives the first turn without
-/// the session itself being reused.
+/// The `__Host-` prefix is enforced by the browser: it refuses to set such a cookie with a `Domain`,
+/// and no sibling host can write it. A presented cookie may only continue a claim it already keys.
 async fn onboard_web(State(state): State<GatewayState>, request: Request) -> Response {
     let secret = state.onboarding.token_secret.clone();
     let headers = request.headers().clone();
@@ -1056,8 +926,8 @@ fn plain(payload: Vec<u8>) -> Response {
         .into_response()
 }
 
-/// The turn's body, bounded next to the read. A body over the cap is refused rather than truncated:
-/// a truncated address or code would be graded as if the member typed it.
+/// A body over the cap is refused rather than truncated: a truncated address or code would be graded
+/// as if the member typed it.
 async fn request_body(request: Request) -> Result<String, RequestInputError> {
     let bytes = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES + 1)
         .await
@@ -1068,9 +938,8 @@ async fn request_body(request: Request) -> Result<String, RequestInputError> {
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
-/// The sealed `__Host-ufo_onboard` session the request carries. Reading every cookie of that name and
-/// honoring the one that opens under our signature is belt against a forged or duplicate value; a
-/// value carrying no signature of ours is read as absent.
+/// Reading every cookie of that name and honoring the one that opens under our signature is belt
+/// against a forged or duplicate value; a value carrying no signature of ours is read as absent.
 fn onboard_session(headers: &HeaderMap, secret: &str) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     for part in cookies.split(';') {
@@ -1082,9 +951,8 @@ fn onboard_session(headers: &HeaderMap, secret: &str) -> Option<String> {
     None
 }
 
-/// The one sanctioned way to bind the onboarding session. It takes no `Domain`, so the cookie is
-/// host-only and can never widen to a parent domain; `HttpOnly` and `Secure` are not negotiable, and
-/// the `__Host-` prefix the name carries makes the browser enforce the same.
+/// It takes no `Domain`, so the cookie is host-only and can never widen to a parent domain; the
+/// `__Host-` prefix makes the browser enforce the same.
 fn set_session_cookie(response: &mut Response, sealed: &str) {
     let cookie =
         format!("{ONBOARD_SESSION_COOKIE}={sealed}; HttpOnly; Secure; SameSite=Lax; Path=/");
@@ -1097,10 +965,8 @@ fn set_session_cookie(response: &mut Response, sealed: &str) {
 /// same header.
 const EXPIRED: &str = "Thu, 01 Jan 1970 00:00:00 GMT";
 
-/// The counterpart of every cookie this deploy binds: an empty value, already expired. A browser
-/// replaces a cookie only when the header names it under the same `Path` and `Domain`, so the
-/// attributes here are the ones `set_session_cookie` and core's own binder write — host-only, under
-/// `Path=/` — or the live value survives beside the cleared one.
+/// A browser replaces a cookie only when the header names it under the same `Path` and `Domain`, so
+/// these attributes are the ones the binders write — or the live value survives beside the cleared one.
 fn expire_cookie(response: &mut Response, name: &str) {
     let cookie =
         format!("{name}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0; Expires={EXPIRED}");
@@ -1109,23 +975,13 @@ fn expire_cookie(response: &mut Response, name: &str) {
     }
 }
 
-/// The mark a session minted behind the join door carries: `key~<tag>~<expiry>`, ahead of the
-/// random id, inside the value the seal covers. The separator is outside the base64url alphabet the
-/// id is drawn from, so an ordinary session can never read as a marked one.
-///
-/// The mark is a bearer — the door answers it in a `Set-Cookie` any HTTP client reads, and a member
-/// can hand it on — so it is bounded on both axes rather than trusted. `tag` is the configured key
-/// under a signature, checked against the key the deploy currently serves: emptying the knob closes
-/// the door for marks already out, and so does rotating it, which is what "empty serves no door"
-/// has to mean. `expiry` bounds a captured one to the sign-in it was minted for.
+/// The separator is outside the base64url alphabet the id is drawn from, so an ordinary session can
+/// never read as a marked one. Emptying the key closes the door for marks already out; so does rotating it.
 const KEYED_SESSION_PREFIX: &str = "key~";
 const KEYED_SESSION_SEPARATOR: char = '~';
 const SIGNUP_KEY_LABEL: &[u8] = b"ufo.signup-key.v1";
 const SIGNUP_KEY_TAG_CHARS: usize = 32;
 
-/// Long enough to read the code out of an email and finish, and no longer. The claim itself lives
-/// `CLAIM_TTL_MINUTES`, so a mark that outlived this would only ever carry a walk that had already
-/// been started over.
 pub const SIGNUP_MARK_TTL_MINUTES: i64 = 30;
 
 fn signup_key_tag(key: &str, secret: &str) -> String {
@@ -1134,7 +990,6 @@ fn signup_key_tag(key: &str, secret: &str) -> String {
     tag
 }
 
-/// The mark the join door binds, naming the key that opened it and when it stops counting.
 pub fn keyed_mark(key: &str, secret: &str, expires_at: DateTime<Utc>) -> String {
     format!(
         "{KEYED_SESSION_PREFIX}{}{KEYED_SESSION_SEPARATOR}{}",
@@ -1143,8 +998,6 @@ pub fn keyed_mark(key: &str, secret: &str, expires_at: DateTime<Utc>) -> String 
     )
 }
 
-/// The mark a presented session already carries, so a re-mint keeps the authority without extending
-/// it: the tag and the expiry are copied, never reissued, and both are graded at the gate.
 fn carried_mark(sealed: &str, secret: &str) -> Option<String> {
     let session = open_session(sealed, secret)?;
     let rest = session.strip_prefix(KEYED_SESSION_PREFIX)?;
@@ -1165,10 +1018,6 @@ fn fresh_session(mark: Option<&str>) -> String {
     }
 }
 
-/// Whether this sealed value still names a session the join door minted under the key this deploy
-/// serves. The claim is keyed by the session, so the authority rides the claim through the code, the
-/// Google hop, and every retry without a column of its own — and every one of those turns grades it
-/// again here, against the live configuration and the clock.
 fn session_is_keyed(
     sealed: &str,
     secret: &str,
@@ -1219,8 +1068,7 @@ fn encode(value: &str) -> String {
     encoded
 }
 
-/// New-workspace invites gate signup unless a deploy explicitly opts out (local dev). Unset means
-/// required, so forgetting the knob never opens signup; garbage fails loud, never defaults.
+/// Unset means required, so forgetting the knob never opens signup; garbage fails loud, never defaults.
 pub fn parse_invite_required(value: &str) -> Result<bool, String> {
     match value.trim().to_lowercase().as_str() {
         "" | "true" | "1" => Ok(true),
@@ -1284,8 +1132,6 @@ mod tests {
 
     #[test]
     fn a_target_the_query_invented_is_dropped_rather_than_carried() {
-        // The page validates the same two shapes before it posts anywhere, so a value outside them
-        // lands the member in the portal instead of at an address the query wrote.
         let held = session("dana@acme.com");
         let portal = format!("{WORKSPACE_URL}{PORTAL_SURFACE_PATH}");
         for asked in [
@@ -1303,10 +1149,6 @@ mod tests {
 
     #[test]
     fn an_ask_only_the_page_can_answer_draws_it_over_a_live_session() {
-        // Each of these reaches the door from a caller a forward would send straight back to, or with
-        // a sentence only the page states: the operator surfaces read a cookie only the page's POST
-        // binds, the artifact refused this very session, the invitation names an address it may not
-        // prove, and a refused Google hop returns its refusal here to be read.
         for held in [session("dana@acme.com"), session("ops@metalcraft.ai")] {
             for asked in [
                 vec![("debug", "1")],
@@ -1380,8 +1222,6 @@ mod tests {
 
     #[test]
     fn the_cleared_cookie_carries_the_attributes_the_bound_one_was_set_with() {
-        // A browser replaces a cookie by name, path and domain, so a clearing header that differs on
-        // any of them leaves the live value in the jar beside it.
         let mut bound = Response::new(Body::empty());
         set_session_cookie(&mut bound, "sealed");
         let mut cleared = Response::new(Body::empty());

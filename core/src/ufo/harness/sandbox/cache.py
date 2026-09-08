@@ -10,11 +10,6 @@ host the proxy recognizes, and the git config that addresses the cache instead o
 CACHE_HOST = "cache.ufo.internal"
 CACHE_GIT_HOSTS = ("github.com",)
 
-# The public package registries and download CDNs the proxy transparently routes through the cache
-# for an internet-holding agent. The proxy intercepts the real host, so package-manager commands are
-# unchanged and a package's own absolute download URL still hits the cache. The sandbox image makes
-# apt's standard archive URLs HTTPS so they use the proxy's CONNECT path. The daemon's own
-# UFO_CACHE_PKG_HOSTS allowlist must stay in step with this list.
 CACHE_PKG_HOSTS = (
     "registry.npmjs.org",
     "pypi.org",

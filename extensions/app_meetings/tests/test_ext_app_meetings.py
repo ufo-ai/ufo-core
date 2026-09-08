@@ -31,7 +31,6 @@ def test_the_account_follows_the_feature() -> None:
     setup = app_meetings.MEETINGS_APP_AGENT.setup
     assert setup.connectors == (app_meetings.CALENDAR_CONNECTOR,)
     assert app_meetings.NOTES_CONNECTOR not in setup.connectors
-    # The prompt is where the account is asked for, on the ask that needs it.
     assert app_meetings.NOTES_CONNECTOR in app_meetings.MEETINGS_APP_PROMPT
 
 

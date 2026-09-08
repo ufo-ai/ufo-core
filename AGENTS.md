@@ -147,6 +147,11 @@ as a review gate:
   fine only off the loop: CLI startup, migrations, build scripts.
 - **No comments; docstrings only on public APIs** — Terraform, tests, and supporting actor methods
   get no explanatory comments or docstrings. Names and structure carry intent.
+  **A comment a reader could derive from the code it sits on is deleted, not shortened.** What
+  survives states a fact the code cannot: a third-party or browser quirk, a measured number, the
+  alternative that was tried and the failure it caused, or an invariant held in another file. Design
+  taste, restated signatures, narrated steps, and per-case test rationale are none of those. Two
+  lines is the ceiling for what survives, and nine in ten do not.
 - **Constants over magic values** — top-level `SCREAMING_SNAKE_CASE`.
 - **Absolute imports, top-level imports, pathlib, guard clauses, built-ins over hand-rolled loops,
   match/case over isinstance chains, no `hasattr`/`getattr`.**

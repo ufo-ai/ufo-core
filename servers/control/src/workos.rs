@@ -1,19 +1,3 @@
-//! WorkOS custody of email verification: Magic Auth for the email and code both the browser and the
-//! terminal collect on our own pages, and a Google OAuth hop (`provider=GoogleOAuth`) for the
-//! browser's `Continue with Google`. WorkOS answers one question — does this person control this
-//! email — and no hosted WorkOS page collects the address: our gateway does, so the signup-email
-//! policy runs before any code is mailed.
-//!
-//! `confirm` grades the member's code: WorkOS answers a code it will not redeem with the OAuth
-//! `invalid_grant`, whether the digits are wrong, expired, or already spent, so that answer is a
-//! wrong code the member may retype and the claim's own time-to-live is what ends the session.
-//! Every other failure is a refusal the member cannot retype past.
-//!
-//! The four calls are made directly rather than through a vendor SDK, because the SDK's own bodies
-//! are these four literals. Each `grant_type` and path below is the one the Python client sends, and
-//! `tests/workos_it.rs` drives them against a local server so a drift in either is a failing test
-//! rather than a broken sign-in.
-
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -41,9 +25,6 @@ pub const GOOGLE_PROVIDER: &str = "GoogleOAuth";
 pub const GRANT_REFUSED: &str = "invalid_grant";
 pub const SIGN_IN_FAILED: &str = "Sign-in failed. Try again.";
 pub const CODE_NOT_SENT: &str = "Could not send the verification code. Try again.";
-/// A bound on the session a state may name, over and above the signature that already makes it
-/// ours. It has to admit the longest value this gateway mints — a sealed session carrying the join
-/// door's mark, which is the random id, the mark's tag and expiry, and the seal.
 pub const MAX_STATE_SESSION_BYTES: usize = 192;
 pub const STATE_SEPARATOR: char = '.';
 pub const WORKOS_TIMEOUT_SECONDS: u64 = 10;
@@ -54,7 +35,6 @@ const ARTIFACT_CARRY_PREFIX: &str = "/artifacts/";
 const MAGIC_AUTH_GRANT: &str = "urn:workos:oauth:grant-type:magic-auth:code";
 const AUTHORIZATION_CODE_GRANT: &str = "authorization_code";
 
-/// The onboarding flow renders the message to the member.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct VerificationError(pub String);
@@ -81,9 +61,6 @@ struct StatePayload {
     j: bool,
 }
 
-/// The OAuth `state`: the onboarding session and what the member clicked to reach sign-in, under a
-/// signature. The session it names is the one the callback writes a verified email under, so only a
-/// state this gateway packed may name one.
 pub fn pack_state(carry: &AuthCarry, secret: &str) -> String {
     let payload = StatePayload {
         s: carry.session.clone(),
@@ -100,10 +77,6 @@ pub fn pack_state(carry: &AuthCarry, secret: &str) -> String {
     format!("{body}{STATE_SEPARATOR}{signature}")
 }
 
-/// The carry the state names, or an error when the signature is not this gateway's or the state
-/// names no usable session. A conversation or artifact that is not its own shape is dropped rather
-/// than refused: the member still signs in, landing on a new conversation instead of somewhere the
-/// query invented.
 pub fn unpack_state(raw: &str, secret: &str) -> Result<AuthCarry, StateError> {
     let (body, signature) = raw.split_once(STATE_SEPARATOR).unwrap_or((raw, ""));
     if !constant_time_eq(signature, &state_signature(body, secret)) {
@@ -145,8 +118,6 @@ pub enum StateError {
     OversizedSession,
 }
 
-/// A canonical 8-4-4-4-12 lowercase hex uuid, the shape a conversation id takes. Anything else is a
-/// value the query invented, so it is dropped rather than carried into a redirect.
 pub(crate) fn is_uuid_shaped(value: &str) -> bool {
     let groups = [8, 4, 4, 4, 12];
     let mut parts = value.split('-');
@@ -165,24 +136,15 @@ pub(crate) fn is_uuid_shaped(value: &str) -> bool {
     parts.next().is_none()
 }
 
-/// Signed under a subkey of the gateway's token secret, so a state and a member's bearer never come
-/// out of one key.
 fn state_signature(body: &str, secret: &str) -> String {
     subkey_signature(secret, STATE_KEY_LABEL, body.as_bytes())
 }
 
-/// The `__Host-ufo_onboard` cookie value: a minted session under a signature, so only a value this
-/// gateway sealed can key a claim. The sealed string is the session everywhere it is compared —
-/// cookie, state, and claim — never the raw id, and a value carrying no signature of ours opens to
-/// nothing.
 pub fn seal_session(session: &str, secret: &str) -> String {
     let signature = cookie_signature(session, secret);
     format!("{session}{STATE_SEPARATOR}{signature}")
 }
 
-/// The minted id a sealed cookie names, or None when the value carries no signature of ours — so a
-/// planted or forged cookie is read as absent and a fresh session minted in its place, never trusted
-/// to key a claim.
 pub fn open_session(value: &str, secret: &str) -> Option<String> {
     let (session, signature) = value.split_once(STATE_SEPARATOR)?;
     if session.is_empty() || !constant_time_eq(signature, &cookie_signature(session, secret)) {
@@ -191,8 +153,6 @@ pub fn open_session(value: &str, secret: &str) -> Option<String> {
     Some(session.to_string())
 }
 
-/// Under a different subkey than the state signature, so the cookie seal and the state seal never
-/// come out of one key.
 fn cookie_signature(session: &str, secret: &str) -> String {
     subkey_signature(secret, COOKIE_KEY_LABEL, session.as_bytes())
 }
@@ -207,7 +167,6 @@ pub(crate) fn subkey_signature(secret: &str, label: &[u8], message: &[u8]) -> St
     format!("{:x}", sign.finalize().into_bytes())
 }
 
-/// Signature comparison that does not leak where two strings first differ.
 pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
@@ -218,9 +177,6 @@ pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
-/// The two verifiers, one closed set. Only the identity proof differs between them: the claim, the
-/// cookie binding, and the signed state are the deploy's own in both, so the code paths a member
-/// reaches locally are the ones a real sign-in exercises.
 #[derive(Debug, Clone)]
 pub enum Verifier {
     Workos(WorkosVerifier),
@@ -263,7 +219,6 @@ impl Verifier {
     }
 }
 
-/// The one question WorkOS answers: does this person control this email.
 #[derive(Debug, Clone)]
 pub struct WorkosVerifier {
     pub api_key: String,
@@ -282,8 +237,6 @@ struct AuthenticateResponse {
     user: AuthenticatedUser,
 }
 
-/// The `error` and `code` fields a WorkOS refusal carries. `invalid_grant` in either is a code the
-/// member may retype; anything else is a refusal they cannot.
 #[derive(Deserialize, Default)]
 struct WorkosRefusal {
     error: Option<String>,
@@ -291,8 +244,6 @@ struct WorkosRefusal {
 }
 
 impl WorkosVerifier {
-    /// The `Continue with Google` hop: WorkOS routes `provider=GoogleOAuth` straight to Google, with
-    /// no hosted WorkOS page in between, and returns to the callback with the code.
     pub fn authorization_url(&self, state: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!(
@@ -376,8 +327,6 @@ impl WorkosVerifier {
     }
 }
 
-/// Percent-encode everything outside the unreserved set, so a state or a redirect URI cannot end a
-/// query parameter early.
 fn encode_query(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -391,8 +340,6 @@ fn encode_query(value: &str) -> String {
     encoded
 }
 
-/// The card the sign-in pages share: the same palette the portal paints, so a member crosses from
-/// either screen into their workspace without the surface changing under them.
 const CONSOLE_STYLE: &str = r#"
   :root { color-scheme: light dark;
           --surface: light-dark(#FAF9F7, #191A1A); --fill: light-dark(#F4F3F2, #262929);
@@ -424,11 +371,6 @@ const CONSOLE_STYLE: &str = r#"
            font: inherit; font-weight: 500; cursor: pointer; }
 "#;
 
-/// The stand-in the Google hop lands on in `WORKOS_MODE=console`: a plain email form whose GET
-/// reaches the same callback a real return does, carrying the state it was handed and the typed
-/// address as the code the console verifier reads straight back. The card names the bypass and the
-/// code the email step takes, both read off `CONSOLE_CODE`, so the screen cannot state a code the
-/// verifier no longer accepts.
 pub fn console_signin_page(state: &str) -> String {
     format!(
         "<!doctype html>\n\
@@ -479,11 +421,6 @@ pub fn workos_console_mode() -> Result<bool, WorkosConfigError> {
     Ok(mode()? == CONSOLE_MODE)
 }
 
-/// The gateway's verifier. `WORKOS_MODE=console` runs the credential-free dev verifier; the default
-/// (`workos`) requires all three values, and the redirect URI is stated rather than derived from a
-/// host: it is the origin that routes the callback to this process, which is the app host in a
-/// hosted deploy and the gateway's own port locally. It has to match the URI registered in the same
-/// WorkOS environment, so a deploy states the one string both ends hold.
 pub fn verifier_from_env() -> Result<Verifier, WorkosConfigError> {
     if mode()? == CONSOLE_MODE {
         tracing::warn!(target: "ufo_control::workos", "gateway.workos.console_mode");

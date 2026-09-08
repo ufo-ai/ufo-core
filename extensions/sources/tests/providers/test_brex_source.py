@@ -83,7 +83,6 @@ async def test_budgets_use_the_budget_id_primary_key_and_advance_no_watermark() 
 
     result = await _fetch("budgets", handle, cursor="prior")
     assert {page.source_ref for page in result.pages} == {"budgets/b1"}
-    # no cursor_field to advance over — the watermark stays where it was
     assert result.next_cursor == "prior"
 
 

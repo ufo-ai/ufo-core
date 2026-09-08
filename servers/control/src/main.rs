@@ -1,5 +1,3 @@
-//! The hosted gateway and database bootstrap entry point.
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -34,7 +32,6 @@ const DEFAULT_PORT: u16 = 8080;
 const OTLP_ENDPOINT_ENV: &str = "UFO_CONTROL_OTLP_ENDPOINT";
 const SERVICE_NAME: &str = "ufo-control";
 
-/// Operate the hosted shared-workspace service.
 #[derive(Parser)]
 #[command(name = SERVICE_NAME, about = "Operate the hosted shared-workspace service.")]
 struct Cli {
@@ -44,48 +41,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Verb {
-    /// Serve onboarding, fleet count, and the terminal client.
     Gateway,
-    /// Shape the platform control schema — every gateway ledger, as the database owner.
     Migrate,
-    /// Grant an address's signup subject one new workspace and email it the invitation.
-    ///
-    /// Both intake answers open the new workspace's main agent prompt. They travel together: a
-    /// grant describes this customer completely or not at all. `--object` names a waitlist object
-    /// where one exists; a grant approved from the intake form answers a form response, which is no
-    /// waitlist object, so it carries no number.
     Invite {
         email: String,
-        /// What they said their company does.
         #[arg(long)]
         business: Option<String>,
-        /// What they said they want an agent to do.
         #[arg(long)]
         goals: Option<String>,
-        /// The waitlist object this approves, when it approves one.
         #[arg(long = "object", value_parser = positive_object)]
         object_number: Option<i32>,
     },
-    /// Re-arm one failed signup Slack Connect delivery once its cause is corrected.
     #[command(name = "slack-connect-retry")]
-    SlackConnectRetry { email_domain: String },
-    /// Re-arm one failed teammate invitation email once its cause is corrected.
+    SlackConnectRetry {
+        email_domain: String,
+    },
     #[command(name = "invite-delivery-retry")]
-    InviteDeliveryRetry { workspace_id: Uuid, email: String },
-    /// Create the shared serve role, the gateway role, and the workspace policies.
+    InviteDeliveryRetry {
+        workspace_id: Uuid,
+        email: String,
+    },
     #[command(name = "rls-bootstrap")]
     RlsBootstrap,
-    /// Print the DSN the serve role connects with, derived from the shared seed.
-    ///
-    /// The password is derived rather than stored, so every party that needs it holds one seed and
-    /// arrives at the same string. This verb is that derivation's only reader outside the bootstrap
-    /// itself — a caller that spelled the hash again would be a second answer to what the password
-    /// is, and the two would drift the first time either changed.
     #[command(name = "serve-dsn")]
     ServeDsn {
-        /// `host:port` the serve role dials.
         postgres_host: String,
-        /// The application database on it.
         app_database: String,
     },
 }
@@ -111,17 +91,11 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// Every record this process logs, on stdout as JSON and — where the platform collector is
-/// configured — shipped to it as OTLP. The `opentelemetry` targets are excluded from the export so
-/// an export failure can never feed the pipeline that reports it.
 fn install_logging() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    // The driver relays every Postgres NOTICE at info with its own file and line attached, and a
-    // migrate Job issues dozens of "already exists, skipping" ones — the verb's own output is what
-    // an operator reads, so the driver is quieted to warnings unless RUST_LOG says otherwise.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,tokio_postgres=warn,rustls=warn"));
     tracing_subscriber::registry()
@@ -167,10 +141,6 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-/// Every environment read precedes the listen, so a misconfigured deploy fails startup on the
-/// environment rather than on a member's first request. The schema the deploy shaped is a
-/// precondition of the same kind — a replica issues no DDL, so an absent ledger fails startup
-/// naming the verb that shapes it.
 async fn gateway() -> Result<(), String> {
     let dsn = db::gateway_dsn_from_env().map_err(|error| error.to_string())?;
     let ca_bundle = db::ca_bundle_from_env().map(PathBuf::from);
@@ -188,8 +158,6 @@ async fn gateway() -> Result<(), String> {
     if !invite_required {
         tracing::warn!(target: "ufo_control::main", "gateway.invite_gate.disabled");
     }
-    // An empty value is no key: a deploy that declares the variable and leaves it blank serves no
-    // join door, rather than one every caller opens with an empty path segment.
     let signup_key = std::env::var(SIGNUP_KEY_ENV)
         .ok()
         .filter(|key| !key.is_empty());
@@ -239,9 +207,6 @@ async fn gateway() -> Result<(), String> {
         console_mode,
     };
 
-    // The Slack Connect inviter runs beside the request path, never inside it: onboarding resolves a
-    // workspace and signs the member in whether or not Slack is reachable. A deploy that has not
-    // enabled it starts no task at all.
     let worker_id = format!(
         "{}.{}",
         hostname::get()
@@ -258,8 +223,6 @@ async fn gateway() -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
 
-    // The teammate invitation poller runs on the same terms: an admin adding someone from the
-    // portal is answered by core, and the email that follows is this task's, on either replica.
     tokio::spawn(
         InviteDeliveries {
             pool: pool_for_invites,
@@ -303,10 +266,6 @@ async fn migrate() -> Result<(), String> {
     Ok(())
 }
 
-/// The SES sender is built before the grant lands, so a deploy missing its mail configuration
-/// refuses without spending the object's one live grant. A grant that outlives its own invitation
-/// still opens the workspace — the member proves it by verifying the granted address — so a failed
-/// send is reported against a standing grant rather than withdrawing it.
 async fn invite(
     email: String,
     business: Option<String>,
@@ -322,10 +281,6 @@ async fn invite(
     };
     let apex = public_apex_host_from_env().map_err(|error| error.to_string())?;
     let workspace_url = require_env(WORKSPACE_BASE_URL_ENV)?;
-    // The gateway's own role, not the owner's. This verb writes one row of `ufo_control.invite_code`
-    // and reads nothing else, and it is run by exec'ing into a gateway pod — which holds the gateway
-    // DSN and the SES identity, and deliberately holds no owner DSN. Asking for the owner's here
-    // would make the documented approval path impossible to run anywhere a person can reach.
     let dsn = db::gateway_dsn_from_env().map_err(|error| error.to_string())?;
     {
         let client = ledger_client(&dsn).await?;
@@ -373,7 +328,6 @@ async fn invite(
 
 async fn slack_connect_retry(email_domain: String) -> Result<(), String> {
     let domain = email_domain.trim().to_lowercase();
-    // As with `invite`: one row of one `ufo_control` table, run from a gateway pod.
     let dsn = db::gateway_dsn_from_env().map_err(|error| error.to_string())?;
     {
         let client = ledger_client(&dsn).await?;
@@ -401,7 +355,6 @@ async fn slack_connect_retry(email_domain: String) -> Result<(), String> {
 
 async fn invite_delivery_retry(workspace_id: Uuid, email: String) -> Result<(), String> {
     let recipient = email.trim().to_lowercase();
-    // As with `invite`: one row of one `ufo_control` table, run from a gateway pod.
     let dsn = db::gateway_dsn_from_env().map_err(|error| error.to_string())?;
     {
         let client = ledger_client(&dsn).await?;
@@ -430,8 +383,6 @@ async fn invite_delivery_retry(workspace_id: Uuid, email: String) -> Result<(), 
     }
 }
 
-/// Policies before role grants: a table that gains its grant before its policy is readable by the
-/// serve role in the window between, so the order is load-bearing rather than incidental.
 async fn rls_bootstrap() -> Result<(), String> {
     require_env(PG_ROLE_SEED_ENV)?;
     let dsn = owner_dsn().map_err(|error| error.to_string())?;
@@ -449,13 +400,10 @@ async fn rls_bootstrap() -> Result<(), String> {
     Ok(())
 }
 
-/// A connection as the database owner — schema DDL, roles, and policies.
 async fn owner_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
     connect(dsn).await
 }
 
-/// A connection as the gateway's own role, which reaches the `ufo_control` ledgers and nothing
-/// in `public`. The operator verbs use this so they can run where an operator can reach them.
 async fn ledger_client(dsn: &str) -> Result<tokio_postgres::Client, String> {
     connect(dsn).await
 }

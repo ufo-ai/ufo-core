@@ -84,9 +84,6 @@ def _stream(
     )
 
 
-# Stream set mirrors Airbyte's source-greenhouse manifest: the six canonical content streams
-# (candidates, jobs, applications, interviews, offers, users) plus the passthrough top-level
-# endpoints and the per-parent substreams. Cursors track Airbyte's manifest exactly.
 CANDIDATES = _stream("candidates", cursor_field="updated_at", canonical=True)
 JOBS = _stream("jobs", cursor_field="updated_at", canonical=True)
 APPLICATIONS = _stream(

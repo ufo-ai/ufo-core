@@ -655,7 +655,7 @@ async def test_a_malformed_address_never_becomes_a_member(db: None, address: str
         ).scalar_one()
     assert added == 0
     # The gate lives in the write, not only in the verb that calls it, so the two creation paths
-    # that match no domain — onboarding's owner and hosted signup — cannot mint the row either.
+    # that match no domain cannot mint the row either.
     with ws(workspace_id), pytest.raises(ValueError, match="local@domain"):
         async with workspace_tx() as connection:
             await create_member(connection, workspace_id, address)

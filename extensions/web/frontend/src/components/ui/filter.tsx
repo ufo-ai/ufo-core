@@ -6,24 +6,10 @@ const STEP: Record<string, number> = { ArrowRight: 1, ArrowLeft: -1 };
 
 export type FilterOption = { label: string; value: string };
 
-/** One choice in a segmented row: what it is worth, what it says, and — where the row switches a
- *  panel rather than narrowing a list — the ids that tie the tab to what it shows. */
 export type Segment = FilterOption & { id?: string; controls?: string };
 
-/** The one row of choices in the portal, whether it narrows a listing or switches a page's panel.
- *  A filled pill slides under the picked one and nothing else moves: selection is drawn in surface
- *  and colour, never in weight or an underline. Bolding remeasures the text, so every segment
- *  after the picked one slides sideways as the member moves along the row; an underline states a
- *  boundary the row does not have, and the same act then looks like two different controls
- *  depending on which screen it is on. It carries the roving tabindex `role="tablist"` requires:
- *  one press reaches the row, then left and right move the choice and carry the focus, wrapping at
- *  each end.
- *
- *  The pill is drawn only once the row has been measured. It has no resting place to be drawn in
- *  before that — a pill given zeros for its first paint slides out of the row's left corner and
- *  grows into the picked choice, which states a change of choice on a screen the member has only
- *  just opened. Mounting it already placed skips that: a transition animates a box that moves, and
- *  a box drawn where it belongs the first time has not moved. */
+/** Bolding remeasures the text, so every segment after the picked one would slide sideways. The pill is
+ *  drawn only once the row is measured — given zeros it slides out of the row's left corner. */
 export function Segmented({
   label,
   segments,
@@ -46,17 +32,12 @@ export function Segmented({
     const row = list.current;
     const active = row?.querySelector<HTMLElement>('[aria-selected="true"]');
     if (!row || !active) return;
-    /* The pill takes the picked choice's whole box, line included: a phone wraps the row, and a
-       pill placed by its left edge alone would sit on the first line under a choice on the second. */
     setPill({
       left: active.offsetLeft,
       top: active.offsetTop,
       width: active.offsetWidth,
       height: active.offsetHeight,
     });
-    /* A row wider than the screen scrolls, and the pill is the only mark of which choice is
-       picked — so the picked one is brought into the row's own view rather than left past an
-       edge, where the row states nothing at all. */
     const before = active.offsetLeft - row.scrollLeft;
     const after = active.offsetLeft + active.offsetWidth - row.scrollLeft - row.clientWidth;
     if (before < 0) row.scrollLeft += before;
@@ -71,9 +52,6 @@ export function Segmented({
       className={cn(
         "relative flex items-stretch gap-hair overflow-x-auto",
         "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
-        /* A phone shows every choice whole, on as many lines as that takes — the treatment the top
-           nav and the pane's own act row already take there. A choice left half past a scrolling
-           edge is both unreadable and too small to press. */
         "max-narrow:flex-wrap",
       )}
     >
@@ -124,9 +102,6 @@ export function Segmented({
   );
 }
 
-/** Narrows a collection to one of its kinds. The empty value is every row, so the caller passes
- *  only the narrowings and the row supplies its own `All` — except where the options are the whole
- *  collection between them, which `all={false}` states and which then draws no unreachable tab. */
 export function Filter({
   options,
   value,

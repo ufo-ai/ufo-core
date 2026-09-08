@@ -6,18 +6,8 @@ import { join, resolve } from "node:path";
 
 import { expect, test } from "vitest";
 
-/** The app page fork loop, built with the real vite against the real kit.
- *
- *  The project's parts come from where the site kind reads them — the app extension's home skill
- *  for the page, its entry, and the document the page reads beside them, the sites extension's
- *  package for `vite.config.ts` and the kit — so this assembles exactly what `source.py` writes
- *  into a sandbox and then does what the skill tells an agent to do with it. It lives in this
- *  suite because `vite` is this package's devDependency: the Python suite has no node_modules to
- *  run a build with.
- *
- *  A staged project must be reached by its RESOLVED path. Through a symlinked `/tmp` — which is
- *  what macOS hands out — rollup refuses the html emit, because the path it derives is neither
- *  absolute nor relative to what it expected. */
+/** A staged project must be reached by its resolved path: through a symlinked `/tmp`, which is what
+ *  macOS hands out, rollup refuses the html emit. `vite` is this package's devDependency, not Python's. */
 
 const EXTENSIONS = join(import.meta.dirname, "..", "..", "..");
 const PAGE = join(EXTENSIONS, "sites", "ufo_ext_sites", "page");
@@ -27,7 +17,6 @@ const APPS = readdirSync(EXTENSIONS, { withFileTypes: true })
   .map((entry) => entry.name.slice("app_".length))
   .sort();
 const BUILD_CEILING_MS = 240_000;
-// The radar page reads `tour.md` beside it, and radar is the app this builds.
 const PROJECT = ["app.tsx", "index.html", "tour.md"];
 
 const homeSkill = (app: string): string =>
@@ -45,10 +34,8 @@ const materialized = (source: string): string => {
 
 const SPRITE_NAME = /tabler-[a-z]-[0-9a-f]{8}\.svg/g;
 
-/** One `vite build` in the project, answering the `dist/src` a redeploy makes the next read's
- *  source of record. Every sprite the built page names is a file of its own tree: the kit reads a
- *  mark through a reference the build resolves, so a member's own build emits the sprites their
- *  page draws rather than naming ours, which no origin of theirs answers. */
+/** The kit reads a mark through a reference the build resolves, so a member's own build emits the
+ *  sprites their page draws rather than naming ours, which no origin of theirs answers. */
 const built = (project: string): string => {
   execFileSync(VITE, ["build"], { cwd: project, stdio: "pipe" });
   const dist = join(project, "dist");
@@ -95,8 +82,6 @@ test.each(APPS)("%s's home skill holds the project's page and its source", (app)
 test(
   "a materialized project builds the page and carries the source the next read starts from",
   () => {
-    // radar of the five, because its page reads a mark through the kit: its build is the one that
-    // proves a sprite reaches a member's own tree rather than naming an origin only ours answers.
     const forked = built(materialized(homeSkill("radar")));
     const assets = readdirSync(join(forked, "..", "assets"));
     expect(assets.filter((file) => file.startsWith("tabler-")).length).toBeGreaterThan(0);

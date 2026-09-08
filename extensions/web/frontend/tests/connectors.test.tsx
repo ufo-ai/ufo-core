@@ -32,12 +32,8 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The catalog stripped to nothing, so a pool row is headed by the provider slug the connection
- *  carries and these tests state the pool alone. */
 const BARE = { providers: [], connectors: [] };
 
-/** The catalog as the read serves it: a tile per tool, the two the pages install themselves, and
- *  the group each stands under. */
 const CATALOG = {
   providers: [
     {
@@ -73,15 +69,12 @@ const CATALOG = {
 
 const COVERAGE = { api: true, sources: true };
 
-/** The slots the address states, in the order the track stands them. */
 function track(): string[] {
   const query = location.hash.split("?")[1] ?? "";
   const open = new URLSearchParams(query).get("open");
   return open ? open.split("~") : [];
 }
 
-/** One tool's row, found by the name it is headed with. Every act on the page says `Connect`, so a
- *  test reaches the act through the row rather than through the word. */
 function row(label: string): HTMLElement {
   const item = screen.getByText(label).closest("li");
   if (!item) throw new Error("no row headed " + label);
@@ -92,18 +85,12 @@ function connects(label: string): HTMLElement {
   return within(row(label)).getByRole("button", { name: "Connect" });
 }
 
-/** One headed zone of the page. A provider the member does not hold stands in two of them — the
- *  shared account under one heading, the connect that lands their own under another — so a test
- *  reaches the row through the zone it is asking about. */
 function zone(title: string): HTMLElement {
   const found = screen.getByRole("heading", { name: title }).closest("section");
   if (!found) throw new Error("no zone headed " + title);
   return found as HTMLElement;
 }
 
-/** One tool's row while a record of the same name stands beside the list: the crumb over that
- *  record carries the label too, and the lane stands after the list, so the row is the first
- *  item the label is found in. */
 function item(label: string): HTMLElement {
   const found = screen
     .getAllByText(label)
@@ -113,9 +100,8 @@ function item(label: string): HTMLElement {
   return found;
 }
 
-/** The press that opens beside: the browser's own gesture for a second tab. One `userEvent`
- *  instance holds the key down over the click — the module's own verbs each set up a fresh one and
- *  would let go of it in between. */
+/** One `userEvent` instance holds the key down across the click; the module's own verbs each set up a
+ *  fresh one and would let go of it in between. */
 async function besideItem(label: string): Promise<void> {
   const user = userEvent.setup();
   await user.keyboard("{Meta>}");
@@ -123,7 +109,6 @@ async function besideItem(label: string): Promise<void> {
   await user.keyboard("{/Meta}");
 }
 
-/** The library, read with the catalog the workspace offers. */
 function library(routes: Record<string, (url: string, init?: RequestInit) => Response> = {}) {
   return wire({
     "/workspace/first-run": () => json(CATALOG),
@@ -134,8 +119,6 @@ function library(routes: Record<string, (url: string, init?: RequestInit) => Res
   });
 }
 
-/** The member coming back from the provider's pages: the tab they left is looked at again, which
- *  re-reads what the row states. */
 async function returning() {
   for (const state of ["hidden", "visible"]) {
     Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
@@ -162,7 +145,6 @@ function grant(provider: string, shared: boolean, name: string) {
   };
 }
 
-/** One stream of one connection, as the sources read serves it. */
 function stream(
   connection: string,
   backend: string,
@@ -205,10 +187,6 @@ test("the connectors section lists the connection pool", async () => {
   expect(screen.getByText(/Only you/)).toBeTruthy();
 });
 
-/** A tab the connector callback page forwarded here arrives naming the account it landed, because
- *  the grant landed in a document this one replaced. The screen states it as a toast and the
- *  address keeps nothing: a reload is not a second connect, and the pool the screen reads is the
- *  standing answer either way. */
 test("a forwarded connect arrival is stated, and leaves the address", async () => {
   history.replaceState(
     null,
@@ -232,9 +210,6 @@ test("the connectors screen states nothing where no arrival named an account", a
   expect(screen.queryByText(/connected\./)).toBeNull();
 });
 
-/** The arrival is spent on being said. A member who walks off the screen and back is not arriving
- *  from a provider, so the second standing draws no toast — which is the same reason the callback
- *  page's own button carries no account: they read the outcome where they pressed it. */
 test("coming back to the connectors screen does not state the arrival again", async () => {
   history.replaceState(
     null,
@@ -255,8 +230,6 @@ test("coming back to the connectors screen does not state the arrival again", as
   expect(screen.queryByText("GitHub · octo connected.")).toBeNull();
 });
 
-/** The connectors screen stands as an app entry on home: the picker lists it under the workspace's
- *  apps, and the press stands the pool in a lane of its own, which the address carries. */
 test("the picker stands the connectors screen in a lane", async () => {
   location.hash = homeHash({ opens: [AGENT_ID] });
   connectors();
@@ -272,8 +245,6 @@ test("the picker stands the connectors screen in a lane", async () => {
   expect(await screen.findByText("github")).toBeTruthy();
 });
 
-/** The screen is one record, so it stands in one lane: a pick made while it stands closes the
- *  picker on it rather than opening a second host over it. */
 test("a second pick of the connectors screen keeps the one lane", async () => {
   location.hash = homeHash({ opens: [HOME_CONNECTORS_LANE, AGENT_ID] });
   connectors();
@@ -296,8 +267,6 @@ test("connectors stays out of the workspace strip", async () => {
   expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
 });
 
-/** The two legs are GitHub's own, so they are read in GitHub's record and stand nowhere on the
- *  page's own ground. */
 test("the GitHub row opens the coverage its install stands on", async () => {
   location.hash = sectionHash("connectors");
   library({ "/github/coverage": () => json({ api: true, sources: false }) });
@@ -319,8 +288,6 @@ test("the GitHub row opens the coverage its install stands on", async () => {
   ]);
 });
 
-/** The library is the root of the path, so a second row leads there instead of piling up beside
- *  the first: what the member is reading is the record they last pressed. */
 test("a second connector row replaces the first, and the address carries one", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
@@ -336,8 +303,6 @@ test("a second connector row replaces the first, and the address carries one", a
   expect(track()).toEqual(["connection/g1"]);
 });
 
-/** Two accounts read side by side is a deliberate act, and it is the browser's own gesture for
- *  opening beside rather than in place. */
 test("a modifier press keeps one connector sheet visible over the path", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
@@ -368,8 +333,6 @@ test("the middle button keeps one connector sheet visible over the path", async 
   expect(track()).toEqual(["github-coverage", "connection/g1"]);
 });
 
-/** Pressing what already stands is not an act: the record is not built again, and Back still
- *  leaves the screen rather than walking through arrivals at it. */
 test("pressing the row whose record already stands changes nothing", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
@@ -386,8 +349,6 @@ test("pressing the row whose record already stands changes nothing", async () =>
   expect(history.length).toBe(steps);
 });
 
-/** Finder marks the row every open column was reached through. Without it a truncated track reads
- *  as slots vanishing rather than as one path. */
 test("the row the standing record was opened from is marked", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
@@ -410,8 +371,6 @@ test("a link carrying a path shows only its last record", async () => {
   expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull();
 });
 
-/** A record opened from another means nothing without it, so shutting a lane shuts what stands
- *  after it. Shutting the last one leaves everything before it standing. */
 test("closing through a path exposes one sheet at a time", async () => {
   location.hash = sectionHash("connectors", { opens: ["github-coverage", "connection/g1"] });
   library({ "/connections": () => json(POOLED_NOTION) });
@@ -547,7 +506,6 @@ test("the pool's record hangs its connection's streams under it, and no other co
   expect(await screen.findByText("issues")).toBeTruthy();
   expect(screen.getByText("2 errors")).toBeTruthy();
   expect(screen.getByText("Reconnect GitHub.")).toBeTruthy();
-  // The slack stream hangs off another connection, so this record never draws it.
   expect(screen.queryByText("messages")).toBeNull();
   expect(screen.queryByText("9 errors")).toBeNull();
 });
@@ -667,8 +625,6 @@ test("the record shares on the connection and revokes on the holder's own edge",
   await pressItem("github");
   await userEvent.click(screen.getByRole("button", { name: "Make private" }));
 
-  // Sharing is a column on the connection, so it rides the connection kind in the record's own
-  // lane — and the spec carries the whole record, or the apply would also forget the tenant.
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
   expect(JSON.parse(posted[0].body)).toMatchObject({
@@ -684,7 +640,6 @@ test("the record shares on the connection and revokes on the holder's own edge",
     },
   });
 
-  // Revoking is one agent's own edge, so it lands in that agent's lane.
   await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
 
@@ -865,8 +820,6 @@ test("the agent's own section states what is shared with that agent", async () =
   expect(await screen.findByText("github")).toBeTruthy();
 });
 
-/** The agent's own dialog holds three reads of it, and the connectors are one of them — reached by
- *  their own tab rather than scrolled past under the spec form. */
 test("the agent's connectors stand as their own read of its settings panel", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   connectors();
@@ -876,7 +829,6 @@ test("the agent's connectors stand as their own read of its settings panel", asy
   expect(await dialog.findByRole("cell", { name: "github" })).toBeTruthy();
   expect(dialog.getByRole("button", { name: "Add connector" })).toBeTruthy();
 
-  // The band names the read showing, and the other two stand under it.
   await userEvent.click(dialog.getByRole("button", { name: "Connectors" }));
   expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
     "Settings",
@@ -927,21 +879,17 @@ test("a connector's consent opens in a window this page owns, so its return page
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
   await userEvent.click(screen.getByRole("button", { name: "Connect" }));
 
-  // The window opened on the press, before the verb had minted anything: opening one after the
-  // round trip would have lost the gesture the browser opens it for.
   const [blank, name, features] = opened.mock.calls[0];
   expect(blank).toBe("");
   expect(name).toBe("ufo-connect");
   expect(features).toContain("popup");
   expect(consent.focus).toHaveBeenCalled();
-  // The window starts with a copy of this tab's session storage, and the mark left in it before
-  // the open is how the provider's return page knows it may take that window away rather than
-  // carry it to a screen the member never left.
+  // A window opened this way starts with a copy of this tab's session storage, and the mark left in it is
+  // how the provider's return page knows it may close itself.
   expect(sessionStorage.getItem("ufo-consent-window")).toBe("1");
 
   StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
 
-  // The frame carrying the link lands in that window, so the panel puts nothing under the act.
   await waitFor(() => expect(consent.location.href).toBe("/surface/web/turns/" + TURN_ID + "/connect"));
   expect(screen.queryByRole("link", { name: "Open the provider consent page" })).toBeNull();
   opened.mockRestore();
@@ -987,13 +935,10 @@ const POOLED_NOTION = {
   ],
 };
 
-/** Two accounts already connected, so a removal has to be one row's act: the account the member
- *  named goes and the account beside it stays. */
 const POOLED_PAIR = {
   connections: [POOLED_NOTION.connections[0], grant("gmail", true, "g2")],
 };
 
-/** The row's own remove, named for the tool it stands on so two rows never offer one word. */
 function removes(label: string): HTMLElement {
   return within(row(label)).getByRole("button", { name: "Remove " + label });
 }
@@ -1025,7 +970,6 @@ test("a connected row removes that one account behind a confirmation naming it",
   expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
   expect(posted[0].body).toEqual({ verb: "delete", kind: "connection", name: "g1" });
 
-  // The list re-reads itself, so the row goes without the member reloading the page.
   await waitFor(() => expect(screen.queryByLabelText("Notion connected")).toBeNull());
   expect(screen.getByLabelText("Gmail connected")).toBeTruthy();
 });
@@ -1052,8 +996,6 @@ test("the confirmation cancels and nothing is disconnected", async () => {
   expect(screen.getByLabelText("Notion connected")).toBeTruthy();
 });
 
-/** The gate is the kind's, not the button's: a member the disconnect refuses reads that refusal
- *  where they pressed, and the account is still there behind it. */
 test("a refused removal states itself in the confirmation and the account stays", async () => {
   const refusal = "only the connection owner or a workspace admin may disconnect an account";
   location.hash = sectionHash("connectors");
@@ -1073,8 +1015,6 @@ test("a refused removal states itself in the confirmation and the account stays"
   expect(screen.getByLabelText("Notion connected")).toBeTruthy();
 });
 
-/** Where the act would be refused it is not drawn: another member's shared account, and a workspace
- *  install, which carries no connection to disconnect. */
 test("a row the member holds no claim on draws no remove", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1098,9 +1038,6 @@ test("a row the member holds no claim on draws no remove", async () => {
   expect(shared.queryByRole("button", { name: "Remove GitHub" })).toBeNull();
 });
 
-/** Whose an account is decides who may disconnect it, so the page says whose it is before the
- *  member presses: their own accounts stand under one heading and the workspace's under another,
- *  and a shared row is never read as one of their own. */
 test("a shared account stands under a heading of its own", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1123,9 +1060,6 @@ test("a shared account stands under a heading of its own", async () => {
   expect(shared.queryByRole("button", { name: "Remove Gmail" })).toBeNull();
 });
 
-/** `own` is whether the viewer may manage an account, which a workspace admin may on every
- *  member's, so the zones read the owner address instead. An admin did not connect a colleague's
- *  account, and no heading tells them they did. */
 test("an admin reads a colleague's account as the workspace's, not their own", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1146,9 +1080,6 @@ test("an admin reads a colleague's account as the workspace's, not their own", a
   expect(within(zone("Shared with the workspace")).getByLabelText("Notion connected")).toBeTruthy();
 });
 
-/** A colleague's shared account stands for the workspace, not for this member: their own turns run
- *  on their own account first, so the tool stays offered beside the shared row until they connect
- *  theirs. */
 test("a provider another member shares still offers the member their own connect", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1170,9 +1101,6 @@ test("a provider another member shares still offers the member their own connect
   expect(within(zone("Available")).getByText("Notion")).toBeTruthy();
 });
 
-/** `own` states whether the viewer may remove an account, which a workspace admin may on every
- *  member's, so the offer reads the owner address instead: an admin is offered the provider a
- *  colleague holds and not the one they hold themselves. */
 test("the library offers a provider another member holds and not the member's own", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1298,7 +1226,6 @@ test("a connected row names the account it stands on and who reaches it", async 
   expect(
     within(row("Notion")).getByText(/Apps: Assistant, Second · Notion team · Only you/),
   ).toBeTruthy();
-  // A workspace install carries no connection row, so its row keeps the catalog's own sentence.
   expect(within(row("GitHub")).getByText(CATALOG.providers[1].summary)).toBeTruthy();
 });
 
@@ -1322,8 +1249,6 @@ test("provider marks keep their own shape", async () => {
   expect(mark!.className).not.toContain("rounded-full");
 });
 
-/** The brokers reach further than the catalog names, so the pool is listed whole: a connection on a
- *  provider no tile offers still stands, headed by the slug it carries. */
 test("a connection outside the catalog still stands in the library", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1344,7 +1269,6 @@ test("an available row stands under the group the catalog gives it", async () =>
   expect(within(row("Slack")).getByText(CATALOG.providers[0].summary)).toBeTruthy();
 });
 
-/** Everything the catalog offers is connected, so the page is the connected zone alone. */
 test("a fully connected catalog stands as one zone", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1568,14 +1492,11 @@ test("the category picker narrows both zones and lands in the place", async () =
 
   expect(location.hash).toContain("chip=Communication");
   expect(connects("Slack")).toBeTruthy();
-  // Notion is connected but stands under another category, so its zone goes with it.
   expect(screen.queryByText("Notion")).toBeNull();
   expect(screen.queryByRole("heading", { name: "Your connections" })).toBeNull();
   expect(screen.queryByText("Gmail")).toBeNull();
 });
 
-/** A connection on a provider the catalog does not name has no category, so a picked one hides it
- *  rather than sweeping it into a group it never stood under. */
 test("a connection outside the catalog stands only under every category", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json({ connections: [grant("sentry", false, "g9")] }) });
@@ -1586,8 +1507,6 @@ test("a connection outside the catalog stands only under every category", async 
   expect(screen.queryByLabelText("sentry connected")).toBeNull();
 });
 
-/** A connector no mark names draws the plain plug, so every biz-ops row beside a vendored provider
- *  would read as the same unnamed connector. */
 test("each biz-ops connector is drawn by a mark of its own", () => {
   for (const slug of ["apollo", "brex", "docusign", "mercury", "pandadoc", "ramp", "xero"]) {
     expect(BRAND_MARKS.has(slug) || slug in PROVIDER_GLYPHS).toBe(true);

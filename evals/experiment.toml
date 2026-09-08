@@ -21,13 +21,6 @@ pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
-# The Slack install writes its own leg and no connector grant, so the connector listing — the one
-# connection read the agent has — reports Slack unconnected and the answer offers the install the
-# workspace already made. The capability states one line, and the arm silences that line's own read
-# rather than its wording, so it removes exactly what the extension contributes. The installed case
-# is what the line claims to move; the uninstalled one is the control that it changes nothing where
-# no install exists.
-
 [[arm]]
 name = "no-slack-block"
 [[arm.replacements]]
@@ -40,11 +33,6 @@ old = """
 new = """
     return False and await install_is_live(ext)
 """
-
-# The closer is one sentence and the arm above leaves it standing, so this arm empties it. Its two
-# sentences were ablated apart: neither carried the answer alone, an empty closer regressed, and the
-# connector caveat came out because it holds only where a capability shares a name with a broker
-# provider.
 
 [[arm]]
 name = "no-closer"

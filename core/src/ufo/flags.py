@@ -59,7 +59,7 @@ async def flag_enabled(flag: str, *, default: bool) -> bool:
         )
         return default
     # The SDK answers a provider's failure rather than raising it, so the error code is the only
-    # place a refused token or a variation the read cannot use shows up.
+    # place a refused token or an unusable variation shows up.
     if details.error_code is not None:
         warn(
             "flags.unresolved",

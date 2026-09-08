@@ -1,18 +1,7 @@
 import type { DatadogRum, RumInitConfiguration } from "@datadog/browser-rum";
 
-/** Datadog Real User Monitoring, including the session recording.
- *
- *  The recording is made in the browser — a stream of DOM changes the SDK captures — so nothing
- *  server-side can produce one and the SDK has to ship in the bundle. What the deploy decides is
- *  whether it runs at all: one image serves every deploy, so the application, the token, and the
- *  environment arrive in the page the surface serves rather than in the build. A deploy that
- *  states none records nothing, and the SDK is never fetched there.
- *
- *  The SDK is imported where it starts rather than at the top of this file: it is 184 kB, the page
- *  loads one script, and that script is what the member waits for. Fetched beside the page instead,
- *  it costs the first few hundred milliseconds of a session — the recorder snapshots the DOM it
- *  finds, so the replay opens on the page as rendered, and a fault thrown before the fetch lands
- *  is the one thing this misses. */
+/** The SDK is imported where it starts rather than at the top: it is 184 kB, the page loads one script,
+ *  and that script is what the member waits for. The recorder snapshots the DOM it finds. */
 
 const CONFIG_ID = "rum";
 const SERVICE = "ufo-portal";
@@ -22,10 +11,8 @@ export type RumDeploy = Record<(typeof FIELDS)[number], string>;
 
 let recording: Promise<DatadogRum> | null = null;
 
-/** What this deploy states, or null where it states nothing. The surface writes the block and
- *  refuses to serve a page that declares none, so an absent block is a page no deploy serves and
- *  it records nothing. A block written half-way is the contract broken, and is said rather than
- *  recorded against: sessions reaching the wrong application are found by nobody. */
+/** The surface writes the block and refuses to serve a page that declares none, so an absent block is a
+ *  page no deploy serves. A block written half-way is said rather than recorded against. */
 export function heldRum(): RumDeploy | null {
   const block = document.getElementById(CONFIG_ID);
   if (!block) return null;
@@ -40,9 +27,6 @@ export function heldRum(): RumDeploy | null {
   return named as RumDeploy;
 }
 
-/** How the portal is recorded. `mask-user-input` is the load-bearing line: every field a member
- *  types into is masked in the replay — a password input is masked whatever this says — while the
- *  rendered page stays readable, so a replay shows the screen the member was looking at. */
 export function rumOptions(deploy: RumDeploy): RumInitConfiguration {
   return {
     applicationId: deploy.applicationId,
@@ -67,8 +51,6 @@ export function startRum(deploy: RumDeploy): void {
   });
 }
 
-/** Name the session after the member the boot read authenticated, so a replay is reachable from
- *  the member who reported the fault. The email is the web surface's own identity for them. */
 export function identifyRum(email: string): void {
   void recording?.then((rum) => rum.setUser({ id: email, email }));
 }

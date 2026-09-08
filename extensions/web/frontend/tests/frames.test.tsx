@@ -19,8 +19,8 @@ async function streaming() {
   return StreamFake.last();
 }
 
-/** A browser queues the `toggle` for an `open` a render wrote in a task of its own; awaiting a timer
- *  of the same kind lets it land before the next frame is emitted. */
+/** A browser queues the `toggle` for an `open` a render wrote in a task of its own; a timer of the same
+ *  kind lets it land before the next frame. */
 const delivered = () =>
   act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
 
@@ -163,8 +163,6 @@ test("the fold stays closed through the turn settling", async () => {
   expect(screen.queryByText("Listing the workspace.")).toBeNull();
 });
 
-// The member's own toggle is the one state there is, so the frames a running turn keeps emitting
-// must not close the fold behind the member who opened it.
 test("a member who opens a running turn keeps it open over the frames after it", async () => {
   const stream = await streaming();
   stream.emit("activity", { text: "Reading the changelog." });
@@ -235,7 +233,6 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
   stream.emit("message", { text: answer });
   expect(await screen.findByText(saying(answer))).toBeTruthy();
 
-  // A background run publishes onto this stream while the parent writes its closing answer.
   stream.emit("subagent_activity", {
     turn_id: "88888888-8888-4888-8888-888888888888",
     parent_turn_id: TURN_ID,
@@ -371,8 +368,6 @@ test("a connect frame offers the act, pressable to the address that mints its co
   const stream = await streaming();
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   const link = await screen.findByRole("link", { name: "Connect Gmail" });
-  // Nothing on the page holds a consent URL: the press lands here, and this mints one and
-  // redirects, so what the member reaches is as fresh as their press.
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
@@ -389,8 +384,6 @@ test("the consent link stands after the page re-reads the transcript", async () 
   });
   await screen.findByText("Authorize it.");
 
-  // Pressing the link is itself what re-reads the transcript: the consent window takes the focus
-  // and gives it back, and the re-read serves the same open handoff the stream drew.
   wire({
     "/transcript": () =>
       json({
@@ -419,8 +412,6 @@ test("a connect turn that ends wordless keeps the control it posted", async () =
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   await screen.findByRole("link", { name: "Connect Gmail" });
 
-  // The reply was cut into the steps, so the terminal states no words — the control and the steps
-  // are all the turn left, and they are what the member acts on.
   stream.emit("terminal", { status: "done", text: "", model: "opus", tokens: 5, cost_micro_usd: 1 });
   await delivered();
 
@@ -441,8 +432,7 @@ test("consent opens in a window this page owns, so its return page can close its
   const [url, name, features] = open.mock.calls[0];
   expect(url).toBe("/surface/web/turns/" + TURN_ID + "/connect");
   expect(name).toBe("ufo-connect");
-  // A browser closes a window a script opened, and only that. Sized for a consent screen, so the
-  // conversation stays in sight behind it.
+  // A browser closes a window a script opened, and only that.
   expect(features).toContain("popup");
   expect(features).toContain("width=520");
   expect(consent.focus).toHaveBeenCalled();
@@ -460,7 +450,6 @@ test("a blocked consent window falls through to the tab the link already opens",
     link.dispatchEvent(clicked);
   });
 
-  // Nothing was opened for the member, so the anchor keeps its own way of getting them there.
   expect(clicked.defaultPrevented).toBe(false);
   expect(link.getAttribute("target")).toBe("_blank");
   open.mockRestore();
@@ -613,8 +602,6 @@ test("a free-text-only question takes words rather than a choice", async () => {
 test("a question allowing attachments is answered in the message box, not the form", async () => {
   await asked({ ...ENTRY, allow_attachments: true });
   expect(await screen.findByText("Which calendar?")).toBeTruthy();
-  // The options are stated so the member knows what is on offer, but none is a control, and there
-  // is no box to type in either: the answer carries a file, and only the composer takes one.
   expect(screen.queryByRole("radio", { name: "Work" })).toBeNull();
   expect(screen.queryByRole("checkbox", { name: "Work" })).toBeNull();
   expect(screen.queryByRole("textbox", { name: "Which calendar?" })).toBeNull();
@@ -648,10 +635,6 @@ test("the slot strip is one quiet act per slot, the open one drawn as held", asy
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const changes = await screen.findByRole("button", { name: "Changes 2" });
-  // The strip stands with the acts at the far end of the conversation's band, so each slot wears
-  // the one act style that band takes: a quiet glyph in the control's own circle. The label and the
-  // count are the act's accessible name rather than words beside the glyph, because a strip that
-  // spelled every slot out would take the whole line the title is on.
   expect(changes.className).toContain("border-transparent");
   expect(changes.className).toContain("bg-transparent");
   expect(changes.className).toContain("hover:bg-fill");

@@ -127,7 +127,6 @@ async def test_backfill_lists_messages_seeds_the_history_cursor_and_renders() ->
     assert "To: team@example.com" in body
     assert "Subject: Launch plan" in body
     assert "Ship it by Friday." in body
-    # the raw MIME never leaks into the recallable body
     assert "multipart" not in body
     assert "Content-Type" not in body
     assert _b64("Ship it by Friday.") not in body

@@ -1194,8 +1194,6 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
     assert response.status_code == 200
     assert repeated.status_code == 200
     assert "installed" in response.text
-    # Nothing is left for the member here, so the page draws the mark, offers the one way back into
-    # the conversation, and takes its own tab away where the browser allows it.
     assert CONNECT_LOGO_PATH in response.text and "window.close()" in response.text
     assert slack.slack_app_dm_url(APP_ID, TEAM_ID) in html.unescape(response.text)
     assert await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT) == BOT_TOKEN
@@ -1373,7 +1371,6 @@ async def test_oauth_callback_reports_a_rejected_code(db: None, tmp_path, monkey
             params={"code": "stale", "state": sealed},
         )
     assert response.status_code == 502
-    # The retry is the whole point of the page, so this one stays open to be read.
     assert "window.close()" not in response.text and slack.ASK_UFO_AGAIN in response.text
     with pytest.raises(CredentialSlotUnset):
         await store.get(workspace_id, slack.SLACK_BOT_TOKEN_SLOT)
@@ -4612,8 +4609,6 @@ async def test_invalid_blocks_reposts_once(
         }
         if connect_request is not None:
             assert second["blocks"][-2]["elements"][0]["action_id"] == slack.CONNECT_ACTION_ID
-            # The button the member actually reads is the one this body posted, so that is the
-            # message a landing connection settles.
             with ws(workspace_id):
                 held = await slack.ScopedStore(slack.SLACK_EXTENSION).get(
                     slack.connect_message_key(
@@ -4696,8 +4691,6 @@ async def test_a_captionless_file_share_keeps_its_note_in_the_attachments_elemen
     note = slack.files_note(slack.DownloadedFiles(delivered=("errors.txt",), keys=(), skipped=()))
     assert inbound == (_fenced(_marker(inbound), "", attachments=note))
     assert note not in inbound.partition(f"</member_message_{_marker(inbound)}>")[0]
-    # A file a member sent from Slack is a file of the conversation on the same terms one sent from
-    # the composer is: an artifact of the turn that carried it, marked as the member's own.
     async with workspace_tx() as connection:
         shared = (
             await connection.execute(

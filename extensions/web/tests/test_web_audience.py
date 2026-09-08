@@ -475,17 +475,12 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
         )
 
     with ws(workspace_id):
-        # The non-admin is a bystander rather than the subject, because the admin gate is the first
-        # thing a non-admin subject would hit — the reader's-own branch sits inside the writer,
-        # behind that gate, so only an admin subject reaches it. `own_args` is that case.
         refused = await TRANSCRIPT.handler(reading(main_agent, bystander_id), args)
         assert refused.is_error
         assert "admin" in refused.content[0].text
         own = await TRANSCRIPT.handler(reading(main_agent, admin_id, own_conversation_id), args)
         assert own.is_error
         assert own.content[0].text != refused.content[0].text
-        # The one refusal answers three branches — no such conversation on this agent, a room or
-        # externally-shared channel, and the reader's own — so it may not claim the id is unknown.
         assert "your own" in own.content[0].text
         assert "has that id" not in own.content[0].text
         speakerless = await TRANSCRIPT.handler(reading(main_agent, None), args)
@@ -509,7 +504,6 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
         recorded = await TRANSCRIPT.handler(reading(main_agent, admin_id), args)
         assert not recorded.is_error
         assert MEMBER_EMAIL in recorded.content[0].text
-        # The record is the operator's, so the admin is told it exists and is told no reader.
         assert "are on the record" in recorded.content[0].text
         assert "can read that record" not in recorded.content[0].text
         async with workspace_tx() as connection:

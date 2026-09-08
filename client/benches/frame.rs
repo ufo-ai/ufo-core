@@ -1,6 +1,3 @@
-//! What a keystroke costs. The client repaints the visible window on every key, so these are the
-//! numbers a member feels as the difference between typing and waiting: the transcript's window,
-//! the re-wrap a resize forces, and the composer under a draft.
 
 use ufo::ui::editor::{AskState, Key};
 use ufo::ui::retained::{Entry, Retained};
@@ -18,8 +15,6 @@ fn theme() -> Theme {
     Theme::for_mode(ColorMode::TrueColor, Scheme::Dark)
 }
 
-/// One answer carrying a fenced block, named after its turn so no two blocks share a source: a
-/// highlighter memoizing by content would otherwise dedupe a whole transcript into one entry.
 fn code_answer(turn: usize) -> String {
     const ANSWER: &str = r#"Turn TURN:
 
@@ -33,8 +28,6 @@ fn parse_line_TURN(line: &str) -> Directive {
     ANSWER.replace("TURN", &turn.to_string())
 }
 
-/// A transcript of `turns` exchanges, laid out once — so what follows measures the path a
-/// keystroke takes, not the first layout.
 fn painted(turns: usize, theme: &Theme) -> Retained {
     let mut retained = Retained::new(WIDTH);
     for turn in 0..turns {
@@ -69,8 +62,6 @@ fn rewrap_on_resize(bencher: divan::Bencher, turns: usize) {
         });
 }
 
-/// The same resize over a transcript whose answers carry code. A fenced block costs the syntax
-/// highlighter two orders of magnitude more than prose, and a re-wrap lays every entry out again.
 #[divan::bench(args = [10, 200])]
 fn rewrap_a_transcript_of_code(bencher: divan::Bencher, turns: usize) {
     let theme = theme();
@@ -90,8 +81,6 @@ fn rewrap_a_transcript_of_code(bencher: divan::Bencher, turns: usize) {
         });
 }
 
-/// The draft is typed, never pasted: a paste past the composer's threshold collapses to a marker
-/// and an `Arc`, so pasting one would measure a short line instead of a long draft.
 #[divan::bench(args = [0, 200, 2000])]
 fn type_a_key(bencher: divan::Bencher, draft: usize) {
     bencher

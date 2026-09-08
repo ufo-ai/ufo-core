@@ -16,8 +16,6 @@ import {
   wire,
 } from "./harness";
 
-/** A link naming one of the app's conversations, which is what reaches the gate: the half picks
- *  among none of them, and the address names the one it holds. */
 const standing = (id: string) => openConversation(AGENT.id, id);
 
 const ADMIN = { ...MEMBER, admin: true };
@@ -46,13 +44,9 @@ const WALLED = {
   disclosable: false,
 };
 
-/** What each of them is called. A conversation the member may not read carries no words of its
- *  own, so one is named by whose it is and one by who may read it. */
 const OWNER = "owner@example.com";
 const ROOM = "Private channel";
 
-/** The acknowledgement as the conversation object projects it to an admin: the instance action
- *  its declaration presents, pre-bound to the row the read answered. */
 const OPEN_TRANSCRIPT = (id: string) => ({
   name: "read_private_transcript",
   description: "Record that an admin opened another member's private conversation.",
@@ -76,9 +70,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The gate is offered for a conversation the member can open by acknowledging it and for no other.
- *  One shared with nobody they belong to is not a gate away — the intent would refuse — so the half
- *  states that rather than offering an act that cannot be taken. */
 test("a disclosable conversation offers the acknowledgement, one shared with nobody does not", async () => {
   wire(conversations([PRIVATE, WALLED]));
   standing(PRIVATE.id);
@@ -242,8 +233,6 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
 });
 
-/** A read that failed is not an app nobody has spoken to: the half states the error, or the member
- *  is handed the composer over a history that is there and never learns the projection refused. */
 test("a failed conversations read states the error rather than the composer", async () => {
   wire({ "/conversations$": () => new Response("nope", { status: 503 }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
@@ -252,9 +241,6 @@ test("a failed conversations read states the error rather than the composer", as
   expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 });
 
-/** The acknowledgement stands under the band naming the conversation it is about, so the member
- *  reads whose it is before taking it and leaves by the acts on that band — and nothing is read
- *  until they do take it. */
 test("the band names the conversation the acknowledgement is about, and reads nothing until it is taken", async () => {
   const { calls } = wire(conversations([PRIVATE]));
   standing(PRIVATE.id);

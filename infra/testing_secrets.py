@@ -17,25 +17,12 @@ SECRET_INPUTS = {
     "spectrum-project-id": "SPECTRUM_PROJECT_ID",
     "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",
 }
-# The properties the testing fleet's own configuration selects, each with one provider and no
-# fallback: `[sandbox] backend`, `[browser] cdp_provider`, the collector's only export credential,
-# and `[memory] index_backend` (infra/envs/testing/ufo.tf). The e2b key is the one a pod refuses to
-# boot without, so it decides the deploy either here or 10 minutes into the apply. Every other
-# property the document carries belongs to a path testing does not exercise, so an empty one costs
-# nothing until someone turns that path on.
 REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
     "browserbase-api-key",
     "datadog-api-key",
     "e2b-api-key",
     "turbopuffer-api-key",
 }
-# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/testing/ufo.tf) and the
-# sign-up enrichment key, seeded out-of-band. They are filled with empty strings when the document
-# lacks them, because the cluster projects each one by name: a property Secrets Manager does not
-# hold leaves the ExternalSecret unready and stops the deploy at the forced re-sync. Empty is a
-# state each family answers by itself — the extension builds no provider without its keys, so every
-# flag reads its closed default and enrichment registers neither its action nor its job — which is
-# why they stay out of REQUIRED_PROPERTIES.
 FAIL_CLOSED_PROPERTIES = frozenset(
     {
         "cloudflare-account-id",

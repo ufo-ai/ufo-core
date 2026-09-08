@@ -305,8 +305,6 @@ fn entry_fields(entry: &str) -> (String, String) {
     (status, name)
 }
 
-/// One file git holds no HEAD version of, read off a pinned parent fd and bounded by the cap every
-/// other diff input takes.
 #[cfg(unix)]
 fn guarded_added_text(path: &str, workspace: &Path) -> Option<String> {
     if binary_extension(&suffix(path)) {
@@ -332,10 +330,6 @@ fn git(repository: &Path, args: &[&str]) -> String {
     }
 }
 
-/// The listing this op builds when no caller supplied one: every checkout under the workspace and
-/// git's own answer for each, in the record shape the host's shell program writes, so one reader
-/// serves both. git is the only thing that knows what a change is here — it counts what any writer
-/// did, reports deletions, and counts nothing outside a checkout.
 #[cfg(unix)]
 fn walked_items(root: &Path) -> Vec<String> {
     let mut items = Vec::new();
@@ -359,10 +353,8 @@ fn walked_items(root: &Path) -> Vec<String> {
     items
 }
 
-/// The same scan with its own walk: the workspace root goes through the guard by descent, the
-/// checkouts under it are found by `sbxfs`'s own rule, and a file with no HEAD version is read off a
-/// pinned parent fd. A `paths` param is accepted and ignored, as `sbxfs` accepts and ignores it: the
-/// answer is every uncommitted change under the workspace.
+/// A `paths` param is accepted and ignored, as `sbxfs` accepts and ignores it: the answer is every
+/// uncommitted change under the workspace.
 #[cfg(unix)]
 pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Path) -> OpResult {
     let root = guarded(guard::contained_dir(

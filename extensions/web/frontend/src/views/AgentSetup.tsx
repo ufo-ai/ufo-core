@@ -27,15 +27,12 @@ import { cn } from "@/lib/cn";
 import { navigate } from "@/lib/router";
 import type { Agent } from "@/lib/types";
 
-/** The recurrence an app offers to arm its schedule with. `hour` null is hourly, which names no
- *  wall-clock time; `weekdays` empty is every day. */
 export type SetupCadence = { hour: number | null; minute: number; weekdays: number[] };
 
 export type SetupSchedule = { name: string; prompt: string; cadences: SetupCadence[] };
 
-/** The setup read, as it arrives. Every field is optional here because nothing crosses the wire
- *  checked: a screen that indexed a list the answer did not carry would blank itself over a payload
- *  that merely declared nothing. `own_page` is whether this workspace has built the app its page. */
+/** Every field is optional because nothing crosses the wire checked: a screen that indexed a list the
+ *  answer did not carry would blank itself over a payload that merely declared nothing. */
 export type SetupState = {
   connectors?: {
     provider: string;
@@ -57,9 +54,6 @@ const CONNECT = "Connect";
 const CONNECTING = "Connecting";
 const CONNECTED = "Connected";
 
-/* A step is titled by what it asks of the member and says nothing about which account answers it,
-   because the same question is put whatever the app happens to be connected to. The line under it
-   is where the provider is named, and the act carries its verb. */
 const ACCOUNT_STEP = "Choose your account";
 const CREDENTIAL_STEP = "Add the workspace credential";
 const SCHEDULE_STEP = "Choose when it runs";
@@ -75,8 +69,6 @@ const NOT_FILLED = "Not filled";
 const ARMED = "Set";
 const CHOOSE_WHEN = "Choose when it runs";
 const SET_UP = "Set up";
-/** The gutter the status mark stands in, so the name, the line under it and the answers all share
- *  one left edge. It is the mark and the gap beside it, named where both are. */
 const STEP_INSET = "pl-[calc(var(--size-glyph)+var(--spacing-sm))]";
 const ANOTHER_CADENCE = "Something else";
 
@@ -91,8 +83,8 @@ const CONSENT_ELSEWHERE = "The consent window closed before the link arrived. Pr
 const EVERY_HOUR = "every hour";
 const EVERY_DAY = "every day";
 const EVERY_WEEKDAY = "every weekday";
-/** The cron this cadence fires on, in UTC. An hourly cadence names no wall-clock time, so there is
- *  nothing to convert; every other one is moved by the member's offset. */
+/** An hourly cadence names no wall-clock time, so there is nothing to convert; every other is moved by
+ *  the member's offset. */
 export function cronFor(cadence: SetupCadence, offsetMinutes: number): string {
   if (cadence.hour === null) return `${cadence.minute} * * * *`;
   const moved = shifted(cadence.hour * 60 + cadence.minute, offsetMinutes);
@@ -101,11 +93,8 @@ export function cronFor(cadence: SetupCadence, offsetMinutes: number): string {
   return `${moved.minute} ${moved.hour} * * ${field}`;
 }
 
-/** What a cadence is called, in the member's own clock.
- *
- *  It names the recurrence and nothing else. A schedule's first fire is its next cron occurrence —
- *  `next_fire` advances strictly past now and the kind runs nothing one-shot — so a label reading
- *  "Now, and every weekday at 9:00" promised a run that never came. */
+/** A schedule's first fire is its next cron occurrence — `next_fire` advances strictly past now and the
+ *  kind runs nothing one-shot — so a label reading Now, and every weekday promised a run that never came. */
 export function labelOf(cadence: SetupCadence): string {
   if (cadence.hour === null) return EVERY_HOUR;
   const time = new Date(2026, 0, 5, cadence.hour, cadence.minute).toLocaleTimeString(undefined, {
@@ -125,10 +114,6 @@ export function labelOf(cadence: SetupCadence): string {
   return `${days} at ${time}`;
 }
 
-/** The cadence a cron stands for, in the member's own clock — the read `cronFor` writes back, so a
- *  schedule the member armed is recognised as the offer they took. Null where the cron is not one
- *  of the shapes an offer converts to: an app's own composition can name anything, and a guess at
- *  what it meant would put words on the screen the schedule does not hold. */
 export function cadenceOf(cron: string, offsetMinutes: number): SetupCadence | null {
   const field = cron.trim().split(/\s+/);
   if (field.length !== 5) return null;
@@ -158,9 +143,6 @@ function span(range: string): number[] {
   return Array.from({ length: to - from + 1 }, (_, step) => from + step);
 }
 
-/** Why an account is being asked for, in the words the connect tiles already use for it. The
- *  catalog states what an agent does with the provider, so the line reads as the reason to connect
- *  it; a provider the catalog does not curate is named without one. */
 function connectNote(label: string, summary: string): string {
   if (!summary) return `Connect ${label} so this app can work from your account.`;
   return `Connect ${label} to ${summary[0].toLowerCase()}${summary.slice(1)}`;
@@ -235,9 +217,6 @@ function SetupStepper({ steps }: { steps: SetupStep[] }) {
               />
             </CollapsibleTrigger>
             <CollapsibleContent id={contentId}>
-              {/* Everything under the name stands where the name stands, past the mark's own
-                  gutter, so the step reads as one column rather than as a title with the rest
-                  hanging off its left. */}
               <div className={cn(STEP_INSET, "flex flex-col items-start gap-2xl pb-sm")}>
                 {step.note ? (
                   <span className="text-fine leading-chrome text-ink-soft">{step.note}</span>
@@ -252,27 +231,11 @@ function SetupStepper({ steps }: { steps: SetupStep[] }) {
   );
 }
 
-/** Wiring one app: the accounts it works from, the workspace installs it needs, and the standing
- *  order that gives it an occasion to run.
- *
- *  It is a screen and not a band on the app's own page, and that is the whole of why the acts here
- *  work. A page is framed cross-origin and speaks with the viewer's whole session, so the bridge
- *  fences it by name — and the two acts an unwired app most needs are exactly the ones that cannot
- *  cross: connecting an account is a consent handoff, and forking the page is model work. Here they
- *  are ordinary portal acts.
- *
- *  An app arrives at this screen instead of its page, which is what the page is spared: with no
- *  account there is nothing real to draw, and rows of sample data in their place would be showing a
- *  member someone else's app and calling it theirs. The page draws what the app is and what it has
- *  done; this screen exists so it never has to draw what it would be. */
 export function AgentSetup({
   agent,
   onBuilt,
 }: {
   agent: Agent;
-  /** Told when this read says the workspace has built the app its page. The boot roster carries that
-   *  fact for the shell, and a build lands long after boot — so the roster is read again, and the
-   *  app stops being one the workspace is still building. */
   onBuilt: () => void;
 }) {
   const [reloads, setReloads] = useState(0);
@@ -286,14 +249,8 @@ export function AgentSetup({
   useEffect(() => {
     if (built) onBuilt();
   }, [built, onBuilt]);
-  /** The turn the connect admitted, watched for the link it mints.
-   *
-   *  A consent link is minted per speaking member at stream time — never in a transcript and never
-   *  in the intent's own answer — so the turn's stream is where it arrives. A turn that ends
-   *  without one is a refusal the member has to read.
-   *
-   *  Every path out of this effect releases the controls. The stream closes on the first of the two
-   *  frames, so a control left waiting on the other would wait for the life of the screen. */
+  /** A consent link is minted per speaking member at stream time, never in the intent's own answer. The
+   *  stream closes on the first of the two frames, so a control left waiting on the other waits forever. */
   useEffect(() => {
     if (watching === null) return;
     const stream = new EventSource(BASE + "/turns/" + watching + "/stream");
@@ -321,8 +278,8 @@ export function AgentSetup({
 
   async function connect(provider: string) {
     setNotice(QUIET);
-    /* Opened on the press, before the round trip that mints the link: a window opened afterwards
-       has lost the gesture the browser opens one for. */
+    /* Opened on the press, before the round trip that mints the link: a window opened afterwards has lost
+       the gesture the browser opens one for. */
     const opened = openConsentWindow();
     if (!opened) {
       setNotice({ text: BLOCKED_POPUP, refused: true });
@@ -330,8 +287,6 @@ export function AgentSetup({
     }
     consent.current = opened;
     setConnecting(provider);
-    /* The grant is this app's own: the intent names this agent, so the account the member picks
-       binds here rather than to whichever app they last opened. */
     const outcome = await postIntent(agent.id, {
       verb: "connect",
       kind: "connection",
@@ -348,44 +303,23 @@ export function AgentSetup({
     setWatching(outcome.turn_id);
   }
 
-  /** Build the app's page from its own sources, and watch it happen.
-   *
-   *  It stands below the setup list because it is what the list is for: the todos are what the app
-   *  needs before it can read anything, and this is the act that turns a wired app into its screen.
-   *  It is offered whether or not they are settled — an app builds a thinner page from fewer
-   *  sources, and a member who wants to see it now is not told to come back later.
-   *
-   *  The press opens the work rather than spending it: the ask rides to the app's own new chat and
-   *  stands in the composer, so the member reads what they are about to ask for and sends it. The
-   *  build then runs in a conversation they can watch and correct. */
   function buildApp() {
     setPendingAsk(agent.id, BUILD_ASK, false);
     navigate(newChatHash(agent.id));
   }
 
-  /** Hand the app's own instructions to the composer, where the member sends them and the app
-   *  drives the rest. The words are the app's declaration, so what is asked for is what the app
-   *  said it needs, not a second description of it written here. */
   function ask(instructions: string) {
     setPendingAsk(agent.id, instructions, false);
     navigate(newChatHash(agent.id));
   }
 
-  /** A cadence the offers do not cover, in the member's own words. Only they know what they meant
-   *  by it, so the words go to the app rather than to a parser here: it composes the schedule and
-   *  says back what it armed, in the conversation the member sends them from. */
   function sayCadence(said: string) {
     setPendingAsk(agent.id, `${CADENCE_ASK} ${said}`, false);
     navigate(newChatHash(agent.id));
   }
 
-  /** Arm the app's declared schedule on this cadence, or move the cadence of the order it already
-   *  holds.
-   *
-   *  The prompt rides on the create alone. The row that exists holds it already, and the kind holds
-   *  content to the task's creator: a spec that set `prompt` again is refused for every admin who
-   *  did not arm it, on a step that only ever asked them how often. Omitting it preserves what the
-   *  order runs. */
+  /** The prompt rides on the create alone: the kind holds content to the task's creator, so a spec that
+   *  set `prompt` again is refused for every admin who did not arm the order. */
   async function arm(schedule: SetupSchedule, cadence: SetupCadence, armed: boolean) {
     setNotice(QUIET);
     setArming(schedule.name);
@@ -463,8 +397,6 @@ export function AgentSetup({
         ];
         return (
           <div className="flex flex-col gap-2xl">
-            {/* What the app is stands over what it still needs, in the column that holds them
-                both: a member meets the app before the list of what it is waiting on. */}
             <div className="flex flex-col gap-2xs">
               <h1 className="m-0 text-subtitle leading-chrome font-medium">
                 {`${SET_UP_APP} ${agentName(agent.name)} app`}
@@ -495,10 +427,6 @@ export function AgentSetup({
     instructions: string,
   ) {
     if (order.armed && (order.kind !== SCHEDULE_KIND || schedule === null)) return ARMED;
-    /* A kind the app offers no cadence for is settled in chat, because settling it is more than one
-       answer: a feed trigger takes a registered source, shared, and a trigger naming it. So the row
-       carries the ask rather than a control it cannot complete — a row that stated the need and
-       offered nothing left the member reading a chore with no way to do it. */
     if (order.kind !== SCHEDULE_KIND || schedule === null) {
       if (!instructions) return NOT_INSTALLED;
       return (
@@ -512,12 +440,6 @@ export function AgentSetup({
         </Button>
       );
     }
-    /* The cadence is the whole of what the member is asked. The app authored the prompt, because
-       the prompt IS the app's job — asking a member to write it is asking them to write the app
-       they were given. */
-    /* What the app is armed with, said the way the offers say it. An answer the member composed
-       themselves matches no offer, so it stands in the field they wrote it in rather than being
-       dropped: the step shows what it is set to either way. */
     const held = order.schedule ? cadenceOf(order.schedule, new Date().getTimezoneOffset()) : null;
     const taken = held ? labelOf(held) : "";
     const offered = schedule.cadences.some((offer) => labelOf(offer) === taken);

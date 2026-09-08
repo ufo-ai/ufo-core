@@ -26,8 +26,6 @@ from ufo_ext_sources.watermark import text_checkpoint
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
 
-# Stream-name → list-endpoint path. Streams sit under `/v1/` (vendors, expenses) or `/v2/`
-# (everything else); tracking the path per-stream keeps the mapping explicit.
 _LIST_PATHS: dict[str, str] = {
     "transactions": "/v2/transactions/card/primary",
     "transfers": "/v1/transfers",
@@ -53,8 +51,6 @@ def _stream(
     )
 
 
-# Stream set mirrors Airbyte's source-brex catalog (6 streams), plus `transfers`, which Airbyte
-# leaves out and Brex's own transfer events name.
 BREX_STREAMS: list[StreamSpec] = [
     _stream("budgets", primary_key="budget_id"),
     _stream("departments"),

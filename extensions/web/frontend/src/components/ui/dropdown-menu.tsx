@@ -3,15 +3,12 @@ import type { ComponentProps } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** A menu's root: holds whether it is open, for the acts or narrowings behind one control. */
 export const DropdownMenu = DropdownMenuPrimitive.Root;
 
-/** The control that opens the DropdownMenu it stands in; `asChild` makes the child the trigger. */
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 
 export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 
-/** A set of DropdownMenuRadioItem rows of which one is chosen — a sort, an order. */
 export const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup;
 
 const POPUP =
@@ -54,9 +51,6 @@ function Tick() {
   );
 }
 
-/** `container` is where the menu is drawn: the document's own end by default, and the element a
- *  caller names when the menu belongs inside a layer already standing — a drawer is a modal, and a
- *  menu drawn past it is out of the member's reach. */
 export function DropdownMenuContent({
   className,
   sideOffset = 4,
@@ -75,7 +69,6 @@ export function DropdownMenuContent({
   );
 }
 
-/** One act in a menu: a row the pointer lights and a press performs, shutting the menu. */
 export function DropdownMenuItem({
   className,
   ...props
@@ -127,8 +120,6 @@ export function DropdownMenuSubContent({
   );
 }
 
-/** A choice a member turns on and off rather than picks between. Ticking one leaves the menu open:
- *  the options are read as a set and are usually changed together. */
 export function DropdownMenuCheckboxItem({
   className,
   children,
@@ -149,7 +140,6 @@ export function DropdownMenuCheckboxItem({
   );
 }
 
-/** One choice in a DropdownMenuRadioGroup, ticked when it is the one chosen. */
 export function DropdownMenuRadioItem({
   className,
   children,
@@ -169,10 +159,6 @@ export function DropdownMenuRadioItem({
   );
 }
 
-/** The name over the items it heads. It is a caption rather than an item: no row height, no fill
- *  under the pointer, no press — a line that answers the pointer is a line the member reads as
- *  pickable, and this one only says what the options below it are. It takes the register the table
- *  heads take, so a name over a set reads the same wherever the portal states one. */
 export function DropdownMenuLabel({
   className,
   ...props
@@ -186,9 +172,6 @@ export function DropdownMenuLabel({
   );
 }
 
-/** The rule between two groups of items. It reaches the popup's own edges rather than stopping at
- *  the padding the items stand in, so the menu is parted in two instead of carrying a short line
- *  inside one column of rows. */
 export function DropdownMenuSeparator({
   className,
   ...props

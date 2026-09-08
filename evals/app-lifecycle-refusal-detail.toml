@@ -16,11 +16,6 @@ pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
-# Whether a lifecycle refusal that names the state and the page's own throw is load-bearing. In one
-# recorded run this check produced eight of twelve refusals, `the page never mounted` was the
-# dominant state, and every case spent its whole turn budget on six to twelve rebuilds. The arm
-# returns the refusal to the bare reason the builder read then. Read on the process scores — spawns
-# and deploys per case — because the claim is that a named fault is repaired rather than rebuilt.
 [[arm]]
 name = "bare-lifecycle-reason"
 

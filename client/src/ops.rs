@@ -1,4 +1,3 @@
-//! Executing the ops a `run` directive asks of this terminal.
 
 mod exec;
 pub mod fileops;
@@ -26,8 +25,6 @@ struct ReadBackParams {
     workspace: Option<String>,
 }
 
-/// Session-stable op state: the scratch workdir walk enumerations land in and the directory the
-/// member launched from.
 #[derive(Clone)]
 pub struct OpRuntime {
     pub workdir: PathBuf,
@@ -35,7 +32,6 @@ pub struct OpRuntime {
     pub home: Home,
 }
 
-/// Run one op and answer its reply body, or the failure string carried in `x-ufo-op-err`.
 pub fn run_op(rt: &OpRuntime, session: &Session, op: &OpRequest) -> Result<Vec<u8>, String> {
     match op.kind.as_str() {
         OP_EXEC => exec::run_at_home(&op.params, &rt.workdir, &rt.cwd, &rt.home, op.timeout_s),

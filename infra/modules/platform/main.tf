@@ -14,10 +14,8 @@ locals {
   ingress_s3_role_name = "${local.name}-ingress-s3"
   cache_s3_role_name   = "${local.name}-cache-s3"
 
-  # The gateway, shared serve fleet, proxy, and observability stack run here.
   system_namespace = "ufo-system"
 
-  # Secrets Manager path prefix for this environment.
   secret_prefix = "ufo/${var.name}"
 }
 

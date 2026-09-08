@@ -1,8 +1,3 @@
-//! The one round-trip ufo makes of the terminal at startup: the kitty keyboard flags it takes and
-//! the color it draws on, asked in a single write and read once, under a single deadline.
-//!
-//! The read owns the tty, so it also takes whatever the member typed while the terminal was
-//! answering. Those bytes come back as the keys they were, for the loop to replay in order.
 
 use crossterm::event::KeyEvent;
 #[cfg(unix)]
@@ -10,7 +5,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::ui::theme::Scheme;
 
-/// What the terminal answered, and what the member typed while it answered.
 pub struct Probe {
     pub kitty: bool,
     pub scheme: Option<Scheme>,
@@ -22,9 +16,6 @@ const ESC: u8 = 0x1b;
 #[cfg(unix)]
 const BEL: u8 = 0x07;
 
-/// Kitty keyboard flags, then the background color, then primary device attributes — the sentinel
-/// every terminal answers, so a terminal that ignores the first two is known to have ignored them
-/// instead of being waited on.
 #[cfg(unix)]
 const QUERY: &[u8] = b"\x1b[?u\x1b]11;?\x1b\\\x1b[c";
 
@@ -32,12 +23,6 @@ const QUERY: &[u8] = b"\x1b[?u\x1b]11;?\x1b\\\x1b[c";
 const DEADLINE: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl Probe {
-    /// Ask the terminal and read what it says.
-    ///
-    /// Call this exactly once, at startup, with the tty already in raw mode and **before the
-    /// input reader thread exists**: a reader running alongside would race this one for both the
-    /// reply and the member's keystrokes. A terminal that says nothing costs the deadline and
-    /// answers nothing — no flags, no scheme, no keys.
     #[cfg(unix)]
     pub fn query() -> Probe {
         use std::os::fd::AsRawFd;
@@ -81,11 +66,6 @@ fn is_tty(fd: std::os::fd::RawFd) -> bool {
     (unsafe { libc::isatty(fd) }) == 1
 }
 
-/// Write the query and read until the attributes reply closes it or the deadline runs out. The
-/// wait is `select` over a non-blocking descriptor: Darwin's `poll` answers `POLLNVAL` for a tty
-/// the instant it is asked, so a client that trusted it would read a terminal that never spoke
-/// and hang there forever. The descriptor's flags are put back, since it may be the process's own
-/// stdin.
 #[cfg(unix)]
 fn read_reply(read_fd: std::os::fd::RawFd, write_fd: std::os::fd::RawFd) -> Vec<u8> {
     use std::time::Instant;
@@ -154,7 +134,6 @@ fn readable_within(fd: std::os::fd::RawFd, window: std::time::Duration) -> bool 
     ready > 0 && unsafe { libc::FD_ISSET(fd, &readable) }
 }
 
-/// The three answers, and the bytes that were none of them.
 #[cfg(unix)]
 struct Split {
     kitty: bool,
@@ -163,13 +142,6 @@ struct Split {
     typed: Vec<u8>,
 }
 
-/// Take the answers out of what was read, leaving the member's own bytes.
-///
-/// An escape sequence that is not one of the three answers is dropped: an arrow key or a function
-/// key would take crossterm's whole parser to name, and half a sequence is worse than none. A
-/// sequence still arriving when the buffer ends — down to a bare trailing escape byte, which the
-/// deadline or the sentinel cut off mid-sequence — goes the same way, so no escape byte ever
-/// reaches the keys. An answer already read stands whatever follows it.
 #[cfg(unix)]
 fn split(bytes: &[u8]) -> Split {
     use crate::ui::theme::scheme_from_osc11;
@@ -222,7 +194,6 @@ fn split(bytes: &[u8]) -> Split {
     split
 }
 
-/// The payload of an OSC string and the length it occupies, terminated by `ST` or `BEL`.
 #[cfg(unix)]
 fn command_string(bytes: &[u8]) -> Option<(&[u8], usize)> {
     for (at, byte) in bytes.iter().enumerate() {
@@ -236,10 +207,6 @@ fn command_string(bytes: &[u8]) -> Option<(&[u8], usize)> {
     None
 }
 
-/// The keys the member's bytes were, decoded the way crossterm decodes them in raw mode: `\r` is
-/// Enter, `\n` is Ctrl+J, a control byte is its Ctrl pair, and a character is itself. A truncated
-/// multi-byte character is left behind rather than replayed as a replacement glyph, and [`split`]
-/// has already taken every escape byte out.
 #[cfg(unix)]
 fn keys(typed: &[u8]) -> Vec<KeyEvent> {
     let mut keys = Vec::new();

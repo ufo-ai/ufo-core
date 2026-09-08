@@ -1,4 +1,3 @@
-//! Display-width text geometry: clipping, transcript word-wrap, and entry-row layout.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -6,8 +5,6 @@ pub fn width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-/// Text as painted units: an OSC escape is one zero-width unit that never splits; every other
-/// char takes its display width, minimum one column.
 pub fn units(text: &str) -> Vec<(&str, usize)> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -28,7 +25,6 @@ pub fn units(text: &str) -> Vec<(&str, usize)> {
     out
 }
 
-/// The longest prefix of `text` that fits `max` display columns.
 pub fn clip(text: &str, max: usize) -> &str {
     let mut used = 0;
     for (index, ch) in text.char_indices() {
@@ -41,10 +37,6 @@ pub fn clip(text: &str, max: usize) -> &str {
     text
 }
 
-/// One transcript wrap step: the byte end of the head row and the byte start of the remainder.
-/// Text that fits the window is never broken; a break lands on the last space so no word is cut,
-/// the head carries no trailing spaces, the remainder starts past them, and every step makes
-/// progress.
 pub fn wrap_head(text: &str, cap: usize) -> (usize, usize) {
     let mut taken = clip(text, cap);
     if taken.is_empty() && !text.is_empty() {
@@ -75,8 +67,6 @@ pub fn wrap_head(text: &str, cap: usize) -> (usize, usize) {
     (head_end, rest)
 }
 
-/// Entry text as byte ranges, one per painted row: hard-wrapped at `cap1` columns for the first
-/// row and `cap` for the rest, split on embedded newlines, never empty.
 pub fn hard_rows(text: &str, cap1: usize, cap: usize) -> Vec<(usize, usize)> {
     let mut rows = Vec::new();
     let mut start = 0;
@@ -103,8 +93,6 @@ pub fn hard_rows(text: &str, cap1: usize, cap: usize) -> Vec<(usize, usize)> {
     rows
 }
 
-/// The painted row holding the cursor byte offset and the display width before it in that row —
-/// a cursor on a wrap boundary lands at the start of the later row.
 pub fn cursor_pos(text: &str, rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
     let mut at = 0;
     for (index, row) in rows.iter().enumerate() {

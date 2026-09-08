@@ -14,8 +14,6 @@ export type SheetProps = {
   describedBy?: string;
 };
 
-/** A drawer on the right edge that opens over the pane without taking the screen: a title, a close
- * control, optional acts, and a scrolling body. The pane behind stays live. */
 export function Sheet({ open, onClose, title, children, actions, describedBy }: SheetProps) {
   return (
     <DialogPrimitive.Root modal={false} open={open} onOpenChange={(next) => !next && onClose()}>

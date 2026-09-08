@@ -9,8 +9,6 @@ import type { Surfaces } from "@/lib/types";
 
 import { AGENT, atPhoneWidth, json, MEMBER, SECOND, useStreamFake, wire } from "./harness";
 
-/** The workspace column, which the shell draws at a phone width alone: the drawer the hamburger
- *  opens holds it, so a test reading the rows or the foot opens it first. */
 async function openWorkspaceColumn(): Promise<HTMLElement> {
   await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
@@ -36,8 +34,6 @@ const WITHHELD: Surfaces = {
       "app-store": false,
 };
 
-/** An app the deploy withholds. The mark rides the boot read's own agent row, so the app is the
- *  workspace's either way — this is what the portal draws it out of, not what it may open. */
 const HIDDEN_APP = { ...SECOND, name: "wiki", app: "wiki", hidden: true };
 
 test("an app the deploy offers is a row the sidebar pins itself", async () => {
@@ -109,10 +105,8 @@ test("offered workspace screens keep their tabs and connectors stays out of the 
   expect(screen.queryByRole("tab", { name: "Sources" })).toBeNull();
 });
 
-/** The roster is an admin's screen, so the tab that opens it is drawn for an admin alone. Its
- *  address still answers everyone — a withheld screen loses its tab and keeps its address — and
- *  the destination opens on the first tab this member is drawn, so no entry to it lands a non-admin
- *  on a tab that is not there. */
+/** A withheld screen loses its tab and keeps its address, and a destination opens on the first tab this
+ *  member is drawn. */
 test("the team tab is an admin's, and the workspace opens on the first tab drawn", async () => {
   location.hash = "#/workspace/apps";
   const plain = render(
@@ -131,8 +125,6 @@ test("the team tab is an admin's, and the workspace opens on the first tab drawn
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
 });
 
-/** The rail row and the palette row both open the destination's first drawn tab, so a member the
- *  roster is not drawn for lands on Apps rather than on a tab the strip does not carry. */
 test("the workspace row lands a member on the first tab they are drawn", async () => {
   location.hash = "";
   const desk = render(
@@ -168,9 +160,6 @@ test("the workspace row lands a member on the first tab they are drawn", async (
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
 });
 
-/** The palette reaches the same destinations the nav does and lists each of them once. Here the
- *  workspace opens on Apps, whose address this shell already carries above, so the palette states
- *  that one place once rather than under two names. */
 test("the palette carries no second name for the workspace", async () => {
   location.hash = "";
   render(

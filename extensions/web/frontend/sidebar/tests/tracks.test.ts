@@ -36,8 +36,6 @@ test("a track reads back on the screen that held it, whichever screen that is", 
   ]);
 });
 
-/** A lane names the app its record is read in as well as the record, so one track stands two apps'
- *  records and comes back holding both. */
 test("a track of two apps' lanes reads back with each lane in its own app", () => {
   holdTrack(ARTIFACTS, [
     "object/" + AGENT + "/scheduled_task/morning-digest",
@@ -78,10 +76,8 @@ test("closing every slot drops the screen's key rather than holding an empty lin
   expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
 });
 
-/** A track the address holds whole and the store cut short is the same fault one layer down: the
- *  screen would come back holding fewer lanes than the link the member followed states. The verbs
- *  that open a lane stop at the cap, so a row past it is one a caller made up, and it raises there
- *  rather than reading back shorter than it was written. */
+/** A row this store cannot round trip raises here, at the call that made it up, rather than reading
+ *  back shorter than it was written. */
 test("a track past the cap is refused where it was made up, never held short", () => {
   const opened = Array.from(
     { length: TRACK_MAX_SLOTS + 1 },
@@ -96,9 +92,6 @@ test("a track past the cap is refused where it was made up, never held short", (
   expect(heldTrack(ARTIFACTS)).toEqual(full);
 });
 
-/** A screen the member can work from is worth more than an arrangement nothing here can name, and
- *  a row of lanes this module did not write is exactly that: the lanes would stand under records
- *  nothing can resolve. The mark is what tells the two apart. */
 test("a value this store did not write reads as an empty track and is dropped", () => {
   for (const corrupt of [
     '{"slots":["object/report/august"]}\n',

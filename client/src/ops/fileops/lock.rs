@@ -1,13 +1,5 @@
-//! The cross-process write lock, name for name with `sbxfs`'s.
-//!
-//! A `write` and an `edit` are read-modify-write over one inode, and one workspace is shared by
-//! every carrier, subagent and shell command that reaches it, each running its own `ufo fs`
-//! process. The staged-inode rename makes a single write atomic; only an exclusive lock across
-//! processes keeps two writers from each reading the same text and one landing on top of the other.
-//!
-//! The lock file is a digest of the target path under the temp dir, which is where `sbxfs` put it:
-//! outside the workspace, so no root contains it and no enumeration can see it, and under the same
-//! name, so a writer through the old script and one through this binary contend for one lock.
+//! The lock file is a digest of the target path under the temp dir, where `sbxfs` put it: outside the
+//! workspace, so no enumeration sees it, and under the same name, so both writers contend for one lock.
 
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
@@ -17,8 +9,8 @@ use crate::ops::fileops::text::{failed, OpError};
 
 const LOCK_DIR: &str = "ufo-sbxfs-locks";
 
-/// `{tempdir}/ufo-sbxfs-locks/{sha256(path)}` — the digest of the path's own bytes, hex lowercase,
-/// which is what `hashlib.sha256(str(path).encode()).hexdigest()` answers for the same path.
+/// `{tempdir}/ufo-sbxfs-locks/{sha256(path)}` — the path's own bytes, hex lowercase, which is what
+/// `hashlib.sha256(str(path).encode()).hexdigest()` answers for the same path.
 pub fn lock_path(target: &Path) -> PathBuf {
     let digest = ring::digest::digest(&ring::digest::SHA256, target.as_os_str().as_bytes());
     let name: String = digest
@@ -29,7 +21,6 @@ pub fn lock_path(target: &Path) -> PathBuf {
     std::env::temp_dir().join(LOCK_DIR).join(name)
 }
 
-/// An exclusive lock on one path, held until this value drops.
 pub struct FileLock {
     descriptor: libc::c_int,
 }
@@ -41,8 +32,6 @@ impl Drop for FileLock {
     }
 }
 
-/// Wait for the exclusive lock on `target`. A lock this call cannot take is an unhandled failure,
-/// not a refusal: the model has nothing to correct about a temp dir it cannot write.
 pub fn exclusive(target: &Path) -> Result<FileLock, OpError> {
     let path = lock_path(target);
     let directory = path.parent().unwrap_or(Path::new("/"));

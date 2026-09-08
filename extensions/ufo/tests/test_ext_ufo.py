@@ -1673,7 +1673,6 @@ def test_a_non_ascii_cwd_is_recovered_as_utf8_not_mojibake() -> None:
         SimpleNamespace(headers=Headers(raw=[(b"x-ufo-cwd", real_cwd.encode("utf-8"))])),
     )
     assert _utf8_header(request, "x-ufo-cwd") == real_cwd
-    # A plain ASCII path is invariant through the round trip.
     ascii_request = cast(
         StarletteRequest,
         SimpleNamespace(headers=Headers(raw=[(b"x-ufo-cwd", b"/Users/alex/proj")])),

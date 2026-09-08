@@ -891,10 +891,7 @@ SLACK_CONTEXT_TEXT_LIMIT = 3_000
 SLACK_TEXT_MESSAGE_LIMIT = 3_500
 MAX_SLACK_MESSAGE_BYTES = 40_000
 MAX_SLACK_BLOCK_MESSAGE_BYTES = 100_000
-# Slack's own documented ceiling for a single file; an over-cap artifact goes out as a TTL link.
 SLACK_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
-# Undocumented Slack ceiling: `files.completeUploadExternal` answers `internal_error` when one call
-# names more files than this, so a larger share goes out as the fewest messages Slack will take.
 SLACK_ATTACH_MAX_FILES = 10
 SLACK_INVALID_BLOCKS_ERROR = "invalid_blocks"
 SLACK_OVERSIZE_HEADING = "**Attachments (too large to upload):**"
@@ -918,8 +915,6 @@ SLACK_FILE_HOST_SUFFIX = ".slack.com"
 SLACK_INBOX_DIR = "slack-inbox"
 MAX_INBOUND_FILES = 10
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
-# The workspace write takes the body whole, so its bound is the ceiling on an inbound file: a larger
-# one could not land at all, and refusing it here skips that file instead of failing the message.
 SLACK_INBOUND_FILE_MAX_BYTES = WORKSPACE_WRITE_MAX_BYTES
 PRIVATE_ROOM_CHANNEL_TYPES = frozenset({"group", "mpim"})
 CHANNEL_LABEL_PREFIX = "#"

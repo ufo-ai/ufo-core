@@ -1,5 +1,3 @@
-// The wiki app's page: a static site built with the portal's app kit. Edit this file and redeploy
-// to change the page.
 
 import {
   BANDS,
@@ -53,39 +51,17 @@ import type {
   ReactMouseEvent,
 } from "ufo/kit";
 
-/** What the store calls the page's opening paragraph: one item per subject, rewritten in place by
- *  the job that re-reads every fact standing under it. It is written to be read whole, so it is
- *  what a page opens on. */
 const SUMMARY_CLASS = "overview";
 
 const NOT_FOUND = 404;
-/** What an item the store filed on its own is classed as, before any consolidation. */
 const ATOM_CLASS = "fact";
-/** What the store calls a cluster of aged rows the consolidator collapsed into one. The rows it
- *  stands for are stamped superseded and leave every band the moment it is written, so a band
- *  drawing atoms alone loses what a member recorded instead of showing what replaced it. Every
- *  summary carries the `fact` kind, so the Facts band is where they stand. */
 const CLUSTER_CLASS = "semantic";
 const MEMBER_PREFIX = "member/";
-/** The app's own name, which is what its front page is called and what every page and sheet inside
- *  it is reached from. */
 const WIKI = "Wiki";
-/** What a member's page is headed by until the roster has answered who they are. */
 const MEMBER = "Member";
 const MEMORY_KIND = "memory";
 const MEMBER_KIND = "member";
-/** Memory items are named by uuid, so the index's default order by name is arbitrary. `written` is
- *  the field the kind declares for the moment it recorded an item, and every band reads newest
- *  first — the order a document states what it knows in. */
 const NEWEST_FIRST = "order_by=written&order=desc";
-/** The overview's read: the written paragraph, which carries `item_class=overview` — the class
- *  axis, not a memory kind — newest first. A deploy that runs without memory registers no `memory`
- *  kind at all and answers the listing with a 404, which the band states as memory being absent
- *  rather than as a fault. */
-/** One band's read of one class. The listing filter takes a single value and the portal cuts its
- *  answer to a page before this app sees it, so asking for every class and sorting them here would
- *  spend that page on rows the band does not draw — a band whose newest page is all `episodic`
- *  would draw nothing and report itself absent. Two reads, each filtered where the cut happens. */
 const bandRead = (memoryKind: string, itemClass: string) =>
   "/objects/" +
   MEMORY_KIND +
@@ -98,14 +74,9 @@ const bandRead = (memoryKind: string, itemClass: string) =>
 
 const OVERVIEW_READ =
   "/objects/" + MEMORY_KIND + "?item_class=" + SUMMARY_CLASS + "&" + NEWEST_FIRST;
-/** What a section's own paragraph is classed as: one row per topic, rewritten in place by the job
- *  that re-reads the topic rather than appended to. One read answers every band, because five reads
- *  for five paragraphs is five round trips for one document. */
 const SECTION_CLASS = "section";
 const SECTION_READ =
   "/objects/" + MEMORY_KIND + "?item_class=" + SECTION_CLASS + "&" + NEWEST_FIRST;
-/** How many rows a topic holds behind its fold before the Memory tab is the better place to
- *  keep reading. */
 const TOPIC_ROWS = 24;
 
 const MEMORY_ABSENT =
@@ -116,11 +87,6 @@ const PRIVATE_TO_THEM =
 
 type TopicSpec = { memoryKind: string; title: string; note: string };
 
-/** The parts each page is divided into: the memory kinds the store already files a write under,
- *  each read as the section of a wiki it answers. Nothing here is derived — a kind is a column on
- *  the item, so a section names what somebody already told an app. The two sets differ only in
- *  their words, because a workspace's own knowledge and one person's are read differently even
- *  where the kind filing them is the same. */
 const WORKSPACE_TOPICS: TopicSpec[] = [
   {
     memoryKind: "preference",
@@ -198,9 +164,6 @@ type MemberRow = {
 
 type MembersPayload = { objects: MemberRow[] };
 
-/** What the nightly people pass writes about one member: the part they play here and what they are
- *  carrying now, both read from the workspace's shared facts alone. A member the pass has not
- *  reached yet simply has none, and the roster row stands as it always did. */
 type ProfileRow = {
   name: string;
   role: string | null;
@@ -211,9 +174,6 @@ type ProfilesPayload = { objects: ProfileRow[] };
 
 const PROFILE_KIND = "profile";
 
-/** Every member's role and focus in one read, keyed by the member id the roster names them by. A
- *  deploy running without memory registers no `profile` kind and answers 404, which leaves the
- *  roster drawn exactly as it is rather than failing the band around it. */
 function useProfiles(reloads: number): Map<string, ProfileRow> {
   const state = usePanelRead<ProfilesPayload>(
     "/objects/" + PROFILE_KIND + "?order_by=written&order=desc",
@@ -226,8 +186,6 @@ function useProfiles(reloads: number): Map<string, ProfileRow> {
   );
 }
 
-/** Every topic's paragraph in one read. A band takes its own out of the answer, so the page pays one
- *  round trip for the five it draws and a topic the job has not written yet simply has none. */
 function useSections(reloads: number, scope: Scope): MemoryObject[] {
   const state = usePanelRead<ObjectsPayload>(SECTION_READ, reloads);
   return state.phase === "ready"
@@ -243,9 +201,6 @@ function useRoster(reloads: number) {
   );
 }
 
-/** Which records a page is built from. The read answers the viewer's own subjects and no one
- *  else's, so the workspace's own knowledge and the viewer's private knowledge arrive together and
- *  are told apart by their subject alone. */
 type Scope = "shared" | "own";
 
 function inScope<T extends { subject: string | null }>(
@@ -261,11 +216,6 @@ function inScope<T extends { subject: string | null }>(
   );
 }
 
-/** One record reaches a page once per agent the viewer reads through: the index fans out over
- *  every agent their web audience holds, and a memory or a member is scoped by subject or by
- *  workspace rather than by an agent, so each agent answers the same row. The uuid naming it is
- *  the identity, and the fan-out still earns its keep — a page-derived item only one agent's
- *  source grants admit arrives once, from that agent. */
 function distinct<Row extends { name: string }>(rows: Row[]): Row[] {
   const seen = new Set<string>();
   const kept: Row[] = [];
@@ -353,15 +303,6 @@ function RecordSlot({
 
 type Entry = { id: string; title: string };
 
-/** A wiki page: the article at the page's own left edge, and its contents in a column beside it on
- *  the right. The contents are what a member navigates a long page by, so they stand where an
- *  encyclopedia puts them — outside the article, in view while it scrolls — and they list only the
- *  parts this page actually drew. They stand after the article in the document as well as to its
- *  right, so what is read, tabbed and drawn are one order: the article first, its index after it.
- *  They carry no heading of their own: a column of the page's own section names, set back from
- *  them, is already read as the way through it, and the landmark names it for a reader who cannot
- *  see that. Below the narrow breakpoint the column is dropped rather than stacked: a contents list
- *  above the article it indexes is a second thing to scroll past to reach the first. */
 function Article({
   header,
   entries,
@@ -405,9 +346,6 @@ function Article({
   );
 }
 
-/** Which parts a page drew, and how current each one is. A part decides its own emptiness from its
- *  own read, so the contents cannot be listed until each has answered; each reports itself, and the
- *  page's own stamp is the newest moment any part carries. */
 function usePresence() {
   const [seen, setSeen] = useState<
     Record<string, { drawn: boolean; newest: string | null }>
@@ -431,14 +369,6 @@ function usePresence() {
   return { present, report, updated: stamps.at(-1) ?? null };
 }
 
-/** The one control the page's own acts hang off, and the stamp saying how current it is.
- *
- *  The two acts are not the same act. Reload re-reads every part: a topic is a live projection of
- *  `memory_item`, so a fresh read is the whole of what a portal read can do on its own. Rebuilding
- *  the page facts asks the derivation pass to write those rows again from the pages they came from,
- *  and it reaches nothing else — so the act is named for the band it reaches and the dialog states
- *  the two bands it leaves alone. A control named for the page while it redoes one part of it reads
- *  as a promise, and the rows it would quietly skip are the ones nothing can write a second time. */
 function Acts({
   updated,
   onReload,
@@ -491,9 +421,6 @@ function Acts({
   );
 }
 
-/** What the workspace knows about itself, and who is in it. This is the app's own front page, so
- *  it states the shape of the place first — how many people, how many hold a seat — then what has
- *  been settled here, and last the roster, which is the way through to a person. */
 function Workspace({
   viewer,
   opens,
@@ -588,9 +515,6 @@ function Workspace({
   );
 }
 
-/** The roster as the way into a person's page. It is drawn even when it holds only the viewer,
- *  because a workspace with one member is a fact about the workspace rather than an empty topic —
- *  and unlike a topic, the member reading it is always in it. */
 function People({
   state,
   rows,
@@ -600,7 +524,6 @@ function People({
 }: {
   state: ReturnType<typeof usePanelRead<MembersPayload>>;
   rows: MemberRow[];
-  /** What each member does and carries, by member id. Absent for a member the pass has not read. */
   profiles: Map<string, ProfileRow>;
   viewer: string | null;
   onOpen: (id: string) => void;
@@ -633,10 +556,6 @@ function People({
   );
 }
 
-/** One member's page. Their own memory is theirs alone — the store answers a portal read on the
- *  reader's subjects and no one else's, an admin included — so this page is the whole of what the
- *  workspace can say about a colleague, and says so rather than drawing empty topics that would
- *  read as a person nothing is known about. */
 function Member({
   id,
   viewer,
@@ -734,10 +653,6 @@ function Member({
   );
 }
 
-/** The account of whoever the page is about, when there is one. Nothing is drawn until the
- *  consolidator has written a summary — an empty overview is the page apologising for itself, and
- *  the topics below already say what is known. A deploy without memory says so, because that is a
- *  fact about the deploy rather than an empty topic. */
 function Overview({
   state,
   scope,
@@ -785,8 +700,6 @@ function Overview({
   );
 }
 
-/** How current the account is, stamped once over the whole of it: what a reader is deciding is
- *  whether to trust this page at all, which the oldest line on it cannot answer. */
 function overviewNote(
   state: ReturnType<typeof usePanelRead<ObjectsPayload>>,
   scope: Scope,
@@ -806,16 +719,6 @@ function overviewNote(
     : written + " Last written " + day(last) + ".";
 }
 
-/** One topic's band: the memory kind's own listing, set as a bulleted list. A row opens the item
- *  it came from — the provenance a summary of it cannot carry — so each bullet is the control that
- *  opens it, underlining under the pointer rather than standing out of the prose as a link the
- *  member has to read past on every line. The bullet whose record is standing carries the mark
- *  every open row in the portal takes, so the page states where the record beside it was opened
- *  from and a second bullet reads as a step taken rather than as the first record vanishing.
- *
- *  A topic holding nothing is not drawn: a wiki states what is known, and a heading over the words
- *  "nothing recorded" is a row of furniture the member cannot act on. A read that *failed* is
- *  drawn, and says so — silence there would be the page reporting an empty topic it never read. */
 function Topic({
   topic,
   scope,
@@ -828,11 +731,9 @@ function Topic({
 }: {
   topic: TopicSpec;
   scope: Scope;
-  /** Every topic's paragraph, read once for the page and handed to the band it belongs to. */
   sections: MemoryObject[];
   reloads: number;
   opens: string[];
-  /** The page a bullet is pressed on, which every record it opens stands after. */
   from?: string;
   onPresent: (id: string, drawn: boolean, newest: string | null) => void;
   onPlace: (place: Placement) => void;
@@ -902,18 +803,6 @@ function Topic({
   );
 }
 
-/** One part of the document: a heading ruled off from what it introduces, then the page's own
- *  prose. The body is `typeset` — the register every document in the portal is read in, so a
- *  paragraph, a bullet and a numbered step here are the same elements an agent's reply sets, and
- *  the page carries no list styling of its own.
- *
- *  A part is folded to about four lines and the heading is the control that opens it: a member
- *  scanning six headings for the one they came for should reach it without paging through the one
- *  above. The note stands outside the fold, because it says what the part is and a preview that
- *  spent a line on that would show one item less. The fold is offered only where something is
- *  actually behind it — a part that already fits is never given a chevron that would do nothing —
- *  which is why the height is measured rather than the rows counted: what overflows is a wrapped
- *  line, not an item. */
 function Band({
   id,
   title,

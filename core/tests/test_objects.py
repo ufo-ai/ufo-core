@@ -187,8 +187,6 @@ async def _member(workspace_id: UUID, created_at: datetime) -> UUID:
 
 FABLE_MODEL = "anthropic/claude-fable-5"
 
-# The ids these tests write. `claude-opus-42` is deliberately absent: it is the typo the
-# write must refuse.
 DEPLOY_MODELS = (
     "auto",
     "claude-opus-4-8",

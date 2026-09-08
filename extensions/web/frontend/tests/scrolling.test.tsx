@@ -5,9 +5,7 @@ import { App, SCROLL_MARK, SCROLL_QUIET_MS } from "@/App";
 
 import { AGENT, MEMBER, useStreamFake, wire } from "./harness";
 
-/** The shell, mounted so its document listener is the real one under test, and a pane beside it
- *  standing in for anything the portal scrolls. Time is faked before the mount so the quiet period
- *  is driven rather than waited on. */
+/** Time is faked before the mount so the quiet period is driven rather than waited on. */
 function shell() {
   vi.useFakeTimers();
   onTestFinished(() => {
@@ -38,7 +36,6 @@ test("a pane wears the scroll mark while it moves and loses it once it stops", a
   scroll(pane);
   expect(pane.hasAttribute(SCROLL_MARK)).toBe(true);
 
-  // The bar outlives the pause between two wheel notches, so one gesture draws one bar.
   await wait(SCROLL_QUIET_MS - 1);
   expect(pane.hasAttribute(SCROLL_MARK)).toBe(true);
   scroll(pane);

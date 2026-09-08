@@ -1,14 +1,6 @@
-//! Role-named colors resolved once at startup: truecolor where the terminal speaks it, the
-//! 256-cube otherwise, and no color at all under `NO_COLOR`/plain mode.
-//!
-//! Prose keeps the terminal's own foreground — body text, headings, fenced code — so a member
-//! whose background was read wrong, or never read at all, still reads every word at the contrast
-//! their terminal was configured for. Only the signal roles carry a hue, and every hue is chosen
-//! twice: bright on a dark background, dark and saturated on a light one.
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// How much color the terminal takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
     TrueColor,
@@ -16,15 +8,12 @@ pub enum ColorMode {
     Plain,
 }
 
-/// Which scheme the terminal background reads as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scheme {
     Dark,
     Light,
 }
 
-/// Every color a screen may use, named by role. A new color is a new field here, never an
-/// inline value at a call site.
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub mode: ColorMode,
@@ -108,11 +97,6 @@ const LIGHT: Palette = Palette {
 };
 
 impl Theme {
-    /// Resolve the palette for the running terminal: mode from `COLORTERM`/`TERM`, plain under
-    /// `NO_COLOR`, and the scheme the startup probe read off the terminal's background.
-    ///
-    /// A terminal that named no background falls back to what `COLORFGBG` states, and then to the
-    /// dark palette.
     pub fn detect(plain: bool, probed: Option<Scheme>) -> Theme {
         let mode = if plain || std::env::var_os("NO_COLOR").is_some() {
             ColorMode::Plain
@@ -136,7 +120,6 @@ impl Theme {
         Theme::for_mode(mode, scheme)
     }
 
-    /// The palette for one mode and scheme.
     pub fn for_mode(mode: ColorMode, scheme: Scheme) -> Theme {
         let palette = match scheme {
             Scheme::Dark => DARK,
@@ -196,11 +179,6 @@ const GRAY_STEP: i32 = 10;
 const GRAY_STEPS: i32 = 24;
 const NEUTRAL_SPREAD: u8 = 12;
 
-/// The xterm-256 index nearest an RGB value: the 6×6×6 cube (16..=231) or the 24-step gray ramp
-/// (232..=255), whichever sits closer under a green-weighted distance. A near-neutral value takes
-/// the ramp where the two tie, since the ramp is ten times finer there than the cube's six levels.
-/// Indices 0..=15 are never answered — a terminal remaps those, so the same index is a different
-/// color on the next member's screen.
 pub fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     let level = |value: u8| {
         CUBE_LEVELS
@@ -252,8 +230,6 @@ fn luma(rgb: Rgb) -> f32 {
     (0.2126 * rgb.0 as f32 + 0.7152 * rgb.1 as f32 + 0.0722 * rgb.2 as f32) / 255.0
 }
 
-/// The scheme an OSC 11 reply states: `\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\`, `#1e1e2e`, and every
-/// channel width X11 spells those in. `None` when the text carries no color.
 pub fn scheme_from_osc11(reply: &str) -> Option<Scheme> {
     let color = parse_osc11_color(reply)?;
     Some(if luma(color) > LIGHT_LUMA {
@@ -302,8 +278,6 @@ fn scale_channel(field: &str) -> Option<u8> {
     Some((value * 255 / full) as u8)
 }
 
-/// The scheme `COLORFGBG` states, read off its background field — the last one, so `15;0` and
-/// rxvt's `0;default;15` both answer. `None` where the value names no background color index.
 pub fn scheme_from_colorfgbg(value: &str) -> Option<Scheme> {
     let background: u8 = value.rsplit(';').next()?.trim().parse().ok()?;
     match background {

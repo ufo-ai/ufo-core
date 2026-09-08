@@ -8,12 +8,6 @@
 <meta name="description" content="UFO. Build the unknown." />
 <link rel="canonical" href="https://ufo.ai/" />
 
-<!-- What a link unfurler draws. It reads these tags and then comes back for the card itself,
-     unauthenticated, so the URL is absolute and names the one anonymous immutable image origin the
-     apex has: /share/og-home.jpg, compiled into the gateway beside /login/logo.png. The render is
-     untouched — a crawler follows this URL, a browser never does, so the page still fetches nothing.
-     The apex is written out rather than derived because this document is one string with no host of
-     its own, and the marketing page's canonical home is the production apex wherever it is served. -->
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="UFO" />
 <meta property="og:url" content="https://ufo.ai/" />
@@ -31,23 +25,6 @@
 
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" media="(prefers-color-scheme: light)" />
 <link rel="icon" href="/favicon-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)" />
-
-<!-- ===========================================================================
-     Figma node 2013:635 of "UFO.ai Brand".
-
-     The faces and the illustration are inlined as data: URIs, so the render
-     needs no network. The tab mark is the one the brand keeps, served by the
-     worker at /favicon.svg, so no copy of it can drift.
-
-     One knowing departure from the node: #fafafa -> var(--foreground)
-     (sand-50 #F3ECDE) for "the unknown." and the nav. Marginally warmer than the
-     node's cool near-white; that is the palette behaving correctly, not a drift.
-
-     The node draws the buttons in Inter Medium 14px, which is what they use.
-     The brand deck asks for Canela on display and Roboto Mono elsewhere; the
-     node's buttons are shadcn component instances (I2013:648, I2013:649) and
-     Inter is the typeface that kit ships with.
-     =========================================================================== -->
 
 <style>
 
@@ -295,8 +272,6 @@ body {
 </head>
 <body>
 
-<!-- The wordmark as the brand draws it, not re-exported from Figma — the node's
-     65x16 logo and this symbol's 196x49 viewBox are the same 4:1 mark. -->
 <svg class="svg-defs" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden">
 <symbol id="ufo-logo" viewBox="0 0 196 49">
 <g>
@@ -416,7 +391,6 @@ body {
          href="https://docs.google.com/forms/d/e/1FAIpQLSeXdDbu8pE64Q2zIf4OYQLz0Gu_ETM7P--4_DjtwRQmKS1FIQ/viewform"
          target="_blank" rel="noopener">
         Join Waitlist
-        <!-- lucide chevron-right, exported from the node. -->
         <svg class="btn-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
           <path transform="translate(5.33333 3.33333)" fill-rule="evenodd" clip-rule="evenodd" d="M0.195262 0.195262C0.455612 -0.0650874 0.877722 -0.0650874 1.13807 0.195262L5.13807 4.19526C5.39842 4.45561 5.39842 4.87772 5.13807 5.13807L1.13807 9.13807C0.877722 9.39842 0.455612 9.39842 0.195262 9.13807C-0.0650874 8.87772 -0.0650874 8.45561 0.195262 8.19526L3.72386 4.66667L0.195262 1.13807C-0.0650874 0.877722 -0.0650874 0.455612 0.195262 0.195262Z"/>
         </svg>

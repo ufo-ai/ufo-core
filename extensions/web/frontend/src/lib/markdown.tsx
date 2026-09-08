@@ -15,8 +15,7 @@ import {
 import { visit } from "unist-util-visit";
 
 /** Raw HTML an agent wrote is prose, not markup: a reply that says `<script>` is talking about
- *  `<script>`. Parsed, the sentence would lose the words it needs, so every html node crosses into
- *  the tree as the characters it was written as, before it can become an element. */
+ *  `<script>`, so every html node crosses into the tree as the characters it was written as. */
 function literalHtml() {
   return (tree: Root) => {
     visit(tree, "html", (node) => {
@@ -25,12 +24,6 @@ function literalHtml() {
   };
 }
 
-/** Streamdown classes its prose for a reading width it does not know: `list-inside` puts a wrapped
- *  line under its own bullet, a quotation arrives italic and behind a four-pixel rule. Those
- *  elements are drawn bare and `typeset` sets them, which is the register every other document in
- *  the portal is read in. What stays Streamdown's is what it draws better than an element can — the
- *  code block with its language and the table with its own scroll — now that both resolve their
- *  colours, type and radii through this portal's tokens. */
 const BARE_TAGS = [
   "p",
   "h1",
@@ -54,13 +47,8 @@ function bare(tag: (typeof BARE_TAGS)[number]) {
     createElement(tag, props);
 }
 
-/** A `mermaid` fence is a drawing the reply describes, so it is drawn. The library that draws it
- *  is loaded the first time a diagram asks for it, never in the page's own bundle. The SVG bakes
- *  its colours in at render, so each render reads the scheme mark `scheme.ts` keeps on the root —
- *  greys on a light page, mermaid's dark set on a dark one. A chart that will not parse —
- *  half-streamed, or simply wrong — shows the fence's own text as the code it is; `initialize` is
- *  a no-op because Streamdown never calls it, and each render configures the instance it
- *  awaited. */
+/** The SVG bakes its colours in at render, so each render reads the scheme mark off the root.
+ *  `initialize` is a no-op because Streamdown never calls it, and each render configures the instance. */
 const MERMAID_CONFIG: MermaidConfig = {
   startOnLoad: false,
   suppressErrorRendering: true,
@@ -109,11 +97,8 @@ function resolved(url: string): URL | null {
   }
 }
 
-/** A link the member did not write opens in its own tab, carries no opener, and reaches only a
- *  protocol a reader can follow — `javascript:` is a script the reply asked the page to run under
- *  the member's session, and it stays the words it was written as. An image is drawn only from this
- *  origin, so a reply cannot report who read it to a third party. The checkbox markdown mints for a
- *  task list is a mark on the page, never a control. */
+/** `javascript:` is a script the reply asked the page to run under the member's session, so a link
+ *  reaches only a protocol a reader can follow. An image is drawn only from this origin. */
 const COMPONENTS: Components = {
   ...Object.fromEntries(BARE_TAGS.map((tag) => [tag, bare(tag)])),
   a: ({ node: _node, className: _className, href, children, ...props }) => {
@@ -133,13 +118,8 @@ const COMPONENTS: Components = {
     props.type === "checkbox" ? <input {...props} disabled /> : null,
 };
 
-/** Only an address written with the scheme it is followed by: anything else a member typed reads as
- *  the words it is, so `www.example.com` is never resolved against the page it was typed on. */
 const LINKABLE = /(https?:\/\/|mailto:)[^\s<>]+/gi;
 
-/** An address typed into a sentence ends before the sentence does: the full stop that closes the
- *  sentence, and a bracket the sentence put around the address, belong to the sentence. The scheme
- *  is never trimmed into, so what is left still resolves as the address it was written as. */
 function address(match: string, scheme: string): string {
   let opened = 0;
   let closed = 0;
@@ -159,8 +139,7 @@ function address(match: string, scheme: string): string {
 }
 
 /** A member's own words are not markup: their `#`, `*` and `[docs](url)` stay the characters they
- *  typed. An address is the one exception, because a member who types one means the place it points
- *  at, and it is drawn as the anchor a reply's link is drawn as, under the same policy. */
+ *  typed. An address is the exception, drawn as the anchor a reply's link is, under the same policy. */
 export function Linked({ text }: { text: string }) {
   const parts: ReactNode[] = [];
   let read = 0;
@@ -181,15 +160,12 @@ export function Linked({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
-/** A single newline is a line break, because an agent writing a list of lines means the lines it
- *  wrote. `harden` is left out of the chain: it answers a refused link with a `[blocked]` span in
- *  its own words, and one policy for what a reply may link to and load already lives in
- *  `COMPONENTS`. */
+/** `harden` is left out of the chain: it answers a refused link with a `[blocked]` span in its own
+ *  words, and one policy for what a reply may link to already lives in `COMPONENTS`. */
 const REMARK_PLUGINS = [...Object.values(defaultRemarkPlugins), remarkBreaks, literalHtml];
 const REHYPE_PLUGINS = [defaultRehypePlugins.raw, defaultRehypePlugins.sanitize];
 const ARRIVING_PLUGINS = [...REHYPE_PLUGINS, arrive];
 
-/** A settled document: what it holds is all it will ever hold, so no block is completed for it. */
 export function Markdown({ text }: { text: string }) {
   return (
     <Streamdown
@@ -207,10 +183,6 @@ export function Markdown({ text }: { text: string }) {
   );
 }
 
-/** A reply arriving a token at a time. The text is split into blocks and each is memoised, so a
- *  settled paragraph is not re-parsed on every frame, and the block still being written is
- *  completed as it goes — a half-typed fence reads as the code block it is becoming rather than as
- *  three backticks. */
 export function StreamingBody({ text }: { text: string }) {
   return (
     <Streamdown

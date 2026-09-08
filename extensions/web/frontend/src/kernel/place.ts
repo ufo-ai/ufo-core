@@ -5,11 +5,6 @@ import { mergePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
 
 type Outcome = { view: string; notice: string | undefined; acts: number };
 
-/** The place bookkeeping every pane that holds a listing shares: the outcome notice a mutation
- *  leaves, the remount key that carries it to the next mount, and the push/replace/back step a
- *  place change earns. One owner, so the workspace's tabs and a top-level section cannot disagree
- *  about what opening a row does to history. The patch itself is merged by the codec, so this owner
- *  holds no list of place keys to fall behind the type. */
 export function usePlaceRecorder({
   view,
   place,

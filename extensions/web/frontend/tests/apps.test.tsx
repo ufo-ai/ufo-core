@@ -22,11 +22,8 @@ window.cancelAnimationFrame = (id) => void animationFrames.delete(id);
 const applicationLifecycle = await import("@/apps/lifecycle");
 vi.doMock("@/apps/lifecycle", () => applicationLifecycle);
 
-/** The app page's side of the bridge, tested against a fake shell on this same window: jsdom's
- *  `window.top` is the window itself, so the runtime's posts land on our own listener and our
- *  replies land on the runtime's. Each test imports the module fresh — the correlation maps and
- *  the held init are module state. A page reaches the shell through the imported kit and nothing
- *  else, so no test here defines a global for it to find. */
+/** jsdom's `window.top` is the window itself, so the runtime's posts land on our own listener. Each
+ *  test re-imports the module: the correlation maps and the held init are module state. */
 
 type Runtime = typeof import("@/apps/runtime");
 
@@ -366,9 +363,6 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
   expect(await screen.findByRole("heading", { name: "Wiki" })).toBeTruthy();
 });
 
-/** Under a lane band the shell draws no band of its own — the lane's is the one header — and what
- *  the band would have carried on its right, the act the view offers, stands as a row over the body.
- *  Unbanded, the same view is headed by the shell's band with the act on it. */
 test("a banded section app draws no band and keeps the view's act as a row over the body", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -406,10 +400,6 @@ test("a banded section app draws no band and keeps the view's act as a row over 
   expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
 });
 
-/** A view that heads its own page hands its band up through the one mechanism it always uses, and
- *  under a lane band that band is its acts: the name the lane already states is not said twice, and
- *  the act the page offers is still reachable. The shell draws no band over such a view either way,
- *  so a lane holds exactly one row of acts. */
 test("a banded section app keeps an owning view's band acts and draws no name", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -447,8 +437,6 @@ test("a banded section app keeps an owning view's band acts and draws no name", 
   expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
 });
 
-/** A page with no act of its own spends no height on the row: the shell's act slot is a host that
- *  stands empty until a view fills it, so the row is drawn and hidden rather than absent. */
 test("a banded page offering no act hides the row it would have stood on", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -465,9 +453,6 @@ test("a banded page offering no act hides the row it would have stood on", async
   expect(row.querySelector("*:not(.contents)")).toBeNull();
 });
 
-/** A lane the page opens beside itself draws its own band whole. It is a surface of its own, so the
- *  name it states and the way out of it are the lane's own and not the page's — the rule that
- *  collapses a header under a band stops at the lane that band heads. */
 test("a lane opened inside a banded page keeps its own band", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -494,9 +479,6 @@ test("a lane opened inside a banded page keeps its own band", async () => {
   expect(screen.getByRole("button", { name: "Close Report" })).toBeTruthy();
 });
 
-/** Every `navigate` the page has posted over the bridge, in order. `settled` is what makes "nothing
- *  was posted" a fact rather than a race: `postMessage` delivers in order, so a message queued by a
- *  press has already arrived once the sentinel queued after it has. */
 function navigations(): { posted: string[]; settled: () => Promise<void> } {
   const posted: string[] = [];
   let arrive = () => {};
@@ -517,11 +499,6 @@ function navigations(): { posted: string[]; settled: () => Promise<void> } {
   };
 }
 
-/** Under a band the page's place is its own. A filter picked inside a lane is a move within that
- *  lane, so the page redraws at the new place and asks the portal for nothing — reported, the
- *  portal would answer by standing the member on this page's own full screen, which is the whole
- *  track torn up to answer a press that never left it. Standing on its own screen the same press is
- *  the address changing, and the page says so. */
 test("a filter inside a banded page moves the page alone; unbanded it moves the portal", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -562,9 +539,6 @@ test("a filter inside a banded page moves the page alone; unbanded it moves the 
   expect(bridge.posted[0]).toContain("kind=file");
 });
 
-/** A record opened beside the listing is a place change like any other, so under a band it is the
- *  page's own: the lane stands in the frame's own track, beside the listing that raised it, and the
- *  portal is not asked to move. */
 test("a record opened inside a banded page stands in the page's own track", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -606,10 +580,6 @@ test("a record opened inside a banded page stands in the page's own track", asyn
   expect(bridge.posted).toEqual([]);
 });
 
-/** The conversation a record names is a place this page cannot draw, so the link to it is one the
- *  shell takes: it rides the bridge's navigate verb and the frame's own address stays where it
- *  stands. A cell that answered the press itself would stop the shell's listener at
- *  `defaultPrevented` and write the frame's address instead, which moves nothing the member sees. */
 test("a conversation link inside a framed record rides the bridge and leaves the frame standing", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -667,9 +637,6 @@ test("a conversation link inside a framed record rides the bridge and leaves the
   expect(location.hash).toBe("#/radar");
 });
 
-/** A lane is 320 pixels wide, so the page inside one takes the lane's own gutter — the same padding
- *  its body and a transcript take, all round — rather than the screen's, whose 88-pixel gutter would
- *  spend more than half the lane on margins and whose page top is deeper than the band above it. */
 test("a banded page takes the lane's gutter and an unbanded one the screen's", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -853,8 +820,6 @@ test("an application action reads its durable result and submits the exact prepa
   );
 });
 
-/** A page spells no address by hand: every builder the route table declares stands on the kit, so a
- *  builder that is renamed breaks the page at `tsc` rather than inside a frame at runtime. */
 test("the kit publishes every route builder and the route-kind test", async () => {
   vi.resetModules();
   const kit = (await import("@/apps/kit")) as unknown as Record<string, unknown>;

@@ -380,18 +380,15 @@ class IngressServe:
         instead of being served. The boundary is what keeps the claim to the view path without
         taking a name that only resembles it."""
         application = FastAPI(openapi_url=None)
-        # The bare path routes to its own handler, never to `_open` with a defaulted argument: a
-        # route carrying no `{view_path}` placeholder makes FastAPI bind that parameter from the
-        # query string, so `/~t?view_path=<token>` would have been read as a view link.
+        # The bare path routes to its own handler: a route carrying no `{view_path}` placeholder
+        # makes FastAPI bind that parameter from the query string.
         application.add_api_route(INGRESS_VIEW_PATH, self._no_view_token, methods=PROXY_METHODS)
         application.add_api_route(
             f"{INGRESS_VIEW_PATH}/{{view_path:path}}", self._open, methods=PROXY_METHODS
         )
         application.add_api_route("/{path:path}", self._proxy, methods=PROXY_METHODS)
-        # A WebSocket handshake matches no HTTP route, so the view path is claimed a second time
-        # here: without these two, `/~t/{token}` over WebSocket would reach the catch-all and be
-        # forwarded to the sandbox as a request path, which is the leak the HTTP routes above exist
-        # to close.
+        # A WebSocket handshake matches no HTTP route, so `/~t/{token}` over WebSocket would
+        # otherwise reach the catch-all and be forwarded as a request path.
         application.add_api_websocket_route(INGRESS_VIEW_PATH, self._no_socket_view)
         application.add_api_websocket_route(
             f"{INGRESS_VIEW_PATH}/{{view_path:path}}", self._no_socket_view
@@ -617,8 +614,6 @@ class IngressServe:
         if files is not None:
             return await self._serve_stored(request, authorized, files, path)
         if authorized.shipped is not None:
-            # A shipped bundle lives only in the fleet store; a `None` manifest is the digest gone,
-            # not a sandbox to dial — 404 for the portal's remount on the new digest to heal.
             return Response(NOT_FOUND, status_code=404, media_type="text/plain")
         dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
@@ -993,13 +988,8 @@ class IngressServe:
                 try:
                     await self._relay(websocket, upstream)
                 except Exception as error:
-                    # Any failure of the relay, not an enumeration of its classes. Three spellings
-                    # of "the viewer is gone" have escaped a named tuple so far — `RuntimeError`
-                    # from Starlette's state machine, `WebSocketDisconnect` out of a send, and an
-                    # `AttributeError` raised inside the ASGI server's own protocol when the
-                    # transport resets with no loop yield in between — and the next one costs
-                    # another socket that ends with no record and no close frame. What the viewer
-                    # needs is the terminal state, which is the same whatever the class was.
+                    # Any failure of the relay, not an enumeration of its classes: three spellings
+                    # of the viewer is gone have escaped a named tuple so far.
                     log_error(
                         "ingress.socket_failed",
                         conversation_id=str(authorized.conversation_id),

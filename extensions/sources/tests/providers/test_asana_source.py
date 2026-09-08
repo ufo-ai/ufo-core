@@ -58,7 +58,6 @@ async def test_workspaces_follow_offset_pagination_and_render_titled_json() -> N
     assert result.snapshot is False
     assert result.deletes == ()
 
-    # the default render titles from `name` and dumps the record's JSON beneath it
     body = next(page.body for page in result.pages if page.source_ref == "workspaces/1")
     assert "Acme HQ" in body
 
@@ -99,7 +98,6 @@ async def test_full_refresh_stream_never_sends_the_modified_since_filter() -> No
 
     result = await _fetch("users", handle, cursor="2026-02-01T00:00:00.000Z")
     assert seen == [None]
-    # no cursor_field to advance over — the watermark stays put rather than moving
     assert result.next_cursor == "2026-02-01T00:00:00.000Z"
     assert {page.source_ref for page in result.pages} == {"users/u1"}
     assert result.pages[0].updated_at is None

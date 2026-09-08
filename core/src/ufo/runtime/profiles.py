@@ -24,10 +24,6 @@ GENERAL_PURPOSE_TOOLS = (
     "grep",
     "load_skill",
     "share_file",
-    # Cross-extension tools matching the source general_purpose's set: web search/fetch, the
-    # connector trio, and the spreadsheet REPL. Names resolve only if the owning extension is
-    # installed (the strict allow-list filters against the live tool set), so an absent extension
-    # leaves the tool silently unavailable rather than erroring.
     "search_web",
     "search_vertical",
     "fetch_url",

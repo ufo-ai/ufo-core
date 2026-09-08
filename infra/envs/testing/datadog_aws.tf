@@ -1,22 +1,4 @@
-# Datadog's view of RDS. The database's own metrics — connection count, CPU, freeable memory —
-# reach Datadog only through CloudWatch, and nothing was reading CloudWatch, so a saturating
-# database was invisible in the same dashboards that carry every other signal. The application's
-# OTLP exporter cannot supply these: it reports what the client experienced, never what the
-# database was doing.
-#
-# The integration is per AWS account, not per environment, and both roots deploy into this one
-# account. It lives in the testing root because that is the only root the deploy pipeline applies.
-# Its metrics cover every RDS instance in the account, so prod's database is collected from here
-# too, distinguished by the `dbinstanceidentifier` tag rather than by which root created this.
-# `gates.py` holds the one-root rule.
-#
-# CloudWatch keeps a point every one to five minutes depending on the metric — the credit metrics
-# are five-minute only — and Datadog collects RDS in batches, so the newest minutes of any window
-# are still empty.
 
-# Datadog's own AWS account, the principal the role below trusts. Site-specific — this is us5's,
-# the site `monitors.tf` pins its api_url to. A wrong value fails as sts:AssumeRole denied with no
-# other symptom, so it is read off the org's AWS integration page, never assumed.
 locals {
   datadog_aws_account_id = "464622532012"
 }
@@ -40,10 +22,6 @@ data "aws_iam_policy_document" "datadog_assume_role" {
   }
 }
 
-# Read-only and scoped to what the RDS namespace needs: the metric surface, the resource
-# descriptions Datadog joins against it, and the tags it keys those metrics by. Datadog's published
-# policy grants its whole product surface; nothing here collects logs, traces, or any other
-# service, so the rest would be authority with no reader.
 data "aws_iam_policy_document" "datadog_rds_metrics" {
   statement {
     effect = "Allow"
@@ -89,18 +67,12 @@ resource "datadog_integration_aws_account" "ufo" {
     include_only = [var.region]
   }
 
-  # Only the namespace whose metrics the role can actually read. An unfiltered integration would
-  # bill for every namespace in the account while the policy above refuses most of them.
   metrics_config {
     namespace_filters {
       include_only = ["AWS/RDS"]
     }
   }
 
-  # The provider requires these blocks, so each names the collection it is turning off rather than
-  # omitting it: no forwarder to send logs, no service to trace, and resource collection off, which
-  # otherwise defaults on. The IAM policy above already refuses all three; this is the same refusal
-  # said where a reader looks for it.
   logs_config {
     lambda_forwarder {}
   }

@@ -48,8 +48,6 @@ def _stream(
     )
 
 
-# Stream set mirrors Airbyte's source-ashby catalog (18 streams). `application_criteria_evaluations`
-# is a per-application substream; `applications_for_criteria` is its parent enumeration.
 ASHBY_STREAMS: list[StreamSpec] = [
     _stream("candidates", path="/candidate.list", cursor_field="updatedAt", canonical=True),
     _stream("job_postings", path="/jobPosting.list", cursor_field="updatedAt", canonical=True),

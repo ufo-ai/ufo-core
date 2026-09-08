@@ -15,9 +15,8 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** `laidLog` measures the log through `Element.prototype`, which every later test in this file
- *  shares. Undoing it here rather than at the end of the test that asked for it means one failed
- *  assertion takes down that test alone. */
+/** `laidLog` measures the log through `Element.prototype`, which every later test here shares. Undoing
+ *  it now rather than at the end means one failed assertion takes down that test alone. */
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -41,11 +40,8 @@ function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
 }
 const REFUSED_TURN = "44444444-4444-4444-8444-444444444444";
-/** The id of a reply the turn delivered mid-flight, as its `reply` frame carries it. */
 const REPLY_ID = "66666666-6666-4666-8666-666666666666";
 
-/** What the chat route answers a message that joined the run a live turn already opened: admission
- *  opened no run for this delivery, so the tail on that turn is the one carrying its frames. */
 const FOLDED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go", opened_run: false };
 
 async function sendingMidTurn(chat: Route): Promise<void> {
@@ -91,8 +87,6 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
-/** An agent on `auto` runs whatever model the deploy picked, so naming it on the reply states a
- *  choice the member never made — the spend stands alone. */
 test("a reply from an agent on auto states its spend and names no model", async () => {
   wire({
     ...transcript(),
@@ -220,7 +214,6 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
-  // The line states the step. The fold it opens onto stands closed until the member asks for it.
   expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(1);
   expect(screen.queryByText("Thinking…")).toBeNull();
 
@@ -241,13 +234,11 @@ test("the working line is not taken down when the turn's first step lands", asyn
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   const opening = await screen.findByText("Thinking…");
-  // The wait states itself with a glyph. Nothing stands behind the line yet, so no chevron opens it.
   const waiting = opening.closest("[data-slot=marker]")!;
   expect(waiting.querySelector("[data-throb]")).toBeTruthy();
   expect(waiting.querySelector("svg.size-icon")).toBeNull();
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
-  // The same element, not one that replaced it: the words change in place under the glyph.
   expect(await screen.findByText("Reviewing the pull request.")).toBe(opening);
   expect(document.querySelector("[data-slot=marker] svg.size-icon")).toBeTruthy();
 });
@@ -311,8 +302,6 @@ test("a live subagent run nests under the reply it produced", async () => {
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
-/** A run delegated to another agent is headed by that agent, named the way every other surface
- *  names it. A run the spawn named carries that name instead. */
 test("a run delegated to an agent heads the row with the agent's drawn name", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review it." }], turn: TURN_ID }));
   open();
@@ -371,7 +360,6 @@ test("a live run states its name and current step, and clears the wait when it e
   expect(screen.getByText("UK sports news")).toBeTruthy();
 });
 
-/** Where two strings stand relative to each other in the rendered page. */
 function order(first: string, second: string): boolean {
   const log = document.body.textContent ?? "";
   return log.indexOf(first) < log.indexOf(second);
@@ -394,8 +382,6 @@ test("what a reply did stands above the reply, in the order the turn did it", as
   );
   open();
 
-  // The tools ran before the agent wrote a word about them, so the disclosure states them where
-  // they happened — above the answer they produced, never under it.
   await userEvent.click(await screen.findByText("Completed 1 step"));
   expect(screen.getByText("Running the focused tests.")).toBeTruthy();
   expect(order("Running the focused tests.", "The tests pass.")).toBe(true);
@@ -413,9 +399,6 @@ test("a message that opens a turn stands above the reply it is waiting for", asy
   await userEvent.type(screen.getByLabelText("Ask UFO"), "write a poem");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  // Nothing was running when this was sent, so it is the prompt a turn answers rather than a
-  // message waiting on one — it stands where the member said it, above the reply to it, while
-  // its own POST is still in flight.
   expect(await screen.findByText("write a poem")).toBeTruthy();
   expect(order("write a poem", "Thinking…")).toBe(true);
 
@@ -438,10 +421,6 @@ test("a queued message stays under the answer streaming above it, and never move
   StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
-  // The turn answers the message it is already inside before it takes up the next one, so a message
-  // waiting on it stands after that answer — under the reply it delivered and over the composer,
-  // which is where the drain will leave it. Drawn above, it would state an order the turn
-  // contradicts, and every bubble would shift the moment the fold landed.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "4+4=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("4+4=")).toBeTruthy();
@@ -474,9 +453,6 @@ test("a message sent mid-turn joins the running turn, waits to be taken up, and 
   StreamFake.last().emit("message", { text: "reading it" });
   expect(await screen.findByText(saying("reading it"))).toBeTruthy();
 
-  // Admission opened no run for the follow-up, so its frames come up the tail already open on that
-  // turn — a second attach would leave two EventSources writing one live turn, every chunk doubled
-  // and the reply recorded twice.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
   const send = screen.getByRole("button", { name: "Send" });
   expect((send as HTMLButtonElement).disabled).toBe(false);
@@ -518,9 +494,6 @@ test("a reply the turn delivered before the fold stands ahead of the message it 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(waiting("1+1=")).toBe(true));
 
-  // The poem was sent to the member as the turn's own reply to the first message, so it stands in
-  // the log where the durable transcript will state it — above the message the drain then folds.
-  // The fold ends the round and the next round streams into a fresh live bubble.
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   StreamFake.last().emit("message", { text: "2" });
   StreamFake.last().emit("terminal", {
@@ -549,8 +522,6 @@ test("working narration is not a reply: a drain clears it rather than settling i
   StreamFake.last().emit("message", { text: "Thinking about ducks." });
   expect(await screen.findByText(saying("Thinking about ducks."))).toBeTruthy();
 
-  // Untagged round text reaches no member — Slack posts none of it — so the page must not keep it
-  // as a reply either. The drain ends the round and the words go with it.
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   StreamFake.last().emit("message", { text: "2" });
   StreamFake.last().emit("terminal", {
@@ -584,9 +555,6 @@ test("a drain that beats the response leaves the reply above the message", async
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("1+1=")).toBeTruthy();
 
-  // The queue row is committed before the POST answers, so the drain can name it while the
-  // response is in flight and no bubble holds the arrival yet. The bubble the send is still
-  // waiting on is the fold's target all the same, and the delivered reply stands above it.
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   land({ ...FOLDED, arrival_id: ARRIVAL_ID });
   StreamFake.last().emit("message", { text: "2" });
@@ -616,10 +584,6 @@ test("each fold clears its own message, and the replies between them keep their 
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
-  // Each drain beats its own response, so it clears the wait on a bubble whose arrival id has not
-  // landed yet, and it consumes one marker per row it names. A marker left behind would clear the
-  // next message's wait instead of this one's, and a reply delivered after a fold stands under the
-  // message it answers.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("1+1=")).toBeTruthy();
@@ -669,9 +633,6 @@ test("a drain that beats the response leaves no wait under the message it took u
   });
   await sendingMidTurn(() => admitted);
 
-  // The queue row is committed before the POST answers, so the turn can reach a round boundary,
-  // drain it and say so while the response is still in flight. Stamping the id afterwards would
-  // hold a wait nothing will ever name again.
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
   land({ ...FOLDED, arrival_id: ARRIVAL_ID });
   StreamFake.last().emit("message", { text: "reading both" });
@@ -685,8 +646,6 @@ test("a wait states nothing once the turn it was waiting on has ended", async ()
   await sendingMidTurn(() => json({ ...FOLDED, arrival_id: ARRIVAL_ID }));
   await waitFor(() => expect(waiting("and again")).toBe(true));
 
-  // A failed turn releases what it never absorbed back to pending, so the message really is still
-  // waiting — but not on this turn, and a pulse under the bubble with nothing running says it is.
   StreamFake.last().emit("terminal", { status: "failed", error_class: "ProviderTimeout" });
 
   expect(await screen.findByText("(failed: ProviderTimeout)")).toBeTruthy();
@@ -704,8 +663,6 @@ test("a failed mid-turn send states the error and leaves the reply streaming", a
   expect(await screen.findByText(saying("reading it"))).toBeTruthy();
   fail();
 
-  // The failure is the POST's alone: the turn it never reached goes on streaming up the tail the
-  // page holds, so the reply stays standing and the next delta lands on it, not on a blank bubble.
   expect(await screen.findByText("Error 500 — try again.")).toBeTruthy();
   expect(screen.getByText(saying("reading it"))).toBeTruthy();
   expect(StreamFake.opened.length).toBe(1);
@@ -715,9 +672,6 @@ test("a failed mid-turn send states the error and leaves the reply streaming", a
 });
 
 test("a refused mid-turn message is tailed on the turn it founded, behind no live source", async () => {
-  // A fold refused for an unheld seat or a tripped cap founds a turn of the message's own, carrying
-  // its own terminal and naming no arrival. The page tails it to state the refusal, and the source
-  // it held cannot stay open behind that one: two on one chat double every delta between them.
   await sendingMidTurn(() =>
     json({ turn_id: REFUSED_TURN, conversation_id: CONVO_ID, title: "go", opened_run: false }),
   );
@@ -761,10 +715,6 @@ test("a refusal states itself alone, never glued to the reply the page stopped t
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-  // The refused message founds a turn of its own, so the page leaves the running turn's tail for
-  // that one — and a tail draws the turn it opened on from that turn's own replay. Carrying the
-  // half-streamed answer over would record one bubble holding two turns, and the answer the page
-  // stopped tailing is the running turn's to state, on the next read of it.
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
   StreamFake.last().emit("parked", { message: "Over the spend cap — raise it to carry on." });
 
@@ -776,9 +726,6 @@ test("a refusal states itself alone, never glued to the reply the page stopped t
 });
 
 test("a fold that resumes a parked turn is tailed again, because admission opened that run", async () => {
-  // A fold onto a parked turn requeues it, and admission says this delivery opened the run: the
-  // frames come from a fresh workflow on the same turn id, so the id matching what the page thinks
-  // it is tailing is no reason to leave that source in place.
   await sendingMidTurn(() => json({ ...FOLDED, opened_run: true, arrival_id: ARRIVAL_ID }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
@@ -1246,8 +1193,6 @@ test("tasks slot preserves an empty truncated board's context", async () => {
   });
   open();
 
-  /* The sidebar carries a Tasks app of its own, and the slot's own control is the one that names
-     what it holds, so the press is aimed by that name rather than by the row it stands in. */
   await waitFor(() =>
     expect(document.querySelector("[data-slot=header]")?.textContent).toBeTruthy(),
   );
@@ -1259,9 +1204,6 @@ test("tasks slot preserves an empty truncated board's context", async () => {
   expect(screen.getByText("Some tasks may not be shown.")).toBeTruthy();
 });
 
-/** A site bound as an app's homepage answers to its agent's level rather than to its own
- *  `visibility`, so the slot's line states when the site was made and last changed and nothing
- *  about who may read it. */
 test("sites slot renders hosted links with when they were made and last changed", async () => {
   const url = "https://ufo.example/sites/signed";
   wire({
@@ -1806,8 +1748,6 @@ test("a question the conversation has moved past states its answers and offers n
   const reply = (await screen.findByText("asking")).closest("[data-slot=message]") as HTMLElement;
   expect(within(reply).getByText("First?")).toBeTruthy();
   expect(within(reply).getByText("alpha")).toBeTruthy();
-  // The entry they left says nothing: the turn is over, so there is no answer to record and no
-  // control that could still take one.
   expect(screen.queryByText("Second?")).toBeNull();
   expect(screen.queryByRole("radio", { name: "gamma" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
@@ -1940,9 +1880,6 @@ test("a turn puts shared images in one carousel before its document grid", async
   expect(carousel.nextElementSibling).toBe(documents);
 });
 
-/** A file is shared by the turn that is running, not by the turn after it: the frame naming one
- *  arrives while the reply is still being written, and the row goes up then. What keeps it off the
- *  next turn is the store dropping the list at the send, which the test below pins. */
 test("a file the running turn shares stands under the log before the turn ends", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
@@ -1977,9 +1914,6 @@ test("a file the running turn shares stands under the log before the turn ends",
   expect(screen.getAllByRole("button", { name: "report.csv" })).toHaveLength(1);
 });
 
-/** A file rides the reply that shared it, never the foot of the log: the member's next message
- *  stands below the reply and its files, and a follow-up turn takes nothing away from what an
- *  earlier reply showed. */
 test("a file stays on the reply that shared it when a follow-up opens the next turn", async () => {
   let land: (payload: unknown) => void = () => {};
   const admitted = new Promise<Response>((resolve) => {
@@ -2043,8 +1977,6 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
   expect(screen.getAllByRole("img", { name: "portrait.jpg" })).toHaveLength(1);
 });
 
-/** The reload half of the same fact: the transcript states files on the reply that shared them,
- *  so a conversation read back draws an earlier reply's image where it was, not nowhere. */
 test("a write-up the reply carried opens as the detailed report above the attachments", async () => {
   wire(
     transcript({
@@ -2174,7 +2106,6 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
   expect(rows[rows.length - 1].textContent).toBe("Anything else?");
 });
 
-/** An application a turn created, as the surface names it on the reply that made it. */
 const CREATED_APP = { id: SECOND_ID, name: "second", model: "claude-sonnet-5", icon: "aten" };
 
 test("an application the turn created stands on the reply that made it, and opens it", async () => {
@@ -2513,12 +2444,8 @@ test("a streamed chunk never steals focus from where the member put it", async (
   expect(document.activeElement).toBe(elsewhere);
 });
 
-/** The transcript of a compacted conversation is only the tail; its cursor names the bounded page
- *  standing above it, and each page's response names the one above it — the chain is the server's
- *  to state. The row over the oldest loaded message brings the next page in when it is seen — the
- *  test's IntersectionObserver sees everything at once, so the pages land unprompted — and each
- *  reads above the tail in order, the loading row gone and no further page asked for once a
- *  response names none. */
+/** Each page's response names the one above it, so the chain is the server's to state. The test's
+ *  IntersectionObserver sees everything at once, so the pages land unprompted. */
 test("a compacted conversation pages its earlier messages in above the tail", async () => {
   const { calls } = wire({
     "/transcript?cursor=page-2": () =>
@@ -2566,9 +2493,6 @@ test("a compacted conversation pages its earlier messages in above the tail", as
   ]);
 });
 
-/** The reply being written and the reply that landed are one row in one list: the pane follows
- *  the element, so a row rebuilt at the end of every turn would take the transcript back to the
- *  top with it. The streamed row and the settled one must share a key. */
 test("the reply that landed keeps the streaming row's element", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
@@ -2598,11 +2522,8 @@ test("a conversation that never compacted asks for no pages", async () => {
   expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([]);
 });
 
-/** jsdom lays nothing out, so the geometry of a page landing is stated by hand: a pane showing
- *  three hundred pixels, every row a hundred tall at its index. Loading a page adds its height
- *  above the line being read, and the row puts exactly that height back on the scroller — here
- *  two rows, two hundred pixels — including for the last page, whose correction runs in the very
- *  commit that empties the row. */
+/** jsdom lays nothing out, so a page landing's geometry is stated by hand: a pane showing three hundred
+ *  pixels, every row a hundred tall at its index. */
 test("loading a page above holds the line being read where it was", async () => {
   const load = vi.fn();
   const earlier: EarlierMessages = { pages: [], more: true, loading: false, failed: true, load };
@@ -2658,9 +2579,6 @@ test("loading a page above holds the line being read where it was", async () => 
   expect(pane.scrollTop).toBe(200);
 });
 
-/** The read-back transcript pages the same way, and a page that would not come stops asking: the
- *  row states what happened and waits to be pressed rather than retrying against the same answer
- *  on every scroll. */
 test("a transcript read back retries a failed page only when pressed", async () => {
   const load = vi.fn();
   render(
@@ -2683,11 +2601,6 @@ test("a transcript read back retries a failed page only when pressed", async () 
   expect(load).toHaveBeenCalledTimes(1);
 });
 
-/** The live chat gives the conversation a height of its own and scrolls it there. A transcript read
- *  back stands in a page that already scrolls, so it draws no pane, no viewport and no way back to a
- *  foot it does not own — a second scroll region inside a scrolling page is a second bar beside the
- *  same words, and one sized to a share of a container with no height to share out collapses to
- *  nothing and clips the transcript. */
 test("the live chat scrolls its own pane and a transcript read back scrolls with the page", async () => {
   wire(transcript({ messages: [{ role: "assistant", text: "Done." }] }));
   open();
@@ -2709,11 +2622,8 @@ test("the live chat scrolls its own pane and a transcript read back scrolls with
   expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
 });
 
-/** jsdom lays nothing out, so the pane the transcript is read through is stated here: a thousand
- *  pixels of messages seen three hundred at a time, with the foot of the content moving as the
- *  reader scrolls. Every call the scroller makes — whether the reader is at the foot, whether a
- *  reply follows them — is read off these numbers, and a browser clamps the foot to what is left
- *  under the fold. */
+/** jsdom lays nothing out, so the pane is stated here; a browser clamps the foot to what is left under
+ *  the fold. */
 const FOLD = 300;
 const CONTENT = 1000;
 const FOOT = CONTENT - FOLD;
@@ -2730,8 +2640,7 @@ function laidLog(log: HTMLElement): void {
   });
 }
 
-/** A line taking its space in the log. jsdom fires no resize, so the reply growing is stated by
- *  adding to the content the scroller watches. */
+/** jsdom fires no resize, so a reply growing is stated by adding to the content the scroller watches. */
 function lands(log: HTMLElement) {
   log
     .querySelector("[data-slot=message-scroller-content]")!
@@ -2822,10 +2731,6 @@ test("a send the composer cannot answer leaves the attachment where the member p
 });
 
 test("a second press while the attachment travels sends the file once", async () => {
-  /** The send carries the bytes to the store before it admits the message, so the card still holds
-   *  the file while it runs. A member who presses Send again in that window means the one message
-   *  they wrote, not a second turn carrying the same file — and on the start screen, not a second
-   *  conversation. */
   let mint: () => void = () => {};
   const minting = new Promise<void>((resolve) => (mint = resolve));
   const { handler } = wire({
@@ -2862,9 +2767,6 @@ test("a second press while the attachment travels sends the file once", async ()
 });
 
 test("the card refuses an eleventh file and says so while the member can still see it", async () => {
-  /** The surface refuses a send of more than ten attachments, so the card holds the same bound: the
-   *  member reads it with the files in front of them, rather than losing their words to a 413 the
-   *  send answers after it cleared the box. */
   wire({
     ...transcript(),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
@@ -2886,8 +2788,6 @@ test("the card refuses an eleventh file and says so while the member can still s
 });
 
 test("a file attached while the send runs stays in the card for the next message", async () => {
-  /** The send takes the files it read when the member pressed. A file attached while the upload runs
-   *  was never in that body, so it stays where the member put it instead of vanishing unsent. */
   let mint: () => void = () => {};
   const minting = new Promise<void>((resolve) => (mint = resolve));
   wire({
@@ -2950,9 +2850,6 @@ test("the composer draws a picked image as itself and a picked PDF as a badged c
   expect(sent.getAttribute("src")).toMatch(/^data:image\/gif;base64,/);
 });
 
-/** The card draws one page, so that is what the composer asks the route to render: a batch it would
- *  drop still costs a rasterize and holds one of the service's render permits while the member is
- *  still writing. */
 test("the composer asks the preview route for the one page its card draws", async () => {
   const asked: (string | null)[] = [];
   wire({
@@ -2979,9 +2876,6 @@ test("the composer asks the preview route for the one page its card draws", asyn
   expect(asked).toEqual(["1"]);
 });
 
-/** The other half of the same message, read back: the transcript states what the member attached as
- *  files with a picture each, and the note admission wrote at the foot of their words never reads as
- *  words. */
 test("a reloaded message draws what the member attached rather than naming where it landed", async () => {
   const preview =
     "/surface/web/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/attachments/web-inbox/lights.gif";
@@ -3015,9 +2909,6 @@ test("a reloaded message draws what the member attached rather than naming where
   expect(screen.queryByText(/Attached files/)).toBeNull();
 });
 
-/** A preview link is answered off the conversation's live workspace, so it can stop answering while
- *  the message stays on the page. The card names the file then, rather than leaving a broken
- *  frame. */
 test("an attachment whose picture will not load falls back to naming the file", async () => {
   wire(
     transcript({
@@ -3044,8 +2935,6 @@ test("an attachment whose picture will not load falls back to naming the file", 
   expect(screen.getByText("lights.gif")).toBeTruthy();
 });
 
-/** What a member attached is a file of the conversation, so it opens the way every other file in
- *  the transcript opens rather than sitting on the bubble as a picture nothing can be done with. */
 test("a member's own attachment opens from the bubble", async () => {
   wire(
     transcript({
@@ -3070,9 +2959,6 @@ test("a member's own attachment opens from the bubble", async () => {
   expect(await screen.findByRole("button", { name: "Open lights.gif" })).toBeTruthy();
 });
 
-/** A picture a reply shared is drawn inline rather than as a card, and its link expires the same
- *  way the member's own attachment does. It answers a dead link the same way too: the file is
- *  named, never left as a broken frame. */
 test("a shared picture whose link will not load falls back to naming the file", async () => {
   wire(
     transcript({
@@ -3385,8 +3271,6 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   StreamFake.last().emit("activity", { text: "Applying the migration." });
   StreamFake.last().emit("resumed", { attempt: "attempt-one" });
 
-  // The line stands where the work does, so the wait reads as interrupted rather than as stopped.
-  // Opening it states the resume a second time, as a step beside the one it interrupted.
   const resumed = await screen.findByText("Resumed after a restart");
   expect(screen.queryByText("Applying the migration.")).toBeNull();
 
@@ -3395,9 +3279,6 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   expect(screen.getByText("Applying the migration.")).toBeTruthy();
 });
 
-/** Which app a new conversation reaches is settled by the route that opened the start screen, not
- *  by a control inside the box: the composer holds the words, the files and the send, and nothing
- *  that would rename the app under them. */
 test("a new conversation's composer offers no way to switch app", async () => {
   wire({
     ...transcript(),
@@ -3428,9 +3309,6 @@ test("a new conversation opens with the composer focused", async () => {
   expect(document.activeElement).toBe(box);
 });
 
-/** One pane stands for every start screen, so a route naming another agent renames the composer
- *  already on the screen rather than mounting one beside it: the box is the same element after the
- *  rename, and the member's place in the words is where they left it. */
 test("a route renaming the start screen keeps the same box, and the place in its words", async () => {
   wire({ ...transcript() });
   location.hash = "#/";
@@ -3450,10 +3328,6 @@ test("a route renaming the start screen keeps the same box, and the place in its
   expect(after.selectionEnd).toBe(6);
 });
 
-/** One pane stands for every start screen, so a route that names another agent — the rail's "Ask
- *  assistant" names the main one — renames the composer already on the screen rather than
- *  mounting one that would read the named agent's draft. The box must read that draft itself, and
- *  the words it was holding stay stored under the agent they were written for. */
 test("a route that renames the start screen's agent reads that agent's own draft", async () => {
   wire({ ...transcript() });
   localStorage.setItem("ufo.chat-draft." + MEMBER.id + "/new:" + AGENT_ID, "words for the main agent");
@@ -3487,8 +3361,6 @@ test("the start screen's empty space is the box's: a press in it lands the curso
   expect(document.activeElement).toBe(box);
   expect(box.selectionStart).toBe(4);
 
-  // A press on the card is the card's own: the box places its cursor where the member pressed, and
-  // the controls beside it keep their presses.
   await userEvent.click(screen.getByRole("button", { name: "Attach files" }));
   expect(document.activeElement).not.toBe(box);
 });
@@ -3517,21 +3389,13 @@ test("a starter says its sentence on the press, and leaves with the start screen
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
-/** The composer states which application the message is addressed to, wearing the mark that app
- *  wears in the sidebar, and the member can take the band away. The start screen states what the
- *  pane is for above it, because a pane that opens on nothing else says nothing at all. */
 test("the composer names the app it addresses, and the band can be taken away", async () => {
   wire(transcript());
-  // An app that is not the chat app, which is the whole case the band exists for: it says the words
-  // are going somewhere other than the assistant. `app_chat` ships the chat app as the main agent,
-  // so a main agent standing in for "some app" here would be that app and would prove the opposite.
   location.hash = "#/new/" + SECOND_ID;
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask UFO");
 
-  // The band wears the mark the sidebar draws this app under, not a category glyph standing in.
-  // The app's own name stands in the sidebar too, so the band is read on the page alone.
   const page = within(screen.getByRole("main"));
   const band = page.getByText("Second");
   expect(band.parentElement!.querySelector("svg")).toBeTruthy();
@@ -3539,13 +3403,9 @@ test("the composer names the app it addresses, and the band can be taken away", 
   await userEvent.click(screen.getByRole("button", { name: "Stop addressing Second" }));
 
   expect(page.queryByText("Second")).toBeNull();
-  // Taking the band away leaves the words and the acts under it exactly where they were.
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });
 
-/** The band qualifies the words by naming the app they address, which the chat app's own composer
- *  cannot do: there the app is the surface, so the band would name the screen the member is already
- *  looking at. */
 test("the chat app's composer does not name itself over its own words", async () => {
   wire(transcript());
   location.hash = "#/agents/" + CHAT_APP_ID + "?open=compose";
@@ -3621,10 +3481,6 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
-/** A row the ranking could not make ready stands in an application's slot all the same, and what it
- *  still needs is stated by the mark alone: the row says its work, and the account it waits on is
- *  the brand it wears. The mark draws at the size every other row's mark draws at, never at the
- *  square a connector tile takes. */
 test("a spare unlock stands in an app's slot and wears the brand of what it needs", async () => {
   wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
   location.hash = "#/";
@@ -3633,8 +3489,6 @@ test("a spare unlock stands in an app's slot and wears the brand of what it need
   const row = await screen.findByRole("button", { name: /accounts each deal is still waiting on/ });
   expect(row.textContent).not.toContain("Connect");
 
-  // The mark is the account's brand and not the app icon the row's own `mark` would draw, which is
-  // the whole of what states the price on a row that no longer says one.
   const glyph = row.firstElementChild!;
   expect(glyph.getAttribute("style")).toContain("--brand-salesforce");
   const mark = glyph.getAttribute("class") ?? "";
@@ -3735,14 +3589,10 @@ test("an unlock is an ask, not a departure: it names its accounts and says the b
     screen.queryByRole("link", { name: /Connect more accounts/ }),
   ).toBeNull();
 
-  // The account's mark draws in the glyph the rows above it draw, not at the square a connector
-  // tile takes: jsdom lays nothing out, so the size it is asked for is what a test can hold.
   const mark = row.firstElementChild!.getAttribute("class") ?? "";
   expect(mark).toContain("size-(--size-glyph)");
   expect(mark).not.toContain("--size-brand-mark");
 
-  // The press says the build, never a connect: the agent asks for what it turns out not to hold,
-  // and the connect control rides its reply.
   await userEvent.click(row);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(said).toEqual([
@@ -3770,7 +3620,6 @@ test("a landed connect states the account it made, and presses nothing", async (
   expect(settled.closest("a")).toBeNull();
   expect(screen.getByText("Work account")).toBeTruthy();
   expect(screen.queryByRole("link", { name: /Connect/ })).toBeNull();
-  // The words that asked stay: the record reads with the instruction it answers.
   expect(screen.getByText("Use the connection control.")).toBeTruthy();
 });
 
@@ -3807,9 +3656,6 @@ test("the starters close on a link to the connectors screen, which the press rea
   const cta = screen.getByRole("link", { name: /Connect more accounts/ });
   expect(cta.getAttribute("href")).toBe("#/connectors");
 
-  // The start screen prevents the default of every mousedown outside the box, so that a press in
-  // its empty space lands the cursor in the words. A link is reached on the click that follows,
-  // and this holds that the one does not swallow the other.
   await userEvent.click(cta);
 
   expect(location.hash).toBe("#/connectors");

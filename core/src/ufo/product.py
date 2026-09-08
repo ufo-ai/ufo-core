@@ -142,11 +142,8 @@ async def product_census() -> None:
             )
         ).label("invited"),
         sa.exists(
-            # An owner is the one mark of an app the workspace made for itself: a create refuses
-            # without a speaking member, while the main agent signup writes and every
-            # `AgentProvision` the fleet applies leave the column null. Provenance says the
-            # opposite of what it looks like here — `app_chat` provisions the main agent of every
-            # hosted workspace, so a provisioned row is the fleet's mark and stands on all of them.
+            # `app_chat` provisions the main agent of every hosted workspace, so a provisioned row
+            # is the fleet's mark and stands on all of them.
             sa.select(tables.agent.c.id).where(
                 tables.agent.c.workspace_id == workspace_id,
                 tables.agent.c.owner_member_id.is_not(None),

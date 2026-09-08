@@ -1,6 +1,3 @@
-//! The dock terminal: finalized transcript lines scroll natively above a repainted dynamic
-//! region, every frame wrapped in one synchronized-output write. Styled lines arrive as ratatui
-//! `Line`s and leave as ANSI; the dock repaints only rows whose rendering changed.
 
 use std::io::Write;
 
@@ -17,8 +14,6 @@ const CLEAR_LINE: &str = "\x1b[2K";
 const CLEAR_BELOW: &str = "\x1b[J";
 const RESET: &str = "\x1b[0m";
 
-/// Render one styled line to ANSI, the line's own style under each span's. Plain mode emits
-/// the text alone — no SGR at all.
 pub fn render_line(line: &Line, mode: ColorMode) -> String {
     let mut out = String::new();
     for span in &line.spans {
@@ -71,17 +66,12 @@ fn sgr_for(style: Style, mode: ColorMode) -> String {
     format!("\x1b[{}m", codes.join(";"))
 }
 
-/// The hardware cursor's place inside the dock, rows from the dock's top row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DockCursor {
     pub row: u16,
     pub col: u16,
 }
 
-/// One dynamic region under the transcript. Between frames the terminal cursor rests on a known
-/// dock row — the last row after a plain paint, the composer row while the hardware cursor shows —
-/// and every frame begins by walking up from that row to the region's top, so terminal scrolling
-/// between frames stays correct where absolute positions would drift.
 pub struct DockTerm<W: Write> {
     out: W,
     mode: ColorMode,
@@ -103,9 +93,6 @@ impl<W: Write> DockTerm<W> {
         }
     }
 
-    /// Paint one frame: transcript lines (if any) flow into scrollback above the dock, the dock
-    /// repaints beneath them, and the hardware cursor lands at `cursor` (hidden when None). One
-    /// buffered write, wrapped in synchronized output.
     pub fn frame(
         &mut self,
         transcript: &[Line],
@@ -142,7 +129,6 @@ impl<W: Write> DockTerm<W> {
         self.out.flush()
     }
 
-    /// Erase the dock and leave the cursor at its former top row.
     pub fn erase(&mut self) -> std::io::Result<()> {
         if self.rows_painted == 0 {
             return Ok(());
@@ -157,7 +143,6 @@ impl<W: Write> DockTerm<W> {
         self.out.flush()
     }
 
-    /// Restore the cursor on the way out.
     pub fn close(&mut self) -> std::io::Result<()> {
         self.erase()?;
         self.out.write_all(SHOW_CURSOR.as_bytes())?;
@@ -226,9 +211,6 @@ impl<W: Write> DockTerm<W> {
 const ALT_ENTER: &str = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l";
 pub const ALT_LEAVE: &str = "\x1b[?1049l\x1b[?25h";
 
-/// The whole terminal, owned: every frame paints exactly the screen's rows, diffing against the
-/// previous frame so an unchanged row costs nothing. Rows position absolutely, so nothing the
-/// dock does can shift the transcript and a resize is one clean repaint.
 pub struct AltScreen<W: Write> {
     out: W,
     mode: ColorMode,
@@ -246,7 +228,6 @@ impl<W: Write> AltScreen<W> {
         }
     }
 
-    /// Everything written so far, for a screen over a buffer.
     #[cfg(test)]
     pub fn written(&self) -> &[u8]
     where
@@ -255,9 +236,6 @@ impl<W: Write> AltScreen<W> {
         self.out.as_ref()
     }
 
-    /// Write bytes the frame diff knows nothing about — a clipboard or image sequence the terminal
-    /// answers itself. They go to the screen's own sink, so nothing reaches a terminal the caller
-    /// did not hand over.
     pub fn splice(&mut self, bytes: &str) {
         let _ = self.out.write_all(bytes.as_bytes());
         let _ = self.out.flush();
@@ -271,7 +249,6 @@ impl<W: Write> AltScreen<W> {
         self.out.flush()
     }
 
-    /// Back to the main screen; the caller prints the exit document there.
     pub fn leave(&mut self) -> std::io::Result<()> {
         self.prev.clear();
         #[cfg(unix)]
@@ -280,12 +257,10 @@ impl<W: Write> AltScreen<W> {
         self.out.flush()
     }
 
-    /// Repaint after a size change: every row is unknown again.
     pub fn invalidate(&mut self) {
         self.prev.clear();
     }
 
-    /// Paint one frame of exactly the screen's rows; `cursor` is (row, col) from the top left.
     pub fn frame(&mut self, rows: &[Line], cursor: Option<(u16, u16)>) -> std::io::Result<()> {
         let rendered: Vec<String> = rows
             .iter()
@@ -325,8 +300,6 @@ impl<W: Write> AltScreen<W> {
         self.out.flush()
     }
 
-    /// Print retained lines onto the main screen, after `leave` — the conversation outlives the
-    /// session in the terminal's own scrollback.
     pub fn print_document(&mut self, lines: &[Line]) -> std::io::Result<()> {
         let mut buffer = String::new();
         for line in lines {

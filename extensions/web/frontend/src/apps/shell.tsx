@@ -35,13 +35,6 @@ import { TabbedPane } from "@/views/TabbedPane";
 import type { PaneView } from "@/views/registry";
 
 
-/** An app homepage is the portal's own screen mounted alone: the view, its registry entry, and the
- *  section host are the portal's own modules, so the page is the reference rendering rather than a
- *  copy of it — the runtime shims are the only seam. Links the page cannot claim as its own place
- *  ride the bridge's navigate verb; the frame's address never moves. */
-
-/** Route every in-page link: a route the app claims changes its own place; anything else the shell
- *  may take goes over the bridge. Either way the click never mutates the frame's address. */
 export function useAppLinks(claim: (route: Route) => boolean, portal: string): void {
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
@@ -66,34 +59,11 @@ export function useAppLinks(claim: (route: Route) => boolean, portal: string): v
   }, [claim, portal]);
 }
 
-/** One section screen standing as the whole page, its place in page state and seeded by the place the
- *  pane was opened at — the whole place, so the screen inside the frame stands where the address
- *  outside it says. A link back into the same section is a place change here, never a trip through
- *  the portal.
- *
- *  Under a band the page's place is its own: the address the member holds names the lane, not the
- *  page's state. A lane hands the page no place to begin with, and a filter, a search, a page step
- *  or a record opened beside the listing is a move inside the lane — reported to the portal it would
- *  land the member on this page's own full screen, which is the track torn up to answer a press that
- *  never asked to leave it. So a banded place change is `setPlace` and nothing else, and the record
- *  lane it opens is drawn by the shell's own track inside the frame. Standing on its own screen the
- *  page reports every such change, because there the address is what the member holds.
- *
- *  This page's own app address is one of its links too — the crumb the shell hands a page standing
- *  one step deeper names it — so it is claimed the same way: pressed under a band it is the page
- *  coming back to its own head inside the lane, not the portal standing that head full screen.
- *
- *  A link out of this section is not a place change either way: it names an app or a section this
- *  page cannot draw, so it rides the bridge's navigate verb and the portal moves — banded too, where
- *  the lane is what the member left. */
 export function SectionApp({
   tab,
   view,
   init,
 }: {
-  /** This page's one pane view, by name. Where the name is also a section the address codec reads,
-   *  the page claims links to it; the rest are reached as their app, which the page claims by its
-   *  own agent id. */
   tab: string;
   view: PaneView;
   init: AppInit;
@@ -106,8 +76,6 @@ export function SectionApp({
     },
     [init.agentId, init.banded],
   );
-  // The pane's own place changes are taken as they arrive, and one the page itself just reported is
-  // not taken twice: the address is what says two places are the same place.
   useEffect(
     () =>
       onPlaced((next) =>
@@ -173,10 +141,6 @@ function Booted({
   }, [init.agents]);
   if (failed) return <p className="p-4 text-sm">{failed}</p>;
   if (agents === null) return null;
-  // The page is the whole viewport, hosted the way the portal's shell hosts a pane: one grid cell
-  // the height of the screen, stretching what stands in it. The screens size themselves by growing
-  // into a bounded column, and a page as tall as its content would stack a start screen at the top
-  // and let a transcript push its composer off the bottom.
   return (
     <TooltipProvider>
       <Viewer.Provider value={init.member.email}>
@@ -200,9 +164,6 @@ function ApplicationLifecycleBoundary({
   return children;
 }
 
-/** Mount an app page: connects to the portal over the bridge, waits for its `init`, and renders
- * `render(init, agents)` into `root` inside the kit's providers. The one call a page's entry
- * makes. */
 export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,

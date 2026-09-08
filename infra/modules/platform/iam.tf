@@ -1,6 +1,3 @@
-# IRSA roles. Each binds an in-cluster ServiceAccount to an AWS IAM role via the
-# cluster OIDC provider. Add-on controllers get AWS-managed policies; the app SAs
-# get a tight custom policy scoped to this environment's store bucket.
 
 module "irsa_lb_controller" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
@@ -22,9 +19,8 @@ module "irsa_external_secrets" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.48"
 
-  role_name                      = "${local.name}-external-secrets"
-  attach_external_secrets_policy = true
-  # Scope to this environment's secrets only.
+  role_name                             = "${local.name}-external-secrets"
+  attach_external_secrets_policy        = true
   external_secrets_secrets_manager_arns = ["arn:aws:secretsmanager:${var.region}:${data.aws_caller_identity.current.account_id}:secret:${local.secret_prefix}/*"]
 
   oidc_providers = {
@@ -74,9 +70,6 @@ module "irsa_app_s3" {
 }
 
 
-# The ingress serves stored site bytes and writes nothing: its grant is read-only, so a compromised
-# relay cannot alter or delete what the workspaces store. ListBucket rides along so a missing key
-# answers 404 rather than an AccessDenied the store cannot tell apart.
 data "aws_iam_policy_document" "ingress_s3" {
   statement {
     sid       = "ListBucket"
@@ -114,9 +107,6 @@ module "irsa_ingress_s3" {
 }
 
 
-# The sandbox cache daemon runs in the proxy pod and reaches only the cache bucket — a separate,
-# tighter grant than serve's app_s3 (the proxy holds no blob access). Scoped to this env's cache
-# bucket alone.
 data "aws_iam_policy_document" "cache_s3" {
   statement {
     sid       = "ListBucket"

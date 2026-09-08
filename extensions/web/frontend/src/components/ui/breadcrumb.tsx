@@ -2,13 +2,6 @@ import type { ComponentProps } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** Where the member is, said as the path they took to get here: the place they came from, held
- *  back, and the thing they are looking at, in full ink. It is the screen's title and its way out
- *  at once — a member who wants the list they arrived from should not have to find it again in the
- *  sidebar, and a title that is only a title makes them.
- *
- *  The last crumb is the page itself, so it is not a link. It carries `aria-current` instead,
- *  which is how a reader is told the path ends here rather than by a link that goes nowhere. */
 export function Breadcrumb(props: ComponentProps<"nav">) {
   return <nav aria-label="Breadcrumb" data-slot="breadcrumb" {...props} />;
 }
@@ -36,10 +29,6 @@ export function BreadcrumbItem({ className, ...props }: ComponentProps<"li">) {
   );
 }
 
-/** A crumb the member can go back to, drawn as the address it stands at: the step is navigation, so
- *  it is an anchor a member can open in a second tab or press with a modifier, and inside a framed
- *  page it is the link that page's own handler carries over the bridge. A step no address reaches is
- *  not this — it is the landmark's name, and text is all it is. */
 export function BreadcrumbLink({ className, ...props }: ComponentProps<"a">) {
   return (
     <a
@@ -65,8 +54,6 @@ export function BreadcrumbPage({ className, ...props }: ComponentProps<"span">) 
   );
 }
 
-/** The mark between two crumbs, drawn rather than spoken: a reader hears the path from the list
- *  it is in, and a slash read out between every pair is noise. */
 export function BreadcrumbSeparator({ className, ...props }: ComponentProps<"li">) {
   return (
     <li

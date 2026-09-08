@@ -16,18 +16,6 @@ pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
-# Four traps, each taken from a refusal that cost a deploy in the 2026-09-07 run: kanban-board
-# spent 9 deploys and call-notes 13, against `MAX_PRODUCT_QA_CALLS` of 3. Seven of call-notes'
-# thirteen went on `lacks visible <region>` after it put four regions behind tabs; one deploy per
-# case went on a page that never mounted, reaching for `.map` on absent data; several on a 361 px
-# document where a flex child wanted `min-w-0`.
-#
-# The arm drops all four. Read it on `processQa`, which is the deploy count, and on `processBuilder`
-# and the app scores beside it: if the traps are load-bearing the arm deploys more and the control
-# passes more, and if the counts sit together the strings are context the child was not short of.
-#
-# Rules the skill already stated and the child broke anyway — `gap-xs`, `max-w-[140px]` — are
-# deliberately not in this change. Those are compliance, and no arm here would measure them.
 [[arm]]
 name = "no-repair-traps"
 

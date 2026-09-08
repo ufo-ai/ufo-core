@@ -65,27 +65,13 @@ ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
 SBX_BIN_DIR = "/usr/local/bin"
 UFO_DIR = "/etc/ufo"
-# The path-containment guard the serve process imports as `ufo.harness.containment`, baked so an
-# in-sandbox program confines paths with the same module the host runs, not a second copy.
 MODULE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "harness"
-# The in-sandbox CLI is the compiled client — `ufo fs` for the file ops, `ufo llm` for egress — so
-# the image bakes one binary where it used to bake two Python scripts. The client crate is built by
-# its own pipeline, never inside this image: a Rust toolchain layer would add minutes and gigabytes
-# to every sandbox for a binary the release build already produces for this target.
 CLIENT_SOURCE_DIR = ROOT / "client"
 SANDBOX_CLIENT_TARGET = "x86_64-unknown-linux-musl"
-# Fixed, not read off this machine: the base image is amd64, and a target derived from the builder's
-# own architecture would make the definition digest — and so every published template name — differ
-# between two runners building the same commit. musl links statically, so the binary needs nothing
-# from the base's libc.
 CLIENT_STAGE_DIR = ROOT / "sandbox" / "artifacts"
 CLIENT_STAGE_PATH = CLIENT_STAGE_DIR / CLIENT_BINARY_NAME
 SYSTEM_SKILLS_STAGE_PATH = CLIENT_STAGE_DIR / "system-skills.zip"
 SYSTEM_SKILLS_ARCHIVE_PATH = f"{UFO_DIR}/system-skills.zip"
-# Inside the repository because the build context is the repository root and `.dockerignore`
-# excludes `**/target`, so the crate's own output directory cannot be COPY'd from.
-# What the binary is built from, and so what the image's digest moves with. `target/` is this
-# machine's build state and `tests/` never reaches the binary.
 CLIENT_ROOT_FILES = ("Cargo.toml", "Cargo.lock", "build.rs")
 CLIENT_SOURCE_DIRS = ("src", "licenses", "scripts")
 
@@ -98,13 +84,6 @@ class Sizing:
     memory_mb: int
 
 
-# The resources every E2B sandbox built from a tier's template gets. E2B fixes them at build time —
-# the SDK's `Sandbox.create` takes no sizing argument at all — so an E2B deploy sizes its boxes here
-# or nowhere: one template per size, and the agent's `sandbox_size` picks which one a fresh sandbox
-# is created from. A size applies to every turn in that sandbox: a subagent runs in the sandbox of
-# the turn that spawned it, so coding work takes the same size. `small` is the floor a repository
-# checkout plus a toolchain build needs (the SDK default of 2 vCPU / 1024 MB outgrows on the
-# memory axis); `large` is E2B's build ceiling of 8 vCPU / 8192 MiB.
 SANDBOX_TIERS: dict[str, Sizing] = {
     "small": Sizing(cpu_count=2, memory_mb=2048),
     "medium": Sizing(cpu_count=4, memory_mb=4096),
@@ -115,26 +94,13 @@ if tuple(SANDBOX_TIERS) != SANDBOX_SIZES:
 DOCKER_BASE_IMAGE = "e2bdev/code-interpreter:latest"
 DOCKER_IMAGE_TAG = "ufo-sandbox:latest"
 START_COMMAND = "tail -f /dev/null"
-# Build as root, run as the base image's non-root user. set_user brackets the layers because
-# to_dockerfile drops the per-step run_cmd/copy user, and a sandbox that runs as root after sudo is
-# stripped would be a regression.
 BUILD_USER = "root"
 RUNTIME_USER = "user"
-# The template's readiness probe is the baked-tool check the publish gate enforces: a build that
-# fails to bake a tool never goes READY, so the publish fails instead of drifting silently.
 READY_VERIFY_TIMEOUT_SECONDS = 120
 BUILD_ATTEMPTS = 3
 BUILD_RETRY_BACKOFF_SECONDS = 15
-# The build-definition digest is baked here so --check can read it off the live template and compare
-# to source — the drift gate that keeps publishing opt-in without letting a stale template pass.
 BUILD_DIGEST_PATH = f"{UFO_DIR}/template-digest"
 
-# bc → shell arithmetic in agent timing/build scripts; poppler-utils →
-# pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the headless browser skills;
-# libreoffice-{writer,calc,impress} → soffice for the office convert/recalc paths; pandoc →
-# docx↔markdown text extraction; qpdf → pdf CLI merge/split/encrypt/repair; tesseract-ocr → the
-# pytesseract OCR path for scanned PDFs; ffmpeg → the video/GIF encoder the media paths shell out
-# to (imageio-ffmpeg wraps the same binary).
 APT_PACKAGES = (
     "python3",
     "ca-certificates",
@@ -163,9 +129,6 @@ APT_HTTPS_COMMAND = (
     "s|http://security.debian.org|https://security.debian.org|g; "
     "s|http://cdn-fastly.deb.debian.org|https://cdn-fastly.deb.debian.org|g' {} +"
 )
-# gh is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN (the egress proxy forwards its
-# sentinel-carrying requests through the connector broker). It installs from GitHub's own apt repo —
-# the distro archives lag years behind.
 GH_INSTALL_COMMAND = (
     "mkdir -p -m 755 /etc/apt/keyrings && "
     "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg "
@@ -194,7 +157,6 @@ NODE_INSTALL_COMMAND = (
     'tar -xzf "$archive" -C /usr/local --strip-components=1 --no-same-owner && '
     'rm "$archive"'
 )
-# Skill runtimes the office/pdf/media/document-review scripts assume pre-installed.
 PIP_PACKAGES = (
     "urllib3",
     "brotli",
@@ -214,12 +176,6 @@ PIP_PACKAGES = (
     "pytesseract",
     "imageio-ffmpeg",
 )
-# Globally installed under the npm --prefix (/usr/local) so the pptx/docx/pdf/website/game scripts
-# `require()` them from any cwd; SANDBOX_ENV exports NODE_PATH so resolution is base-independent.
-# vite turns an app page's project — its source and the kit it composes against — into the static
-# site the agent deploys.
-# playwright drives the website-building game test client; its browser binary installs separately
-# into PLAYWRIGHT_BROWSERS_DIR (the npm package alone can't launch).
 NPM_PACKAGES = (
     f"pnpm@{PNPM_VERSION}",
     "pptxgenjs",
@@ -232,14 +188,6 @@ NPM_PACKAGES = (
     "pdf-lib",
     f"playwright@{PLAYWRIGHT_VERSION}",
 )
-# Runtime env the image needs beyond the base — SANDBOX_ENV, defined in core beside its
-# run-boundary consumer: NODE_PATH so node resolves the globally installed skill modules from any
-# cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked at build time. The Docker
-# carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
-# every exec's envs, since e2b commands do not inherit the template ENV.
-# Importable modules baked into the sandbox bin dir, each with a version bumped on any content
-# change so the digest moves: a program's own directory is `sys.path[0]`, so a sibling here is what
-# an in-sandbox script imports with no installed package inside the sandbox.
 SANDBOX_MODULES: tuple[tuple[str, int], ...] = (("containment.py", 4),)
 SANDBOX_TEMPLATE_READY_COMMAND = f"""
 set -ex

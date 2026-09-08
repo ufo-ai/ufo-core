@@ -88,8 +88,6 @@ CODE_APP_AGENT = AgentProvision(
     icon="git-pull-request",
     setup=AgentSetup(
         connectors=(GITHUB_CONNECTOR,),
-        # A feed wakes this app, so it declares the standing order a feed arms and offers no
-        # cadence: a pull request changes when it changes.
         standing=(TRIGGER_KIND,),
         instructions=CODE_APP_SETUP_INSTRUCTIONS,
     ),

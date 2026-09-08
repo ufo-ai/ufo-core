@@ -57,8 +57,6 @@ const SLACK_POINTS = [
   "One install for the whole workspace.",
 ];
 
-/** The nine goals the goals step offers, in the order it offers them and the order their threads
- *  open in. The first is pressed when the step opens. */
 const GOALS = [
   "Growing revenue",
   "Shipping product",
@@ -71,13 +69,10 @@ const GOALS = [
   "Other",
 ];
 
-/** How every goal thread opens: who the member is, then the goal in their words. */
 function opens(role: string, goal: string): string {
   return "I just set up this workspace. My business: Design studio. My role: " + role + ". My goal: " + goal + ". ";
 }
 
-/** The goal threads the picks below found, as the run says them. Each one carries the goal's own
- *  instructions: no skill routes on these words, so the words are the whole brief. */
 const REVENUE_ASKS =
   "Start by working out my funnel as it stands from whatever CRM, billing, analytics or " +
   "spreadsheet access I have granted: volume at each stage, conversion between them, and average " +
@@ -102,26 +97,19 @@ const HIRING_THREAD =
   "offered. Name the one role holding the rest back. Contact no candidate and send nothing. Ask " +
   "me at most one thing.";
 
-/** Other's thread, in the words the member typed for it. */
 const OTHER_THREAD =
   opens("Founder", "Launching in Japan") +
   "Start by saying what you can already read about it from whatever access I " +
   "have granted, and the first step you would take. Do not guess what you could not read — say " +
   "so. Ask me at most one thing.";
 
-/** The business as the default below writes it, said into the chat the run founds off the business
- *  step: the first task is the whole of it, and the run says it before every step that follows. */
 const OPENING =
   "I just set up this workspace. My business: Design studio. Set up my first task: a daily competitive analysis.";
 
-/** What the default answers leave in the chat: the first task, then the thread of the goal the run
- *  opens with pressed. */
 const DEFAULT_SENT = [OPENING, REVENUE_THREAD];
 
-/** Where the run leaves the member: the thread it founded, with the connectors screen beside it. */
 const HANDED = homeHash({ opens: [homeConversationLane(CONVO_ID), HOME_CONNECTORS_LANE] });
 
-/** The install as the surface object projects it, read by the Slack step on the press. */
 const INSTALL_READS: Record<string, Route> = {
   "/actions/surface/slack$": () =>
     json({
@@ -137,8 +125,6 @@ const INSTALL_READS: Record<string, Route> = {
     }),
 };
 
-/** The surfaces the workspace offers once Slack is declined, as the surfaces read projects them:
- *  nothing connected, iMessage offered, and the install command the terminal card shows. */
 const SURFACES_READ: Record<string, Route> = {
   "/workspace/surfaces$": () =>
     json({
@@ -156,8 +142,6 @@ const SURFACES_READ: Record<string, Route> = {
     }),
 };
 
-/** The acts the read projects for this member: the profile collection's confirm is the one the
- *  website step posts, and a deploy without the enrichment extension projects none. */
 const CONFIRM_VIEW: FirstRunPayload["actions"]["enrichment_profile"][number] = {
   name: "confirm_website",
   description: "Confirm the website the enrichment reads.",
@@ -166,8 +150,6 @@ const CONFIRM_VIEW: FirstRunPayload["actions"]["enrichment_profile"][number] = {
   label: "Next",
 };
 
-/** The memory collection's own act: the one write the run makes, and the bound it declares on the
- *  body the page composes. */
 const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
   name: "record_first_run",
   description: "Record what the first run learned.",
@@ -182,10 +164,8 @@ const ACTIONS: Pick<FirstRunPayload, "actions"> = {
 
 const SLACK_TILE = { name: "slack", label: "Slack", summary: "Send and read messages.", group: "Messaging" };
 
-/** The domain the workspace was founded under, which the website step opens on. */
 const DOMAIN = "simplecasual.com";
 
-/** A deploy offering the Slack install and one connector besides it, so the tools step stands. */
 const FIRST_RUN = {
   providers: [SLACK_TILE, { name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" }],
   connectors: [{ name: "slack", label: "Slack", installed: false }],
@@ -194,17 +174,13 @@ const FIRST_RUN = {
   ...ACTIONS,
 };
 
-/** A deploy running the enrichment extension: the website step posts its confirm. */
 const WITH_WEBSITE = {
   ...FIRST_RUN,
   actions: { ...ACTIONS.actions, enrichment_profile: [CONFIRM_VIEW] },
 };
 
-/** A catalog carrying nothing but Slack: no tool to offer, so no tools step. */
 const SLACK_ONLY = { ...FIRST_RUN, providers: [SLACK_TILE] };
 
-/** A catalog wide enough to rank: two of these are on both the designer's and the engineer's lists,
- *  one on the engineer's alone, and one on neither. */
 const RANKED = {
   ...FIRST_RUN,
   providers: [
@@ -216,7 +192,6 @@ const RANKED = {
   ],
 };
 
-/** What the enrichment made of the confirmed website, as the profile index projects it. */
 const PROFILE_ROW = {
   name: ADMIN.email,
   summary: "Founder at Simplecasual (Design Consulting)",
@@ -233,14 +208,12 @@ const PROFILE_ROW = {
   company_location: null,
 };
 
-/** The business box as the matched row above writes it: the company summary over its facts. */
 const LEARNED = "keep it simple, keep it casual.\nDesign Consulting, 1-10 people, founded 2013.";
 
 const PROFILE_READ: Record<string, Route> = {
   "/objects/enrichment_profile": () => json({ objects: [PROFILE_ROW], next_cursor: null }),
 };
 
-/** A deploy offering no Slack install: the run is the five questions. */
 const NO_SLACK = {
   ...FIRST_RUN,
   ...ACTIONS,
@@ -253,7 +226,6 @@ const HELD_SLACK = {
   connectors: [{ name: "slack", label: "Slack", installed: true }],
 };
 
-/** Who the default answers say the workspace is for, as memory records it before the goals. */
 const WHO = "Design studio. Their website: " + DOMAIN + ". Their role: Founder.";
 
 beforeEach(() => {
@@ -266,7 +238,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The one record the run holds in this tab across a reload, under the member's own key. */
 const ANSWERS_KEY = "ufo.first-run." + ADMIN.email;
 
 function stored(): Record<string, unknown> | null {
@@ -274,8 +245,6 @@ function stored(): Record<string, unknown> | null {
   return held ? (JSON.parse(held) as Record<string, unknown>) : null;
 }
 
-/** The first run's own reads, plus the reads home makes once the run hands the member over, plus
- *  whatever the case wires over them, drawn as far as the welcome. */
 function mount(
   routes: Record<string, Route> = {},
   member = ADMIN,
@@ -297,7 +266,6 @@ function mount(
   return wired;
 }
 
-/** The run past its welcome, stood on the website question. */
 async function open(
   routes: Record<string, Route> = {},
   member = ADMIN,
@@ -309,8 +277,6 @@ async function open(
   return wired;
 }
 
-/** Every act the page submitted, in order: the lane below the agent it posted on — `intents` for
- *  an object mutation, the action route for a presented act — and the body it carried. */
 function intents(calls: { url: string; body: unknown }[]): unknown[] {
   return calls.map((call) => ({ lane: laneOf(call.url), body: call.body }));
 }
@@ -319,9 +285,6 @@ function laneOf(url: string): string {
   return url.split("/agents/" + AGENT.id + "/")[1];
 }
 
-/** The two lanes an act posts on, answering each with what that act's handler would — an action by
- *  the name its route ends in, any other verb by the verb. Anything unnamed applies, so a case
- *  states only the outcome it is about. */
 function recorder(outcomes: Record<string, unknown> = {}): {
   calls: { url: string; body: unknown }[];
   route: Route;
@@ -344,9 +307,6 @@ const lanes = (posted: ReturnType<typeof recorder>): Record<string, Route> => ({
   "/actions/": posted.route,
 });
 
-/** Every founding send the run's chat received, as the route receives it: the words, and the url
- *  they were posted to. The run says its opening line by sending it, so the wire is where a case
- *  reads whether it was said — and where a case mid-run reads that nothing was. */
 function chatSink(): { sent: (string | FormData)[]; posted: string[]; route: Route } {
   const sent: (string | FormData)[] = [];
   const posted: string[] = [];
@@ -363,15 +323,8 @@ function chatSink(): { sent: (string | FormData)[]; posted: string[]; route: Rou
 
 let chat = chatSink();
 
-/** The acts the run posted, answered as applied. A case reads it for the memory the run wrote, and
- *  wires its own lane where it is about a refusal. */
 let acts = recorder();
 
-/** The run's end: the workspace building itself, then Open your workspace onto home, standing the
- *  thread the run founded with the connectors screen beside it.
- *
- *  The opening line is the first thing said, not the only one: it left on the business step, and a
- *  run that picked goals founded a thread per goal after it. */
 async function built(expected = OPENING) {
   await screen.findByRole("heading", { name: "Creating your business’s workspace" });
   await userEvent.click(
@@ -386,13 +339,11 @@ function next(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Next" }) as HTMLButtonElement;
 }
 
-/** Where the head says the run stands: the step it is on, and how many it counts. */
 function counted(): (string | null)[] {
   const progress = screen.getByRole("progressbar", { name: "Step" });
   return [progress.getAttribute("aria-valuenow"), progress.getAttribute("aria-valuemax")];
 }
 
-/** Presses the options of a grid until exactly the named ones are on. */
 async function press(group: string, on: string[]) {
   const options = within(await screen.findByRole("group", { name: group })).getAllByRole("button");
   for (const option of options) {
@@ -401,19 +352,16 @@ async function press(group: string, on: string[]) {
   }
 }
 
-/** Passes the website question as it opens and moves on. */
 async function passWebsite() {
   await screen.findByRole("heading", { name: WEBSITE_HEADING });
   await userEvent.click(next());
 }
 
-/** Answers the business question and moves on. */
 async function describeBusiness(about = "Design studio") {
   await userEvent.type(await screen.findByLabelText("About your business"), about);
   await userEvent.click(next());
 }
 
-/** Answers the role question with exactly these roles and moves on. */
 async function pickRoles(roles: string[] = ["Founder"]) {
   await press("Role", roles);
   await userEvent.click(next());
@@ -423,14 +371,11 @@ async function pickRole(role = "Founder") {
   await pickRoles([role]);
 }
 
-/** Passes the tools question with nothing picked and moves on. */
 async function skipTools() {
   await screen.findByRole("heading", { name: "Which tools do you work in?" });
   await userEvent.click(next());
 }
 
-/** Answers the goals question with exactly these goals — the first pressed by default until told
- *  otherwise — types Other's words where they are given, and moves on. */
 async function pickGoals(goals: string[] = ["Growing revenue"], other = "") {
   await screen.findByRole("heading", { name: "What is top of mind right now?" });
   await press("Top of mind", goals);
@@ -438,7 +383,6 @@ async function pickGoals(goals: string[] = ["Growing revenue"], other = "") {
   await userEvent.click(next());
 }
 
-/** The five questions answered with the defaults, stood on the step after them. */
 async function answer() {
   await passWebsite();
   await describeBusiness();
@@ -447,8 +391,6 @@ async function answer() {
   await pickGoals();
 }
 
-/** The member coming back from the provider's install page: the tab they left is looked at again,
- *  which is the whole account this page has of an install granted somewhere else. */
 async function returning() {
   for (const state of ["hidden", "visible"]) {
     Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
@@ -488,8 +430,6 @@ test("closing the welcome opens the chat", async () => {
   expect(stored()).toBeNull();
 });
 
-/** Closing walks out of the run rather than finishing it: nothing more is said, and the first
- *  task's own thread — founded back on the business step — is left running. */
 test("closing a step opens the chat with nothing more asked", async () => {
   await open(lanes(recorder()));
 
@@ -524,8 +464,6 @@ test("the address opens the first run on its own, with no query at all", async (
   await waitFor(() => expect(location.hash).toBe("#/first-run/website"));
 });
 
-/** The step is the address's, written over rather than stacked: a reload lands on the same step,
- *  and the browser's Back leaves the run rather than walking it. */
 test("each step reached writes its own address, and Back from the first returns to the welcome", async () => {
   const entries = history.length;
   await open(lanes(recorder()));
@@ -661,7 +599,6 @@ test("the page draws no shell around the step", async () => {
   expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
 });
 
-/** Every question is one headline: no company name over it and no line under it. */
 test("the head counts six steps with Slack, advancing one per answer under a single headline and a Close", async () => {
   await open(lanes(recorder()));
 
@@ -777,7 +714,6 @@ test("the business step gates Next on the business and names who is answering", 
   await screen.findByRole("heading", { name: "What is your role at the business?" });
 });
 
-/** Roles are a set: a member who founded the company and designs for it presses both. */
 test("the role step offers the twelve roles as a set, presses Founder until told otherwise, and Other asks for words", async () => {
   await open();
   await passWebsite();
@@ -810,9 +746,6 @@ test("the role step offers the twelve roles as a set, presses Founder until told
   expect(next().disabled).toBe(false);
 });
 
-/** The role's own tools, offered as a multiple choice: the engineer is asked about the code and
- *  issue tools, and the picks are what the step then connects. A tool this deploy's catalog does
- *  not carry is not offered, so the grid names only what a press can grant. */
 test("the tools step offers the connectors the picked role works in", async () => {
   await open(lanes(recorder()));
   await passWebsite();
@@ -827,8 +760,6 @@ test("the tools step offers the connectors the picked role works in", async () =
   expect(next().disabled).toBe(false);
 });
 
-/** The grid ranks: what more of the picked roles name comes first, then what one names, then the
- *  rest of the catalog in the catalog's order — and Slack, which has a step of its own, never. */
 test("the tools step ranks the picked roles' tools ahead of the rest of the catalog", async () => {
   await open(lanes(recorder()), ADMIN, RANKED);
   await passWebsite();
@@ -841,8 +772,6 @@ test("the tools step ranks the picked roles' tools ahead of the rest of the cata
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
 });
 
-/** A founder writes code too: GitHub stands among the founder's own tools, ahead of the catalog's
- *  remainder, so the press that connects it is one step away on the default run. */
 test("the founder's own tools name GitHub ahead of the rest of the catalog", async () => {
   await open(lanes(recorder()), ADMIN, RANKED);
   await passWebsite();
@@ -854,7 +783,6 @@ test("the founder's own tools name GitHub ahead of the rest of the catalog", asy
   expect(tools.map((tool) => tool.textContent)).toEqual(["Gmail", "Notion", "GitHub", "Linear"]);
 });
 
-/** Picking nothing is skipping: Next carries straight on to the goals, and nothing is connected. */
 test("the tools step skips to the goals where nothing is picked", async () => {
   const posted = recorder();
   await open(lanes(posted));
@@ -869,8 +797,6 @@ test("the tools step skips to the goals where nothing is picked", async () => {
   expect(intents(posted.calls)).toEqual([]);
 });
 
-/** The picks are connected on the step itself: each one presses the act its own provider takes —
- *  the broker's connect verb for an account that is the member's. */
 test("a picked tool is stood to connect, and the press asks for that account", async () => {
   const posted = recorder();
   await open(lanes(posted));
@@ -898,8 +824,6 @@ test("a picked tool is stood to connect, and the press asks for that account", a
   );
 });
 
-/** Next off the connect list carries on with whatever is left unconnected: the run asks for the
- *  accounts once and never holds the member on them. */
 test("Next off the connect list carries on to the goals", async () => {
   await open(lanes(recorder()));
   await passWebsite();
@@ -1018,8 +942,6 @@ test("one press opens the consent window and lands the minted link in it", async
   opened.mockRestore();
 });
 
-/** The link is minted on the intent lane and never through the chat; a browser that refuses the
- *  window is the one case the step still renders it. */
 test("a browser that refuses the window still hands the member the link", async () => {
   const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
   await open(lanes(posted));
@@ -1107,8 +1029,6 @@ test("the member coming back from Slack's pages lands on the success screen, and
   await built();
 });
 
-/** The install is granted in another window and this tab never goes away, so the step's own watch
- *  is the only read that sees it: the page's own read is half a minute behind. */
 test("the step's own watch lands the success screen while the tab stays open", async () => {
   vi.useFakeTimers();
   onTestFinished(() => {
@@ -1210,9 +1130,6 @@ test("Back from the surfaces step returns to the Slack step", async () => {
   expect(counted()).toEqual(["6", "7"]);
 });
 
-/** The run ends on home, standing the assistant's own lane, and that lane's composer is the one the
- *  opening line was committed for: it says it on arrival, with no keystroke, and the transcript the
- *  member lands on is the conversation they asked for rather than an empty box. */
 test("the last screen lands home on the founded thread with connectors beside it", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK);
 
@@ -1229,8 +1146,6 @@ test("the last screen lands home on the founded thread with connectors beside it
   );
 });
 
-/** The chat app home stands is the agent the first task is said to, whichever agent the run itself
- *  was drawn for. */
 test("the opening line is said to the chat app home stands, not the agent the run was drawn for", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK, [AGENT, CHAT_APP]);
 
@@ -1241,8 +1156,6 @@ test("the opening line is said to the chat app home stands, not the agent the ru
   expect(chat.posted[0]).toContain("/agents/" + CHAT_APP_ID + "/chat?conversation=new");
 });
 
-/** Coming through the run a second time is a second opening line, so it opens a conversation of its
- *  own: the lane the member is handed cannot be the one the last run founded. */
 test("a second run through opens a new conversation rather than the one the first founded", async () => {
   await open(lanes(recorder()), ADMIN, NO_SLACK);
   await answer();
@@ -1262,7 +1175,6 @@ test("a second run through opens a new conversation rather than the one the firs
   expect(chat.posted[2]).toContain("conversation=new");
 });
 
-/** The website is the first question on every deploy, whether or not one can look it up. */
 test("the website step opens the run, prefilled with the workspace's domain, and Back returns to the welcome", async () => {
   await open();
 
@@ -1277,8 +1189,6 @@ test("the website step opens the run, prefilled with the workspace's domain, and
   expect(screen.queryByRole("progressbar", { name: "Step" })).toBeNull();
 });
 
-/** A workspace founded under no domain — a personal address — opens the box empty, and where the
- *  deploy has no confirm act Next posts nothing and simply moves on. */
 test("a workspace with no domain opens the website box empty, and Next posts nothing without the act", async () => {
   const posted = recorder();
   await open(lanes(posted), ADMIN, { ...FIRST_RUN, workspace_domain: null });
@@ -1293,7 +1203,6 @@ test("a workspace with no domain opens the website box empty, and Next posts not
   expect(intents(posted.calls)).toEqual([]);
 });
 
-/** Once the member has written in the box, the domain the read hands back stays out of it. */
 test("a website the member typed survives a reload rather than being written over by the domain", async () => {
   await open();
 
@@ -1445,8 +1354,6 @@ test("a profile that lands after the role step does not replace the confirmed ro
   expect(screen.getByRole("button", { name: "Engineer" }).getAttribute("aria-pressed")).toBe("false");
 });
 
-/** The company the enrichment matched is written into the business box and nowhere else: no step
- *  names it over its heading. */
 test("confirming posts the website and pre-selects Founder, and no step names the company", async () => {
   const posted = recorder();
   await open({ ...lanes(posted), ...PROFILE_READ }, ADMIN, WITH_WEBSITE);
@@ -1527,7 +1434,6 @@ test("the run writes the business, the website, the role and the goals to memory
   ]);
 });
 
-/** Several roles are one answer, said as one: in memory, and on every goal thread. */
 test("several roles are joined in memory and in every goal thread", async () => {
   await open({}, ADMIN, NO_SLACK);
   await passWebsite();
@@ -1552,7 +1458,6 @@ test("several roles are joined in memory and in every goal thread", async () => 
   ]);
 });
 
-/** Other stands for the words the member typed for it, beside the roles picked off the grid. */
 test("Other's words stand in for it among the roles", async () => {
   await open({}, ADMIN, NO_SLACK);
   await passWebsite();
@@ -1572,7 +1477,6 @@ test("Other's words stand in for it among the roles", async () => {
   ]);
 });
 
-/** A workspace with no domain and a member who typed none records no website. */
 test("a run with no website writes none", async () => {
   await open({}, ADMIN, { ...NO_SLACK, workspace_domain: null });
   await passWebsite();
@@ -1727,9 +1631,6 @@ test("the workspace builds itself one app at a time, then the assistant, then of
   expect(location.hash).toBe(HANDED);
 });
 
-/** An app this deploy withholds is not drawn at all. `hidden` says the portal withholds it from
- *  every list it draws, never that the app is unbuilt — so naming it here would state something
- *  untrue about a shipped app the workspace already holds. */
 test("a withheld app is left out of the build screen rather than promised", async () => {
   vi.useFakeTimers();
   onTestFinished(() => {

@@ -1,18 +1,3 @@
-//! The member bearer the gateway mints for a hosted member (the client stores it in
-//! `~/.ufo/credentials`, surfaces verify it).
-//!
-//! One self-contained HMAC claim, no server-side state. The codec is core's — `core/src/ufo/
-//! bearer.py` spells it out and owns the verify half every product surface reads through — so this
-//! half signs, and reads a claim back only for the sign-in door, which stands in front of those
-//! surfaces and answers before any of them sees the request. `tests/contract.rs` holds both
-//! directions to core's own vectors:
-//!
-//! ```text
-//! payload_json = {"email": "<lower email>", "exp": <unix seconds>, "ws": "<workspace uuid>"}
-//! body         = base64url(payload_json)            # padding stripped
-//! token        = body + "." + hex(hmac_sha256(secret, body))
-//! ```
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
@@ -26,12 +11,8 @@ pub const TOKEN_SECRET_ENV: &str = "UFO_TOKEN_SECRET";
 pub const TOKEN_TTL_DAYS: i64 = 30;
 const TOKEN_SEPARATOR: char = '.';
 
-/// The cookie a bearer rides in a browser, core's `SESSION_COOKIE` under the same name it binds.
 pub const SESSION_COOKIE: &str = "ufo_session";
 
-/// The claim's fields in the order core's `json.dumps(..., sort_keys=True)` writes them. Serde
-/// serializes a struct in declaration order, so alphabetical here is byte-identical there — and the
-/// bytes are what the signature covers, so a reordering would verify nowhere.
 #[derive(Serialize)]
 struct Claim<'a> {
     email: &'a str,
@@ -39,7 +20,6 @@ struct Claim<'a> {
     ws: &'a str,
 }
 
-/// Sign a bearer claiming `workspace_id` for `email`, expiring `TOKEN_TTL_DAYS` from `now`.
 pub fn mint_token(
     secret: &str,
     workspace_id: &str,
@@ -54,7 +34,6 @@ pub fn mint_token(
     )
 }
 
-/// The codec itself, taking the expiry outright so a test can pin one.
 pub fn sign(
     secret: &str,
     workspace_id: &str,
@@ -79,10 +58,6 @@ pub fn sign(
     Ok(format!("{body}{TOKEN_SEPARATOR}{signature:x}"))
 }
 
-/// The lowercased member email a presented bearer proves, or None when it proves nothing: signature
-/// under this deploy's secret and expiry are both checked before either field is read, so a forged,
-/// tampered, or expired token yields no identity. A deploy holding no secret verifies nothing rather
-/// than accepting a token signed with the empty key.
 pub fn verified_email(secret: &str, token: &str, now: DateTime<Utc>) -> Option<String> {
     if secret.is_empty() {
         return None;
@@ -102,22 +77,12 @@ pub fn verified_email(secret: &str, token: &str, now: DateTime<Utc>) -> Option<S
     Some(presented.email.to_lowercase())
 }
 
-/// The claim read back off the wire. Only the fields the sign-in door acts on are named, and every
-/// one of them is read after the signature over the whole body verifies.
 #[derive(Deserialize)]
 struct PresentedClaim {
     email: String,
     exp: i64,
 }
 
-/// Re-escape every non-ASCII character as `\uXXXX`, the way `json.dumps` does under its default
-/// `ensure_ascii=True`. Core writes the signed body with that default and `serde_json` writes UTF-8
-/// straight through, so without this an address carrying one accented letter signs a different body
-/// here than the codec core verifies against — a token no surface would accept, for the members
-/// least able to guess why. In valid JSON every non-ASCII byte sits inside a string literal, and
-/// `serde_json` has already escaped the quotes, backslashes, and control characters, so rewriting
-/// the rest one character at a time cannot disturb the structure. A character above the basic plane
-/// becomes the surrogate pair Python emits for it.
 fn escape_non_ascii(json: &str) -> String {
     if json.is_ascii() {
         return json.to_string();
@@ -206,8 +171,6 @@ mod tests {
 
     #[test]
     fn a_non_ascii_address_signs_the_escaped_body_core_writes() {
-        // `json.dumps` escapes non-ASCII by default, so the signed body core verifies against
-        // carries `é` rather than the UTF-8 byte a straight-through writer would emit.
         let token = sign(SECRET, WORKSPACE, "josé@exämple.com", at(1_735_689_600)).unwrap();
         let body = token.split_once('.').unwrap().0;
         let json = String::from_utf8(URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap();

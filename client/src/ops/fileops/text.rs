@@ -19,14 +19,11 @@ pub fn failed(message: impl Into<String>) -> OpError {
     OpError::Failed(message.into())
 }
 
-/// A guard refusal reaches the model the way `sbxfs`'s `ContainmentError` does: as the recoverable
-/// `{"error": …}` body, with the message untouched.
 #[cfg(unix)]
 pub fn guarded<T>(outcome: Result<T, GuardError>) -> Result<T, OpError> {
     outcome.map_err(|error| refused(error.message()))
 }
 
-/// A param `sbxfs` reaches by subscript, so its absence is the `KeyError` the model reads back.
 #[cfg(unix)]
 pub fn required<'a>(params: &'a serde_json::Value, name: &str) -> Result<&'a str, OpError> {
     params

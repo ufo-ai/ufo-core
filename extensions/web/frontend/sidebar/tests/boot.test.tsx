@@ -44,10 +44,8 @@ test("the built page names a hashed module and stylesheet under this surface", (
   expect(page).toContain("<!doctype html>");
 });
 
-/** The markdown chokepoint refuses a foreign image element, but a renderer can fetch without
- *  minting an element — mermaid's image shape prefetches `node.img` from any host during layout.
- *  The page's own policy is the boundary a library cannot go around: the browser refuses every
- *  image load off this origin, however it was asked for. */
+/** mermaid's image shape prefetches `node.img` from any host during layout, which the markdown
+ *  chokepoint cannot catch: only the page's own policy refuses a load it never minted an element for. */
 test("the page tells the browser images load only from this origin", () => {
   const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(builtPage());
   expect(meta?.[1]).toBe("img-src 'self' data:");
@@ -125,8 +123,6 @@ test("a live session whose email holds no member row is told that, not to sign i
 
   expect(await screen.findByText("Not a member of this workspace")).toBeTruthy();
   expect(screen.getByText(/An admin has to add the address/)).toBeTruthy();
-  // The bearer behind this refusal is live, so the sign-in door would forward it straight back to
-  // the workspace that just refused it. Another address is reached by clearing this one first.
   expect(
     screen.getByRole("link", { name: "Sign in with another email" }).getAttribute("href"),
   ).toBe(SIGN_OUT_PATH);
@@ -162,11 +158,9 @@ test("the sidebar names the shell's destinations and states the member at its fo
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
     "Collapse sidebar",
-    /* The two acts the column leads with, each printing the chord that reaches it. */
     "New chat\u21e7\u2318O",
     "Search",
     "Apps",
-    /* The sidebar stands open, so the app's row states its name and the pin act every row wears. */
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
     "App Store",
@@ -187,8 +181,6 @@ test("a section heading folds its section, and holds its menu behind a mark draw
 
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
   for (const name of ["Apps", "Chats"]) {
-    /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
-       before it is an act, and the act it does carry is the one a member does to a heading. */
     const band = within(sidebar).getByRole("button", { name });
     expect(band.getAttribute("aria-haspopup")).toBeNull();
     expect(band.getAttribute("aria-expanded")).toBe("true");
@@ -197,9 +189,6 @@ test("a section heading folds its section, and holds its menu behind a mark draw
     expect(chevron.getAttribute("class")).not.toContain("opacity-0");
   }
 
-  /* A menu is a second act on the same row, so it takes its own mark — held in the layout and drawn
-     transparent, so nothing under the pointer moves as it arrives. Only the section that has one
-     draws it: Apps carries its act as a row instead. */
   expect(within(sidebar).queryByRole("button", { name: "Apps options" })).toBeNull();
   const options = within(sidebar).getByRole("button", { name: "Chats options" });
   expect(options.getAttribute("aria-haspopup")).toBe("menu");
@@ -215,9 +204,6 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
   const apps = within(sidebar).getByRole("navigation", { name: "Apps" });
 
-  /* The nav scrolls nowhere, so a section held at its natural height would push the rows under it
-     — Connectors, Workspace, and the way out — past the bottom edge on a short screen. The squeeze
-     is spent inside the list, which caps and scrolls. */
   const section = apps.parentElement;
   if (!section) throw new Error("the apps list stands in no section");
   expect(section.className).not.toContain("shrink-0");
@@ -228,7 +214,6 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   expect(scroller.className).toContain("overflow-y-auto");
   expect(scroller.className).toContain("max-h-(--size-apps-open)");
 
-  // The foot is what must survive it.
   expect(within(sidebar).getByRole("button", { name: "Workspace" })).toBeTruthy();
 });
 
@@ -236,7 +221,6 @@ test("the shell opens with the sidebar open, and a sidebar the member folded sta
   wire({});
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  // A browser holding no choice opens on the named rows, not on the glyph rail.
   await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
   expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeTruthy();
   first.unmount();
@@ -245,35 +229,6 @@ test("the shell opens with the sidebar open, and a sidebar the member folded sta
   expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeTruthy();
 });
 
-/** A desk width draws the mark at the sidebar's head; a phone width keeps it on the bar, centred
-test("until the member pins for themselves, the workspace's apps stand pinned, chat first", () => {
-  wire({});
-  const apps = [
-    { id: SECOND_ID, name: "wiki", model: "auto", main: false, icon: "stele", app: "wiki" },
-    {
-      id: "3aa87d3e-8f10-4d40-bb9c-9e40f79c11aa",
-      name: "chat",
-      model: "auto",
-      main: false,
-      icon: "flange",
-      app: "chat",
-    },
-  ];
-  render(<App agents={[AGENT, ...apps]} member={MEMBER} onAgents={() => {}} />);
-
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  const names = within(sidebar)
-    .getAllByRole("button")
-    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
-  const chat = names.indexOf("Chat");
-  const wiki = names.indexOf("Wiki");
-  expect(chat).toBeGreaterThan(-1);
-  expect(wiki).toBeGreaterThan(chat);
-  expect(names).not.toContain("Assistant");
-});
-
-/** A stored pin no live agent answers — an app since removed, or the old fixed reads — resolves
- *  to nothing rather than a row. */
 test("a stored pin nothing answers draws no row", () => {
   localStorage.setItem("pinned-rows", "wiki\nradar");
   wire({});
@@ -287,8 +242,6 @@ test("a stored pin nothing answers draws no row", () => {
   expect(names).not.toContain("Radar");
 });
 
-/** The bar's mark stands between the hamburger and the account. It is centred out of the row —
- *  absolutely placed — so the row it stands over keeps one line whatever the mark's own width. */
 test("the bar's mark stands at a phone width too, centred out of the row", () => {
   atPhoneWidth();
   wire({});
@@ -328,12 +281,9 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
     "Collapse sidebar",
-    /* The two acts the column leads with, each printing the chord that reaches it. */
     "New chat\u21e7\u2318O",
     "Search",
     "Apps",
-    /* The drawer is always drawn whole, so the app's row states its name and the pin act every row
-       wears. */
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
     "App Store",
@@ -357,8 +307,6 @@ test("the sidebar's foot states who is signed in and offers the way back out", a
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
   expect(within(foot).getByText("Member")).toBeTruthy();
 
-  // The sign-in door forwards a browser that already holds a session, so this is the act that
-  // reaches the form: it clears the cookies on the host that bound them and lands there.
   const went: string[] = [];
   vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
   await userEvent.click(within(foot).getByRole("button", { name: "Sign out" }));

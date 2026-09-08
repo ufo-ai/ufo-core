@@ -1,8 +1,3 @@
-//! What a member waits for before anything is on screen: the binary loading, its statics
-//! initializing, and the arguments parsing. `--help` is the one path that reaches the screen
-//! without the wire, so it is the whole cost and nothing else. Beside it sit the two loads a first
-//! screen can pay — the syntax assets a fenced code block needs, and the rows the conversation
-//! page draws from the list the workspace answers.
 
 use std::process::{Command, Stdio};
 
@@ -27,8 +22,6 @@ fn run_to_the_help_screen() {
     assert!(status.success(), "--help exits 0");
 }
 
-/// The first fenced code block in a reply pays this, once per process, behind the renderer's
-/// `OnceLock`.
 #[divan::bench]
 fn load_the_syntax_assets() {
     divan::black_box((

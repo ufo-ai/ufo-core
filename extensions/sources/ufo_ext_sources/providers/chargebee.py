@@ -27,7 +27,6 @@ TIMEOUT_CONNECT_SECONDS = 30.0
 TIMEOUT_READ_SECONDS = 60.0
 _REFUSAL_STATUS = frozenset({401, 403})
 
-# Stream-name → list-endpoint path. Substreams (a parent loop) are handled separately.
 _LIST_PATHS: dict[str, str] = {
     "addon": "/addons",
     "comment": "/comments",

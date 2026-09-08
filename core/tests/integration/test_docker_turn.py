@@ -212,10 +212,8 @@ async def test_turn_execs_bash_in_a_live_container(
     frame = await engine.run()
 
     assert frame is not None and frame.status == "done"
-    # The real container ran `echo` and its stdout reached the model as the tool result.
     assert model.seen_tool_result is not None
     assert MARKER in model.seen_tool_result
-    # …and it is durable in the transcript the turn wrote.
     stored = await Transcript(blob=blob, conversation_id=turn.conversation_id).read()
     assert stored is not None
     tool_result = next(

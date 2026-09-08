@@ -4,9 +4,6 @@ import { expect, onTestFinished, test, vi } from "vitest";
 
 import type { Fetched } from "@/lib/api";
 
-/** A read the test settles by hand, so a case can reject one the way a browser rejects a fetch the
- *  surface aborted — which the real `getJson` never does, because it answers every fault as a
- *  `Fetched` row. */
 type Read = {
   signal?: AbortSignal;
   answer: (payload: unknown) => void;
@@ -39,9 +36,6 @@ function abortError(): DOMException {
   return new DOMException(ABORT_MESSAGE, "AbortError");
 }
 
-/** Every rejection the run left for the browser to report. A read rejected by our own cleanup must
- *  leave none: the member's screen keeps drawing, and the monitor watching unhandled errors in prod
- *  stays quiet. */
 function unhandledRejections(): unknown[] {
   const seen: unknown[] = [];
   const note = (reason: unknown) => void seen.push(reason);
@@ -50,7 +44,7 @@ function unhandledRejections(): unknown[] {
   return seen;
 }
 
-/** Two macrotask turns: node reports an unhandled rejection after the microtask queue drains. */
+/** Two macrotask turns: node reports an unhandled rejection only after the microtask queue drains. */
 async function settled(): Promise<void> {
   for (let turn = 0; turn < 2; turn += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));

@@ -52,9 +52,7 @@ async def test_people_flatten_lifts_the_composite_id_and_value_cells() -> None:
         return httpx.Response(200, json={"data": [person]})
 
     result = await _fetch("people", handle)
-    # the record_id is nested under `id`; flatten lifts it to the top-level primary key
     assert {page.source_ref for page in result.pages} == {"people/r1"}
-    # a full records-query run is an authoritative snapshot
     assert result.snapshot is True
     assert result.next_cursor is None
     assert result.pages[0].created_at == "2026-01-15T10:00:00.000000+00:00"

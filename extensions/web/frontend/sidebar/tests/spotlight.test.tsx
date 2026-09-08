@@ -52,8 +52,8 @@ const FOUND_TASK = owned({
   paused: false,
 });
 
-/** The record a radar hit opens, wired ahead of the index it was found in — the stub matches on
- *  the path it is given, and the index's own path is a prefix of the record's. */
+/** Wired ahead of the index it was found in: the stub matches on the path it is given, and the index's
+ *  own path is a prefix of the record's. */
 const FOUND_TASK_DETAIL = {
   ...TASK_KIND,
   name: "nightly-deploy",
@@ -65,7 +65,6 @@ const FOUND_TASK_DETAIL = {
   updated_at: "2026-08-01T09:00:00Z",
 };
 
-/** Every read the spotlight fans out to, each answering the one term. */
 function everything(extra: Record<string, Route> = {}) {
   return wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
@@ -92,8 +91,6 @@ function nothing() {
   });
 }
 
-/** The shipped app whose pane holds the workspace's files: a file hit lands on the app that reads
- *  its kind. A task hit lands on the workspace's own tasks tab, which needs no app. */
 const ARTIFACTS_APP = {
   id: "7f1b9f6e-9f30-4f8f-9a6e-1d9d1c2b3a41",
   name: "artifacts",
@@ -120,8 +117,8 @@ async function type(term: string) {
   return box;
 }
 
-/** The heading over each run of rows. cmdk hides the heading element itself and points the group's
- *  label at it, so the order they stand in is read off the elements rather than off a role. */
+/** cmdk hides the heading element itself and points the group's label at it, so the order the runs
+ *  stand in is read off the elements rather than off a role. */
 function headings() {
   return [...document.querySelectorAll("[cmdk-group-heading]")].map((head) => head.textContent);
 }
@@ -145,7 +142,6 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(asked.some((url) => url.includes("/objects/" + TASK_KIND.kind))).toBe(true);
 });
 
-/** An agent is named by the boot payload the shell already holds, so it needs no read of its own. */
 test("an agent matches from the payload the shell holds, under its own heading", async () => {
   const { calls } = everything();
   await open();
@@ -157,8 +153,6 @@ test("an agent matches from the payload the shell holds, under its own heading",
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });
 
-/** Memory is gone from the workspace, so the box does not read it: a kind the deploy no longer
- *  holds would stand a group under every term that the member cannot open. */
 test("the box reads no memory and stands no memory group", async () => {
   const { calls } = everything();
   await open();
@@ -183,13 +177,8 @@ test("a hit opens the place that holds it", async () => {
 });
 
 
-/** A site belongs to the workspace, not to an agent, so its read names one agent — as the
- *  artifacts screen's does. Fanning it out would list the one site once per agent. It is listed
- *  and opened where sites live, which is the artifacts screen, never the radar feed. */
-
-/** An object's name is unique under its own agent, not across the workspace, so two agents may
- *  each hold a `nightly-deploy`. Both stand, and each hit opens the lane naming its own agent: the
- *  search cannot contradict the index it reads. */
+/** An object's name is unique under its own agent, not across the workspace, so two agents may each
+ *  hold a `nightly-deploy`. */
 test("two agents' same-named records both stand, each opening its own", async () => {
   const second = owned({ ...FOUND_TASK, mine: false }, SECOND);
   wire({
@@ -217,8 +206,6 @@ test("two agents' same-named records both stand, each opening its own", async ()
 });
 
 
-/** A read that refused is not a kind with no hits: the group states the refusal, so the member
- *  never reads a searched workspace as an empty one. */
 test("a read that fails states so under its own heading, and the others still answer", async () => {
   wire({
     "/slots": () => json({ slots: [] }),
@@ -248,9 +235,6 @@ test("a term nothing answers says so once, not once per kind", async () => {
   expect(headings()).toEqual([]);
 });
 
-/** The fan-out rests before it fires, so a term states that it is being read rather than standing
- *  under an empty list that reads as a workspace holding nothing. The line stands until the last
- *  kind lands, because a kind that has not answered yet may still hold rows. */
 test("a term states that it is being read until the reads answer", async () => {
   everything();
   await open();
@@ -262,8 +246,6 @@ test("a term states that it is being read until the reads answer", async () => {
   await waitFor(() => expect(found.queryByText("Searching…")).toBeNull());
 });
 
-/** A read the suite holds open, so the panel can be read while one kind is still being answered.
- *  Every call waits, and `lands` answers all of them. */
 function slow(answer: () => Response): { route: Route; lands: () => void } {
   const waiting: (() => void)[] = [];
   return {
@@ -272,8 +254,6 @@ function slow(answer: () => Response): { route: Route; lands: () => void } {
   };
 }
 
-/** The reads are one per kind and they answer at their own speeds, so each kind is drawn as it
- *  lands, and the slow one takes its own place in the list when it arrives. */
 test("a kind stands as soon as it answers, while a slower kind is still being read", async () => {
   const conversations = slow(() => json({ conversations: [FOUND_CONVERSATION] }));
   everything({ "/conversations$": conversations.route });
@@ -312,8 +292,6 @@ test("the chord opens the palette from anywhere, and closes it again", async () 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-/** `ctrl+k` is kill-line wherever a field is readline-shaped, so the palette never takes it: the
- *  chord is Meta's alone, and that is what the bar states as the shortcut. */
 test("the ctrl chord leaves the palette shut", async () => {
   everything();
   portal();
@@ -328,8 +306,6 @@ test("the ctrl chord leaves the palette shut", async () => {
   expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
 });
 
-/** Opened on nothing, the palette is still worth reading: it states what the member can do and
- *  every place the bar reaches, and it reads nothing until there is a term to read for. */
 test("an unopened term lists what to do and where to go, and reads nothing", async () => {
   const { calls } = everything();
   await open();

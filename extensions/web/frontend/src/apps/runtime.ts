@@ -10,34 +10,13 @@ import {
   settleLifecycleWork,
 } from "@/apps/lifecycle";
 
-/** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1) and
- *  the whole of what a page needs from the portal: the page is a built bundle that imports this
- *  module with the rest of the kit, so nothing is fetched off the portal to make it run. `connect`
- *  performs the ready/init handshake, and `installShims` reroutes the page's `fetch` and
- *  `EventSource` for `BASE`-prefixed paths through the shell's `call` verb — `lib/api`,
- *  `lib/turnStream`, and every kernel read work verbatim, and the page never speaks the protocol
- *  itself. Everything else — the page's own assets, absolute signed artifact links — keeps the
- *  native path. */
-
 export type AppInit = {
   member: { email: string; admin: boolean };
   agents?: Agent[];
   agentId: string;
-  /** Whether the frame stands under a lane band that already names the page and holds the way out.
-   *  Every header a banded page draws is the acts it carries and nothing more — no title, no crumb,
-   *  no bar, no way out — standing on the row the band would have put them on, so a lane shows one
-   *  header at the height every other lane's stands at and the page's own act is still reachable. */
   banded: boolean;
-  /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
-   *  reads its screen off the address the member arrived with rather than off one field of it. */
   place: WorkspacePlace;
-  /** Where this page stands in the portal, as the shell's own trail names it: the label and the
-   *  address it stands at. The page's band draws it as its crumb whenever that band names something
-   *  deeper than the page — a report, a member's page — so where the member is reads the same inside
-   *  the frame as the tab title says outside it. One band per page: the crumb joins the page's own
-   *  band rather than restoring a band above it. */
   crumb?: Crumb;
-  /** The portal's origin, which a page names an artifact of another conversation from. */
   portal: string;
 };
 
@@ -130,12 +109,8 @@ window.addEventListener("message", (event: MessageEvent) => {
   }
 });
 
-/** The handshake: announce `ready` until the shell's `init` arrives. The shell attaches its
- *  listener when the pane mounts, so a frame whose bundle evaluated first would lose a single
- *  `ready` — hence the retries. They are bounded because a page nothing frames would otherwise
- *  post forever, and the wait is not: an `init` arriving after the last `ready` still mounts the
- *  page, so a shell slower than the budget costs a page nothing. A page nothing frames stays
- *  unmounted, which is all there is to draw without a shell to read through. */
+/** The shell attaches its listener when the pane mounts, so a frame whose bundle evaluated first would
+ *  lose a single `ready` — hence the bounded retries. An `init` after the last one still mounts the page. */
 export function connect(): Promise<AppInit> {
   return new Promise((resolve) => {
     if (init) {
@@ -153,31 +128,18 @@ export function connect(): Promise<AppInit> {
   });
 }
 
-/** Move the portal to an address: the page asks the shell framing it to go there, so a link inside
- * an app lands on a portal screen rather than inside the frame. */
 export function navigate(to: string): void {
   send({ ufo: "navigate", to });
 }
 
-/** Hand words to the composer of a new chat with this app, unsent.
-
- *  The member reads them and presses send themselves. A press that spends a turn without the member
- *  reading it is a surprise, and an ask that turns a feature on binds what it grants to whoever
- *  speaks it — so the member has to be in that conversation rather than merely the cause of one.
- *  The frame could not send it anyway: the bridge admits `POST agents/{id}/chat` from the chat
- *  surface alone, and that fence does not move for this. */
 export function compose(text: string): void {
   send({ ufo: "compose", text });
 }
 
-/** Tell the shell a send on this page founded a conversation, so its rail carries the row without
- *  waiting for the next read. */
 export function founded(agentId: string, conversationId: string, title: string): void {
   send({ ufo: "founded", agent_id: agentId, conversation_id: conversationId, title });
 }
 
-/** The pane's place as it changes while the page stands — the live half of `init`'s `place`. Returns
- *  the unsubscribe. */
 export function onPlaced(listener: (place: WorkspacePlace) => void): () => void {
   PLACE_LISTENERS.add(listener);
   return () => {
@@ -231,10 +193,6 @@ function tunneled(reply: DataReply): Response {
   return new Response(reply.body ?? "", { status: reply.status, headers });
 }
 
-/** `EventSource` over the bridge's stream relay, faithful where `turnStream` depends on it: `open`
- *  fires when the shell's relay connected, named frames dispatch as message events, and a stream
- *  ending for any reason the page did not ask for closes the source and fires `error` — exactly
- *  the signal the reattach logic acts on. */
 class BridgeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -287,9 +245,6 @@ class BridgeEventSource extends EventTarget {
   }
 }
 
-/** Reroute the page's portal transport: a fetch of a `BASE`-prefixed path and a turn stream's
- *  `EventSource` ride the bridge; everything else — the page's own assets, absolute signed
- *  artifact links — keeps the native path. */
 export function installShims(): void {
   const native = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, options?: RequestInit): Promise<Response> => {

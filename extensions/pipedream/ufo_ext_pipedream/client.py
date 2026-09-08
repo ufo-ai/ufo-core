@@ -92,9 +92,6 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     "attio": ConnectorSpec("Attio", "attio", "api.attio.com"),
     "brex": ConnectorSpec("Brex", "brex", "platform.brexapis.com"),
     "discord": ConnectorSpec("Discord", "discord", "discord.com"),
-    # DocuSign addresses each account on the region host its base URI names (na3.docusign.net,
-    # eu.docusign.net, demo.docusign.net); it publishes no single API host, so the grant admits
-    # none and every call runs server-side through Pipedream.
     "docusign": ConnectorSpec("DocuSign", "docusign", ""),
     "github": ConnectorSpec(
         "GitHub",

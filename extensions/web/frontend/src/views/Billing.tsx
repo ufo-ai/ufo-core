@@ -20,8 +20,6 @@ import type { ActionView } from "@/lib/types";
 
 const BILLING_PATH = "/ext/metronome/billing";
 
-/** The workspace object's billing action, which both of this screen's acts address: the refill
- *  rule and the provider link are two operations of the one action the workspace projects. */
 const BILLING_ACTION = "manage_billing";
 
 const REFILL_DOLLARS = 100;
@@ -45,10 +43,6 @@ type BillingReport =
       purchases?: Purchase[];
     };
 
-/** Why the read did not answer. The tab is drawn on every deploy, and only the status says which of
- *  three unrelated things happened: no billing extension is installed so the route is not mounted at
- *  all, the reader is not an admin, or the read failed. One sentence for all three states a refusal
- *  on a deploy that has no billing to refuse. */
 type Unanswered = "absent" | "forbidden" | "unreadable";
 
 type BillingState =
@@ -68,8 +62,8 @@ function unanswered(status: number): Unanswered {
   return "unreadable";
 }
 
-/** A balance is an exact figure, signed when the workspace is into its grace allowance, so it
- *  never takes `money`'s sub-cent shorthand. */
+/** A balance is an exact figure, signed when the workspace is into its grace allowance, so it never
+ *  takes `money`'s sub-cent shorthand. */
 function dollars(micro: number): string {
   return (micro < 0 ? "-" : "") + "$" + (Math.abs(micro) / MICRO_USD_PER_USD).toFixed(2);
 }
@@ -89,16 +83,12 @@ function creditDate(value: string): string {
   }).format(new Date(value));
 }
 
-/** A whole-dollar field: the intent carries whole dollars, so the control cannot offer cents it
- *  would have to discard. An unreadable or non-positive entry answers null and the save refuses
- *  rather than sending a figure the member did not mean. */
+/** The intent carries whole dollars, so the control cannot offer cents it would have to discard. */
 function wholeDollars(value: string): number | null {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
-/** One fact and the act that changes it, side by side — the shape a billing screen is read in: what
- *  is true now on the left, the one thing to do about it on the right. */
 function Standing({
   statement,
   note,
@@ -175,14 +165,8 @@ function Credits({ rows }: { rows: Purchase[] }) {
   );
 }
 
-/** The workspace's prepaid balance, the card behind it, and the rule that keeps it funded — read
- *  from the metronome extension's own endpoint rather than the panel API. The route authenticates
- *  the session itself and answers admins only.
- *
- *  Both acts live here because the workspace that most needs them is the one whose balance refuses
- *  every turn: a card cannot be saved in chat once the gate is closed, and a refill is refused
- *  until a card is on file. The refill control is therefore drawn even with no card, disabled and
- *  stating what unblocks it, so the member reads the whole path at once. */
+/** The route authenticates the session itself and answers admins only. A card cannot be saved in chat
+ *  once the gate is closed, and a refill is refused until a card is on file. */
 export function WorkspaceBilling({
   place,
   onPlace,
@@ -193,16 +177,12 @@ export function WorkspaceBilling({
   const mainAgent = useMainAgent();
   const [state, setState] = useState<BillingState>({ phase: "asking" });
   const [reloads, setReloads] = useState(0);
-  // What an act left, split the way every placed screen splits it: an act that applied is the
-  // pane's own outcome and rides the place, and a refusal belongs to this mount alone.
   const [refusal, setRefusal] = useState<NoticeState>(QUIET);
   const notice: NoticeState = refusal.text ? refusal : { text: place.notice ?? "", refused: false };
   const [link, setLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [amount, setAmount] = useState(String(REFILL_DOLLARS));
   const [below, setBelow] = useState(String(REFILL_BELOW_DOLLARS));
-  // The workspace is the one row the member stands in, and the acts projected for it are what the
-  // screen draws its two controls over — the same projection every other control reads.
   const workspace = useWorkspaceId();
   const acts = usePanelRead<{ actions: ActionView[] }>(
     workspace ? "/actions/workspace/" + workspace : null,
@@ -268,8 +248,6 @@ export function WorkspaceBilling({
       : null;
   const figures = { amount: wholeDollars(amount), below: wholeDollars(below) };
   const card = report.card;
-  // A provider that would not answer leaves the card unknown, which is not the same as absent: it
-  // must not read as an invitation to save one, and it cannot license arranging a refill either.
   const unread = report.card_unread === true;
   const arrangeable =
     billing !== undefined && card !== null && figures.amount !== null && figures.below !== null;

@@ -17,19 +17,6 @@ permissions:
 jobs:
   integration:
     name: integration ${{ matrix.shard }}
-    # An org-hosted larger runner (4 vCPU, 16 GB, ~87 GB free disk), bought for its disk: the
-    # ~6-7 GB sandbox image plus build scratch outgrow ubuntu-latest's ~14 GB free, and the serial
-    # pass below gains nothing from cores. Shards run on separate machines, so each owns its own
-    # Docker daemon, MinIO name, and Chrome — the single-owner constraints below are per-machine.
-    # Three shards is the knee: every shard pays its setup and boot before its tests run, so a
-    # fourth buys seconds.
-    #
-    # ci.yaml calls this on every pull request in the `checks` lane, beside the ten shards and with
-    # no edge onto the jobs that build the portal or the client: a `needs:` is all-or-nothing, so
-    # any edge would start these shards two minutes late and push them past the shards' wall. The
-    # prefix stays short instead — the image pull runs in the background from its first possible
-    # step and both Rust binaries come from a content-keyed cache — so a shard ends well inside
-    # that wall.
     strategy:
       fail-fast: false
       matrix:
@@ -59,18 +46,6 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      # The docker-gated tests need the ~6-7 GB sandbox image, and building it is ~3.3 minutes of
-      # this job. `sandbox-image.yml` publishes it from main under a tag keyed by the pinned
-      # Dockerfile, so a tag that exists was built from this commit's definition on this base. The
-      # pull is ~90 seconds of network, so it starts as soon as `uv` can render the definition its
-      # key derives from, detached with its output on a file, and the build prefix below runs
-      # beside it; the step before the tests joins it. Every miss —
-      # this PR changes the definition, the base tag moved, the package was evicted, the key does
-      # not derive at all, the pull did not finish — leaves the env unset and the fixture builds
-      # exactly as before. Every call here that leaves the runner is walled — the derivation
-      # resolves the floating base tag against an unauthenticated registry, the login talks to
-      # ghcr.io, and the pull moves gigabytes — because an unwalled one that never returns burns
-      # `timeout-minutes: 45` and takes every test below down with it. Walled, each ends as a miss.
       - name: Start pulling the published sandbox image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,17 +73,6 @@ jobs:
           cache-dependency-path: extensions/web/frontend/pnpm-lock.yaml
       - run: pnpm -C extensions/web/frontend install --frozen-lockfile
       - run: pnpm -C extensions/web/frontend exec vite build --config vite.sdk.config.ts
-      # Two Rust binaries, each a pure function of its crate and the toolchain, so each is cached
-      # under exactly that key and its build runs only on a miss. `rust-cache` alone never gives
-      # this: it keeps dependencies and drops the workspace crate's own artifacts, so every run paid
-      # both crate builds (~100 s). The eval-stack tests boot a real serve beside its ufo-egress
-      # data plane, so an in-sandbox fetch has a proxy to reach; the stack locates the built binary
-      # and fails loud without it. The sandbox image bakes the compiled `ufo` client and `ufo fs` is
-      # what every file op in the docker-gated tests runs, so the crate is built for the image's
-      # target — needed even when the pull hits, because the local-carrier tests run the same binary
-      # as a host subprocess; the fixture stages it and fails loud rather than skipping when it is
-      # absent. `client/**` covers `scripts/build-gh.sh`, whose pins determine the gh payload the
-      # build embeds.
       - id: toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -159,11 +123,6 @@ jobs:
             cat "$RUNNER_TEMP/sandbox-pull.log"
             echo "no published image for ${SANDBOX_PULL_IMAGE##*:} — the fixture builds it"
           fi
-      # Serial pass: the container/image-build/live turns run one process, no xdist — the ~6-7 GB
-      # sandbox image build, the fixed-name MinIO container, and the live integration turns each need
-      # a single owner of their shared resource. `integration` tests needing an absent key (a live
-      # model) skip with a clear reason; Docker, Postgres, Chrome, and the DevTools ports are
-      # required and fail loudly when unavailable so the gate proves its declared coverage.
       - run: make test-integration SHARD=${{ matrix.shard }}
       - uses: actions/upload-artifact@v4
         if: always()

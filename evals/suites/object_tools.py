@@ -991,8 +991,6 @@ async def _graded_first_task(output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(False, f"schedule {row.schedule!r} is not one fire a day")
     if row.expires_at is None:
         return CapabilityVerdict(False, "the daily informational task has no expires_at")
-    # The first brief is written in the turn itself, so the row carries no immediate fire and the
-    # ten-fire bound is counted from the schedule's own first occurrence.
     permitted, fire = _permitted_fires(row, row.expires_at, BOUNDED_INFORMATIONAL_FIRES)
     if permitted != BOUNDED_INFORMATIONAL_FIRES or fire != row.expires_at:
         return CapabilityVerdict(

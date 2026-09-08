@@ -1,5 +1,3 @@
-//! The OS clipboard behind Ctrl+V: an image wins, text otherwise, read through the platform's
-//! own tool so the static binary carries no clipboard stack.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -15,14 +13,12 @@ const IMAGES_DIR: &str = "images";
 const RUNTIME_ID_HEX_CHARS: usize = 32;
 const TOOL_DEADLINE: Duration = Duration::from_secs(5);
 
-/// What the clipboard held.
 pub enum Clip {
     Image(Vec<u8>),
     Text(String),
     Empty,
 }
 
-/// Read the clipboard: image bytes when one is held, a copied file's path next, text otherwise.
 pub fn read() -> Result<Clip, String> {
     if let Some(bytes) = read_image()? {
         return Ok(Clip::Image(bytes));
@@ -37,13 +33,10 @@ pub fn read() -> Result<Clip, String> {
     Ok(Clip::Text(text))
 }
 
-/// Save pasted image bytes under this conversation's runtime directory; answers the
-/// `$UFO_HOME` path the message names.
 pub fn stash_image(bytes: &[u8], home: &Path, channel: &str) -> Result<String, String> {
     stash(bytes, "png", home, channel)
 }
 
-/// Copy a dropped image file into the runtime directory; answers its `$UFO_HOME` path.
 pub fn stash_copy(source: &Path, home: &Path, channel: &str) -> Result<String, String> {
     let bytes = std::fs::read(source)
         .map_err(|error| format!("could not read {}: {error}", source.display()))?;
@@ -55,8 +48,6 @@ pub fn stash_copy(source: &Path, home: &Path, channel: &str) -> Result<String, S
     stash(&bytes, &extension, home, channel)
 }
 
-/// The image file a paste names, when the pasted text is exactly one existing image path —
-/// what a drag-drop or a Finder copy delivers as text.
 pub fn dropped_image(text: &str) -> Option<PathBuf> {
     let trimmed = text.trim();
     let unquoted = trimmed
@@ -119,7 +110,6 @@ fn stash(bytes: &[u8], extension: &str, home: &Path, channel: &str) -> Result<St
     Ok(format!("$UFO_HOME/{relative}"))
 }
 
-/// Remove this session's stashed images, and the stash directories once nothing else is in them.
 pub fn sweep_stash(home: &Path) {
     let own = format!("image-{}-", std::process::id());
     let runs = home.join(RUNS_DIR);

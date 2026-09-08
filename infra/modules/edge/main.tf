@@ -1,6 +1,3 @@
-# The public worker serves one apex from its environment's configured origin. The route claims the
-# whole host because Cloudflare matches patterns against the URL including its query, so exact-path
-# patterns miss it.
 
 terraform {
   required_providers {
@@ -77,22 +74,12 @@ resource "cloudflare_workers_route" "edge" {
   script  = cloudflare_workers_script.edge.script_name
 }
 
-# A public site's share card is the one anonymous address on the app host, and one pasted link is
-# fetched by every unfurler that reads it. This route hands that path to the worker, which answers it
-# off one stored copy so the app host reads the row and streams the bytes once per window rather than
-# once per request. Only the card path is claimed: everything else on that host is a member's own
-# authenticated traffic and keeps going straight to the origin. The pattern is prefixed rather than
-# exact because Cloudflare matches it against the URL including its query.
 resource "cloudflare_workers_route" "site_cards" {
   zone_id = var.zone_id
   pattern = "app.${var.hostname}/surface/sites/share/site/*"
   script  = cloudflare_workers_script.edge.script_name
 }
 
-# An artifact URL's query is its whole grant, so the worker stores a served response under the exact
-# signed URL and answers repeats of it from the edge — previews the portal draws on every poll stop
-# re-reading S3 per request. Only 200s the origin marked public are stored; refusals and the
-# member-refresh redirect say no-store and pass straight through.
 resource "cloudflare_workers_route" "artifact_bytes" {
   zone_id = var.zone_id
   pattern = "app.${var.hostname}/artifacts/*"

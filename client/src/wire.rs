@@ -1,4 +1,3 @@
-//! The directive wire: tab-separated lines over held HTTP POST streams.
 
 use std::cell::OnceCell;
 use std::error::Error as _;
@@ -10,7 +9,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum time one connection attempt and one reconnect window may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -23,7 +21,6 @@ pub enum SystemSkillsFetch {
     Downloaded(String),
 }
 
-/// One `run` directive: an op the server asks this terminal to execute.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpRequest {
     pub op_id: String,
@@ -52,7 +49,6 @@ pub struct RuntimeAttestation {
     pub environment: Option<String>,
 }
 
-/// One parsed directive line. Unknown verbs parse to `Unknown` and are dropped by the renderer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Directive {
     Say(String),
@@ -97,7 +93,6 @@ pub enum Directive {
     Unknown,
 }
 
-/// Reverse the surface's escaping: `\\`→`\`, `\t`→tab, `\n`→newline, single pass.
 pub fn unescape(field: &str) -> String {
     let mut out = String::with_capacity(field.len());
     let mut chars = field.chars();
@@ -124,7 +119,6 @@ fn field(fields: &[String], index: usize) -> String {
     fields.get(index).cloned().unwrap_or_default()
 }
 
-/// Parse one raw line into a directive: split on tabs, unescape each field after the verb.
 pub fn parse_line(line: &str) -> Directive {
     let mut parts = line.split('\t');
     let verb = parts.next().unwrap_or("");
@@ -188,8 +182,6 @@ pub fn parse_line(line: &str) -> Directive {
     }
 }
 
-/// The body one request carries: a member message, an empty resume, an idle listen (empty, marked
-/// with `x-ufo-listen` so the surface knows the turn's end was already rendered), or an op's reply.
 #[derive(Clone)]
 pub enum PostBody {
     Message(String),
@@ -201,9 +193,6 @@ pub enum PostBody {
     },
 }
 
-/// Where a session's posts land: the member's own terminal conversation, keyed by the channel this
-/// client chose, or a conversation the member joined by id — on any surface, in its own sandbox,
-/// so it stages no ops and syncs no local skills.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Channel(String),
@@ -211,7 +200,6 @@ pub enum Target {
 }
 
 impl Target {
-    /// The path under `/surface/ufo/` this target posts to.
     pub fn path(&self) -> String {
         match self {
             Target::Channel(channel) => channel.clone(),
@@ -219,14 +207,12 @@ impl Target {
         }
     }
 
-    /// The name the footer, the title bar, and the resume hint show.
     pub fn label(&self) -> &str {
         match self {
             Target::Channel(name) | Target::Conversation(name) => name,
         }
     }
 
-    /// The channel, where this target is a terminal conversation of the member's own.
     pub fn channel(&self) -> Option<&str> {
         match self {
             Target::Channel(channel) => Some(channel),
@@ -235,10 +221,6 @@ impl Target {
     }
 }
 
-/// One conversation the member may open, as the workspace lists it: `channel` names the member's
-/// own terminal conversations, which resume rather than join; `postable` is false where the
-/// surface takes no message from here; `main` says the conversation runs with the workspace's
-/// main agent, so the agent is named only where it is another.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationRow {
     pub id: String,
@@ -258,8 +240,6 @@ struct ConversationList {
     conversations: Vec<ConversationRow>,
 }
 
-/// Reads the member's conversation list on its own connection, off the wire thread, so the held
-/// stream is never disturbed and the list never waits on it.
 #[derive(Clone)]
 pub struct Lister {
     url: String,
@@ -268,7 +248,6 @@ pub struct Lister {
 }
 
 impl Lister {
-    /// GET the conversations the member may open, narrowed by `search` when it is not empty.
     pub fn list(&self, search: &str) -> Result<Vec<ConversationRow>, String> {
         let mut request = build_agent()
             .get(&self.url)
@@ -299,9 +278,6 @@ impl Lister {
     }
 }
 
-/// One member session on the wire: endpoint state, persistent connections, and the since cursor.
-/// The pooled agent is built by the thread that first posts, and dropped once idle: reading the
-/// system trust store costs tens of milliseconds, and the main thread is setting up the terminal.
 pub struct Session {
     pub gateway_url: String,
     pub workspace_url: Option<String>,
@@ -331,8 +307,6 @@ fn build_agent_with_write_timeout(write_timeout: Duration) -> ureq::Agent {
         .build()
 }
 
-/// The system's IANA timezone, read once: every posted message carries it so the agent reads the
-/// member's local time. A system whose zone cannot be named sends no header.
 fn system_timezone() -> Option<&'static str> {
     static ZONE: OnceLock<Option<String>> = OnceLock::new();
     ZONE.get_or_init(|| iana_time_zone::get_timezone().ok())
@@ -381,8 +355,6 @@ impl Session {
         self
     }
 
-    /// A fresh session on `target` with this one's sign-in and runtime choices: its own
-    /// connection, no cursor — what a conversation opened from the list starts on.
     pub fn retarget(&self, target: Target) -> Session {
         Session {
             gateway_url: self.gateway_url.clone(),
@@ -402,10 +374,6 @@ impl Session {
         }
     }
 
-    /// Resolve a file-valued environment before the first turn: upload each local path named
-    /// under `files:` (relative to the document), rewrite those entries to the digests the server
-    /// names, upload the document once, and pin its digest. A `sha256:` digest passes through
-    /// untouched, and a document whose `files` already hold digests uploads byte-identical.
     pub fn resolve_environment(&mut self) -> Result<(), String> {
         let Some(value) = self.environment.clone() else {
             return Ok(());
@@ -423,8 +391,6 @@ impl Session {
         Ok(())
     }
 
-    /// The document re-serialized with every local `files:` path uploaded and replaced by its
-    /// digest, or None when there is nothing to resolve.
     fn resolved_files(&self, document: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
         let mut parsed: serde_json::Value = serde_yaml::from_slice(bytes)
             .map_err(|error| format!("could not parse environment file {document}: {error}"))?;
@@ -489,8 +455,6 @@ impl Session {
         Ok(digest)
     }
 
-    /// The endpoint this session posts to: the workspace surface when signed in, onboarding
-    /// otherwise.
     pub fn endpoint(&self) -> String {
         match &self.workspace_url {
             Some(workspace) => {
@@ -508,13 +472,10 @@ impl Session {
         }
     }
 
-    /// The base URL the member is talking to, for error reporting.
     pub fn base(&self) -> &str {
         self.workspace_url.as_deref().unwrap_or(&self.gateway_url)
     }
 
-    /// The reader of the member's conversation list — None on an onboarding stream, which has no
-    /// workspace to list.
     pub fn lister(&self) -> Option<Lister> {
         let workspace = self.workspace_url.as_deref()?;
         Some(Lister {
@@ -527,7 +488,6 @@ impl Session {
         })
     }
 
-    /// POST one request and stream its directives as they arrive.
     pub fn post(&mut self, body: PostBody) -> Result<DirectiveStream, String> {
         if self.last_post.elapsed() > AGENT_IDLE_REFRESH {
             self.agent.take();
@@ -555,9 +515,6 @@ impl Session {
         })
     }
 
-    /// The stop this session would post, prepared while the member is still watching the stream it
-    /// ends — None on an onboarding stream, which holds no turn to stop. Nothing here touches the
-    /// held stream's agent: that one is mid-response, and the stop travels on its own connection.
     pub fn stop(&self) -> Option<Stop> {
         self.workspace_url.as_ref()?;
         Some(Stop(
@@ -566,9 +523,6 @@ impl Session {
         ))
     }
 
-    /// The lane for send-only POSTs — None on an onboarding stream, which holds no conversation
-    /// to send into. The lane carries only what admission needs, never the terminal headers, so a
-    /// send can never disturb the held stream's claim.
     pub fn send_lane(&self) -> Option<SendLane> {
         self.workspace_url.as_ref()?;
         Some(SendLane {
@@ -581,8 +535,6 @@ impl Session {
         })
     }
 
-    /// POST one privately entered secret out of band; the response body is directive lines whose
-    /// `say` fields are returned for the caller to render.
     pub fn post_secret(
         &self,
         sealed: &str,
@@ -609,7 +561,6 @@ impl Session {
             .collect())
     }
 
-    /// GET the served client binary for `target` from the gateway into `dest`.
     pub fn fetch_client_binary(&self, target: &str, dest: &Path) -> Result<(), String> {
         let url = format!(
             "{}/ufo/bin/{target}",
@@ -673,7 +624,6 @@ impl Session {
         Ok(SystemSkillsFetch::Downloaded(etag))
     }
 
-    /// GET the staged bytes of an in-flight write op into `dest`.
     pub fn fetch_staged(&self, op_id: &str, dest: &Path) -> Result<(), String> {
         let workspace = self
             .workspace_url
@@ -744,8 +694,6 @@ impl Session {
     }
 }
 
-/// The instant-send ack: the turn that took the message, whether this send opened it, and the
-/// arrival id the turn names when it folds the message in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SentAck {
     pub turn_id: String,
@@ -753,8 +701,6 @@ pub struct SentAck {
     pub arrival_id: String,
 }
 
-/// Builds send-only POSTs: one message admitted the moment it is typed, on its own connection,
-/// while the held stream keeps the tail.
 #[derive(Clone)]
 pub struct SendLane {
     endpoint: String,
@@ -766,8 +712,6 @@ pub struct SendLane {
 }
 
 impl SendLane {
-    /// POST one message under `send_id`. A retry with the same id is admitted once and answers
-    /// the same ack, so a flaky link never doubles a message.
     pub fn send(&self, send_id: &str, text: &str) -> Result<SentAck, String> {
         let mut request = build_agent()
             .request("POST", &self.endpoint)
@@ -806,9 +750,6 @@ impl SendLane {
         sent_ack(&body).ok_or_else(|| "the server acknowledged nothing".to_string())
     }
 
-    /// Take back one acknowledged send the turn has not taken up. Ok(true) and the words are the
-    /// member's again; Ok(false) and they already left their hands — folded into a turn, founded
-    /// onto one, or retracted before.
     pub fn retract(&self, arrival_id: &str) -> Result<bool, String> {
         let mut request = build_agent()
             .request("POST", &self.endpoint)
@@ -830,7 +771,6 @@ impl SendLane {
     }
 }
 
-/// The `sent` ack inside a send-only response body.
 fn sent_ack(body: &str) -> Option<SentAck> {
     body.lines().find_map(|line| match parse_line(line) {
         Directive::Sent {
@@ -846,13 +786,9 @@ fn sent_ack(body: &str) -> Option<SentAck> {
     })
 }
 
-/// One member stop, prepared and not yet sent: the whole request, so the thread watching for Esc
-/// fires it without reaching back into the session the drain is reading.
 pub struct Stop(ureq::Request);
 
 impl Stop {
-    /// End the conversation's running turn. The body is empty — a stop admits no message — and the
-    /// answer is the cancelled terminal the held stream is about to render, so it is discarded here.
     pub fn send(self) -> Result<(), String> {
         match self.0.send_string("") {
             Ok(response) => {
@@ -905,7 +841,6 @@ fn header_safe(value: &str) -> String {
         .collect()
 }
 
-/// Directives read line by line off one held response stream.
 pub struct DirectiveStream {
     reader: Box<dyn BufRead>,
     failed: bool,
@@ -1134,8 +1069,6 @@ mod tests {
         line: String,
     }
 
-    /// The parsed directive mapped back to its wire spelling. Exhaustive on purpose: a new
-    /// variant fails to compile here until the fixture row that proves it exists.
     fn canonical(directive: &Directive) -> Option<(&'static str, Vec<String>)> {
         match directive {
             Directive::Say(text) => Some(("say", vec![text.clone()])),

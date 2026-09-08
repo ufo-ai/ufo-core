@@ -433,9 +433,6 @@ class EvalStack:
         serve_binary = (root / "eval-serve").absolute()
         serve_binary.symlink_to(Path(sys.executable).with_name("ufoctl"))
         env = dict(os.environ) | spec.env
-        # Each stack derives its own per-run owner DSN as database.owner_url. Drop any UFO_OWNER_DSN
-        # inherited from the shell, which _shared_owner_dsn prefers over the config — else it would
-        # point this run's cross-workspace owner engine at a foreign (possibly production) database.
         env.pop(OWNER_DSN_ENV, None)
         env["UFO_CONFIG"] = str(config_file.resolve())
         env["UFOCTL_DIR"] = str((root / ".ufoctl").resolve())
@@ -443,9 +440,6 @@ class EvalStack:
         env[key_env] = env.get(key_env) or Fernet.generate_key().decode()
         secret_env = config.artifacts.token_secret_env
         env[secret_env] = env.get(secret_env) or secrets.token_urlsafe(32)
-        # The shared egress material serve and its ufo-egress read from the same env: serve trusts
-        # the CA and mounts the control RPC, the proxy signs leaves with the key and calls back with
-        # the control token, and both verify sandbox run tokens against one UFO_TOKEN_SECRET.
         ca_cert, ca_key = _mint_egress_ca()
         env[EGRESS_CA_CERT_ENV] = ca_cert
         env[EGRESS_CA_KEY_ENV] = ca_key
@@ -878,7 +872,6 @@ class EvalStack:
         serve: asyncio.subprocess.Process,
         egress: asyncio.subprocess.Process | None = None,
     ) -> None:
-        # Drain the proxy first, while serve's control RPC is up for its meter flush, then serve.
         for name, process in (("egress", egress), ("serve", serve)):
             if process is None or process.returncode is not None:
                 continue

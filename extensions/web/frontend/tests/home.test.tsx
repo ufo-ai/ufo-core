@@ -50,7 +50,6 @@ const FOUNDED_CONVO_ID = "99999999-9999-4999-8999-999999999999";
 const AGENT_INSTANCE = mintHomeLane(AGENT_ID, [AGENT_ID]);
 const CONVERSATION_LANE = homeConversationLane(CONVO_ID);
 
-/** The sends that founded a conversation, off the wire's own record of what was asked. */
 const foundingSends = (calls: string[]): string[] =>
   calls.filter((url) => url.includes("/chat?conversation=new"));
 
@@ -68,9 +67,6 @@ const drawHome = (opens: string[]) => {
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 };
 
-/** The picker lane, which the address stands: closing the last lane a member holds leaves it, and a
- *  workspace holding no chat app opens on it. Home is already standing when it is asked for here, so
- *  the arrival is a move of the member's own rather than a boot carrying the lane in. */
 const openPicker = async (beside: string[] = []): Promise<HTMLElement> => {
   location.hash = homeHash({ opens: [HOME_NEW_LANE, ...beside] });
   window.dispatchEvent(new HashChangeEvent("hashchange"));
@@ -87,8 +83,6 @@ const status = (held: Partial<AgentStatus>): AgentStatus => ({
 });
 
 beforeEach(() => {
-  // The history's ladder and Show set are held in this browser, so one test's picks must not open
-  // the next one's lanes.
   localStorage.clear();
   useStreamFake();
 });
@@ -205,9 +199,6 @@ test("a rail app switches the expanded lane and keeps it expanded", async () => 
   expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
 });
 
-/** A pick made inside an expanded lane opens what it picked in that lane's place, so the expansion
- *  is left naming a lane the row no longer holds. The row stands whole again there, with every lane
- *  shown: what one lane's expansion hides, the end of it gives back. */
 test("a conversation picked inside an expanded lane opens it and stands the row again", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([SECOND_ID, AGENT_ID]);
@@ -247,9 +238,6 @@ test("the rail's home mark keeps the row the member arranged", async () => {
   expect(laneNames()).toEqual(["Second", "Assistant"]);
 });
 
-/** The rail marks the lane the member is standing in, and the bracket walk is what moves it: the
- *  tile the press lands on is the one the box stands under. The mark is the rail's whole answer to
- *  "which of these am I in", so a row nobody has stood in yet carries none. */
 test("the rail marks the lane the member is standing in, and the walk moves the mark", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, SECOND_ID]);
@@ -272,8 +260,6 @@ test("the rail marks the lane the member is standing in, and the walk moves the 
   await waitFor(() => expect(marked()).toEqual(["Assistant"]));
 });
 
-/** The mark names a lane on home's row, so it goes when that row does: a tile still marked on the
- *  workspace screen names a lane standing nowhere on it. */
 test("the rail drops its mark when the member leaves home", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, SECOND_ID]);
@@ -294,9 +280,6 @@ test("the rail drops its mark when the member leaves home", async () => {
   expect(marked()).toBe(0);
 });
 
-/** The mark answers a question the member asked by walking the row, so it stands long enough to be
- *  read and then leaves the rail alone. The tile stays the current one — what fades is the box, not
- *  the answer. */
 test("the rail's mark fades once the member has had time to read it", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, SECOND_ID]);
@@ -323,8 +306,6 @@ test("the rail's mark fades once the member has had time to read it", async () =
   }
 });
 
-/** A rail press is the other way a lane becomes the one the member is in, and the mark follows it
- *  even though the press took focus off the row. */
 test("the rail marks the lane its own tile was pressed for", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, SECOND_ID]);
@@ -340,12 +321,6 @@ test("the rail marks the lane its own tile was pressed for", async () => {
   );
 });
 
-/** The row may be wider than the screen, and the rail's tile is how a lane that scrolled off it is
- *  reached: the press brings that lane into view and leaves the row in the order the member arranged
- *  it. Two presses are two asks — the member scrolled away between them. Every scroll the press
- *  causes is written down, the rail's own mark included, so a stray one cannot hide behind a
- *  narrower spy: the lane comes into view, then the mark does, and the second press moves the mark
- *  nowhere because the member has not left the lane it already stands under. */
 test("the rail's tile brings its lane into view and leaves the row where it stood", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   const scrolled: string[] = [];
@@ -376,10 +351,6 @@ test("the rail's tile brings its lane into view and leaves the row where it stoo
   }
 });
 
-/** The press places home and the lane it names lands with the row, a commit after home mounts. The
- *  mark stands on the tile that was pressed all the same: the ask waits for its lane rather than
- *  going out under a row that has not stood it yet, or the member is left on a rail marking
- *  nothing. */
 test("the rail's tile from another screen lands home with that lane in view and marked", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   const scrolled: string[] = [];
@@ -412,10 +383,6 @@ test("the rail's tile from another screen lands home with that lane in view and 
   }
 });
 
-/** The picker offers the apps and, under them, the conversations the member has had — one list,
- *  one order, wherever they are read. A row takes the lane over as that conversation's lane. The
- *  connectors screen closes the app list: the portal draws it rather than an app, and a member
- *  reaches it the way they reach an app. */
 test("the picker lane offers the workspace's apps and the member's history", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
@@ -440,9 +407,6 @@ test("the picker lane offers the workspace's apps and the member's history", asy
   expect(laneNames()).toEqual([CHAT_ROW.title, "Assistant"]);
 });
 
-/** The picker's history is the chat lane's own list, drawn by the same runs: a surface the member
- *  put away stays put away, and under the recency ladder the rows that are left stand as one flat
- *  list, with no date named over them. */
 test("the picker's history hides put-away surfaces and names no run under recency", async () => {
   wire(
     chatsOnWire([
@@ -458,20 +422,13 @@ test("the picker's history hides put-away surfaces and names no run under recenc
   const chats = within(picker)
     .getByRole("heading", { name: "History", level: 3 })
     .closest("section")!;
-  // The Slack row is the surface the member put away, and a portal row is never hidden: the
-  // hidden one must be the only row absent.
   expect(within(chats).queryByText(new RegExp("Hidden thread"))).toBeNull();
   expect(within(chats).getAllByText(new RegExp(CHAT_ROW.title))).toHaveLength(2);
   expect(within(chats).queryByRole("heading", { level: 4 })).toBeNull();
-  // The colleague's row came in on the terminal: a row that is not a portal chat says its source,
-  // the way the chat lane's own history says it.
   expect(within(chats).getByText(new RegExp("Terminal"))).toBeTruthy();
   expect(within(chats).queryAllByRole("list")).toHaveLength(0);
 });
 
-/** The picker names its runs where the name is what the member asked for: a history ordered by app
- *  says which app each run is, the way the chat lane's own history says it, and the names go again
- *  the moment the member takes the recency order back. */
 test("the picker's history names the app over each run under the app ladder", async () => {
   const terminal = {
     ...CHAT_ROW,
@@ -505,8 +462,6 @@ test("the picker's history names the app over each run under the app ladder", as
   expect(within(chats).getByText(new RegExp(terminal.title))).toBeTruthy();
 });
 
-/** The picker narrows its history the way the chat lane's own history does: the same menu, over the
- *  same held choices, so a surface put away here is put away wherever it is read. */
 test("the picker's history offers the history menu", async () => {
   wire(
     chatsOnWire([
@@ -529,9 +484,6 @@ test("the picker's history offers the history menu", async () => {
   expect(heldChatHidden()).toEqual(["slack"]);
 });
 
-/** The chat lane opens on the member's own history: the conversations stand over the entry the next
- *  one starts in, each named by its source where it came in somewhere else, and the runs are the day
- *  each one last moved. */
 test("the chat lane's unsaid state stands the member's history over the new chat entry", async () => {
   const terminal = {
     ...CHAT_ROW,
@@ -551,7 +503,6 @@ test("the chat lane's unsaid state stands the member's history over the new chat
     .map((row) => row.textContent ?? "");
   expect(rows.some((row) => row.includes(CHAT_ROW.title))).toBe(true);
   expect(rows.some((row) => row.includes(terminal.title) && row.includes("Terminal"))).toBe(true);
-  // A portal chat states no source: the history is read in the portal.
   expect(rows.filter((row) => row.includes("Terminal"))).toHaveLength(1);
 });
 
@@ -588,9 +539,6 @@ test("a new chat tab opens its history at the top after the rows load", async ()
   });
 });
 
-/** The stamp on a row is the moment its conversation last moved, read as the distance from now
- *  while that is what says a row is recent and as the day itself once it is not — a few characters
- *  either way, so a narrow lane spends its width on the title rather than on a full date per row. */
 test("a history row stamps when its conversation last moved", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
@@ -602,8 +550,6 @@ test("a history row stamps when its conversation last moved", async () => {
   expect(stamp.getAttribute("datetime")).toBe(CHAT_ROW.last_at);
 });
 
-/** The ladder and the surfaces the member keeps are the history's own narrowings, held in this
- *  browser: a member who asked to see their terminal sessions asked about their own history. */
 test("the history runs the rows in the ladder the member picks and drops the surfaces they put away", async () => {
   const terminal = {
     ...CHAT_ROW,
@@ -634,9 +580,6 @@ test("the history runs the rows in the ladder the member picks and drops the sur
   expect(within(lane).getByText(new RegExp(CHAT_ROW.title))).toBeTruthy();
 });
 
-/** The two narrowings are the browser's, not one list's: a member who puts a surface away in the lane
- *  they are reading has put it away in their history, and the lane beside it says so where it stands
- *  rather than on the next visit. */
 test("a narrowing taken in one lane's history stands in the lane beside it", async () => {
   const terminal = {
     ...CHAT_ROW,
@@ -660,17 +603,12 @@ test("a narrowing taken in one lane's history stands in the lane beside it", asy
   await waitFor(() => expect(within(second).queryByText(/Ship the ledger/)).toBeNull());
   await userEvent.keyboard("{Escape}");
 
-  // And the menu the other lane opens ticks what the member took, rather than what that lane
-  // mounted holding.
   await userEvent.click(within(second).getByRole("button", { name: "History options" }));
   expect(
     (await screen.findByRole("menuitemcheckbox", { name: "Terminal" })).getAttribute("aria-checked"),
   ).toBe("false");
 });
 
-/** The act on a lane's band opens the very list the chat lane opens on: the same heading, the same
- *  narrowings behind their glyph, the same day runs, and the entry the next conversation starts in
- *  holding the foot. */
 test("the history a lane's band opens is the one the chat lane opens on, over a new chat entry", async () => {
   const terminal = {
     ...CHAT_ROW,
@@ -694,11 +632,6 @@ test("the history a lane's band opens is the one the chat lane opens on, over a 
   );
 });
 
-/** Two lanes of one app are two conversations, and the entry under a history is that lane's own. The
- *  send that founds one leaves the lane beside it exactly as it stood: its box still sends, and the
- *  words the member typed there are still there to send. On one key between them the founding send
- *  leaves that key holding the forwarding record, so the second box has nothing to send into, and it
- *  clears the draft the member left in it. */
 test("founding under one lane's history leaves the lane beside it sending, with its own words", async () => {
   let answered = 0;
   const { calls } = wire({
@@ -740,11 +673,6 @@ test("founding under one lane's history leaves the lane beside it sending, with 
   await waitFor(() => expect(foundingSends(calls)).toHaveLength(2));
 });
 
-/** The palette's ask names the one composer it is for, and a lane turned to its history is why: it
- *  stands a founding box for the same agent, and on the chat screen's own key it would take the ask
- *  the palette set on its way to that screen — the words said into a screen the member has left, and
- *  the conversation they open standing in no lane. The lane's box founds on its own key, so the ask
- *  is left standing until the chat screen reads it. */
 test("an ask the palette means for the chat screen is left standing by a lane's history", async () => {
   const { calls } = wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -769,10 +697,6 @@ test("an ask the palette means for the chat screen is left standing by a lane's 
   expect(foundingSends(calls)[0]).toContain("/agents/" + AGENT_ID + "/chat");
 });
 
-/** An ask keyed to the agent alone — the setup screen's acts and a page's compose both hand one to
- *  the agent's new chat and route there — is meant for that screen's own composer. A lane's history
- *  stands a founding box for the same agent, and a take there would delete the ask while the
- *  navigation tears the lane down: the words reach no box the member can send. */
 test("an ask keyed to the agent alone is left standing by a lane's history", async () => {
   const { calls } = wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -795,8 +719,6 @@ test("an ask keyed to the agent alone is left standing by a lane's history", asy
   expect(foundingSends(calls)).toHaveLength(0);
 });
 
-/** A founding send that fails is read where it was said: the words stand in the log with the fault
- *  under them, and the box is live to send again — never a box that cleared and shows nothing. */
 test("a founding send that fails under a lane's history keeps the words and states the fault", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -817,9 +739,6 @@ test("a founding send that fails under a lane's history keeps the words and stat
   expect(send.disabled).toBe(false);
 });
 
-/** The lane's own box may be founding on the lane key when the member turns to the history. The
- *  landing moves that key to the conversation and leaves the forwarding record behind it; the
- *  history's box founds on a key of its own, so it is still standing and still sends. */
 test("a founding send that lands while the history stands leaves the history's own box sending", async () => {
   let release: (landed: Response) => void = () => {};
   let sends = 0;
@@ -852,9 +771,6 @@ test("a founding send that lands while the history stands leaves the history's o
   );
 });
 
-/** Two founding sends can be in flight at once, and each landing writes the track as the address
- *  holds it at the landing, never as it stood when the send left: the second landing keeps the
- *  conversation the first put on the track. */
 test("two founding sends racing under two histories land as two conversations", async () => {
   const releases: ((landed: Response) => void)[] = [];
   wire({
@@ -891,9 +807,6 @@ test("two founding sends racing under two histories land as two conversations", 
   );
 });
 
-/** The hand-off that swaps the lane clears what the founding left behind — the forwarding record on
- *  the history's own key, and the lane key the chat box founds on — so the next lane this app
- *  stands up opens a new chat rather than the conversation the member just left. */
 test("the next lane this app stands up opens a new chat, not the conversation the history founded", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -1033,10 +946,8 @@ test("the dot is live while an app works, blocked while it waits on the member, 
   expect(statusDot(undefined, false)).toBeNull();
 });
 
-/** The dot stands outside the mark's own box, and the track the tiles scroll in clips both axes: a
- *  box that scrolls one way clips the other. So the track carries a gutter as wide as the overhang
- *  and pulls back out over the rail's padding, leaving the marks in the column they stood in. Held
- *  to the rail's own width instead, the clip edge cuts every dot in half. */
+/** A box that scrolls one way clips the other, so the track carries a gutter as wide as the dot's
+ *  overhang and pulls back out over the rail's padding. */
 test("the rail's tile track keeps the dot's overhang inside the scroll box", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
@@ -1099,8 +1010,6 @@ test("a founding lane's hold moves to the conversation the send opened", () => {
   expect(view.result.current.working).toBe(false);
 });
 
-/** Every other lane's band indents its name after a glyph; the picker's carries the mark of the
- *  rail's New tab tile, so its name lines up with the rest instead of standing flush left. */
 test("the picker lane's band carries the New tab glyph", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
@@ -1109,10 +1018,6 @@ test("the picker lane's band carries the New tab glyph", async () => {
   expect(picker.querySelector("[data-slot=header] svg.tabler-icon-plus")).not.toBeNull();
 });
 
-/** Every act on a lane's band is a mark and nothing else: the glyph, the muted tone the marks
- *  around it take, and no box. A 32-pixel control among them would set the row's spacing from its
- *  own width, and the row would no longer read at the pitch the band is drawn at. Nothing stands
- *  there to state the handle either — the band itself is what a reorder is carried by. */
 test("a lane band's acts are marks in the muted tone, and no grip stands among them", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, SECOND_ID]);
@@ -1133,8 +1038,6 @@ test("a lane band's acts are marks in the muted tone, and no grip stands among t
   expect(band.querySelector("svg.tabler-icon-grip-vertical")).toBeNull();
 });
 
-/** Held, the act darkens to the page's own ink. A filled box behind a 16-pixel mark is wider than
- *  the gap between it and the mark beside it, so the pressed state has to be the ink itself. */
 test("a lane's history act states its hold in ink rather than in a filled box", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);

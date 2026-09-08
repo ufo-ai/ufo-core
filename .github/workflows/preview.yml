@@ -1,9 +1,5 @@
 name: preview
 
-# The preview renderer (RFC 0037) is a standalone Rust crate. `check` builds and lints without any
-# document tooling — the ignored tests need no soffice or pdfium. `render` runs the full suite,
-# ignored tests included, inside the hermetic testbed image: the GitHub runner's Ubuntu apt mirror
-# is too unreliable to install LibreOffice live (see the incident this replaced).
 on:
   push:
     branches: [main]

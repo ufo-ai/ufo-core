@@ -115,10 +115,6 @@ def _stream(
     )
 
 
-# Stream list mirrors Airbyte's source-github configured catalog: name, primary key, cursor field.
-# Cursor fields follow Airbyte's `default_cursor_field` — `updated_at` for mutable collections,
-# `created_at` for append-only feeds, None for full-refresh-only streams. `issues` and `comments`
-# are the two GitHub reads with a server-side `?since` filter.
 ALL_STREAMS: list[StreamSpec] = [
     _stream("repositories", cursor_field="updated_at", canonical=True),
     _stream("issues", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
@@ -170,8 +166,6 @@ ALL_STREAMS: list[StreamSpec] = [
 ]
 
 
-# Per-stream API paths. `{owner}`/`{repo}`/`{org}` are resolved at fetch time from the granted-org
-# repo catalog.
 _PATHS: dict[str, str] = {
     "assignees": "/repos/{owner}/{repo}/assignees",
     "branches": "/repos/{owner}/{repo}/branches",
@@ -200,9 +194,6 @@ _PATHS: dict[str, str] = {
     "users": "/orgs/{org}/members",
 }
 
-# Where a stream's records sit inside its response body. The Actions API is the one corner of
-# GitHub's REST surface that wraps a collection in a counted envelope; every other path here
-# answers with the bare array a stream absent from this table reads.
 _RECORD_PATHS: dict[str, str] = {
     "workflow_runs": "workflow_runs",
     "workflows": "workflows",
@@ -466,11 +457,6 @@ class GitHubConnector(RestConnector):
                         and (since is None or record[field] >= since)
                     ]
                 high, _ = _cursor_bounds(landed, stream.cursor_field)
-                # `low` spans what the PROVIDER returned, never what survived the filter. The walk
-                # stops its descent when `low` crosses the floor, so reporting the filtered span
-                # would hide that this repo's history had already run past it — and a page filtered
-                # away entirely would report nothing at all, leaving the walk to follow the link
-                # header down the whole history while landing none of it.
                 _, low = _cursor_bounds(page, stream.cursor_field)
                 yield WalkPage(
                     records=with_context(landed, **{REPO_PARTITION_FIELD: repo_key}),

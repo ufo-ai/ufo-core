@@ -1,7 +1,5 @@
 name: client
 
-# The client's lane, called by `ci` once its triage says `client/` changed. The trigger lives
-# there so one decision selects every lane and a skipped lane still posts its contexts.
 on:
   workflow_call:
   workflow_dispatch:
@@ -45,9 +43,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
-  # The suite under nextest: a process per test, and a wedged one fails by name at its deadline
-  # instead of holding the job to its ceiling. Benches are excluded — a `harness = false` target
-  # takes no libtest arguments, so `--all-targets` would hand divan's runner flags it rejects.
+  # Benches are excluded: a `harness = false` target takes no libtest arguments, so `--all-targets`
+  # would hand divan's runner flags it rejects.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -64,11 +61,8 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --profile ci
-      # The run's own page states which tests ran and what each cost, so a failure or a slow test
-      # is read where it happened instead of downloaded. `annotate_only` keeps the report off the
-      # Checks API, which a called workflow cannot reach without its caller widening the token, and
-      # `require_tests` fails the step if the report is empty — a wrong path would otherwise
-      # publish an empty summary and look like a pass.
+      # `annotate_only` keeps the report off the Checks API, which a called workflow cannot reach without
+      # its caller widening the token; `require_tests` fails an empty report rather than looking like a pass.
       - uses: mikepenz/action-junit-report@v6
         if: always()
         with:
@@ -85,9 +79,8 @@ jobs:
           path: client/target/nextest/ci/junit.xml
           retention-days: 14
 
-  # Every bench built and run once. Without a CodSpeed token that is the whole gate — a bench that
-  # stopped compiling or started panicking fails here — because wall-clock numbers off a shared
-  # runner carry no signal. With one, the same command reports instruction counts per pull request.
+  # Without a CodSpeed token that is the whole gate — a bench that stopped compiling fails here —
+  # because wall-clock numbers off a shared runner carry no signal.
   bench:
     runs-on: ubuntu-latest
     timeout-minutes: 20

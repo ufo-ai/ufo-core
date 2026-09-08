@@ -451,8 +451,6 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.FAILED_CONSENT_STATUS
     assert "location" not in response.headers
-    # The member may have reached consent from anywhere, so the body states the outcome and lets
-    # them close the page rather than sending them to a chat that need not exist.
     body = response.body.decode()
     assert "was not connected" in body and "Close this tab" in body
     assert "chat" not in body and "agent" not in body

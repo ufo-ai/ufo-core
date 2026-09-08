@@ -574,7 +574,6 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
     assert turn.speaker_member_id == member_id
     assert turn.member_id is None
     assert (await _writeback(turn_id)).status == WRITEBACK_PENDING
-    # A redelivery of the same message joins the one turn and one writeback.
     again = await context.admit(
         conversation_id,
         "hello",
@@ -920,8 +919,6 @@ async def test_streams_hang_off_their_connection_and_take_its_visibility(
         (issues, private, "issues"),
     ]
     assert owner_view[0].backend == "folder"
-    # The stream of a private connection is as private as the account it syncs, and no admin
-    # authority widens either — the read takes no `admin` at all.
     assert [view.id for view in await context.list_sources(peer)] == [root]
 
 
@@ -1826,7 +1823,6 @@ async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_
             )
         ).scalar_one()
     assert email == "new.joiner@example.com"
-    # A second surface identity for the same email resolves to the one member, never a duplicate.
     assert await context.join_member("UNEW2", "new.joiner@example.com") == joined
 
 
@@ -1838,9 +1834,6 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
         ("UGIGI", "gigi@elsewhere.com"),
         ("UBARE", "example.com"),
         ("UEMPTY", "@example.com"),
-        # Malformed at the workspace's own domain: a surface asserts the address, so the shape
-        # rule is what stops a row no sign-in normalizes to and no later join equals. A rule
-        # reading only the last `@` admits both — they carry `example.com` — and seats them.
         ("USPACE", "jane doe@example.com"),
         ("UTWICE", "a@b@example.com"),
     ):
@@ -2927,9 +2920,6 @@ async def test_join_member_seats_every_teammate_it_creates(db: None, tmp_path) -
             ).all()
         }
     assert all(rows[join] is not None for join in joins)
-
-
-# --- read views: the debug surface's data half ---------------------------------------------------
 
 
 async def _conversation_row(

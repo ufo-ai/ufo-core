@@ -3,62 +3,40 @@ resource "random_password" "rds" {
   special = false # RDS master password disallows several specials; keep it URL-safe.
 }
 
-# The seed derives the shared RLS-subject serve role password.
 resource "random_password" "pg_role_seed" {
   length  = 48
   special = false
 }
 
-# UFO_TOKEN_SECRET — the member-surface bearer HMAC (RFC 0011 §4): the ufo surface verifies member
-# tokens and the gateway mints them, both keyed by this.
 resource "random_password" "ufo_token" {
   length  = 48
   special = false
 }
 
-# The shared secret the sandbox cache daemon presents to the proxy's loopback credential callback
-# (RFC 0032). Minted here so both the proxy and the cache container read one value from the platform
-# secret; unused until the cache is enabled.
 resource "random_password" "cache_control_token" {
   length  = 48
   special = false
 }
 
-# The bearer the Rust control plane presents to serve's onboarding RPC (RFC 0036). Its own secret,
-# never the egress control token: control's credential reaches those four routes and nothing else.
-# Minted here so serve (which reads ufo-platform-secrets whole) and the gateway pod share one value.
 resource "random_password" "onboard_control_token" {
   length  = 48
   special = false
 }
 
-# The bearer the standalone ufo-egress data plane presents to serve's egress-control RPC (RFC 0035).
-# Minted here so serve (which reads ufo-platform-secrets whole) and the proxy pod share one value.
 resource "random_password" "egress_control_token" {
   length  = 48
   special = false
 }
 
-# The bearer the preview service (RFC 0037) requires for an `inline` render. Prod renders through the
-# `put_url` sink — the presigned URL is its own capability — so the token gates nothing prod calls,
-# but the service still requires it at boot. Minted here so the pod reads one value; unused until the
-# preview service is enabled.
 resource "random_password" "preview_token" {
   length  = 48
   special = false
 }
 
-# The shared serve fleet's process keys live only in the ufo-serve Secret.
-# The Fernet credential key seals every hosted workspace's BYOK credential rows, so it is minted once
-# and reused verbatim every apply — a re-minted key orphans every stored credential. A Fernet key is
-# url-safe base64 of 32 bytes; random_id.b64_url is exactly that without padding, so the trailing "="
-# (the single pad byte a 32-byte value needs) is appended in the serve_credential_key local below.
 resource "random_id" "serve_credential_key" {
   byte_length = 32
 }
 
-# UFO_ARTIFACT_TOKEN_SECRET — the shared fleet's artifact-delivery signing secret (config
-# artifacts.token_secret_env).
 resource "random_password" "serve_artifact_token" {
   length  = 64
   special = false
@@ -67,32 +45,17 @@ resource "random_password" "serve_artifact_token" {
 locals {
   rds_endpoint = module.rds.db_instance_endpoint # host:port
 
-  # Owner admin DSN: LOGIN as ufo_owner (RDS master, table owner → RLS bypass) on the shared `ufo`
-  # database. The bootstrap dials this with asyncpg, so it is a plain libpq URL.
   admin_dsn = "postgresql://ufo_owner:${random_password.rds.result}@${local.rds_endpoint}/${var.app_database_name}"
 
-  # The shared serve fleet's DSN — the RLS-*subject* ufo_serve role on the shared app database, the
-  # one role for every hosted workspace (it sets app.workspace_id per transaction). The password is
-  # derived from the same seed + formula as `servers/control/src/rls.rs` role_password()
-  # (sha256("<seed>:ufo_serve")), reproduced here so the terraform-rendered config matches the role
-  # the rls-bootstrap Job creates — a cross-runtime contract, `servers/control/src/rls.rs` is the source of
-  # truth. Core
-  # derives the DBOS system store as the `<name>_dbos` sibling (config.DatabaseConfig), so this url
-  # alone resolves the fleet's shared `ufo_dbos` system database; the rls-bootstrap Job provisions it.
   serve_password = sha256("${random_password.pg_role_seed.result}:ufo_serve")
   serve_dsn      = "postgresql+asyncpg://ufo_serve:${local.serve_password}@${local.rds_endpoint}/${var.app_database_name}"
 
-  # The gateway's own role, derived the same way and created by the same Job. It is granted the
-  # `ufo_control` schema and nothing in `public`, so the pod on the unauthenticated sign-in path
-  # holds a credential that cannot reach a tenant's rows.
   control_password = sha256("${random_password.pg_role_seed.result}:ufo_control")
   control_dsn      = "postgresql://ufo_control:${local.control_password}@${local.rds_endpoint}/${var.app_database_name}"
 
-  # Fernet key: url-safe base64 of 32 bytes needs one "=" of padding, which random_id.b64_url omits.
   serve_credential_key = "${random_id.serve_credential_key.b64_url}="
 }
 
-# Postgres bootstrap credentials.
 resource "aws_secretsmanager_secret" "postgres" {
   name = "${local.secret_prefix}/postgres"
   tags = local.tags
@@ -107,7 +70,6 @@ resource "aws_secretsmanager_secret_version" "postgres" {
   })
 }
 
-# Platform-generated runtime material.
 resource "aws_secretsmanager_secret" "platform" {
   name = "${local.secret_prefix}/platform"
   tags = local.tags
@@ -129,10 +91,6 @@ resource "tls_self_signed_cert" "egress_ca" {
   }
 }
 
-# The key, request, and leaf the front door used to carry held no object outside terraform state, so
-# state is all there is to drop; the ACM certificate they fed was real and is destroyed with them.
-# Forgetting also leaves the plan guard's refusal to delete a `tls_private_key` standing, and the
-# type it withholds is the egress CA's own.
 removed {
   from = tls_private_key.sandbox_proxy
   lifecycle {
@@ -154,13 +112,6 @@ removed {
   }
 }
 
-# The proxy's front door is a public endpoint, so its NLB listener carries a publicly trusted
-# certificate and a sandbox reaches the proxy on the trust store it already has; the egress CA above
-# is left to the leaves the proxy mints inside the tunnel. The member's terminal is the carrier that
-# makes the split load-bearing — it runs commands on a machine whose trust store nothing may touch,
-# and curl reads no environment variable for the certificate of an HTTPS proxy. The validation
-# record names this environment's own host, so each environment owns its own; the zone's shared
-# singletons stay with testing.
 data "cloudflare_zone" "dns" {
   filter = { name = var.dns_zone_names[0] }
 }
@@ -203,10 +154,8 @@ resource "aws_secretsmanager_secret_version" "platform" {
 
   secret_id = aws_secretsmanager_secret.platform.id
   secret_string = jsonencode({
-    "ufo-token-secret" = random_password.ufo_token.result
-    "egress-ca-cert"   = tls_self_signed_cert.egress_ca.cert_pem
-    # PKCS#8, not the RSA-PKCS#1 `private_key_pem`: the Rust proxy loads this with rcgen's
-    # `KeyPair::from_pem`, which parses PKCS#8 (`BEGIN PRIVATE KEY`) and refuses PKCS#1.
+    "ufo-token-secret"        = random_password.ufo_token.result
+    "egress-ca-cert"          = tls_self_signed_cert.egress_ca.cert_pem
     "egress-ca-key"           = tls_private_key.egress_ca.private_key_pem_pkcs8
     "egress-control-token"    = random_password.egress_control_token.result
     "onboard-control-token"   = random_password.onboard_control_token.result
@@ -215,13 +164,6 @@ resource "aws_secretsmanager_secret_version" "platform" {
   })
 }
 
-# The runtime provider credentials. Terraform owns the secret document and never a version of it:
-# every value inside is written out-of-band — the deploy's own secrets step for the properties it
-# holds an Actions secret for (infra/testing_secrets.py, infra/production_secrets.py), an operator
-# for the rest (docs/onboarding.md) — so a version terraform declares can only ever carry
-# placeholders. `ignore_changes` is no protection: Secrets Manager drops a version once later writes
-# leave it unlabelled, the next refresh finds the recorded version gone, and the apply *creates* it
-# again — publishing empty strings over every live credential. That is outage 0002.
 resource "aws_secretsmanager_secret" "api_keys" {
   name = "${local.secret_prefix}/api-keys"
   tags = local.tags
@@ -232,9 +174,6 @@ resource "aws_secretsmanager_secret" "gateway_slack_connect" {
   tags = local.tags
 }
 
-# Testing holds both placeholder versions in state from when they were managed resources; drop them
-# from state without deleting the live versions in AWS, whose values a deploy and an operator wrote.
-# Prod never applied either one, so both blocks are a no-op there.
 removed {
   from = aws_secretsmanager_secret_version.api_keys
   lifecycle {
@@ -249,18 +188,10 @@ removed {
   }
 }
 
-# The gateway's WorkOS credentials are a standing prerequisite, created and seeded out-of-band once
-# per environment before its first deploy (docs/onboarding.md). Terraform reads the secret rather
-# than owning it: an empty placeholder version would boot the gateway with blank WORKOS_API_KEY /
-# WORKOS_CLIENT_ID, which fails its startup check, so the seed must precede the rollout and can never
-# be produced by the same apply that rolls the gateway.
 data "aws_secretsmanager_secret" "gateway_workos" {
   name = "${local.secret_prefix}/gateway-workos"
 }
 
-# Testing already holds this secret and its placeholder version in terraform state from when they
-# were managed resources; drop both from state without deleting the live seeded secret in AWS. Prod
-# never applied them, so both are a no-op there.
 removed {
   from = aws_secretsmanager_secret.gateway_workos
   lifecycle {

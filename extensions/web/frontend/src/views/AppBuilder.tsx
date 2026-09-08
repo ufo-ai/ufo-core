@@ -9,16 +9,12 @@ import { chatState, updateChat, useChat } from "@/lib/chatStore";
 import { sendMessage } from "@/lib/turnStream";
 import type { Agent, Member } from "@/lib/types";
 
-/** What the portal says to open the run. The interview itself lives in the `create-application`
- *  skill, so this is an opening move and not a script: the agent reads what it already knows about
- *  the business and answers with a proposal. */
 const OPENING_MESSAGE = "Build me a new app.";
 
 export const APP_CREATOR_TITLE = "App Creator";
 
-/** The wizard's own founding key — not the chat screen's `new:<agentId>`, so neither pane's
- *  founding send can ever hold the other's busy, and a wizard mount finds nothing on the key it
- *  watches but its own run. */
+/** Not the chat screen's `new:<agentId>`, so neither pane's founding send can ever hold the other's
+ *  busy, and a wizard mount finds nothing on the key it watches but its own run. */
 export function wizardKey(agentId: string): string {
   return "wizard:" + agentId;
 }
@@ -26,25 +22,10 @@ export function wizardKey(agentId: string): string {
 export type AppBuilderProps = {
   agent: Agent;
   member: Member;
-  /** Every settled turn: the apps read is re-run, so the app the last phase created reaches the
-   *  rail with no signal of its own. */
   onSettled: () => void;
   onClose: () => void;
 };
 
-/** The app-building wizard, in the apps screen's own pane. It is a real conversation with the main
- *  agent over the chat transport every other conversation rides — no create endpoint of its own, and
- *  the app it lands is `object_apply` through the same gate a chat-founded build uses.
- *
- *  Unlike the panel-to-chat precedent (`pendingAsk`, which hands the composer words the member
- *  presses send on), the wizard opens speaking: the member already stated their intent by pressing
- *  `App Creator`, and what they want back is the proposal, not a prompt to type. Which
- *  conversation the run is lives in the store, not in this component: whichever send founds it —
- *  the opening send, or the composer's after that send failed — `migrateChat` leaves the founding
- *  record on the wizard's key, and this pane binds by reading the key it watches, so a mount holds
- *  no state an unmount can lose. A wizard reopened over a run in flight — or reached again after
- *  any other screen — joins that run where the key says it is, and a second conversation cannot be
- *  founded while the key wears the first. */
 export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProps) {
   const key = wizardKey(agent.id);
   const held = useChat(key);
@@ -52,12 +33,8 @@ export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProp
   const [settles, setSettles] = useState(0);
 
   useEffect(() => {
-    // The store is read here rather than from the render's snapshot: a StrictMode second pass and
-    // the sends of other mounts have already marked the key, and only the key's current state says
-    // whether an opening send belongs. Anything already on it — a run in flight, a forwarding
-    // record, a failed opening the member should read — means the pane joins or the member speaks
-    // next, never a second send. A key closed mid-founding is reopened first, so the landing keeps
-    // its forwarding record for the pane now watching it.
+    // Read here rather than from the render's snapshot: a StrictMode second pass and the sends of other
+    // mounts have already marked the key, and only its current state says whether an opening send belongs.
     const current = chatState(key);
     if (current.closed) updateChat(key, (state) => ({ ...state, closed: false }));
     if (current.founded || current.busy || (current.messages ?? []).length > 0) return;
@@ -82,12 +59,6 @@ export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProp
   );
 }
 
-/** How far the run has come, read from the wizard conversation's own todo board — the durable record
- *  the `create-application` skill opens with one task per phase and marks as it goes, which the
- *  portal already serves as the conversation's `tasks` slot. Nothing else on the wire says where a
- *  conversation is, and a bar drawn from a guess about the words would state a phase the agent is
- *  not in. The board is re-read on every settled turn, which is where a phase changes; a run whose
- *  agent kept no board draws no bar rather than an invented one. */
 function Phases({
   conversationId,
   agentId,
@@ -105,15 +76,11 @@ function Phases({
   );
   if (board.phase !== "ready" || !board.payload.total_count) return null;
   const { tasks, total_count: total, completed_count: done } = board.payload;
-  // The phase the bar names: the one under way, or between turns the last one finished. A run that
-  // has finished none names the first, which is the phase it is about to take.
   const reached =
     tasks.find((task) => task.status === "in_progress") ??
     tasks.filter((task) => task.status === "completed").at(-1) ??
     tasks[0];
   return (
-    // The bar stands in the reading column the transcript below it is set in, so the phase and the
-    // words of the phase are read down one measure rather than across the whole pane.
     <div className={cn(COLUMN, "flex shrink-0 flex-col gap-xs px-2xl pt-lg")}>
       <div
         role="progressbar"

@@ -22,8 +22,6 @@ const INSTALL = "Install";
 const REMOVE = "Remove";
 const RESTORE_ACTION = "restore_application";
 
-/** One row of the store: a shipped app the workspace holds, one it removed, or the act that builds
- *  a new one. */
 type Listing =
   | { key: string; kind: "installed"; agent: Agent }
   | { key: string; kind: "removed"; app: ArchivedApp }
@@ -40,12 +38,6 @@ function listingName(row: Listing): string {
   }
 }
 
-/** The deploy's apps in name order — the ones the workspace holds live and the ones it removed, one
- *  list, since a member scanning for an app does not know which state it is in — and the act that
- *  builds one last, where the apps list carried it before the store did. The chat app is not
- *  listed: it is the main agent's row, which the New chat row above the list is the way to, and a
- *  member can neither install nor remove it. An app the deploy withholds is listed nowhere, live or
- *  archived. */
 function listings(agents: Agent[], archived: ArchivedApp[]): Listing[] {
   const shipped: Listing[] = [
     ...agents
@@ -59,19 +51,11 @@ function listings(agents: Agent[], archived: ArchivedApp[]): Listing[] {
   return shipped.concat({ key: "creator", kind: "creator" });
 }
 
-/** The app store: every app the deploy ships, as installed or as one to install, and App Creator
- *  for the app it does not. Installing a shipped app is restoring the row the workspace archived,
- *  through the same `restore_application` action the Apps tab's archived filter posts; removing one
- *  is the archive the app's own settings offer. Both are admin acts because a shipped app has no
- *  owner — the row answers to admins alone — so a member who is not one reads the installed apps and
- *  the build act and nothing they cannot press. Either act re-reads the boot payload the rows are
- *  drawn from, so the row moves between states with no signal of its own. */
 export function Store({
   member,
   onBuild,
 }: {
   member: Member;
-  /** Raises the app-building wizard, which is the store's own last row. */
   onBuild: () => void;
 }) {
   const { agents, archived, onRestored } = useApps();

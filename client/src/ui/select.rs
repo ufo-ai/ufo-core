@@ -1,6 +1,3 @@
-//! Mouse selection over the retained transcript, in content coordinates: an anchor survives
-//! streaming and scrolling because it names a rendered line, not a screen row. Click counting
-//! widens the grain — one press selects characters, two a word, three a line.
 
 use std::time::{Duration, Instant};
 
@@ -9,7 +6,6 @@ use unicode_width::UnicodeWidthChar;
 pub const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
 pub const EDGE_SCROLL_LINES: isize = 3;
 
-/// How much one press selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grain {
     Char,
@@ -17,7 +13,6 @@ pub enum Grain {
     Line,
 }
 
-/// A selection anchored to absolute content lines.
 pub struct Selection {
     pub anchor: (usize, usize),
     pub head: (usize, usize),
@@ -40,8 +35,6 @@ impl Selection {
         self.dragged = true;
     }
 
-    /// The selected display-column span of one absolute line, widened to the grain against that
-    /// line's text; None when the line is outside the selection.
     pub fn cols_for(&self, line: usize, text: &str) -> Option<(usize, usize)> {
         let (start, end) = self.ordered();
         if line < start.0 || line > end.0 {
@@ -72,8 +65,6 @@ impl Selection {
         (from < to).then_some((from, to))
     }
 
-    /// The selected text, reading each line through `text_of`, rows joined by newlines and
-    /// trailing pad stripped.
     pub fn extract(&self, text_of: &mut dyn FnMut(usize) -> String) -> String {
         let (start, end) = self.ordered();
         let mut rows: Vec<String> = Vec::new();
@@ -97,8 +88,6 @@ impl Selection {
     }
 }
 
-/// The display columns of the run of non-whitespace holding `col`, end exclusive; None when the
-/// column sits on whitespace or past the text.
 fn word_bounds(text: &str, col: usize) -> Option<(usize, usize)> {
     let cells: Vec<(usize, usize, char)> = cells(text);
     let at = cells
@@ -118,9 +107,6 @@ fn word_bounds(text: &str, col: usize) -> Option<(usize, usize)> {
     Some((cells[first].0, cells[last].0 + cells[last].1))
 }
 
-/// The text between two display columns. A character the span cuts through is kept whole, so a
-/// wide character never comes back as half of itself, and a zero-width mark rides the character
-/// it decorates.
 fn slice_cols(text: &str, from: usize, to: usize) -> &str {
     let mut col = 0;
     let mut span: Option<(usize, usize)> = None;
@@ -166,7 +152,6 @@ fn line_width(text: &str) -> usize {
         .sum()
 }
 
-/// Counts presses at the same spot inside the multi-click window: 1, 2, 3, then wraps.
 pub struct ClickTracker {
     last: Option<(Instant, (usize, usize), u8)>,
 }
@@ -176,12 +161,10 @@ impl ClickTracker {
         ClickTracker { last: None }
     }
 
-    /// Register a press and answer the grain it selects.
     pub fn press(&mut self, at: (usize, usize)) -> Grain {
         self.press_at(at, Instant::now())
     }
 
-    /// `press` against a stated moment.
     pub fn press_at(&mut self, at: (usize, usize), now: Instant) -> Grain {
         let count = match self.last {
             Some((when, spot, count))
@@ -206,8 +189,6 @@ impl Default for ClickTracker {
     }
 }
 
-/// Dragging at the window's edge scrolls it: negative above the top, positive below the bottom,
-/// zero inside.
 pub fn edge_scroll(mouse_row: u16, view_rows: usize) -> isize {
     if mouse_row == 0 {
         return -EDGE_SCROLL_LINES;

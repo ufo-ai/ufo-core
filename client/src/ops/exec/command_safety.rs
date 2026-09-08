@@ -11,14 +11,6 @@ use tree_sitter_bash::LANGUAGE as BASH;
 const MAX_NESTING_DEPTH: usize = 8;
 const SHELL_INVOCATION_WORDS: usize = 3;
 
-/// Whether this command line spawns a literal forced `rm`.
-///
-/// A wrapper hands its own tail to `execvp`, and nothing in `nohup rm -rf x` tells it apart from
-/// `git rm -f x` by shape, so no list of wrapper names can be complete. Every argument position is
-/// therefore read as a command start, which judges what a wrapper might exec whether or not this
-/// file knows that wrapper's name, at the price of refusing a `rm` subcommand and an unquoted
-/// `rm -rf` carried as an argument. `trap` and `eval` are the exception the shell grammar itself
-/// makes: their argument is a script, and this file already parses that language.
 pub(super) fn dangerous_command_match(command: &[String]) -> bool {
     dangerous_command_match_with_depth(command, 0)
 }

@@ -180,10 +180,6 @@ class AppQaReplayProbe:
             name=name,
             output_dir=f"{OUTPUT_ROOT}/{self.fixture.name}/{self.phase}",
             project=APP_ROOT,
-            # The subject here is repairing a page against live audits, so the audit measures the
-            # page alone. The captured wireframe stays beside it as the record of the run it came
-            # from, unedited: re-cutting it to today's lane would falsify the provenance that names
-            # the run, arm and call which produced these bytes.
             design_path=None,
             compile_source=True,
         )

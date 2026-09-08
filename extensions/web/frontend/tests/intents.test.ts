@@ -9,10 +9,8 @@ beforeEach(() => {
 });
 
 test("a refusal reaches the member in the words that refused it", async () => {
-  /** The fences between an app page and the intents lane answer in plain text: the bridge's
-   *  endpoint table, its verb table, a surface that refused the request outright. Read as JSON they
-   *  all become "Error 400 — try again.", which tells a member nothing and tells them to do the one
-   *  thing that cannot work. Each marks the body as written for a member, which is what admits it. */
+  /** The fences answer in plain text; read as JSON they all become Error 400 — try again. Each marks the
+   *  body as written for a member, which is what admits it. */
   vi.stubGlobal(
     "fetch",
     vi.fn(
@@ -30,8 +28,6 @@ test("a refusal reaches the member in the words that refused it", async () => {
 });
 
 test("an unmarked body is the surface talking to itself, and never reaches the member", async () => {
-  /** A body nobody marked was not written for a member: a route's own "no such agent", a gateway's
-   *  HTML error page. Shown verbatim it is an unbounded document drawn into a notice line. */
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => new Response("<html><body>502 Bad Gateway</body></html>", { status: 502 })),

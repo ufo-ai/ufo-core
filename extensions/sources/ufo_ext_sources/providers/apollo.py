@@ -25,7 +25,6 @@ from ufo_ext_sources.watermark import text_checkpoint
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
 
-# Stream-name → (search path, response key, sort field).
 _SEARCHES: dict[str, tuple[str, str, str]] = {
     "contacts": ("/api/v1/contacts/search", "contacts", "contact_created_at"),
     "accounts": ("/api/v1/accounts/search", "accounts", "account_created_at"),

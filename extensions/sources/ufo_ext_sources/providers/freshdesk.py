@@ -29,7 +29,6 @@ TICKET_PAGE_CEILING = 300
 SETTINGS_PAGE_KEY = "helpdesk"
 _REFUSAL_STATUS = frozenset({401, 403})
 
-# Stream-name → REST resource path. Substreams / nested trees are dispatched separately.
 _SIMPLE_PATHS: dict[str, str] = {
     "agents": "/api/v2/agents",
     "business_hours": "/api/v2/business_hours",

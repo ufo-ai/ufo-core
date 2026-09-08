@@ -119,7 +119,6 @@ async def test_cursor_streams_thread_updated_after_and_forms_never_do() -> None:
         assert request.url.params.get("updated_after") is None
         return httpx.Response(200, json={"data": [{"id": "f1", "name": "NDA"}]})
 
-    # `forms` carries no cursor_field — a stored cursor sends no filter and advances no watermark
     result = await _fetch("forms", forms, cursor="2026-02-01")
     assert {page.source_ref for page in result.pages} == {"forms/f1"}
     assert result.next_cursor == "2026-02-01"

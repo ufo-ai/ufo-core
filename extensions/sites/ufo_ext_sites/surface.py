@@ -99,9 +99,6 @@ NOT_FOUND_BODY = "no such site"
 UNCONFIGURED_BODY = "Site hosting is not configured on this deployment."
 CSRF_REJECTED_BODY = "the visibility form did not match this session; reload the page and retry"
 HOMEPAGE_FOLLOWS_AGENT_BODY = "this site is an agent's homepage; its visibility follows the agent's"
-# The sign-out door, not the sign-in one: this page is also what a browser holding a live session
-# for another workspace is answered, and the sign-in door forwards such a browser to its own portal
-# rather than drawing the form. Clearing first reaches the form either way.
 NOT_SIGNED_IN_PAGE = (
     "<main><p>This site is not public, and this browser is not signed in to the workspace that "
     f'hosts it.</p><p><a href="{LOGOUT_PATH}">Sign in</a>, then open this link again.</p></main>'
@@ -327,9 +324,6 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
         return _not_found()
     frame_path = f"{FRAME_PATH}/{token}"
     base = ctx.public_base_url
-    # A link unfurler is unauthenticated, so whatever the head says is public by definition: the
-    # site's own name and its own picture go in the card only when the site itself is public. A
-    # homepage follows its agent, whose levels stop at `workspace`, so it is never named or drawn.
     published = site.homepage_agent_id is None and site.visibility == "public"
     share = _share_tags(
         site.name if published else None,
@@ -702,8 +696,6 @@ _HOMEPAGE_FRAME_STYLE = "body{background:transparent}"
 SITES_SURFACE = SurfaceSpec(
     name=SURFACE_SITES,
     routes=(
-        # The card's route is declared before the deep-link route, because a deep link matches any
-        # path under a token and would otherwise swallow this one as a site path.
         SurfaceRoute(
             method="GET",
             path=f"{SITE_CARD_SEGMENT}/{{{TOKEN_PARAM}}}/{{{CARD_HASH_PARAM}}}.{CARD_EXTENSION}",

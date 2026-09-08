@@ -47,33 +47,16 @@ import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
 import type { Agent, Conversation, Member } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
 
-/** What the half is called before a conversation exists to name it, and the act that starts one.
- *  The act stands with the acts at the far end of the band, where every act on the whole surface
- *  stands. */
 const NEW_CONVERSATION = "New conversation";
 const NEW = "New";
 const BUILD_PAGE = "Build page";
 
-/** The slot a conversation nobody has founded yet stands in. Every other slot on this screen is
- *  named by the conversation it holds; this one has no conversation to name it, and the send that
- *  founds one writes that conversation's id over it. */
 const FRESH = "new";
 
-/** What an app's own conversations are called wherever they are reached — the lane every app but
- *  the chat app opens beside its page, whose own page lists them itself. One word, so a member
- *  finds the same conversations under the same name on either screen. */
 const HISTORY = "History";
 const NO_HISTORY = "No conversations yet.";
-/** What the list says where the read stopped at its own bound. The read carries no cursor, so the
- *  list cannot page — and a list that ended in silence on a set the member cannot know is cut
- *  states a history the app does not have. Search is the way past the bound: it narrows the read
- *  rather than the page, so a conversation older than this list holds is still found. */
 const HISTORY_BOUND = "The newest few. Search finds an older one.";
 
-/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, and the
- *  tasks that run it on a clock. Three reads of one app, none of which heads a page of its own. The
- *  skills are the workspace's, so they stand on the workspace page and the spec states only whether
- *  this app loads them. The names live here because the band's menu is what picks between them. */
 export const SETTINGS_TABS = ["settings", "connectors", "scheduled"] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
@@ -83,17 +66,12 @@ export const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
 };
 
 
-/** The glyph each read is drawn with. The menu takes its names and its order from the tabs
- *  themselves, so a member picks the same word here that heads the panel they land on. */
 const SETTINGS_TAB_GLYPHS: Record<SettingsTab, typeof IconSettings> = {
   settings: IconSettings,
   connectors: IconPlug,
   scheduled: IconClipboardCheck,
 };
 
-/** The three reads as a member picks between them. Both places that offer the pick stand this one
- *  list — the band's menu on the app screen, and the panel's own breadcrumb once it is open — so a
- *  read is named, marked and set the same way wherever it is chosen. */
 export function SettingsTabItems({ onPick }: { onPick: (tab: SettingsTab) => void }) {
   return (
     <>
@@ -114,9 +92,6 @@ export function SettingsTabItems({ onPick }: { onPick: (tab: SettingsTab) => voi
   );
 }
 
-/** The acts an app carries beyond its conversation, gathered under one glyph. Each opens the app's
- *  own dialog on the read it names, so all three are reached from the band the app heads rather
- *  than from a gear that names only one of them. */
 function AppMenu({
   name,
   onPick,
@@ -143,39 +118,17 @@ function AppMenu({
 export type AgentPaneProps = {
   agent: Agent;
   member: Member;
-  /** Every conversation the portal can carry on, as the rail already holds them, or null until the
-   *  rail has answered. The chat transport answers for a conversation the web surface founded and
-   *  for no other, so the rail — not the app's conversation index, which lists every surface the
-   *  app has ever spoken on — is what says which ones this half can open. Null is not the empty
-   *  list: a conversation the member owns would otherwise read as one they may not continue for as
-   *  long as the rail takes to arrive, and forever if it never does. */
+  /** Null is not the empty list: a conversation the member owns would otherwise read as one they may not
+   *  continue for as long as the rail takes to arrive. */
   chats: ChatRow[] | null;
   place: WorkspacePlace;
   onSettings: (tab: SettingsTab) => void;
-  /** The founded conversation, told to the shell so the rail carries the row this half is now
-   *  holding — this half reads the rail to know which conversations it can carry on, so a chat the
-   *  rail has not heard of is one the half would slide off the moment anything re-read. */
   onCreated: (conversationId: string, title: string) => void;
-  /** A conversation the framed page's own send founded, with the agent it ran under — the page
-   *  chats across agents, so the pane's own agent cannot stand in. */
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
-  /** Re-read the roster. The boot read says which app the workspace is still building, and the pane
-   *  is where a build that landed after that read is first met. */
   onAgents: () => void;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
 };
 
-/** The apps screen's pane: the app's homepage whole, headed by the app's name with the way out to
- *  the page and the settings act beside it. Opening an app is opening what it built — the page IS
- *  the app to the member reading it — so nothing shares the width with it.
- *
- *  An app that has built no page draws its conversation instead: arriving opens the one that moved
- *  last, so the screen lands on the work rather than on a list of it, and an app nobody has spoken
- *  to opens the composer, because the first thing a member does with a new app is talk to it.
- *
- *  Beside a page stands one conversation: the app's editing chat, the newest the member directs
- *  the app in, opened by the band's toggle. The sidebar is the list of the rest — any of them
- *  opens here by its own address. */
 export function AgentPane({
   agent,
   member,
@@ -192,42 +145,9 @@ export function AgentPane({
   const agents = useAgents();
   const target = place.opens?.[0];
   const home = useHomepage(agent, settles);
-  // The chat app's page is the conversation screen itself, so a conversation it holds is that page's
-  // own target rather than a chat beside it. The main agent is the chat app's row, so this is every
-  // conversation the member has: each stands in the page's own column, never in a lane over it.
   const speaks = agent.app === CHAT_SURFACE && home.state === "set";
-  // An app the workspace has not finished wiring stands on its setup screen instead of here. With
-  // no account there is nothing real for its page to draw, and the alternative — sample rows in
-  // place of records — shows a member someone else's app and calls it theirs. The screen is an
-  // address rather than a band over this one, so it is linkable, and the acts it carries are the
-  // portal's own: a framed page can start neither an admin's workspace install nor a model turn.
-  // A shipped app the workspace has never built stands on its setup screen, and the moment it has
-  // built one it stands on that page for good. Built is the line, not wired: an app builds a
-  // thinner page from fewer sources, and a member who wants to see it before every todo is settled
-  // gets to.
-  //
-  // Only an app an extension shipped is sent there — the main agent among them, since the chat
-  // app is that row. An agent a member built has no bound site and is never meant to have one: it
-  // draws its conversation column, and a gate that read "no site" as "never built" made that
-  // column unreachable at its own address.
-  //
-  // The boot read says which app the workspace is still building, on the agent object: the shell
-  // draws its sidebar from that same roster, and a fact learned a request later had it draw the
-  // column and take it away again. An app that declares nothing has nothing that screen could
-  // list — chat, radar, tasks, wiki and artifacts declare none — so the roster answers no and the
-  // app stands on its page.
-  //
-  // What the roster cannot answer is when the build lands. It is the answer the page was given at
-  // boot, and a build binds the app's page long after that — so an app built in this session still
-  // wears the flag, and moving on it alone leaves the member on a setup screen for an app that has
-  // its page. The flagged app is therefore asked for itself, and only its own fresh answer moves
-  // them. An answer saying the page is built re-reads the roster instead, which is what puts the
-  // shell back around an app the workspace is no longer building; a read that failed, or one whose
-  // payload states nothing, leaves the member on the page they asked for.
-  //
-  // The move replaces rather than pushes. A pushed entry sends Back to the app address, which
-  // mounts the pane, reads the same answer and pushes the setup screen over it again, so the member
-  // can never step back past the app.
+  // The move replaces rather than pushes: a pushed entry sends Back to the app address, which mounts the
+  // pane, reads the same answer and pushes the setup screen over it again.
   const flagged = agent.stands_on_setup === true;
   const setup = usePanelRead<SetupState>(
     flagged ? "/agents/" + agent.id + "/setup" : null,
@@ -241,15 +161,6 @@ export function AgentPane({
   useEffect(() => {
     if (built) onAgents();
   }, [built, onAgents]);
-  // Two reads, each authoritative for a different question. The index says which conversations the
-  // app has at all — every surface it has ever spoken on — and which external ones accept comments.
-  // The rail says which portal and extension conversations are the app's directive chats.
-  //
-  // The index is read only when a conversation is on screen: one the address opens, or — for an
-  // agent whose page is not set — the editing conversation the pane stands on by default, since
-  // there the conversation is the screen. An app showing its own set page with nothing open needs
-  // none of it, so switching between apps does not pull each one's conversation history; the chat
-  // toggle resumes the editing conversation from the rail the shell already holds.
   const listed = usePanelRead<{ conversations: Conversation[]; more: boolean }>(
     !speaks && target !== COMPOSE && (target !== undefined || home.state !== "set")
       ? "/agents/" + agent.id + "/conversations"
@@ -257,11 +168,6 @@ export function AgentPane({
     settles,
   );
   const rows = listed.phase === "ready" ? (listed.payload.conversations ?? []) : [];
-  // The app's directive conversations as the rail carries them, and the one the chat toggle
-  // opens: the newest of them, because an app has one editing conversation — the chat the member
-  // directs the app in — and the newest row is where that direction last happened. An app nobody
-  // has directed yet has none, and the toggle opens the composer; the send that founds one makes
-  // it the editing chat from then on.
   const directives =
     chats === null
       ? null
@@ -274,20 +180,9 @@ export function AgentPane({
           (newest, row) => (newest === null || row.last_at > newest.last_at ? row : newest),
           null,
         );
-  // What the address opens, split by what it names. The fresh sentinel and the app's own
-  // conversations — the chats that direct this app — are the pane's to hold: the right-side chat,
-  // a slot in this screen's track beside the page. Any other target — a run, a record, another
-  // agent's conversation — is the page's own, handed to the frame in `init` and opening nothing
-  // portal-side: the page is the screen that knows how to stand on it. An address naming nothing
-  // opens the newest conversation the member can speak in, so arriving lands on the work rather
-  // than on a list of it, and on an app they have only ever read, on the composer.
   const composeFallback = target === COMPOSE && home.state !== "set";
-  // The rail's own row for a target the index answer does not carry. The two reads are bounded
-  // differently — the index answers one page of 100 rows over every surface the app has ever spoken
-  // on, machine lanes included, while the rail bounds the member's own chats on their own — so an
-  // app holding 100 rows newer than the member's chat with it keeps that chat on the rail and
-  // outside the index's page. The rail is what says which conversations this half can open, so a
-  // row it carries is one the half holds, whether the index answered it or not.
+  // The two reads are bounded differently — the index answers one page of 100 rows over every surface
+  // the app has spoken on, while the rail bounds the member's own chats — so a row can fall outside it.
   const railHeld =
     target !== undefined && !rows.some((entry) => entry.id === target)
       ? (directives?.find((row) => row.conversation_id === target) ?? null)
@@ -301,35 +196,17 @@ export function AgentPane({
   const wanted = held === FRESH;
   const named =
     held !== undefined && !wanted ? (rows.find((entry) => entry.id === held) ?? null) : null;
-  // Acknowledging is recorded, not reflected: the index answers `readable` from audience membership
-  // alone, so a conversation this member has just opened still arrives false and would be handed
-  // back its own gate — and every press would write another audit row for a disclosure already
-  // made. What the member did in this pane is held here, the way a permalink's pane holds it.
+  // The index answers `readable` from audience membership alone, so a conversation this member has just
+  // opened still arrives false, and every press would write another audit row for a disclosure made.
   const [disclosed, setDisclosed] = useState<string | null>(null);
   const start = () => onPlace({ ...place, opens: [FRESH] }, "push");
-  /** Ask the app for the page it has none of.
-   *
-   *  An app with no homepage draws its conversation column and nothing else, so this is the only
-   *  place a member can be offered the build without being sent to look for it. The press opens
-   *  the work rather than spending it: the ask stands in the composer of the app's own new chat,
-   *  where the member reads it, sends it, and watches the build in a conversation they can
-   *  correct. It is the same words the setup screen's press types, because a member who has seen
-   *  one should not have to recognise a second phrasing as the same act. */
   const buildPage = () => {
     setPendingAsk(agent.id, BUILD_ASK, false);
     onPlace({ ...place, opens: [FRESH] }, "push");
   };
-  // Which lane the list is standing over, rather than whether it is open at all. The lane is named
-  // by the conversation it holds, so opening one from the list — or shutting the lane, or starting
-  // a conversation — names a different lane and puts the list away with nothing having to remember
-  // to. A flag would survive all three and draw the list over the conversation the member just
-  // opened.
   const [listing, setListing] = useState<string | null>(null);
   const lane = held ?? FRESH;
   const history = held !== undefined && listing === lane;
-  // The fallback to the newest conversation the member can speak in stands for an address that
-  // names none; a target the rail holds is already named, so answering it with another row would
-  // open a place the address never asked for.
   const opened =
     wanted || railHeld !== null
       ? null
@@ -339,19 +216,11 @@ export function AgentPane({
           : (rows.find((entry) => entry.id === editing?.conversation_id) ??
             rows.find((entry) => live.has(entry.id)) ??
             null)));
-  // What the half is drawing, named rather than spelled inline: four states read as a chain of
-  // conditions no one can follow. Nothing is drawn while the reads that decide are still in
-  // flight — a composer put up for that frame is one the member could type into, and the words
-  // would be founded on a conversation the next answer replaces. A target the rail already names
-  // waits for neither read: the row is the whole answer, and the index will not carry it.
   const settling =
     opened === null &&
     !wanted &&
     railHeld === null &&
     (live === null || listed.phase === "loading");
-  // A conversation shared with nobody this member belongs to is not one an acknowledgement can
-  // open: the index says so on the row itself, and the intent would refuse. The half says that
-  // rather than offering an act that cannot be taken.
   const walled = opened !== null && !opened.readable && !opened.disclosable;
   const gated = opened !== null && !walled && !opened.readable && disclosed !== opened.id;
   const reading =
@@ -364,14 +233,7 @@ export function AgentPane({
 
   const url = home.state === "set" ? home.url : null;
   const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
-  // The half stands for a homepage that exists; an app with none draws one column, because a column
-  // whose only content is the sentence that it is empty takes half the screen to say what the app
-  // having no homepage already says.
   const beside = url !== null;
-  // A target the pane cannot hold is the page's to stand on — but an app with no page has nowhere
-  // to hand it. A conversation the rail knows is drawn here under its own agent, so a rail click
-  // works in the window before the app's page exists; anything else states the miss, because
-  // answering with some other conversation would open a place the link never named.
   const railRow =
     target !== undefined && !conversational && !beside
       ? ((chats ?? []).find(
@@ -385,14 +247,8 @@ export function AgentPane({
     !beside &&
     railAgent === null &&
     listed.phase === "ready";
-  // The framed page stands at this pane's own place, less the track the pane holds as a slot
-  // itself — one meaning per channel, so nothing is opened twice. It crosses whole: a frame handed
-  // one key of a place could only stand the screen the address names by guessing the rest.
   const framed = mergePlace(place, conversational ? { opens: undefined } : {});
 
-  /** The conversation, whole. Its own band is drawn where the conversation is the screen; standing
-   *  in a lane, the lane's header already states the name and draws the way out, and a second band
-   *  under it would state both a second time. */
   const conversation = (
     <section aria-label={agentName(agent.name)} className="flex min-h-0 min-w-0 flex-1 flex-col">
       {beside ? null : (
@@ -422,17 +278,12 @@ export function AgentPane({
         />
       )}
       {listed.phase === "failed" ? (
-        // A read that refused must never be read as an app nobody has spoken to: one draws the
-        // composer over a history that is there, the other states why it cannot be shown.
         <PanelEmpty>{listed.message}</PanelEmpty>
       ) : missing ? (
         <PanelEmpty>This conversation is not in {agentName(agent.name)}.</PanelEmpty>
       ) : settling ? null : walled ? (
         <PanelEmpty>This conversation is not shared with this account.</PanelEmpty>
       ) : gated ? (
-        // Another member's private conversation is opened by acknowledging it, which is a turn
-        // and a record. The address naming it is what reaches the gate, so a link a member was
-        // sent lands on the acknowledgement rather than on the transcript.
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl">
           <Disclose
             key={opened.id}
@@ -442,12 +293,6 @@ export function AgentPane({
           />
         </div>
       ) : reading ? (
-        // A conversation the portal cannot continue is read rather than answered. Where another
-        // surface holds it, that surface is the way on and the heading it draws is the way back to
-        // it. Where the portal's own surface holds it — a run on a clock, a turn the workspace
-        // seeded — there is nowhere to
-        // send the member, so the line states the fact and stops: `Reply in Portal` read inside
-        // the portal names no act.
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl">
           <ConversationDetail agent={agent} conversation={opened} />
           <p className="mt-2xl max-w-hint text-ink-soft">
@@ -475,19 +320,6 @@ export function AgentPane({
     </section>
   );
 
-  /** Every conversation this app holds, newest first, for the member to open one. It is the app's
-   *  own index rather than the rail's chats — every surface the app has spoken on, so a thread it
-   *  answered in Slack stands here beside the ones started in this lane, and one the member may not
-   *  read is named by whose it is. The row states what the conversation is about and where and when
-   *  it last moved — the three facts the app's own band states, so one conversation is named the
-   *  same wherever it is listed. The moment stands at the row's end rather than after its name,
-   *  since what the member scans for is the name and every row carries one; the surface is named
-   *  only where it is not this one, the way the rail names none on a conversation the portal holds;
-   *  and no mark, because every row here is a conversation and a glyph repeated down the list tells
-   *  no two of them apart. The read carries the newest of them and no cursor, so where it says it
-   *  stopped at its bound the list says so under the rows rather than ending as though the app had
-   *  spoken that many times. Picking a row opens it at its own address, which names a different
-   *  lane and puts this list away. */
   const past = (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable py-md">
       <Panel
@@ -515,13 +347,6 @@ export function AgentPane({
     </div>
   );
 
-  /** Where the conversation stands when the app has a page: a slot in the screen's own track,
-   *  opened by the titlebar's act and named by the conversation it holds. Its band carries the one
-   *  act the member cannot reach from the page — starting another conversation with this app —
-   *  and no menu to switch between them, because a sidebar click lands any conversation here by
-   *  its own address. The act is spent where the pane already stands on a conversation nobody has
-   *  spoken in, so it draws as unavailable rather than founding a second empty one. An app with no
-   *  page has no track to divide, so the conversation is the screen and takes the width whole. */
   const slot = useSlot(beside && held !== undefined ? (history ? past : conversation) : null, {
     id: lane,
     kind: "panel",
@@ -553,8 +378,6 @@ export function AgentPane({
         </Button>
       </>
     ),
-    // The way out shuts what is standing: the list first, then the lane under it. A single X that
-    // took the lane away from a member reading the list would shut two things on one press.
     onClose: history
       ? () => setListing(null)
       : () => onPlace({ ...place, opens: [] }, "replace"),
@@ -567,14 +390,6 @@ export function AgentPane({
           aria-label={agentName(agent.name) + " homepage"}
           className="relative flex min-h-0 min-w-0 flex-1 flex-col"
         >
-          {/* The page heads itself — it is the portal's own screen and draws the band a section
-              drew, so a pane band over it would state the name twice and push the page down a row
-              it never had. The two acts that are the shell's own stand on the band line at its
-              right end, and the page's band makes room for them: the frame inherits the inset the
-              shell's acts occupy, so its own band-right controls end where these begin. */}
-          {/* The act opens the app's editing chat in the lane beside its page. The chat app's page
-              is that conversation, so the shell draws no acts over it: the page holds every way
-              into the conversations it lists. */}
           {speaks ? null : (
             <div className="absolute top-lg right-2xl z-10 flex items-center gap-xs">
               <AppMenu

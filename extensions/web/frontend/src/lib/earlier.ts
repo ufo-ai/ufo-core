@@ -5,10 +5,6 @@ import type { Message } from "@/lib/types";
 
 export type EarlierPage = { cursor: string; messages: Message[] };
 
-/** Older pages of a compacted conversation, held above the tail the transcript already states.
- *  `pages` is what has landed, oldest first; `more` says another page stands above them; `load`
- *  brings it in. A failed load stops asking on its own and waits for `load` to be called again —
- *  the row that watches the scroll would otherwise retry forever against the same answer. */
 export type EarlierMessages = {
   pages: EarlierPage[];
   more: boolean;
@@ -17,11 +13,8 @@ export type EarlierMessages = {
   load: () => void;
 };
 
-/** Pages a conversation's compacted-away messages in from the transcript's cursor, newest page
- *  first. Each response names the bounded page over it, so the chain is the server's to state and
- *  a record the transcript never reflected is never asked for. A transcript that restates a
- *  different root has compacted again since the pages loaded, so they no longer abut the tail and
- *  are dropped rather than drawn around a gap. */
+/** A transcript that restates a different root has compacted again since the pages loaded, so they no
+ *  longer abut the tail and are dropped rather than drawn around a gap. */
 export function useEarlierMessages(path: string | null, root: string | null): EarlierMessages {
   const [held, setHeld] = useState<{
     root: string | null;

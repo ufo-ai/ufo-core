@@ -8,31 +8,22 @@ import { cn } from "@/lib/cn";
 
 export type { QuestionnaireItemDefinition, QuestionnaireItemStatus } from "@shadcn/react/questionnaire";
 
-/** One answer, drawn as the whole row rather than as a mark with a label beside it: the member
- *  presses anywhere in it, or types anywhere in it. `min-w-0` is what keeps the row inside the
- *  card that holds it: a grid item's automatic minimum is its content, and a description that
- *  never wraps would otherwise carry every row past the card's own edge. */
 export const ROW = cn(
   "relative flex min-h-(--size-touch) min-w-0 items-center gap-md rounded-panel border border-edge",
   "bg-transparent px-lg py-sm text-start text-ui transition-colors hover:bg-fill",
 );
 
-/** The key a row is answered by, at its leading edge: the letter the run gives each answer in
- *  order, which is also the key that presses it. */
 export const KEY = cn(
   "pointer-events-none flex size-(--size-avatar) shrink-0 items-center justify-center",
   "rounded-control border border-edge bg-fill",
   "font-mono text-mono leading-none font-medium text-ink-soft",
 );
 
-/** One chevron of the stepper: a glyph in the control's own square, with no border of its own, so
- *  the pair reads as one count rather than as two buttons standing beside a number. */
 const STEP = cn(
   "flex size-(--size-control) items-center justify-center rounded-control",
   "text-ink-soft transition-colors duration-100 ease-control hover:bg-fill hover:text-ink",
 );
 
-/** The act that takes the member on, and the key that takes them on without the pointer. */
 const ONWARD = (
   <>
     Continue
@@ -40,17 +31,6 @@ const ONWARD = (
   </>
 );
 
-/** What a turn asks of the member, taken one question at a time. It is a real form: every answer
- *  is a native control with a native name, so what the member chose survives a reload, reads back
- *  to assistive technology as the radio or checkbox it is, and arrives as form data rather than as
- *  state some component was holding.
- *
- *  Asking one at a time is the point. A turn may ask up to four things, and four stacked questions
- *  in a transcript is a wall the member has to parse before answering any of it; a step names one
- *  decision, says where it sits in the run, and lets them go back.
- *
- *  Every answer carries a letter, so the run is answered from the keyboard as readily as from the
- *  pointer and the key the member presses is drawn on the row it presses. */
 export function Questionnaire({
   className,
   ...props
@@ -65,8 +45,6 @@ export function Questionnaire({
   );
 }
 
-/** One question. It is a fieldset, so the title is its legend and the whole group is named by it
- *  rather than by a paragraph that happens to sit above. */
 export function QuestionnaireItem({
   className,
   ...props
@@ -80,8 +58,6 @@ export function QuestionnaireItem({
   );
 }
 
-/** The question itself, set larger than the answers under it: the member reads the decision first
- *  and the options as what answers it. */
 export function QuestionnaireTitle({
   className,
   ...props
@@ -112,13 +88,6 @@ export function QuestionnaireChoices({
   );
 }
 
-/** One answer the member presses. The native control is laid over the row invisibly and still
- *  carries the focus, the name and the value, so nothing here reimplements what a radio already
- *  is; the key states which answer it is, and the row states that it is the chosen one.
- *
- *  The key sits on the line naming the answer rather than in the middle of however many lines
- *  explain it, so the row's own inset carries its height in place of the touch floor — which is
- *  what keeps a one-line answer reading as centred inside it. */
 export function QuestionnaireChoice({
   children,
   className,
@@ -163,11 +132,6 @@ export function QuestionnaireChoice({
   );
 }
 
-/** What the option means, under what it is called. It wraps rather than truncating — a sentence
- *  cut at the row's edge loses the clause that distinguishes it from the option above — and holds
- *  to two lines, so a column of answers stays a column the member can read down. The answer they
- *  chose states itself whole: it is the one they are acting on, and its length no longer costs
- *  them the ones they are comparing it against. */
 export function QuestionnaireChoiceDescription({ className, ...props }: ComponentProps<"span">) {
   return (
     <span
@@ -182,14 +146,8 @@ export function QuestionnaireChoiceDescription({ className, ...props }: Componen
   );
 }
 
-/** The answer the options do not hold, drawn as the last of them: a row with its own key that the
- *  member types into. Words here are an answer like any other — filling the row settles the
- *  question the way pressing a choice does, and the row states that as the choices state it.
- *
- *  The name the row carries once it holds words is the whole of what submits it, so the `form=""`
- *  the primitive also hangs on an empty row never reaches the DOM: Gecko does not return an element
- *  to its ancestor form when that attribute is removed, so the words the member typed would sit in
- *  no form at all and Continue would submit an empty answer they never see refused. */
+/** Gecko does not return an element to its ancestor form when a `form` attribute is removed, so the
+ *  `form=""` the primitive hangs on an empty row must never reach the DOM. */
 export function QuestionnaireInput({
   shortcut,
   className,
@@ -243,9 +201,6 @@ export function QuestionnaireError({
   );
 }
 
-/** The acts, on one row: where the member is in the run on the left, and what takes them out of
- *  this question on the right — so the act that moves them forward is always in the same place
- *  whether this question is the last one or not. */
 export function QuestionnaireActions({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
@@ -259,9 +214,6 @@ export function QuestionnaireActions({ className, ...props }: ComponentProps<"di
   );
 }
 
-/** Where the member is in the run, and the two acts that move them through it. The count sits
- *  between the chevrons in fixed tracks, so the digits hold one place whether or not there is a
- *  question either side of this one. */
 export function QuestionnaireStepper({ className, ...props }: ComponentProps<"div">) {
   return (
     <div

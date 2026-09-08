@@ -13,9 +13,6 @@ beforeEach(() => {
 });
 
 test("the work band draws the newest conversations, and says where there are more", async () => {
-  /** The whole set is the conversations screen's answer, not this one — a band that paged would be
-   *  a second listing with its own state in a page whose only channel for state is the place. So it
-   *  draws the newest few, newest first, and says so rather than stopping in silence. */
   const rows = Array.from({ length: 12 }, (_, index) => ({
     name: `0000000${index}-0000-4000-8000-00000000000${index}`,
     summary: `Brief ${index}`,
@@ -35,7 +32,6 @@ test("the work band draws the newest conversations, and says where there are mor
       />
     </TooltipProvider>,
   );
-  // The row says its summary and, in the same breath, where the conversation came in and when.
   expect(await screen.findByText("Brief 0 Portal · Aug 24 2026")).toBeTruthy();
   expect(screen.queryByText(/Brief 8/)).toBeNull();
   expect(

@@ -38,10 +38,8 @@ from ufo.host.ext.loader import load_manifests
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 CONCURRENCY = 4
-# A weight unit measured at roughly a minute of wall clock, so a shard of 45 runs under an
-# hour and stays a fraction of the six hours GitHub gives a job. Every shard also pays the
-# checkout, sync, cargo build, and serve boot, so a smaller weight buys wall clock with
-# runner minutes.
+# A weight unit measured at roughly a minute of wall clock, so a shard of 45 runs under an hour and
+# stays a fraction of the six hours GitHub gives a job.
 SHARD_WEIGHT = 45
 DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 PUBLIC_BASE_URL = "http://evals.invalid"

@@ -927,8 +927,6 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
 
     recorded = await flow.complete(state=state, code="the-code")
 
-    # The conversation carries on: the landing grant tells it, and the stamp the surfaces draw a
-    # settled control from rides the same write the grant did, so neither can cost the other.
     assert recorded.resumed is True
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -955,12 +953,9 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
                 .all()
             )
     assert len(turns) == 1
-    # The member-facing name, not the slug and not the broker's id.
     assert turns[0]["inbound"] == "Connected Stub: Work account."
     assert dbos.enqueued == [str(turns[0]["id"])]
 
-    # The member refreshes the callback. The same state carries the same key, so they rejoin the
-    # turn already running rather than founding a second one on the same account.
     await flow.complete(state=state, code="the-code")
 
     with ws(workspace_id):
@@ -1046,7 +1041,6 @@ async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: No
             granted = (
                 await connection.execute(sa.select(sa.func.count()).select_from(tables.connection))
             ).scalar_one()
-    # The seeded intent turn and nothing else, and the grant landed all the same.
     assert turns == 1
     assert granted == 1
 
@@ -1057,8 +1051,6 @@ async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: No
         page = (
             await client.get("/v1/connect/callback", params={"state": state, "code": "the-code"})
         ).text
-    # Nothing waits on this connect, so the page names no conversation and no agent — it states the
-    # outcome and the one generic thing left to do, and takes the window away itself.
     assert CLOSE_THIS_PAGE in page and CONVERSATION_CONTINUES not in page
     assert "conversation" not in page and "agent" not in page
     assert "window.close()" in page
@@ -1114,7 +1106,6 @@ async def test_the_callback_carries_a_link_arrived_tab_to_the_connectors_screen(
         f'location.replace("{PORTAL_URL}?connected=Stub+%C2%B7+Work+account#/connectors")'
         in done.text
     )
-    # One statement of the outcome in the address, on the leg the member reads nothing on.
     assert done.text.count(f"{CONNECTED_PARAM}=") == 1
     assert CLOSE_THIS_PAGE not in done.text and CONVERSATION_CONTINUES not in done.text
 
@@ -1201,18 +1192,9 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
                 "/v1/connect/callback", params={"state": state, "code": "the-code"}
             )
             assert done.status_code == 200
-            # No session stands behind this page — a Slack member finishes consent in a browser
-            # that has never signed in — so it addresses them by what just happened and names the
-            # one thing left to do. The turn already resumed, so this is the one branch that may
-            # name the conversation: the page closes the window the portal opened for it, and the
-            # line stays for the tab no script owns.
             assert CONVERSATION_CONTINUES in done.text
             assert "window.close()" in done.text
 
-    # The conversation that asked for the account is told, as the granting member, so the turn
-    # waiting there carries on without them asking it to. Both callbacks carry the one key the
-    # connection settled on, so a refreshed browser rejoins that message rather than sending a
-    # second one.
     assert [(call.conversation_id, call.speaker_member_id) for call in resumed.calls] == [
         (conversation_id, member_id),
         (conversation_id, member_id),
@@ -1220,12 +1202,8 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
     assert len({call.idempotency_key for call in resumed.calls}) == 1
     assert resumed.calls[0].message == "Connected Stub: Work account."
 
-    # A later connect of the same account is a second act and must reach the conversation too — a
-    # re-consent after the provider revoked the token, or a connect for another agent. The handoff
-    # memoizes one state per asking turn, so a second act is a second authorization.
-    # `GrantStore.record` settles it onto the connection row the first one wrote, so a key built
-    # from the connection would repeat here — and admission, which matches on (workspace, key),
-    # would drop this message while the page told the member the agent was carrying on.
+    # A key built from the connection would repeat here, and admission matches on (workspace, key),
+    # so this message would be dropped while the page said the agent was carrying on.
     later = parse_qs(
         urlparse(
             flow.authorize(
@@ -1551,8 +1529,6 @@ async def test_same_owner_replacements_refuse_stale_generations(db: None) -> Non
     assert regranted.connection_id == reconnected.connection_id
     assert regranted.id != reconnected.id
     with ws(workspace_id), agent(agent_id):
-        # sharing is the connection's own act, so it outlives the grant generation that
-        # asked for it; revoking is the edge's, so a stale grant id reaches nothing
         assert (
             await store.set_shared(regranted.connection_id, False, actor_member_id=member_id)
             is True

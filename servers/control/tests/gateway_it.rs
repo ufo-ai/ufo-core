@@ -1,10 +1,3 @@
-//! The gateway's routes and the one state machine behind them.
-//!
-//! The router is served on a real socket and driven over HTTP, with a local server standing in for
-//! core's onboarding RPC and a real Postgres holding the ledgers. What a member types reaches the
-//! machine the way it will in production — headers, cookies, body caps and all — so the screens
-//! asserted here are the screens they get.
-
 mod harness;
 
 use chrono::{Duration, Utc};
@@ -35,7 +28,6 @@ const WORKSPACE: &str = "11111111-1111-1111-1111-111111111111";
 const CONVERSATION: &str = "6f1c8038-1111-4222-8333-444455556666";
 const SIGNUP_KEY: &str = "ufo";
 
-/// A gateway on its own socket, with its own database and its own two stand-in services.
 struct Rig {
     base: String,
     pool: deadpool_postgres::Pool,
@@ -99,7 +91,6 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
-/// One terminal turn: the session header the client carries, and the body it typed.
 async fn turn(rig: &Rig, session: &str, body: &str) -> String {
     let response = client()
         .post(format!("{}/v1/onboard/terminal", rig.base))
@@ -208,9 +199,6 @@ async fn the_login_page_is_served_as_html() {
 
 #[tokio::test]
 async fn a_browser_already_holding_a_session_is_forwarded_where_it_asked_to_land() {
-    // The door is served on the product's own host, so the cookie the portal binds arrives here: a
-    // member who already proved their address is sent on to the conversation the link named, rather
-    // than asked for that address a second time.
     let rig = rig(vec![], vec![], true).await;
     let held = mint_token(SECRET, WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
     let response = client()
@@ -228,9 +216,6 @@ async fn a_browser_already_holding_a_session_is_forwarded_where_it_asked_to_land
 
 #[tokio::test]
 async fn an_ask_only_the_page_can_answer_gets_it_even_holding_a_session() {
-    // Each of these reaches the door from a caller that would refuse the forward right back to it:
-    // the operator surfaces read `ufo_debug`, which only the page's POST binds; the artifact refused
-    // this very session; and the invitation names an address the session may not prove.
     let rig = rig(vec![], vec![], true).await;
     let held = mint_token(SECRET, WORKSPACE, "ops@metalcraft.ai", Utc::now()).unwrap();
     for asked in [
@@ -279,9 +264,6 @@ async fn a_cookie_that_outlived_its_bearer_gets_the_sign_in_page() {
 
 #[tokio::test]
 async fn signing_out_expires_the_held_session_and_lands_on_the_form() {
-    // The route is the one way back to the form now that the door forwards a live session. It reads
-    // no session, so a browser holding a bearer and a browser holding nothing are answered the same
-    // way, and the form is what the door draws once the cookies are gone.
     let rig = rig(vec![], vec![], true).await;
     let held = mint_token(SECRET, WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
     for carried in [Some(format!("{SESSION_COOKIE}={held}")), None] {
@@ -337,8 +319,6 @@ async fn the_sign_in_illustration_is_served_as_a_webp() {
 
 #[tokio::test]
 async fn the_share_cards_are_served_anonymously_and_cached_for_good() {
-    // What a link unfurler needs is the whole contract here: it carries no session, follows no
-    // redirect, and reads one absolute URL. A card answered any other way is no card at all.
     let rig = rig(vec![], vec![], true).await;
     for (path, card) in [
         (SHARE_HOME_PATH, SHARE_HOME_BYTES),
@@ -413,7 +393,8 @@ async fn an_oversized_channel_or_session_is_refused_rather_than_truncated() {
 
 #[tokio::test]
 async fn an_oversized_body_is_refused_rather_than_graded() {
-    // A truncated address or code would be graded as if the member typed it.
+    // A body over the cap is refused rather than truncated: a truncated address or code would be graded
+    // as if the member typed it.
     let rig = rig(vec![], vec![], true).await;
     let response = client()
         .post(format!("{}/v1/onboard/terminal", rig.base))
@@ -542,14 +523,11 @@ async fn a_granted_domain_founds_its_workspace_and_signs_the_founder_in() {
         "{screen}"
     );
     assert!(screen.contains("token\t"), "{screen}");
-    // An admin on a terminal caps on the first-move menu, so billing costs one selection.
     assert!(
         screen.contains(&format!("choose\t{FIRST_MOVE_PROMPT}")),
         "{screen}"
     );
     assert!(screen.contains(BILLING_CHOICE), "{screen}");
-    // The sign-in that seated the first member carries the first run; the browser opens the
-    // workspace there.
     assert!(screen.contains("first\t1"), "{screen}");
 }
 
@@ -578,8 +556,6 @@ async fn a_teammate_joining_an_existing_workspace_carries_no_first_run() {
         screen.contains("say\tSigned in: second@gmail.com"),
         "{screen}"
     );
-    // The first run belongs to the sign-in that founded the workspace. A teammate joining one that
-    // already stands lands where every later sign-in does.
     assert!(!screen.contains("first\t"), "{screen}");
 }
 
@@ -612,7 +588,6 @@ async fn the_minted_bearer_verifies_as_the_signed_in_member() {
         .lines()
         .find_map(|line| line.strip_prefix("token\t"))
         .expect("a token line");
-    // The body is the claim every surface verifies; this is the one it names.
     let body = token.split_once('.').unwrap().0;
     let decoded = base64_decode(body);
     assert!(
@@ -665,10 +640,6 @@ async fn an_operator_address_is_handed_the_debug_surface() {
 
 #[tokio::test]
 async fn an_admin_domain_claim_lands_on_the_web_portal() {
-    // The debug surface used to be the destination of every sign-in that carried no `?c=`, no `?a=`
-    // and no first-run mark, so a member on the admin email domain could never reach the portal at
-    // all. The claim hands the page a workspace and the operator capability; the portal is where
-    // the page posts the session, and the debug surface is reached only by a member who asked.
     let operator = format!("staff@{OPERATOR_EMAIL_DOMAIN}");
     let rig = rig(
         vec![
@@ -724,14 +695,11 @@ async fn a_teammate_with_one_candidate_joins_without_a_prompt() {
         screen.contains("say\tSigned in: teammate@acme.com"),
         "{screen}"
     );
-    // Billing is not a joined teammate's to set up, so they cap on the ordinary prompt.
     assert!(!screen.contains("choose\tWhat first?"), "{screen}");
     assert!(screen.contains("ask\t>"), "{screen}");
     assert!(!screen.contains("slack\t"), "{screen}");
 }
 
-/// One web turn: the page's POST with the session cookie it holds, answering the payload and the
-/// cookie the response re-minted, if any.
 async fn web_turn(
     rig: &Rig,
     cookie: Option<&str>,
@@ -876,7 +844,6 @@ async fn the_web_channel_mints_a_host_only_session_cookie() {
 
 #[tokio::test]
 async fn a_planted_cookie_standing_behind_no_claim_is_discarded_and_re_minted() {
-    // A validly sealed value a caller obtained by asking must not key a claim it did not start.
     let rig = rig(vec![], vec![], true).await;
     let first = client()
         .post(format!("{}/v1/onboard/web", rig.base))
@@ -933,7 +900,6 @@ async fn the_google_hop_binds_its_session_to_this_browser() {
         .unwrap()
         .to_str()
         .unwrap();
-    // Console mode routes to the local stand-in, carrying the signed state.
     assert!(
         location.starts_with("/v1/onboard/auth/console?state="),
         "{location}"
@@ -962,7 +928,6 @@ async fn a_callback_carrying_a_state_we_never_signed_is_refused() {
 #[tokio::test]
 async fn a_callback_without_the_bound_cookie_refuses_and_lands_on_the_page() {
     let rig = rig(vec![], vec![], true).await;
-    // A state this gateway signed, replayed in a browser that never left.
     let start = client()
         .get(format!("{}/v1/onboard/auth/start?first=1", rig.base))
         .send()
@@ -992,9 +957,6 @@ async fn a_callback_without_the_bound_cookie_refuses_and_lands_on_the_page() {
 
 #[tokio::test]
 async fn the_invitation_ask_survives_the_google_hop_it_was_carried_into() {
-    // The ask is what makes the door draw the form for a recipient already holding another
-    // workspace's session. A hop that dropped it would return the completed sign-in to a door that
-    // forwards it away unfinished, leaving the seat unclaimed.
     let rig = rig(vec![], vec![], true).await;
     let start = client()
         .get(format!("{}/v1/onboard/auth/start?invite=1", rig.base))
@@ -1032,7 +994,6 @@ async fn the_console_stand_in_is_mounted_only_under_console_mode() {
     assert_eq!(response.status(), StatusCode::OK);
     let page = response.text().await.unwrap();
     assert!(page.contains("<h1>Developer sign-in</h1>"), "{page}");
-    // The code the console verifier accepts is named on the screen rather than typed from memory.
     assert!(page.contains(CONSOLE_CODE), "{page}");
     assert!(
         page.contains(&format!("<img src=\"{LOGO_PATH}\"")),
@@ -1042,8 +1003,6 @@ async fn the_console_stand_in_is_mounted_only_under_console_mode() {
 
 #[tokio::test]
 async fn the_mark_is_served_as_a_raster_for_the_readers_that_refuse_the_vector() {
-    // An invitation draws this one: mail clients block SVG, so a message pointing at the vector
-    // shows its recipient nothing. It is the same artwork, served as PNG at its own path.
     let rig = rig(vec![], vec![], true).await;
     let response = reqwest::get(format!("{}{LOGO_PNG_PATH}", rig.base))
         .await
@@ -1063,21 +1022,18 @@ async fn the_mark_is_served_as_a_raster_for_the_readers_that_refuse_the_vector()
 
 #[test]
 fn the_invite_gate_defaults_to_required_and_refuses_a_value_that_is_not_a_boolean() {
-    // Unset means required, so a deploy that forgets the knob never opens signup by accident.
     for closed in ["", "true", "TRUE", " 1 "] {
         assert!(parse_invite_required(closed).unwrap(), "{closed:?}");
     }
     for open in ["false", "FALSE", "0"] {
         assert!(!parse_invite_required(open).unwrap(), "{open:?}");
     }
-    // Garbage fails loud rather than falling to either side of a gate on signup.
     for garbage in ["yes", "no", "maybe", "2"] {
         let refused = parse_invite_required(garbage).unwrap_err();
         assert!(refused.contains("is not a boolean"), "{refused}");
     }
 }
 
-/// One click on the join link, answering the cookie it bound.
 async fn join(rig: &Rig, key: &str) -> (StatusCode, Option<String>) {
     let response = client()
         .get(format!("{}/join/{key}", rig.base))
@@ -1105,8 +1061,6 @@ async fn the_join_door_binds_a_session_and_sends_the_browser_to_the_sign_in_page
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    // The ask is what makes the door draw the form for a browser already holding a session; the
-    // address names no key, and this one is kept out of the next request.
     assert_eq!(
         response
             .headers()
@@ -1140,14 +1094,12 @@ async fn the_join_door_binds_a_session_and_sends_the_browser_to_the_sign_in_page
 async fn a_key_that_does_not_match_is_answered_as_an_unrouted_path() {
     let rig = rig(vec![], vec![], true).await;
     let (status, cookie) = join(&rig, "not-the-key").await;
-    // A refusal of its own would tell a caller the door is there to be guessed at.
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(cookie.is_none(), "{cookie:?}");
 }
 
 #[tokio::test]
 async fn a_deploy_that_configures_no_key_serves_no_join_door() {
-    // Unset is the default, so a deploy never opens signup by leaving the knob alone.
     let rig = rig_with(vec![], vec![], true, None).await;
     let (status, cookie) = join(&rig, SIGNUP_KEY).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1177,7 +1129,6 @@ async fn the_signup_key_founds_the_domain_workspace_with_no_operator_grant() {
     let cookie = cookie.expect("the door binds a session");
 
     let (_, carried) = web_turn(&rig, Some(&cookie), "founder@acme.com").await;
-    // The email turn re-mints, as it does for every arrival; the authority rides the new session.
     let cookie = carried.unwrap_or(cookie);
     let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
     let verbs: Vec<&str> = payload["directives"]
@@ -1189,8 +1140,6 @@ async fn the_signup_key_founds_the_domain_workspace_with_no_operator_grant() {
     assert!(verbs.contains(&"token"), "{payload}");
     assert!(verbs.contains(&"workspace"), "{payload}");
 
-    // The grant the member wrote for themselves is an ordinary row, spent the ordinary way, so the
-    // ledger and everything that reads it see what an operator grant leaves.
     let connection = rig.pool.get().await.unwrap();
     let rows = connection
         .query(
@@ -1237,8 +1186,6 @@ async fn the_signup_key_founds_an_address_workspace_for_gmail() {
         "{payload}"
     );
 
-    // Both identity columns carry the subject: `email_domain` is the one the release being replaced
-    // looks a grant up by, and `gmail.com` there is a grant it hands to any `@gmail.com` arrival.
     let connection = rig.pool.get().await.unwrap();
     let filed = connection
         .query_one(
@@ -1275,8 +1222,6 @@ async fn a_browser_that_never_opened_the_join_link_is_still_refused() {
 
 #[tokio::test]
 async fn the_signup_key_survives_the_google_hop() {
-    // The hop re-mints the session, so an authority the door bound would be dropped there unless it
-    // is carried — and the member would be refused after proving their address.
     let rig = rig(
         vec![],
         vec![
@@ -1335,8 +1280,6 @@ async fn the_signup_key_survives_the_google_hop() {
 
 #[tokio::test]
 async fn a_keyed_session_offers_creation_beside_a_membership_it_already_holds() {
-    // Without this the create option is offered only where a grant already stands, so a member who
-    // belongs somewhere else could never reach the gate that would write theirs.
     let rig = rig(
         vec![
             (200, r#"{"id":"m1"}"#.to_string()),
@@ -1404,9 +1347,6 @@ async fn a_keyed_session_writes_no_second_grant_over_a_spent_one() {
 
 #[tokio::test]
 async fn a_keyed_session_replaces_a_grant_that_expired_unspent() {
-    // `redeem` answers `Expired` before it answers `Unknown`, and `mint` is the only thing that
-    // clears an expired unconsumed row — so a gate that self-granted on `Unknown` alone refused
-    // this domain for good, and told the member to reply to an invite email they never had.
     let rig = rig(
         vec![
             (200, r#"{"id":"m1"}"#.to_string()),
@@ -1444,7 +1384,6 @@ async fn a_keyed_session_replaces_a_grant_that_expired_unspent() {
         .collect();
     assert!(verbs.contains(&"token"), "{payload}");
 
-    // The stale row is gone rather than shadowing the live one, so the domain reads as granted once.
     let connection = rig.pool.get().await.unwrap();
     let rows = connection
         .query(
@@ -1459,7 +1398,6 @@ async fn a_keyed_session_replaces_a_grant_that_expired_unspent() {
         .is_some());
 }
 
-/// The cookie the join door would have bound at a given moment, sealed exactly as it seals one.
 fn keyed_cookie(key: &str, expires_at: chrono::DateTime<Utc>) -> String {
     let mark = keyed_mark(key, SECRET, expires_at);
     let sealed = seal_session(
@@ -1469,7 +1407,6 @@ fn keyed_cookie(key: &str, expires_at: chrono::DateTime<Utc>) -> String {
     format!("{ONBOARD_SESSION_COOKIE}={sealed}")
 }
 
-/// The expiry a marked cookie names.
 fn mark_expiry(cookie: &str) -> String {
     cookie
         .split_once('=')
@@ -1483,9 +1420,6 @@ fn mark_expiry(cookie: &str) -> String {
 
 #[tokio::test]
 async fn the_join_door_draws_the_form_for_a_browser_already_signed_in() {
-    // `/login` forwards a live bearer straight to its portal. The door has just bound a session
-    // carrying an authority that bearer knows nothing about, so a forward would spend it on nothing
-    // and the member could never found their domain without signing out first.
     let rig = rig(vec![], vec![], true).await;
     let response = client()
         .get(format!("{}/join/{SIGNUP_KEY}", rig.base))
@@ -1526,13 +1460,10 @@ async fn the_join_door_draws_the_form_for_a_browser_already_signed_in() {
 
 #[tokio::test]
 async fn a_mark_the_deploy_has_stopped_serving_grants_nothing() {
-    // "Empty serves no door" has to hold for the marks already out, or emptying the knob closes
-    // nothing. The mark is answered in a Set-Cookie any client reads, so it is a bearer.
     let door = rig(vec![], vec![], true).await;
     let (_, cookie) = join(&door, SIGNUP_KEY).await;
     let captured = cookie.expect("the door binds a session");
 
-    // Unset, then rotated: both are a deploy that has stopped serving the key this mark names.
     for signup_key in [None, Some("rotated")] {
         let closed = rig_with(
             vec![
@@ -1565,8 +1496,6 @@ async fn a_captured_mark_stops_counting_when_it_expires() {
         true,
     )
     .await;
-    // The door's own mark, aged past its window. Everything else about the session is untouched, so
-    // the expiry is the only thing that can refuse it.
     let stale = keyed_cookie(
         SIGNUP_KEY,
         Utc::now() - Duration::minutes(SIGNUP_MARK_TTL_MINUTES + 1),
@@ -1582,8 +1511,6 @@ async fn a_captured_mark_stops_counting_when_it_expires() {
 
 #[tokio::test]
 async fn a_re_mint_carries_the_mark_without_extending_it() {
-    // The walk re-mints the session on the email turn and again on the Google hop. A re-mint that
-    // reissued the expiry would let a captured mark be renewed indefinitely.
     let rig = rig(vec![], vec![], true).await;
     let (_, cookie) = join(&rig, SIGNUP_KEY).await;
     let cookie = cookie.expect("the door binds a session");
@@ -1601,9 +1528,6 @@ async fn a_re_mint_carries_the_mark_without_extending_it() {
 
 #[tokio::test]
 async fn the_join_ask_survives_the_google_hop_it_was_carried_into() {
-    // The mark alone is not enough. A member already signed in elsewhere who takes the Google hop
-    // returns to the door, and a return to bare `/login` forwards them to the workspace they already
-    // have — claim verified, mark spent on nothing, domain never founded.
     let rig = rig(
         vec![],
         vec![
@@ -1621,7 +1545,6 @@ async fn the_join_ask_survives_the_google_hop_it_was_carried_into() {
     let cookie = cookie.expect("the door binds a session");
     let bearer = mint_token(SECRET, WORKSPACE, "dana@elsewhere.com", Utc::now()).unwrap();
 
-    // The page hands the ask to the hop, as it does for an invitation.
     let start = client()
         .get(format!("{}/v1/onboard/auth/start?join=1", rig.base))
         .header("cookie", &cookie)
@@ -1667,7 +1590,6 @@ async fn the_join_ask_survives_the_google_hop_it_was_carried_into() {
         .to_string();
     assert!(landing.contains("join=1"), "{landing}");
 
-    // And the door that ask names draws the form rather than forwarding the live bearer away.
     let page = client()
         .get(format!("{}{landing}", rig.base))
         .header("cookie", format!("{SESSION_COOKIE}={bearer}; {hopped}"))

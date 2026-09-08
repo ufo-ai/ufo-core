@@ -110,7 +110,6 @@ function App() {
           gap: "1.5rem",
         }}
       >
-        {/* Header / Orientation */}
         <header
           id="header-region"
           data-app-region="header"
@@ -187,7 +186,6 @@ function App() {
           </div>
         </header>
 
-        {/* Main 2-column Grid */}
         <div
           style={{
             display: "grid",
@@ -196,7 +194,6 @@ function App() {
             alignItems: "start",
           }}
         >
-          {/* Left Column: Unassigned Issues */}
           <section
             id="unassigned-issues-region"
             data-app-region="unassigned-issues"
@@ -377,7 +374,6 @@ function App() {
             </div>
           </section>
 
-          {/* Right Column: Prepared Assignment Review & Team Load */}
           <section
             id="action-review-region"
             data-app-region="action-review"
@@ -414,7 +410,6 @@ function App() {
               </p>
             </div>
 
-            {/* Proposal Details Card */}
             <div
               style={{
                 backgroundColor: "var(--color-field)",
@@ -494,7 +489,6 @@ function App() {
               </div>
             </div>
 
-            {/* Action Trigger */}
             <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
               <button
                 type="button"
@@ -534,7 +528,6 @@ function App() {
               )}
             </div>
 
-            {/* Team Load Reference Table */}
             <div
               style={{
                 marginTop: "0.5rem",

@@ -16,8 +16,6 @@ import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionView, Agent, Member } from "@/lib/types";
 import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
 
-/** The surfaces a member can reach the workspace from, and where each stands: whether this deploy
- *  offers it, whether it is connected, and for the terminal the one command that installs it. */
 export const SURFACES_READ = "/workspace/surfaces";
 
 export type SurfaceRow = {
@@ -30,11 +28,6 @@ export type SurfaceRow = {
 
 export type SurfacesPayload = { surfaces: SurfaceRow[] };
 
-/** The object a workspace install acts on and the action that installs it, keyed by the connector
- *  that takes one: Slack's is the surface object's connect. The object's detail is read for the act
- *  it projects and the act mints the install link inside the turn, so installing takes no message
- *  the member has to send. Every provider outside this map connects a member's own account through
- *  the broker verb instead. */
 export const CONNECT_INSTALLS: Record<string, ObjectAction> = {
   slack: { kind: "surface", name: "slack", action: "slack_connect" },
 };
@@ -69,17 +62,6 @@ const ROSTER_READ = "/workspace/team";
 
 type Roster = { members: Member[]; can_add: boolean; actions: ActionView[] };
 
-/** Waits for the install this step asked for, and reports it once. The install is granted on the
- *  provider's pages, which tell this page nothing, so the only account of it is the projection the
- *  page already reads — asked for often while a step waits on it, and once more the moment the tab
- *  carrying that step is looked at again, which is what a member coming back from the install is
- *  doing. The page's own read of that projection is `held`: whichever of the two reads sees the
- *  install first is the one that reports it, so the order the network answers in cannot strand
- *  the step on a connected install.
- *
- *  A step that opened on a connector the workspace already held never arms: it reads nothing, and
- *  reports nothing to advance past. So the report is only ever the install arriving under a member
- *  who was waiting for it, which is the one thing that should move them on. */
 export function useConnected(name: string, held: boolean, onConnected: () => void) {
   const armed = useRef(!held);
   const state = usePanelRead<FirstRunPayload>(
@@ -99,17 +81,6 @@ export function useConnected(name: string, held: boolean, onConnected: () => voi
   }, [landed, onConnected]);
 }
 
-/** One connector's own step. The act dispatches that connector's admin-gated tool, which seals the
- *  install link for this workspace and answers with it — a non-admin is told who installs it rather
- *  than pressing an act the workspace refuses. The link expires, so the act stays on the step and
- *  mints another.
- *
- *  Pressing it is the whole thing: the consent window opens on the press and the minted link lands
- *  in it, rather than appearing under the button as a second thing to find. A browser that refuses
- *  the window is the only case that still renders the link, because then there is nothing else to
- *  carry the member over. A refusal is the run's to state, so it is handed up rather than drawn
- *  here. The act carries the mark itself, so the product is named once rather than drawn twice on
- *  one page. */
 export function Connect({
   agent,
   admin,
@@ -125,8 +96,6 @@ export function Connect({
   held: boolean;
   onConnected: () => void;
   onRefused: (message: string) => void;
-  /** `step` is the run's full-width act with the mark on it; `row` is the secondary button a list
-   *  row carries at its right edge, labelled by the row itself. */
   form?: "step" | "row";
 }) {
   const [busy, setBusy] = useState(false);
@@ -136,15 +105,13 @@ export function Connect({
   async function connect() {
     if (busy) return;
     setBusy(true);
-    // Opened on the press, before the round trip that mints the link: a window opened afterwards
-    // has lost the gesture the browser opens one for. It waits on the provider's own page.
+    // Opened on the press, before the round trip that mints the link: a window opened afterwards has lost
+    // the gesture the browser opens one for.
     const consent = openConsentWindow();
     const outcome = await postObjectAction(agent.id, CONNECT_INSTALLS[row.name], {});
     setBusy(false);
     if (consent && outcome.url) consent.location.href = outcome.url;
     if (consent && !outcome.url) consent.close();
-    // The step keeps the link only for a member whose browser refused the window, so pressing once
-    // is the whole act for everybody else.
     setLink(consent ? null : (outcome.url ?? null));
     if (!outcome.url) onRefused(outcome.message);
   }
@@ -194,7 +161,6 @@ export function Connect({
 
 const SUMMARY = "text-label leading-(--leading-chrome) text-ink-quiet";
 
-/** The state a connected row wears at its right edge: an outlined pill with a check. */
 function Connected() {
   return (
     <Badge className="gap-2xs border border-edge bg-transparent text-ink">
@@ -216,9 +182,6 @@ function Mark({ name }: { name: string }) {
   }
 }
 
-/** One surface as a row: the mark, the name and what it does, and at the far edge either the
- *  state — connected — or the one act that connects it. What an act needs from the member opens
- *  under the row it belongs to, inside the same border, only once the act is pressed. */
 function Row({
   row,
   act,
@@ -293,9 +256,6 @@ function SlackRow({
   );
 }
 
-/** The phone number the code goes to, then the link the answer mints: a QR code for the phone in
- *  the member's hand and the same link for the one they are reading on, with the sentence the act
- *  answered under both. */
 function IMessageRow({
   row,
   agent,
@@ -364,10 +324,6 @@ function IMessageRow({
   );
 }
 
-/** The install command, revealed and copied on one press so the member can read what they pasted. */
-/** The one step that connects a terminal, drawn under the row rather than behind a press: the
- *  install command the invitation email and the Slack greeting already state, in a code box with
- *  the act that copies it. The words are the same command the read served, split only for tint. */
 function TerminalRow({ row }: { row: SurfaceRow }) {
   const [copied, setCopied] = useState(false);
   const fades = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -421,10 +377,6 @@ function TerminalRow({ row }: { row: SurfaceRow }) {
   );
 }
 
-/** Every surface this deploy offers, one row each, with the act that connects it — read from the
- *  surfaces projection and re-read while any row shown is still unconnected, since Slack and
- *  iMessage connect on pages that tell this one nothing. `hidden` names rows a caller already
- *  drew elsewhere. */
 export function ConnectSurfaces({
   agent,
   member,
@@ -475,8 +427,6 @@ export function ConnectSurfaces({
   );
 }
 
-/** The messaging page: the surfaces, with the member read off the roster the team page reads,
- *  since who may install Slack is the one fact about the viewer the rows need. */
 export function WorkspaceMessaging() {
   const agent = useMainAgent();
   const viewer = useViewer();

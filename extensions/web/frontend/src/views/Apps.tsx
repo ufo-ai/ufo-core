@@ -57,9 +57,6 @@ const FILTERS = [
   { label: ARCHIVED, value: ARCHIVED },
 ];
 
-/** The workspace's apps: every app the member reaches, narrowed to their own or to the archived
- *  ones by the filter the address carries. A live row opens the app; an archived row's one act is
- *  the restore. */
 export function Apps({
   place,
   onPlace,

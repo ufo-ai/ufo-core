@@ -1,9 +1,5 @@
-# The Identity Center admin permission set. Looked up rather than written down because the role
-# carries a generated suffix that changes whenever the permission set is re-provisioned. The ARNs come
-# back carrying the reserved SSO path, which is what an access entry wants: it resolves the principal
-# to a real IAM role and stores its roleID. (Stripping that path is an aws-auth ConfigMap rule and
-# does not apply here — a stripped ARN names no role at all.) Empty in an account with no such
-# permission set, which simply grants no entry.
+# Looked up because the role carries a generated suffix that changes whenever the permission set is
+# re-provisioned. The reserved SSO path is what an access entry wants; stripping it names no role.
 data "aws_iam_roles" "sso_admin" {
   name_regex  = "AWSReservedSSO_AdministratorAccess_.*"
   path_prefix = "/aws-reserved/sso.amazonaws.com/"
@@ -30,7 +26,6 @@ module "platform" {
     tolist(data.aws_iam_roles.sso_admin.arns),
   )
 
-  # HA across AZs for prod.
   az_count                  = 3
   single_nat_gateway        = false
   node_instance_types       = ["m6i.xlarge"]

@@ -6,12 +6,6 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { loadConfigFromFile, type ProxyOptions } from "vite";
 
-/**
- * The dev proxy as Vite itself resolves it. `dev-routing.ts` owns where one request goes and its
- * own suite pins that; these assertions own the object that consumes it, so a rule that stops
- * asking the predicate, stops covering the whole surface, or lets the sign-in redirect leave this
- * origin cannot pass while the predicate's suite stays green.
- */
 const proxyRule = async (config = "vite.config.ts"): Promise<[string, ProxyOptions]> => {
   const loaded = await loadConfigFromFile(
     { command: "serve", mode: "development" },
@@ -32,15 +26,15 @@ test("one rule covers the surface and the gateway's doors, so no route reaches t
 
 test("the sign-in redirect comes back on the dev origin", async () => {
   const [, rule] = await proxyRule();
-  // `open_session` answers a 303 rebuilt from the forwarded Host. Rewriting the origin sends the
-  // developer to the backend, which serves the gitignored built tree this server exists to avoid.
+  // `changeOrigin` stays off because `open_session` answers a 303 rebuilt from the forwarded Host:
+  // rewritten, the sign-in lands on the backend, which serves the gitignored built tree.
   expect(rule.changeOrigin).toBe(false);
   expect(rule.target).toBe("http://localhost:8080");
 });
 
 test("the sidebar shell's page is named under the base the server publishes", async () => {
-  // Vite's base middleware redirects `/index.html` into `base` and answers a 404 for any other
-  // html path outside it, so a bare `/sidebar.html` leaves `/surface/web` with no page at all.
+  // This root's page is `sidebar.html`, named under `base` because vite's base middleware redirects
+  // `/index.html` into the base and answers a 404 for any other html path outside it.
   const [, rule] = await proxyRule("sidebar/vite.config.ts");
   const bypass = rule.bypass;
   if (!bypass) throw new Error("the rule declares no bypass");
@@ -91,8 +85,6 @@ test("the sidebar shell contains only its entry, navigation, and route seams", a
 });
 
 test("both shells send their reads to the stack origin UFO_STACK_ORIGIN names", async () => {
-  // `make web` points the dev server at the Docker stack's one published origin with this
-  // variable, so a hard-coded target would leave that loop reading a stack that is not running.
   process.env.UFO_STACK_ORIGIN = "http://ufo-2.localhost:18180";
   try {
     for (const config of ["vite.config.ts", "sidebar/vite.config.ts"]) {
@@ -120,13 +112,6 @@ test("the rule routes each request through the predicate", async () => {
   expect(routed("GET", "/ext/metronome/billing")).toBeUndefined();
 });
 
-/**
- * The apps tree is one directory the pages build owns and the SDK build adds to, published whole
- * under `apps/<digest>/` and read whole by the web surface. The digest covers every file, so a
- * second build that emptied the directory, or a run of the two in the other order, would publish a
- * tree missing either the pages or the module a forked page is built against — and no page would
- * fail until a member forked one.
- */
 test("the pages and the SDK build into the trees that serve and materialize them", async () => {
   const loaded = async (config: string) => {
     const found = await loadConfigFromFile(

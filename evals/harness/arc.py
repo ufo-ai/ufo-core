@@ -200,12 +200,6 @@ class ArcRun:
                     name=self.case.name,
                     passed=False,
                     reason=f"opening turn did not settle cleanly: {opening.failure_reason}",
-                    # The status and error class the exclusion turned on. `turn produced no
-                    # terminal transcript` is one reason over several faults — a wait the harness
-                    # cancelled, a turn that terminalized empty, a run with no trajectory at all —
-                    # and which one it was decides whether the case is the model's to answer for.
-                    # Without them a red arc case reads only as the reason, and the archived record
-                    # cannot say which fault the night hit.
                     evidence={
                         "grading": self.case.grading,
                         "openingStatus": status or NO_TRAJECTORY,

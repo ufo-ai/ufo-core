@@ -1,5 +1,3 @@
-//! The three `ufo_control` ledgers against a real Postgres.
-
 mod harness;
 
 use chrono::{Duration, Utc};
@@ -31,7 +29,6 @@ fn claim(surface_ref: &str, email: &str) -> OnboardClaim {
 async fn shaping_twice_is_a_no_op_and_leaves_the_schema_required() {
     let pool = ledger_pool().await;
     let mut client = pool.get().await.unwrap();
-    // The Job can run twice — a duplicated pod, an operator by hand — and the second finds head.
     shape_control_schema(&mut client).await.unwrap();
     require_control_schema(&client).await.unwrap();
     for table in LEDGERS {
@@ -135,7 +132,6 @@ async fn a_claim_is_written_read_back_and_verified_once() {
     assert!(read.invite_id.is_none());
 
     assert!(store.mark_verified(written.claim_id).await.unwrap());
-    // A replayed verification must not re-open a claim already spent.
     assert!(!store.mark_verified(written.claim_id).await.unwrap());
     let read = store.live_claim("web", "session-a").await.unwrap().unwrap();
     assert!(read.verified_at.is_some());
@@ -148,10 +144,6 @@ async fn a_personal_mail_claim_is_filed_under_the_subject_the_previous_image_rea
     let written = claim("session-personal", "carol@gmail.com");
     store.insert_claim(&written).await.unwrap();
 
-    // `email_domain` is the column the release being replaced selects and reads as the whole signup
-    // identity. Holding `gmail.com`, a gateway pod of that release picking up this session would
-    // resolve it by the shared provider: a stranger's workspace as the only candidate, or
-    // `uuid5(gmail.com)` founded on a personal member.
     let filed: String = pool
         .get()
         .await
@@ -184,8 +176,6 @@ async fn a_personal_mail_grant_is_filed_under_the_subject_too() {
         .mint(None, "carol@gmail.com", None)
         .await
         .unwrap();
-    // The same column, in the ledger the previous image looks a grant up by: filed under
-    // `gmail.com` it is a grant that image hands to any `@gmail.com` arrival.
     let filed: String = pool
         .get()
         .await
@@ -216,7 +206,6 @@ async fn completing_a_claim_releases_the_session_for_the_next_attempt() {
         .await
         .unwrap()
         .is_none());
-    // The partial unique index only covers live claims, so the pair is free again.
     let second = claim("session-b", "second@acme.com");
     store.insert_claim(&second).await.unwrap();
     let read = store.live_claim("web", "session-b").await.unwrap().unwrap();
@@ -320,7 +309,6 @@ async fn the_intake_profile_rides_the_grant() {
         collected
     );
 
-    // A grant the form never described leaves the agent on the core default.
     invites.mint(None, "founder@other.com", None).await.unwrap();
     assert!(invites
         .profile("founder@other.com")
@@ -342,7 +330,6 @@ async fn a_regranted_domain_describes_the_customer_as_they_are_now() {
         .await
         .unwrap();
 
-    // An expired grant is cleared out of the way by the next mint, so the domain can be re-granted.
     pool.get()
         .await
         .unwrap()
@@ -432,11 +419,9 @@ async fn redeeming_spends_the_grant_once_and_stamps_the_claim() {
     };
     assert_eq!(accepted.object_number, Some(3));
 
-    // The claim carries the grant it spent, so a crash cannot detach the two.
     let read = store.live_claim("web", "session-r").await.unwrap().unwrap();
     assert_eq!(read.invite_id, Some(accepted.invite_id));
 
-    // The same claim redeeming again is accepted; a different claim finds it consumed.
     let again = invites
         .redeem("founder@acme.com", mine.claim_id)
         .await
@@ -528,7 +513,6 @@ async fn a_failed_slack_delivery_rearms_and_a_delivered_one_does_not() {
     assert_eq!(row.get::<_, i32>("attempts"), 0);
     assert!(row.get::<_, Option<String>>("last_error").is_none());
 
-    // A delivered row is untouchable — re-arming it would invite the customer a second time.
     assert!(rearm_failed_delivery(&pool, "other.com")
         .await
         .unwrap()

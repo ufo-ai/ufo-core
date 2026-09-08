@@ -28,8 +28,6 @@ const WITHHELD: Surfaces = {
   "app-store": false,
 };
 
-/** An app the deploy withholds. The mark rides the boot read's own agent row, so the app is the
- *  workspace's either way — this is what the portal draws it out of, not what it may open. */
 const HIDDEN_APP = { ...SECOND, name: "wiki", app: "wiki", hidden: true };
 
 test("an app the deploy offers is a row the sidebar pins itself", async () => {
@@ -100,10 +98,8 @@ test("offered workspace screens keep their tabs and connectors keeps its section
   expect(screen.queryByRole("tab", { name: "Sources" })).toBeNull();
 });
 
-/** The roster is an admin's screen, so the tab that opens it is drawn for an admin alone. Its
- *  address still answers everyone — a withheld screen loses its tab and keeps its address — and
- *  the destination opens on the first tab this member is drawn, so no entry to it lands a non-admin
- *  on a tab that is not there. */
+/** A withheld screen loses its tab and keeps its address, and a destination opens on the first tab this
+ *  member is drawn. */
 test("the team tab is an admin's, and the workspace opens on the first tab drawn", async () => {
   location.hash = "#/workspace/apps";
   const plain = render(
@@ -122,8 +118,6 @@ test("the team tab is an admin's, and the workspace opens on the first tab drawn
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
 });
 
-/** The nav row and the palette row both open the destination's first drawn tab, so a member the
- *  roster is not drawn for lands on Apps rather than on a tab the strip does not carry. */
 test("the workspace row lands a member on the first tab they are drawn", async () => {
   location.hash = "";
   wire({ "/transcript": () => json({ messages: [] }) });
@@ -142,9 +136,6 @@ test("the workspace row lands a member on the first tab they are drawn", async (
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
 });
 
-/** The palette reaches the same destinations the nav does, and its workspace row opens the same
- *  first drawn tab. Here Apps is its own screen, so the workspace row stands beside it and lands on
- *  the roster's neighbour rather than on a tab this member is not drawn. */
 test("the palette's workspace row opens the first tab the member is drawn", async () => {
   location.hash = "";
   wire({ "/transcript": () => json({ messages: [] }) });

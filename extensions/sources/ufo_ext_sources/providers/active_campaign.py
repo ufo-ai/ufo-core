@@ -27,8 +27,6 @@ PAGE_LIMIT = 100
 API_PREFIX = "/api/3"
 _REFUSAL_STATUS = frozenset({401, 403})
 
-# Stream-name → (URL path-segment, response envelope key). The two are usually identical; AC uses
-# camelCase paths/keys for compound resources. Listing them once keeps the dispatch flat.
 _STREAM_PATHS: dict[str, tuple[str, str]] = {
     "contacts": ("contacts", "contacts"),
     "lists": ("lists", "lists"),
@@ -78,8 +76,6 @@ _STREAM_PATHS: dict[str, tuple[str, str]] = {
     "segment_conditions": ("segmentConditions", "segmentConditions"),
 }
 
-# Streams whose server-side `filters[<field>_after]` filter works in v3. The rest full-refresh and
-# the row-level cursor handles incremental dedup.
 _INCREMENTAL_FILTER_STREAMS: dict[str, str] = {
     "contacts": "udate",
     "campaigns": "mdate",

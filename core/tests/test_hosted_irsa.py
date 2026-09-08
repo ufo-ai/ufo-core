@@ -552,7 +552,6 @@ def _check_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies(
         target = document["spec"].get("target", {}).get("name") or document["metadata"]["name"]
         keys = {entry["secretKey"] for entry in document["spec"].get("data", [])}
         supplied.setdefault(target, set()).update(keys)
-        # A `dataFrom` block syncs the whole secret, so anything it targets is unconstrained here.
         if document["spec"].get("dataFrom"):
             supplied[target].add("*")
 
@@ -567,7 +566,6 @@ def _check_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies(
             ):
                 read.add((reference.group(1), reference.group(2)))
 
-    # `safe_dump` reflows the flow-style mappings, so read the references off the source instead.
     read = {
         (match.group(1), match.group(2))
         for match in re.finditer(

@@ -1,4 +1,3 @@
-//! End-to-end sessions against a scripted gateway: real HTTP, the real binary, every mode.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -10,16 +9,12 @@ use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// How long the gateway waits for a request on a connection before calling it abandoned.
 const REQUEST_WAIT: Duration = Duration::from_secs(5);
 
-/// How long a scripted session may run before the client is killed and its output reported.
 const CLIENT_WAIT: Duration = Duration::from_secs(30);
 
-/// How long a test waits for the post it is timing itself against.
 const ARRIVAL_WAIT: Duration = Duration::from_secs(15);
 
-/// How long a test waits for the gateway to serve its script out.
 const SCRIPT_WAIT: Duration = Duration::from_secs(10);
 
 struct Exchange {
@@ -36,7 +31,6 @@ struct Served {
     listings_arrived: std::sync::mpsc::Receiver<()>,
 }
 
-/// The scripted gateway, still serving.
 struct Gateway {
     stop: Arc<AtomicBool>,
     served_out: std::sync::mpsc::Receiver<()>,
@@ -44,15 +38,11 @@ struct Gateway {
 }
 
 impl Gateway {
-    /// Every request of a script served out. A client that leaves the script unfinished costs
-    /// [`SCRIPT_WAIT`] once and fails the assertion that asked, rather than hanging the suite.
     fn requests(self) -> Vec<Request> {
         let _ = self.served_out.recv_timeout(SCRIPT_WAIT);
         self.done()
     }
 
-    /// Everything that arrived, now — for a session that ends with its script part-served, whose
-    /// tail nothing will ever ask for.
     fn done(self) -> Vec<Request> {
         self.stop.store(true, Ordering::Relaxed);
         self.handle.join().expect("the gateway thread")
@@ -81,8 +71,6 @@ fn serve(script: Vec<Exchange>) -> Served {
     serve_with(script, r#"{"conversations":[]}"#)
 }
 
-/// The scripted gateway beside a conversation list it answers every listing GET with, outside the
-/// script — the client reads the list whenever the page opens, and no exchange is spent on it.
 fn serve_with(script: Vec<Exchange>, listing: &'static str) -> Served {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -96,8 +84,6 @@ fn serve_with(script: Vec<Exchange>, listing: &'static str) -> Served {
     let handle = thread::spawn(move || {
         let mut seen = Vec::new();
         'script: for exchange in script {
-            // A connection the client abandoned without speaking — a lane it opened as it left —
-            // is no exchange: this one still belongs to whichever request arrives next.
             let (mut stream, request) = loop {
                 if stopped.load(Ordering::Relaxed) {
                     break 'script;
@@ -148,8 +134,6 @@ fn serve_with(script: Vec<Exchange>, listing: &'static str) -> Served {
                 .iter()
                 .map(|line| format!("{line}\n"))
                 .collect();
-            // 599 severs the stream mid-body: the declared length outruns what is sent, and the
-            // reset makes the client's next read an error rather than a clean end.
             if exchange.status == 599 {
                 let head = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -212,8 +196,6 @@ fn rst_close(stream: std::net::TcpStream) {
     drop(stream);
 }
 
-/// The request one accepted connection carries, or None when it carries none: a client that went
-/// away before writing, or one that said nothing before the deadline.
 fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     let mut raw = Vec::new();
     let mut buffer = [0u8; 4096];
@@ -344,8 +326,6 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     })
 }
 
-/// Wait out the scripted session. A client that outlives it is killed and everything it said is
-/// reported: a session that will not end is a failure to read, never a suite that hangs.
 fn wait_for_client(mut child: Child) -> Output {
     let mut out_pipe = child.stdout.take().expect("piped stdout");
     let mut err_pipe = child.stderr.take().expect("piped stderr");
@@ -466,9 +446,6 @@ fn run_client_with_closed_stdin_and_controlling_terminal(
     )
 }
 
-/// The client on a real terminal: the fullscreen loop only runs on a tty, and only a tty delivers
-/// a key. Nothing here answers the startup probe, so the client pays its deadline once and reads
-/// the terminal's defaults — [`play_the_terminal`] is the rig that answers.
 #[cfg(unix)]
 struct OnPty {
     keys: std::fs::File,
@@ -479,21 +456,15 @@ struct OnPty {
 
 #[cfg(unix)]
 impl OnPty {
-    /// Type `keys` and let the dock repaint.
     fn press(&mut self, keys: &[u8]) {
         self.keys.write_all(keys).expect("keys reach the pty");
         thread::sleep(Duration::from_millis(600));
     }
 
-    /// The dock as it stands, replayed through a terminal emulator the size of the pty: a row
-    /// wider than the client's own terminal has to wrap in the reading exactly as it wrapped on
-    /// the screen.
     fn screen(&self) -> String {
         replayed(&self.painted.lock().unwrap(), self.size)
     }
 
-    /// Retype the terminal's size. The pty raises SIGWINCH on the client, which reads it as a
-    /// resize and repaints the whole alternate screen.
     fn resized(&mut self, size: (u16, u16)) {
         use std::os::fd::AsRawFd;
 
@@ -502,13 +473,10 @@ impl OnPty {
         thread::sleep(Duration::from_millis(600));
     }
 
-    /// Everything ever painted, so a popup that came and went is still evidence.
     fn painted(&self) -> String {
         String::from_utf8_lossy(&self.painted.lock().unwrap()).to_string()
     }
 
-    /// Reap the client. A session the script ended has already exited; one still running is
-    /// killed and the screen it was holding is reported.
     fn reaped(&mut self) -> std::process::ExitStatus {
         let deadline = std::time::Instant::now() + CLIENT_WAIT;
         loop {
@@ -539,20 +507,14 @@ impl OnPty {
     }
 }
 
-/// The size every pty rig runs at unless a test states another. The client reads it off the pty,
-/// so it is the width the mark, the composer and every wrapped row are painted to.
 #[cfg(unix)]
 const SCREEN: (u16, u16) = (80, 24);
 
-/// Two terminals the mark answers differently: one with room for the drawing but not the version,
-/// and one with room for neither.
 #[cfg(unix)]
 const MARK_ONLY: (u16, u16) = (70, 24);
 #[cfg(unix)]
 const NARROW: (u16, u16) = (60, 24);
 
-/// Type a terminal's size onto the pty. Before the client starts this is the size it reads; after,
-/// the kernel raises SIGWINCH on the foreground group and the client repaints at the new one.
 #[cfg(unix)]
 fn set_winsize(tty: std::os::fd::RawFd, (cols, rows): (u16, u16)) {
     let size = libc::winsize {
@@ -568,7 +530,6 @@ fn set_winsize(tty: std::os::fd::RawFd, (cols, rows): (u16, u16)) {
     );
 }
 
-/// Painted bytes read back through a terminal emulator of the given size.
 #[cfg(unix)]
 fn replayed(painted: &[u8], (cols, rows): (u16, u16)) -> String {
     let mut parser = vt100::Parser::new(rows, cols, 0);
@@ -576,9 +537,6 @@ fn replayed(painted: &[u8], (cols, rows): (u16, u16)) -> String {
     parser.screen().contents()
 }
 
-/// The client on a pty, with the leader handed back: whoever holds it types the keys and plays
-/// the terminal. `workspace` is the surface a signed-in client posts to; `None` leaves the client
-/// signed out, so it drives the gateway's onboarding prompts instead.
 #[cfg(unix)]
 fn spawn_on_a_pty(
     url: &str,
@@ -652,9 +610,6 @@ fn spawn_on_a_pty(
     (unsafe { std::fs::File::from_raw_fd(leader) }, child)
 }
 
-/// The terminal the client starts on, played from the pty leader: which of the startup queries get
-/// answered, how long the terminal takes to answer, and what the member types into the window the
-/// probe is reading in.
 #[cfg(unix)]
 struct Terminal {
     replies: Vec<&'static str>,
@@ -762,7 +717,6 @@ fn written(painted: &[u8], marker: &str) -> bool {
 
 #[cfg(unix)]
 impl Played {
-    /// Wait for the composer to paint, and answer when it did.
     fn framed(&self, within: Duration) -> Duration {
         let deadline = std::time::Instant::now() + within;
         loop {
@@ -778,8 +732,6 @@ impl Played {
         }
     }
 
-    /// What the client waited on the terminal: the probe goes out, and the modes it holds until the
-    /// read is done go out after.
     fn probe_wait(&self) -> Duration {
         let tape = self.tape.lock().unwrap();
         let asked = tape.asked_at.expect("the client asked the terminal");
@@ -812,7 +764,6 @@ impl Played {
 }
 
 #[cfg(unix)]
-/// The terminal the client starts on, played from the pty leader, on the `e2e-tty` channel.
 fn run_client_on_pty(
     url: &str,
     args: &[&str],
@@ -824,8 +775,6 @@ fn run_client_on_pty(
 }
 
 #[cfg(unix)]
-/// The client started bare, as a member opens it: no message and no channel, so it opens on the
-/// chats page.
 fn run_home_on_pty(
     url: &str,
     home: &std::path::Path,
@@ -936,8 +885,6 @@ fn plain_session_round_trips_ask_and_exit() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A lane the client opened and abandoned — one it was still connecting as it left — carries no
-/// request, so the gateway holds its script for whoever speaks next.
 #[test]
 fn an_abandoned_connection_is_no_exchange() {
     let served = serve(vec![Exchange {
@@ -1369,9 +1316,6 @@ fn a_conversation_opens_under_the_mark() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A terminal narrower than the drawing opens bare. The rows are a fixed width and the frame
-/// writes each one after an absolute cursor move, so an over-wide row would wrap into the row
-/// beneath it and the diff would keep the wreckage on every frame after.
 #[cfg(unix)]
 #[test]
 fn a_terminal_too_narrow_for_the_mark_opens_bare() {
@@ -1411,9 +1355,6 @@ fn a_terminal_too_narrow_for_the_mark_opens_bare() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The mark is drawn to the width the member is at, not the one the conversation opened at. A
-/// terminal widened past the version's room gains the version, which is the half of a resize a
-/// pre-rendered row cannot fake: pulling one in only clips it.
 #[cfg(unix)]
 #[test]
 fn the_mark_is_redrawn_when_the_terminal_resizes() {
@@ -2373,9 +2314,6 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A turn's end arms the idle listen: the client reconnects empty on the interval carrying its
-/// cursor, a quiet bounce leaves the prompt (and the session) standing, and the turn the
-/// conversation wakes on prints without a keystroke.
 #[cfg(unix)]
 #[test]
 fn an_idle_tty_listens_and_prints_the_turn_that_wakes_the_conversation() {
@@ -2439,9 +2377,6 @@ fn an_idle_tty_listens_and_prints_the_turn_that_wakes_the_conversation() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Ctrl+B on a turn founded from the listening prompt stays a detach: the turn's later frames
-/// must not re-open the presentation, and the member's next message takes the queueing lane that
-/// rejoins the turn — never the send lane a working session uses.
 #[cfg(unix)]
 #[test]
 fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
@@ -2511,9 +2446,6 @@ fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A listen bounce that already streamed a woken turn's frames is that turn's live stream: when
-/// it severs and the resume keeps failing, the reconnect ladder must end the wait with its error
-/// rather than parking a working presentation forever.
 #[cfg(unix)]
 #[test]
 fn a_severed_bounce_runs_the_reconnect_ladder_to_its_end() {
@@ -2566,8 +2498,6 @@ fn a_severed_bounce_runs_the_reconnect_ladder_to_its_end() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// An idle bounce that ends while the member is typing a credential must not reset the entry:
-/// the value posted is everything they typed, on both sides of the bounce.
 #[cfg(unix)]
 #[test]
 fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
@@ -2630,8 +2560,6 @@ fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The signed-out client at the gateway's own prompts: the address types through untouched, one
-/// Enter answers it, and the answered question leaves the composer while the turn runs.
 #[cfg(unix)]
 #[test]
 fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
@@ -2697,8 +2625,6 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The path popup an `@` mention opens holds input, so it answers the keys that leave it: Enter
-/// sends the entry when the filter matches nothing, and an interrupt ends the session.
 #[cfg(unix)]
 #[test]
 fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
@@ -2748,9 +2674,6 @@ fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A terminal that brackets a paste sends one paste event instead of the characters, so every
-/// entry that holds input must take it: the masked entry a `secret` opens, and the composer under
-/// the path popup.
 #[cfg(unix)]
 #[test]
 fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
@@ -2821,8 +2744,6 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The turn's steps stand among the calls that made them while it runs, roll up behind one line
-/// when the answer lands, and open again on the member's own key.
 #[cfg(unix)]
 #[test]
 fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
@@ -2970,9 +2891,6 @@ fn generated_activity_accumulates_live_and_rolls_up() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A background run narrates while the parent writes its closing answer. The answer is the
-/// reply — the run's row never takes it into the rollup — and the rollup line and the run's own
-/// row open and close on a click, the run's rows standing behind its fold the way the web's do.
 #[cfg(unix)]
 #[test]
 fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
@@ -3076,7 +2994,6 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The 1-based screen cell a line of text starts at, for aiming a mouse report.
 #[cfg(unix)]
 fn locate(screen: &str, needle: &str) -> (u16, u16) {
     for (row, line) in screen.lines().enumerate() {
@@ -3172,8 +3089,6 @@ fn a_piped_session_logs_and_counts_generated_activity() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A background run's call reaches a piped session after the parent wrote its answer. The answer
-/// is the reply, so the count states the work and not the words.
 #[test]
 fn a_piped_session_counts_no_step_for_an_answer_a_run_narrated_over() {
     let served = serve(vec![Exchange {
@@ -3197,7 +3112,6 @@ fn a_piped_session_counts_no_step_for_an_answer_a_run_narrated_over() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A run states every call it made, and counts as the one step the web counts it as.
 #[test]
 fn a_piped_session_counts_a_run_once_however_much_it_did() {
     let served = serve(vec![Exchange {
@@ -3451,9 +3365,6 @@ fn wait_for(session: &OnPty, needle: &str) -> String {
     }
 }
 
-/// Bare `--resume` opens on the conversation page. Typing narrows it and Enter joins the row by
-/// id: history replays, then a typed message posts to that same conversation and no directory is
-/// claimed, because a joined conversation keeps the sandbox it has.
 #[cfg(unix)]
 #[test]
 fn the_conversation_page_joins_a_thread_by_id_and_posts_into_it() {
@@ -3521,8 +3432,6 @@ fn the_conversation_page_joins_a_thread_by_id_and_posts_into_it() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A row for one of the member's own terminal conversations resumes on its channel, naming the
-/// directory the client stands in — this terminal is its sandbox again.
 #[cfg(unix)]
 #[test]
 fn a_terminal_row_resumes_on_its_channel_with_the_directory() {
@@ -3549,9 +3458,6 @@ fn a_terminal_row_resumes_on_its_channel_with_the_directory() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Ctrl+K lists over a running conversation and Esc returns to it with the transcript intact. The
-/// script holds one exchange the client never reaches, so the gateway is still listening when the
-/// page asks for its list.
 #[cfg(unix)]
 #[test]
 fn ctrl_k_lists_from_a_conversation_and_esc_returns_to_it() {
@@ -3606,9 +3512,6 @@ fn ctrl_k_lists_from_a_conversation_and_esc_returns_to_it() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Typing on the page writes into the entry bar under `New chat`, and Enter opens a fresh
-/// terminal conversation on a channel of its own with those words as its first message, in the
-/// directory the client stands in.
 #[cfg(unix)]
 #[test]
 fn typing_on_the_page_starts_a_new_chat() {
@@ -3645,7 +3548,6 @@ fn typing_on_the_page_starts_a_new_chat() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A click on a row opens it, the same as Enter on the selection.
 #[cfg(unix)]
 #[test]
 fn a_click_on_the_page_opens_the_row_under_it() {
@@ -3669,8 +3571,6 @@ fn a_click_on_the_page_opens_the_row_under_it() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A conversation on a surface that takes no message from here opens to read, states where to
-/// reply, and lets nothing typed leave.
 #[cfg(unix)]
 #[test]
 fn a_read_only_conversation_opens_and_takes_no_message() {

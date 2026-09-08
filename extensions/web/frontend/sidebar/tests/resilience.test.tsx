@@ -90,8 +90,8 @@ test("a reattach the backoff still holds opens nothing behind the source that re
   await screen.findByText("Reconnecting…");
   expect(pending.size).toBe(1);
 
-  // Sending again attaches now rather than waiting the backoff out. The reattach it overtook has to
-  // be cancelled, not merely forgotten: firing later, it would open a source behind the live one.
+  // The reattach it overtook has to be cancelled, not merely forgotten: firing later, it would open a
+  // source behind the live one.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
@@ -123,9 +123,6 @@ test("a send during the backoff rebuilds the reply from the replay it reattached
   fatal(first);
   await screen.findByText("Reconnecting…");
 
-  // The fold joins the turn whose tail just dropped, so the send reattaches now rather than waiting
-  // the backoff out — and the source it opens replays the turn from its first frame. What that
-  // rebuilds is the reply, not a second copy of it behind the text the dropped source drew.
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));

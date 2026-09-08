@@ -1,11 +1,3 @@
-# Transactional email for onboarding verification codes (the gateway extension's claim machine,
-# RFC 0011 §4). This grants ses:SendEmail for the sending-domain identity, scoped to the From
-# address. The grant lands on a
-# dedicated IRSA role annotated on the gateway's ServiceAccount (ufo-system:ufo-gateway) — the pod
-# exchanges its projected web identity at STS; the FromAddress condition pins it to ses_sender.
-#
-# After apply: request SES production access to send beyond the verified set (a new account is
-# sandboxed to verified recipients only).
 
 variable "ses_sender" {
   type        = string
@@ -19,8 +11,7 @@ variable "ses_sender" {
 
 locals {
   gateway_ses_role_name = "${local.name}-gateway-ses"
-  # The verified identity is the sender's domain. It is SES-account-global.
-  ses_domain = element(split("@", var.ses_sender), 1)
+  ses_domain            = element(split("@", var.ses_sender), 1)
 }
 
 resource "aws_sesv2_email_identity" "onboard" {

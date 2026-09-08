@@ -24,13 +24,6 @@ pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
-# The sources extension offers a narrowed source_trigger for every synced resource a turn's text
-# links to, as one <watch_offer> block. The first arm keeps the hook and its reads and silences only
-# the offer, so it removes exactly the text the extension contributes: the two asking cases measure
-# what the offer moves, and the two in-passing cases are the controls that it makes the agent apply
-# nothing it should not. Measured 2026-09-06 at d9f01d784: asking cases 3/3 vs 0/3, in-passing 3/3
-# in both arms.
-
 [[arm]]
 name = "no-offer"
 [[arm.replacements]]
@@ -45,10 +38,6 @@ new = """
     if not links:
         return None
 """
-
-# The offer carries the call itself — the object_apply manifest, as YAML — so taking it needs no
-# object_explain first. This arm keeps the offer and spells it the earlier way, as prose naming the
-# trigger and its spec, so the pass counts should hold and the `explains` evidence is what moves.
 
 [[arm]]
 name = "prose-offer"

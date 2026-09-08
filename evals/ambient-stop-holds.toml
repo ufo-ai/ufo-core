@@ -17,16 +17,6 @@ pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
-# The ambient reply gate reads one prompt, so every arm is a cut of it measured on the whole
-# slack_silence suite: the three stop cases and their lift control are what the stop rule claims to
-# move, the two exchanges between members are what the statement rule claims to move, and the ten
-# earlier cases are the controls neither may regress. The control arm is the base prompt with every
-# rule standing.
-
-# Rule 1 out: a stop in the history no longer holds. The stop cases are owed NO_REPLY by nothing
-# else — a question the agent could answer and a correction of its work are rule 2's REPLY — so
-# this arm says whether the stop rule is what silences them.
-
 [[arm]]
 name = "no-stop-rule"
 [[arm.replacements]]
@@ -43,11 +33,6 @@ old = """
 """
 new = """
 """
-
-# Rule 4 and the tie-break back to their earlier wording: silence "unless the agent can add
-# something the participants could not easily get themselves", and a balanced call answered. The
-# exchanges between members are where that wording spoke; this arm says whether the statement rule
-# is what keeps the agent out of them.
 
 [[arm]]
 name = "no-statement-rule"

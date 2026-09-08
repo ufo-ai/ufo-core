@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# One entrypoint, three roles (the compose command picks): `init` brings the schema and roles to
-# head once, `gateway` and `serve` are the long-running surfaces. The RLS-subject ufo_serve DSN is
-# derived here from UFO_CONTROL_PG_ROLE_SEED (the config toml carries no env interpolation) and
-# rendered into the serve config + exported for the gateway. The pack is rendered the same way:
-# `assistant` is the local default, and UFO_DEV_PACK selects a wider bundle (assistant_billing
-# adds Metronome so the billing chain can be driven locally).
 set -euo pipefail
 
 PG_HOST="${PG_HOST:-postgres:5432}"
@@ -13,10 +7,7 @@ DEV_PACK="${UFO_DEV_PACK:-assistant}"
 PUBLIC_BASE_URL="${UFO_PUBLIC_BASE_URL:-http://localhost:8710}"
 INGRESS_PUBLIC_URL="${UFO_INGRESS_PUBLIC_URL:-http://ufo.localhost:8100}"
 RENDERED_CONFIG="/tmp/ufo.toml"
-# The one egress CA the local rig shares: serve hands the sandbox its cert (the trust anchor) and the
-# ufo-egress container signs leaves with its key. Minted once into the shared volume; both read it.
 EGRESS_CA_DIR="/egress-ca"
-# A fixed dev bearer the ufo-egress container presents to serve's egress-control RPC. Local only.
 DEV_EGRESS_CONTROL_TOKEN="ufo-local-dev-egress-token"
 
 mint_egress_ca() {
@@ -90,8 +81,6 @@ case "${1:-}" in
     ;;
   serve)
     render_config
-    # serve mounts the egress-control RPC and hands the sandbox the shared CA the ufo-egress
-    # container signs with; the proxy runs as its own compose service in serve's network namespace.
     export UFO_EGRESS_CA_CERT="$(cat "${EGRESS_CA_DIR}/ca.crt")"
     export UFO_EGRESS_CONTROL_TOKEN="${UFO_EGRESS_CONTROL_TOKEN:-$DEV_EGRESS_CONTROL_TOKEN}"
     exec ufoctl serve

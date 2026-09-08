@@ -2,14 +2,8 @@ import type { ActionCall, ActionInput, ActionView, CredentialRequest } from "@/l
 
 export const BASE = "/surface/web";
 
-/** One attachment carried to the blob store: the artifact key its bytes landed under and the
- *  signature the send presents so the surface admits that key. */
 export type UploadRef = { key: string; sig: string };
 
-/** Carry one file's bytes to the blob store and answer the key they landed under with the
- *  signature that admits it, or null when this deploy signs no upload URL and the send must carry
- *  the file itself. The surface measures the URL by the size and the sha256 named here, so the PUT
- *  must be exactly this file and must carry the checksum header the signature covers. */
 export async function uploadAttachment(file: File): Promise<UploadRef | null> {
   try {
     const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
@@ -37,18 +31,12 @@ export type Fetched<T> = { ok: true; payload: T } | { ok: false; message: string
 
 export const SESSION_FAULT_HEADER = "x-ufo-session-fault";
 
-/** The one sign-in door. A session that has ended sends the member here rather than stating that
- *  it ended: signing in again is the only act left, and the page they land on asks for it. */
 export const SIGN_IN_PATH = "/login";
 
-/** The way back to the form. The door above forwards a browser that already holds a session, so an
- *  address other than the one the cookie proves is reached by clearing it first. */
 export const SIGN_OUT_PATH = "/logout";
 
 export type SessionFault = "expired" | "no-member" | "no-seat";
 
-/** Which refusal the surface answered: a bearer it could not read, a live bearer whose email holds
- *  no member row in this workspace, or a live member whose seat this workspace took away. */
 export function sessionFault(res: Response): SessionFault {
   const stated = res.headers.get(SESSION_FAULT_HEADER);
   return stated === "no-member" || stated === "no-seat" ? stated : "expired";
@@ -58,9 +46,6 @@ export const REFUSAL_HEADER = "x-ufo-refusal";
 
 const REFUSAL_MAX_CHARS = 240;
 
-/** A read that fails states the route's own sentence where the route wrote one for the member and
- *  said so with `REFUSAL_HEADER`. A status code alone tells the member nothing about what to do,
- *  and an unmarked body is the surface talking to itself. */
 async function refusal(res: Response): Promise<string> {
   const fallback = "Error " + res.status + " — reload to retry.";
   if (!res.headers.get(REFUSAL_HEADER)) return fallback;
@@ -68,9 +53,6 @@ async function refusal(res: Response): Promise<string> {
   return body && body.length <= REFUSAL_MAX_CHARS ? body : fallback;
 }
 
-/** True for the rejection a read raises because the surface aborted it: a pane superseding its own
- *  read, a frame the shell let go of. That abort is our act and not a fault the member met, so a
- *  caller drops it where it would state any other rejection. */
 export function aborted(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -79,8 +61,6 @@ export function aborted(error: unknown): boolean {
   );
 }
 
-/** A GET of the portal API, answered as `{ok, payload}` or `{ok: false, message, status}`; the
- * message is the route's own sentence to the member. */
 export async function getJson<T>(path: string, signal?: AbortSignal): Promise<Fetched<T>> {
   try {
     const res = await fetch(BASE + path, { credentials: "same-origin", signal });
@@ -96,14 +76,9 @@ export type IntentOutcome = {
   message: string;
   turn_id?: string;
   credentials?: CredentialRequest | null;
-  /** The provider link a connect intent's tool minted for the member who submitted it. */
   url?: string | null;
 };
 
-/** The route a presented action posts on: the agent's lane, then the target the view's call
- *  template names — its kind, the row for an instance action — and the action. The body is the
- *  action's own input and nothing else; the route binds the target, so a page never states where
- *  an act lands, only what it says. */
 export function actionPath(agentId: string, call: ActionCall): string {
   const target = call.name === undefined ? [call.kind] : [call.kind, call.name];
   return (
@@ -119,14 +94,8 @@ export function postAction(
   return postLane(actionPath(agentId, call), input);
 }
 
-/** The object one act installs against, and the action on it: what a screen knows about the act it
- *  offers before any read. */
 export type ObjectAction = { kind: string; name: string; action: string };
 
-/** One act on one object, read and posted in a single press: the row's acts are projected from
- *  their declarations, and the named action posts with the call template that projection bound. An
- *  action the deploy does not present answers as a refusal in the read's own words — the press never
- *  authors a call the portal did not offer, and who may run it is the action's own gate. */
 export async function postObjectAction(
   agentId: string,
   target: ObjectAction,
@@ -141,8 +110,6 @@ export async function postObjectAction(
   return postAction(agentId, view.call, input);
 }
 
-/** Post a prepared intent to an agent — the one mutation path a page has; the turn is the chat
- * transport and the audit record. */
 export function postIntent(agentId: string, envelope: unknown): Promise<IntentOutcome> {
   return postLane("/agents/" + agentId + "/intents", envelope);
 }
@@ -158,9 +125,8 @@ async function postLane(path: string, body: unknown): Promise<IntentOutcome> {
   } catch {
     return { applied: false, message: "Network error — try again." };
   }
-  // A session that ended is not a refusal to read: signing in again is the only act left, so the
-  // member goes to the one door rather than reading that the door is shut. It is the boot read's
-  // own answer to a 401, taken here because a press is where a session is usually found to be over.
+  // A session that ended is not a refusal to read: signing in again is the only act left, so a 401 goes
+  // to the one door rather than stating that the door is shut.
   if (res.status === 401) {
     window.location.assign(SIGN_IN_PATH);
     return { applied: false, message: "" };
@@ -170,11 +136,8 @@ async function postLane(path: string, body: unknown): Promise<IntentOutcome> {
   try {
     outcome = JSON.parse(answered) as Partial<IntentOutcome>;
   } catch {
-    // A fence refuses in its own words and in plain text — the bridge's endpoint and verb tables
-    // answer before the lane is reached at all. Reading those words is the difference between a
-    // member being told why an act is not available here and being told "Error 400". It is read
-    // on the same two terms `refusal` reads a failed GET on: marked as written for the member,
-    // and short enough to be a sentence — an upstream error page is neither.
+    // A fence refuses in its own words and in plain text. It is read on two terms: marked as written for
+    // the member, and short enough to be a sentence — an upstream error page is neither.
     const said = answered.trim();
     const marked = Boolean(res.headers.get(REFUSAL_HEADER)) && said.length <= REFUSAL_MAX_CHARS;
     return {

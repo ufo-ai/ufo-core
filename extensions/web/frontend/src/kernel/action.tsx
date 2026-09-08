@@ -48,20 +48,7 @@ function actionBody(
   return { ...body, ...fixed };
 }
 
-/** One action drawn as the form its schema states: a control per field, defaults standing, the
- *  label on the act that commits it. An action that declares no fields is the act alone.
- *
- *  An action carrying `confirm` commits on the second press, the way `ConfirmButton` does: the
- *  first press arms the act and states the sentence, and editing a field or leaving the act
- *  disarms it. The refusal or result the submit answers stands on the form in the outcome
- *  register every panel uses.
- *
- *  `initial` seeds fields the member is likely to keep — the name an app had, the statement being
- *  corrected. `fixed` pins fields the screen has already decided — the operation its one button
- *  stands for, the ref a correction names — so they never draw and ride the body as given.
- *
- *  `act` receives the input body alone — the caller addresses it with `view.call`. A caller
- *  showing another action mounts a new form (key it by the action's name). */
+/** A caller showing another action mounts a new form: key it by the action's name. */
 export function ActionForm({
   view,
   act,
@@ -129,11 +116,6 @@ function fielded(view: ActionView): boolean {
   return Object.keys(view.input_schema.properties ?? {}).length > 0;
 }
 
-/** The controls a read's projected actions draw, one act per view named by its label. An action
- *  that takes fields opens the form its schema states in a sheet; one that takes none is its form
- *  drawn in place — the act alone, with its confirm step and its outcome. `post` addresses the body
- *  on the lane the caller owns; an applied act closes its sheet and hands the caller the outcome,
- *  which is what the caller re-reads or announces on. */
 export function ActionControls({
   views,
   post,

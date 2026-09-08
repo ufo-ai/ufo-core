@@ -128,7 +128,6 @@ ufo_testsupport = "ufo_testsupport.plugin"
 [dependency-groups]
 dev = [
     "pre-commit>=4.0",
-    # Ships the official actionlint release binary, so the workflow gate needs no separate install.
     "actionlint-py>=1.7.12.24",
     "mammoth>=1.8",
     "mypy>=1.13",
@@ -151,18 +150,6 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# One wheel bundles core, every first-party extension, every pack, and the eval runner. Package
-# extensions and packs
-# (a source directory whose basename is the import name) map 1:1 through `packages`; the source tree
-# stays in core/, extensions/*, packs/*, testsupport/ exactly as it lives.
-# `artifacts` ships the npm-built trees — the debugger's page, the portal's, the app pages, and the
-# kit a forked page builds against: hatchling drops VCS-ignored files even under explicit
-# `packages`, and this is its escape hatch for build products that must ride the wheel. Each entry
-# names a whole build output directory rather than the names inside it, because a name the build
-# starts emitting is a file every test and `load_apps` reads out of the repo tree: a wheel holding
-# some of the tree serves a different content digest than the one the suite proved, and the paths it
-# lost 404 with the suite green. CI's wheel gate holds each of these directories against the built
-# wheel file by file.
 [tool.hatch.build]
 artifacts = [
     "/extensions/debugger/ufo_ext_debugger/static/*",
@@ -216,9 +203,6 @@ packages = [
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]
 
-# Single-file extensions and packs. The ones that ship sibling data (a `migrations/`, `skills/`, or
-# a data file) map into a package directory so the runtime's `_package_dir` / `Path(__file__).parent`
-# resolve that data uniquely per extension; the dataless ones map to a flat top-level module.
 [tool.hatch.build.targets.wheel.force-include]
 "servers/preview/tests/fixtures/fixture-layout.docx" = "servers/preview/tests/fixtures/fixture-layout.docx"
 "servers/preview/tests/fixtures/fixture-print-layout.xlsx" = "servers/preview/tests/fixtures/fixture-print-layout.xlsx"

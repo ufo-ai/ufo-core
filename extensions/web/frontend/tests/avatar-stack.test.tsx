@@ -16,8 +16,7 @@ const TEAM: AvatarStackPerson[] = [
 
 const EVERYONE = TEAM.map((person) => person.name).join(", ");
 
-/** Every URL the browser is asked for a picture. jsdom fetches no image, so the loader is what
- *  stands in — Radix sets `src` on one the moment a source is given. */
+/** jsdom fetches no image, so the loader is what stands in — Radix sets `src` the moment a source is given. */
 function pictures() {
   const asked: string[] = [];
   vi.stubGlobal(
@@ -102,9 +101,6 @@ test("a provider's mark is the circle the face beside it is", () => {
   for (const circle of circlesOf(stack)) expect(circle.className).toContain("rounded-full");
 });
 
-// Who a workspace's members are is the workspace's. A picture asked of a host outside the product
-// carries a member's name or company to that host on every page view, and the portal's own policy
-// names no picture host — so the stack asks nothing of anyone, whatever a person carries.
 test("no picture is asked of any host, whatever a person carries", async () => {
   const asked = pictures();
   render(

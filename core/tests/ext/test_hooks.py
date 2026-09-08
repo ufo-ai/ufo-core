@@ -179,9 +179,6 @@ async def test_a_hook_context_with_no_tailer_wired_fails_loud(db: None) -> None:
         _ext().tail(uuid4())
 
 
-# --- composition model, asserted directly against fire's resolution -----------------------------
-
-
 async def test_modify_input_folds_left_to_right_each_seeing_the_prior() -> None:
     async def append_a(ctx: HookContext) -> HookOutcome:
         return ModifyInput(
@@ -330,9 +327,6 @@ async def test_a_disallowed_outcome_on_an_observe_event_is_ignored() -> None:
     )
     assert resolution.denied is None
     assert resolution.output == "original"
-
-
-# --- engine wiring at the three fire points -----------------------------------------------------
 
 
 @dataclass(frozen=True)

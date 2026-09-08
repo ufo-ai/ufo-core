@@ -504,9 +504,6 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     hand the member a copy, and the child has no member to hand one to: the workspace it shares with
     the parent is the handoff, read back with `glob` and `read`."""
     names = set(WEBSITE_BUILDING_PROFILE.tool_names)
-    # The queue projects the profile by filtering the live tool set on these names, so a name that
-    # resolves to nothing is dropped in silence — a typo would leave the child short of a tool and
-    # every test green. Whatever this profile names has to exist somewhere that ships.
     available = (
         {tool.canonical_id for tool in SITES_TOOLS}
         | {tool.name for tool in BUILTIN_TOOLS}
@@ -514,8 +511,6 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
         | {SEARCH_WEB_TOOL, SEARCH_VERTICAL_TOOL, FETCH_URL_TOOL}
     )
     assert names <= available
-    # Named, not merely resolvable: the containment above passes just as well with a tool dropped,
-    # and the two REPLs are what the child drives a page and a workbook with.
     assert {JS_REPL_TOOL, XLSX_REPL_TOOL} <= names
     assert {
         "start_server",
@@ -897,7 +892,6 @@ def test_the_application_builder_profile_holds_generic_tools_and_one_site_action
     assert profile.untrusted_output is True
     assert profile.isolated_tools is True
     assert profile.connector_read_only is True
-    # The same ceiling its sibling site builder runs under: a runaway's backstop, not a budget.
     assert profile.max_rounds == APPLICATION_BUILDER_ROUND_LIMIT
     assert profile.input_model.model_validate({"objective": "build it"}).preload_skills == (
         APPLICATION_HOMEPAGE_SKILL,
@@ -1304,7 +1298,6 @@ def test_the_audit_hands_the_readiness_wait_the_page_console() -> None:
     waiting on, and the wait that gives up carries them into the diagnostic the gate reads."""
 
     script = APPLICATION_AUDIT_SCRIPT_PATH.read_text()
-    # The wait is exported and called with its timeout second, so the page console goes third.
     assert "frame, timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS, problems = []" in script
     assert (
         script.count("waitForApplicationReady(frame, APPLICATION_LIFECYCLE_TIMEOUT_MS, problems)")
@@ -1457,12 +1450,8 @@ def test_the_lane_width_is_named_once_and_every_copy_of_it_is_watched() -> None:
 
     assert APPLICATION_DESIGN_WIDTH == NARROW_WIDTH
     script = APPLICATION_AUDIT_SCRIPT_PATH.read_text()
-    # The measured-view table is held against NARROW_WIDTH by the app-bench artifact test; what is
-    # gated here is that the design lane has no width of its own to drift.
     assert "DESIGN_INITIAL_VIEWPORT" not in script
     assert "usage: node ${SELF} --design <lane-width> <application-design.svg>" in script
-    # The eval copies this script to app-audit.cjs and the skill ships it as
-    # audit_application.cjs, so a name written into the usage line is wrong in one of the two.
     assert "app-audit.cjs" not in script
     skill = (APPLICATION_SKILL_DIR / "SKILL.md").read_text()
     widths = re.findall(r"\b(\d{3,4}) px\b|--design (\d+)\b", skill)

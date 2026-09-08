@@ -40,9 +40,6 @@ def _stream(
     )
 
 
-# `contracts` carries employee identity via its embedded `worker` sub-object. `forms` has no
-# `updated_at` cursor and full-refreshes, and so does `tasks`: it is read under each contract, where
-# neither the enumeration nor the per-contract request takes a filter to carry a watermark.
 DEEL_STREAMS: list[StreamSpec] = [
     _stream("contracts", canonical=True),
     _stream("forms", cursor_field=None),

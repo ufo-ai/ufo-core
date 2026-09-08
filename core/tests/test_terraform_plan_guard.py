@@ -9,7 +9,6 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 GUARD = ROOT / ".github" / "scripts" / "terraform_plan_guard.py"
-# A retired key of this case's own, so nothing here depends on what the repo's list holds.
 SWEPT_KEY = "enable-swept-away"
 PERSISTENT_DELETIONS = (
     ("module.platform.module.rds.module.db_instance.aws_db_instance.this[0]", "aws_db_instance"),

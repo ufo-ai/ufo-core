@@ -1,5 +1,3 @@
-//! The hosted gateway and database bootstrap for ufo's shared workspace fleet.
-
 pub mod claim;
 pub mod db;
 pub mod directives;

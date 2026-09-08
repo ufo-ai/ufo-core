@@ -430,8 +430,6 @@ async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     proxy, sentinel, git_ca, cargo_ca = result.stdout.split("|")
     assert proxy == f"http://{RUN_TOKEN}:ufo@127.0.0.1:{PROXY_PORT}"
     assert sentinel == SENTINEL_MODEL_KEY
-    # git and cargo (libcurl) ignore CURL_CA_BUNDLE, so they get their own CAINFO or a MITM'd host
-    # fails their TLS. Both point at the same proxy CA the other consumers do.
     assert git_ca and git_ca == handle.egress_env["SSL_CERT_FILE"]
     assert cargo_ca == git_ca
 

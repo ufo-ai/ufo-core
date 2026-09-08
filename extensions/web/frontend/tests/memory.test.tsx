@@ -13,8 +13,6 @@ const MATCH = {
   subject: "shared",
 };
 
-/** The write the memory collection projects, bounded as the installed provider bounds a body: the
- *  schema is where the read states how long a correction may run. */
 const RECORD_CORRECTION = (maxLength?: number) => ({
   name: "record_correction",
   description: "Record a correction to a memory.",

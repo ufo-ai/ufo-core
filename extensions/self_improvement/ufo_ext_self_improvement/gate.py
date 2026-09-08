@@ -14,11 +14,6 @@ from dataclasses import dataclass
 
 WILSON_Z_95 = 1.959963984540054
 
-# The local lift lower bound must clear `LIFT_LOWER_BOUND`, and each arm must carry at least
-# `N_FLOOR` replays. The global stage blocks only on evidence of harm: a candidate is rejected when
-# the whole lift interval on the other task classes sits below `-GLOBAL_REGRESSION_MARGIN` (even
-# its optimistic upper bound is a meaningful regression). Non-inferiority at a tight margin is
-# unprovable at modest n, so equal-or-noisy global performance passes.
 LIFT_LOWER_BOUND = 0.05
 N_FLOOR = 4
 GLOBAL_REGRESSION_MARGIN = 0.05

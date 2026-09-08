@@ -3,13 +3,10 @@ import { useState, type ComponentProps } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** The button's class recipe by `variant` and `size`, for an element that must read as a Button
- * and cannot be one — a download link, a label. */
 export const buttonVariants = cva(
   cn(
     "inline-flex items-center justify-center gap-xs",
-    /* What a phone aims with is a finger, not a pointer, so every act keeps the control height as
-       its floor there whatever its own text and padding come to. */
+    /* What a phone aims with is a finger, so every act keeps the control height as its floor there. */
     "max-narrow:min-h-(--size-control)",
     "rounded-panel transition-[background-color,border-color,opacity,scale]",
     "duration-100 ease-control active:scale-[0.96]",
@@ -35,13 +32,7 @@ export const buttonVariants = cva(
       size: {
         default: "",
         bar: "h-(--size-control) whitespace-nowrap rounded-full px-2xl py-0 text-label",
-        /* The glyph is sized by the portal's glyph token rather than by the box's own em, so an
-           icon act draws at the size of every other glyph on its line — a chevron beside a title,
-           the search's lens — instead of at whatever register the surface around it happens to be
-           set in. */
         icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
-        /* The mark's own box: the glyph and nothing around it, so a row of acts is a row of marks
-           at the glyph's own pitch rather than a row of boxes with a glyph inside each. */
         glyph: "size-(--size-glyph) rounded-control p-0 [&_svg]:size-(--size-glyph)",
       },
     },
@@ -52,21 +43,8 @@ export const buttonVariants = cva(
 export type ButtonProps = ComponentProps<"button"> &
   VariantProps<typeof buttonVariants> & { busy?: boolean };
 
-/** A button lays its content out as a centred row, so a glyph sits in the middle of the box rather
- *  than on the text baseline at its left edge, and `size="icon"` is the box a glyph alone is drawn
- *  in: one `--size-control` circle, which is the shape every icon-only act in the portal takes.
- *  `size="bar"` is the same height drawn as a pill: the acts standing in a page's header or a
- *  section's bar are the height and the shape of the search and the filter beside them, so a band
- *  of controls reads as one row rather than as a tall act with chrome tucked under it.
- *
- *  `variant="mark"` with `size="glyph"` is the act drawn as the mark alone: no box, no ground, the
- *  tone of the marks around it, and the ink of the surface under the pointer. A band whose acts are
- *  16-pixel glyphs a fixed pitch apart cannot draw them in 32-pixel boxes — the boxes would set the
- *  spacing and the pressed one would fill a square the row has no room for.
- *
- *  `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
- *  `disabled` would drop the focused element out of it mid-submit — and swallows the activation
- *  instead, so a second click cannot commit the act twice or submit the form it sits in. */
+/** `busy` keeps the button in the accessibility tree — `disabled` would drop the focused element out of
+ *  it mid-submit — and swallows the activation, so a second click cannot commit the act twice. */
 export function Button({
   className,
   variant,
@@ -98,8 +76,6 @@ export function Button({
   );
 }
 
-/** A destructive act: the first click arms the button and names the act it will commit, the
- *  second click commits it. Leaving the button disarms it. */
 export function ConfirmButton({ verb, onClick, className, ...props }: ButtonProps & { verb: string }) {
   const [armed, setArmed] = useState(false);
   return (

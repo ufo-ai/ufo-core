@@ -119,8 +119,6 @@ class PerAgentRules:
             if authority is None:
                 return ()
             with agent(authority.agent_id):
-                # Cache routes optimize an existing InternetRule. Granting them from the agent flag
-                # alone turns the cache host list into an allowlist and blocks unlisted redirects.
                 internet_allowed = authority.internet_access_allowed and bool(self.internet)
                 rules = (*self.base, *self.internet) if internet_allowed else self.base
                 if isinstance(principal, RunToken):

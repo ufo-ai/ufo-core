@@ -31,14 +31,10 @@ module "rds" {
   max_allocated_storage = var.rds_max_allocated_storage
   storage_encrypted     = true
 
-  # The shared application database. ufo_owner owns schema and migrations; ufo_serve is subject to
-  # workspace RLS policies.
   db_name  = var.app_database_name
   username = "ufo_owner"
   port     = 5432
 
-  # We compose the connection URLs into our own Secrets Manager entry (see secrets.tf),
-  # so disable the module's AWS-managed master password.
   manage_master_user_password = false
   password                    = random_password.rds.result
 
@@ -47,8 +43,6 @@ module "rds" {
   create_db_subnet_group = true
   vpc_security_group_ids = [aws_security_group.rds.id]
 
-  # The DB holds all workspace and turn state, so the deploy pipeline must
-  # never be able to drop it. Recreating an env means flipping this off by hand first.
   deletion_protection     = var.rds_deletion_protection
   backup_retention_period = 7
   skip_final_snapshot     = !var.rds_multi_az

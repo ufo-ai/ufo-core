@@ -466,8 +466,6 @@ async def test_named_config_lookup_stops_walking_inside_the_ingress_timeout() ->
         )
     assert refusal.value.status == composio.NOT_FOUND_STATUS
     assert pages == composio.AUTH_CONFIG_PAGE_WALK_CAP
-    # The walk is followed by the link mint, so the cap has to leave one more Composio call inside
-    # the ingress budget.
     assert (composio.AUTH_CONFIG_PAGE_WALK_CAP + 1) * composio.COMPOSIO_TIMEOUT_SECONDS <= (
         INGRESS_READ_TIMEOUT_SECONDS
     )
@@ -789,8 +787,6 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     assert response.status_code == provider.FAILED_CONSENT_STATUS
     assert response.status_code not in EDGE_REPLACED_STATUSES
     assert "location" not in response.headers
-    # The member may have reached consent from anywhere, so the body states the outcome and lets
-    # them close the page rather than sending them to a chat that need not exist.
     body = response.body.decode()
     assert "was not connected" in body and "Close this tab" in body
     assert "chat" not in body and "agent" not in body
@@ -817,8 +813,6 @@ async def test_oauth_route_answers_a_broker_failure_with_what_composio_said(
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == 503
     assert response.status_code == provider.NO_CONSENT_LINK_STATUS
-    # The page carries the repair an operator must make, so it has to reach the member: the edge
-    # deletes an origin 502 and paints its own host-error page, which names nothing.
     assert response.status_code not in EDGE_REPLACED_STATUSES
     assert "location" not in response.headers
     body = response.body.decode()

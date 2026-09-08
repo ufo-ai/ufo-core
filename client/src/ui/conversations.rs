@@ -1,21 +1,3 @@
-//! The conversation page: every conversation the member may open, as the workspace lists them,
-//! drawn under the mark in place of the transcript, with the regular dock below — the search line
-//! over the entry bar. The conversation underneath keeps running.
-//!
-//! The cursor walks one column. It starts in the entry bar, where typing writes and Enter starts a
-//! new chat with the words typed. Up moves to the search line, where typing narrows the list; Up
-//! again enters the list at its newest row, and Down walks back out the same way. Enter on the
-//! search line or a row opens the highlighted conversation.
-//!
-//! After a pause in typing the workspace is asked again with the words searched, so a thread that
-//! fell off the page's bound is still found by its title or its speaker. While the page is up the
-//! list is asked for again every `REFRESH_EVERY`, so a conversation that moved elsewhere climbs
-//! into view. Every fetch carries a generation and the newest one wins, so a slow answer never
-//! overwrites a later one, and a reload keeps the row the member had selected.
-//!
-//! A row is drawn bold when its conversation moved since the member last saw it — a reply landing
-//! in the conversation behind the page, or a thread somebody else spoke in — and stays bold until
-//! they open it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -50,8 +32,6 @@ const HOUR: u64 = 60 * MINUTE;
 const DAY: u64 = 24 * HOUR;
 const WEEK: u64 = 7 * DAY;
 
-/// Where the cursor stands on the page: the entry bar, the search line above it, or the list
-/// above that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Entry,
@@ -59,7 +39,6 @@ pub enum Slot {
     List,
 }
 
-/// What a key or a click did to the page.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pick {
     None,
@@ -67,17 +46,14 @@ pub enum Pick {
     Close,
 }
 
-/// One fetch the page wants made: its generation, and the words to search for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetch {
     pub generation: u32,
     pub search: String,
 }
 
-/// The list as the workspace last answered it, kept beside the member's history so the page opens
-/// on it — in this process and the next — before the workspace answers again. The file names the
-/// sign-in it was read under, so another member's sign-in on this machine leaves it unread, and a
-/// sign-out deletes it with the credential.
+/// The file names the sign-in it was read under, so another member's sign-in on this machine leaves it
+/// unread, and a sign-out deletes it with the credential.
 pub struct Cache {
     path: PathBuf,
     session: String,
@@ -97,8 +73,6 @@ impl Cache {
         }
     }
 
-    /// The rows stored under this sign-in: none where nothing is stored, the file does not parse,
-    /// or another sign-in wrote it.
     pub fn load(&self) -> Vec<ConversationRow> {
         fs::read_to_string(&self.path)
             .ok()
@@ -135,9 +109,6 @@ pub struct Conversations {
 }
 
 impl Conversations {
-    /// A page opened on `rows` — the list as it last stood, or none yet — that has asked for its
-    /// first list and waits on it, cursor in the entry bar. A row that moved since the member last
-    /// saw it is bold from the start. `back` says whether Esc has a conversation to return to.
     pub fn new(
         back: bool,
         rows: Vec<ConversationRow>,
@@ -166,27 +137,22 @@ impl Conversations {
         }
     }
 
-    /// Whether Esc has a conversation to return to.
     pub fn back(&self) -> bool {
         self.back
     }
 
-    /// Where the cursor stands.
     pub fn slot(&self) -> Slot {
         self.slot
     }
 
-    /// Put the cursor where a click landed.
     pub fn set_slot(&mut self, slot: Slot) {
         self.slot = slot;
     }
 
-    /// The rows the page shows, in list order.
     pub fn rows(&self) -> &[ConversationRow] {
         &self.rows
     }
 
-    /// The fetch the page opened with.
     pub fn first_fetch(&self) -> Fetch {
         Fetch {
             generation: self.generation,
@@ -194,18 +160,8 @@ impl Conversations {
         }
     }
 
-    /// One fetch answered. An answer to an earlier generation is dropped: a later fetch already
-    /// speaks for what the member typed since. The row the member had selected stays selected
-    /// wherever the reload puts it.
-    ///
-    /// `seen` is the activity stamp each conversation had when the member last looked at it:
-    /// when they opened it, or when it first stood on this page. A row whose stamp has moved past
-    /// that is drawn bold, and so is one that appeared while the page was up. The page's first
-    /// load takes `current` — the conversation behind the page, which the member was just
-    /// reading — as seen where it stands.
-    ///
-    /// Says whether the whole list landed — the answer to no search — which is the list the page
-    /// opens on next time.
+    /// An answer to an earlier generation is dropped: a later fetch already speaks for what the member
+    /// typed since.
     pub fn loaded(
         &mut self,
         generation: u32,
@@ -260,17 +216,12 @@ impl Conversations {
         }
     }
 
-    /// Where the page is painted: the screen row its heading stands on and the rows it has below
-    /// the heading, for paging and for reading a click.
     pub fn set_layout(&mut self, top: usize, rows: usize) {
         self.top = top;
         self.list = rows.saturating_sub(HEAD_ROWS).max(1);
         self.picker.set_page(self.list);
     }
 
-    /// Up: the entry bar gives way to the search line, the search line to the newest row, and a
-    /// row to the one above it; the top row wraps back to the entry bar, so a long list never
-    /// strands the cursor.
     pub fn up(&mut self) {
         match self.slot {
             Slot::Entry => self.slot = Slot::Search,
@@ -290,8 +241,6 @@ impl Conversations {
         }
     }
 
-    /// Tab and Shift+Tab: the next or previous slot around the column — list, search, entry — so
-    /// a long list is one key from the entry bar.
     pub fn cycle(&mut self, forward: bool) {
         let rows = self.picker.visible_len() > 0;
         self.slot = match (self.slot, forward) {
@@ -302,7 +251,6 @@ impl Conversations {
         };
     }
 
-    /// Home: the newest row.
     pub fn home(&mut self) {
         if self.picker.visible_len() > 0 {
             self.slot = Slot::List;
@@ -310,8 +258,6 @@ impl Conversations {
         }
     }
 
-    /// Down: a row gives way to the one below it, the last row to the search line, the search
-    /// line to the entry bar, and the entry bar wraps to the newest row.
     pub fn down(&mut self) {
         match self.slot {
             Slot::List => {
@@ -333,9 +279,6 @@ impl Conversations {
         }
     }
 
-    /// One key on the search line or in the list: Enter opens the highlighted row, Esc closes the
-    /// page, typing narrows — and moves the cursor to the search line where it was in the list —
-    /// and PageUp and PageDown move through the rows.
     pub fn key(&mut self, key: PickKey) -> Pick {
         match key {
             PickKey::Up => {
@@ -371,7 +314,6 @@ impl Conversations {
         }
     }
 
-    /// A click on screen row `row`: the conversation drawn there opens.
     pub fn click(&mut self, row: u16) -> Pick {
         let Some(offset) = (row as usize).checked_sub(self.top + HEAD_ROWS) else {
             return Pick::None;
@@ -379,7 +321,6 @@ impl Conversations {
         self.open(self.picker.index_at(offset, self.list))
     }
 
-    /// The wheel moves the highlight and brings the cursor to the list.
     pub fn scroll(&mut self, delta: isize) {
         if self.picker.visible_len() == 0 {
             return;
@@ -388,9 +329,6 @@ impl Conversations {
         self.picker.step(delta);
     }
 
-    /// The fetch the page calls for now: the words typed, once the member has paused and they
-    /// differ from what the workspace was last asked; else the periodic refresh, once
-    /// `REFRESH_EVERY` has passed since the last fetch and nobody is mid-word.
     pub fn due_fetch(&mut self, now: Instant) -> Option<Fetch> {
         if let Some(typed_at) = self.typed_at {
             if now.duration_since(typed_at) < REQUERY_AFTER {
@@ -418,9 +356,6 @@ impl Conversations {
         }
     }
 
-    /// The page's rows in the transcript area: the heading over the list, the highlight drawn
-    /// only while the cursor is in the list, the state of the list where its rows would be, and
-    /// blank rows down to `rows`.
     pub fn render(&self, theme: &Theme, cols: u16, rows: usize) -> Vec<Line<'static>> {
         let mut lines = vec![Line::styled(format!("{INDENT}{TITLE}"), theme.heading)];
         let state = match (&self.error, self.loading, self.rows.is_empty()) {
@@ -446,8 +381,6 @@ impl Conversations {
         lines
     }
 
-    /// The search line the dock draws over the entry bar, and the column the cursor stands at
-    /// when this line holds it.
     pub fn search_line(&self, theme: &Theme, cols: u16) -> (Line<'static>, u16) {
         let label = format!("{} ", labeled(SEARCH_LABEL, self.slot == Slot::Search));
         let budget = (cols as usize).saturating_sub(wrap::width(&label));
@@ -467,14 +400,11 @@ impl Conversations {
     }
 }
 
-/// A label over its caret: the focus caret while the line holds the cursor, the idle one when the
-/// cursor is elsewhere and this line could take it.
 pub fn labeled(label: &str, focused: bool) -> String {
     let caret = if focused { FOCUS_CARET } else { PROMPT_IDLE };
     format!("{label} {caret}")
 }
 
-/// Whether `row` is the conversation on the wire: a terminal row by its channel, any other by id.
 fn is_current(row: &ConversationRow, target: &Target) -> bool {
     match target {
         Target::Channel(channel) => row.channel.as_deref() == Some(channel.as_str()),
@@ -482,9 +412,6 @@ fn is_current(row: &ConversationRow, target: &Target) -> bool {
     }
 }
 
-/// One row as the list states it: where the conversation came in — the room's own name when the
-/// surface gave it one, else the surface — how long since it moved, what it is called, who opened
-/// it when that was somebody else, and which agent when it is not the main one.
 pub fn row_text(row: &ConversationRow, now_seconds: u64) -> String {
     let origin = wrap::clip(&origin(row), ORIGIN_WIDTH).to_string();
     let age = age(row.last_at as u64, now_seconds);
@@ -503,7 +430,6 @@ pub fn row_text(row: &ConversationRow, now_seconds: u64) -> String {
     text
 }
 
-/// Where a conversation came in: the name the surface gave it (`#ops`), else the surface itself.
 fn origin(row: &ConversationRow) -> String {
     match &row.surface_label {
         Some(label) => label.clone(),
@@ -511,7 +437,6 @@ fn origin(row: &ConversationRow) -> String {
     }
 }
 
-/// The surface's name as a member reads it.
 pub fn surface_word(surface: &str) -> String {
     match surface {
         "ufo" => "Terminal".to_string(),
@@ -529,7 +454,6 @@ pub fn surface_word(surface: &str) -> String {
     }
 }
 
-/// How long ago `epoch_seconds` was, in the largest unit that reaches 1.
 pub fn age(epoch_seconds: u64, now_seconds: u64) -> String {
     let elapsed = now_seconds.saturating_sub(epoch_seconds);
     match elapsed {
@@ -600,7 +524,6 @@ mod tests {
         lines.iter().map(Line::to_string).collect()
     }
 
-    /// Which list rows are drawn bold, with the cursor in the entry so no row is highlighted.
     fn bold_rows(page: &mut Conversations) -> Vec<bool> {
         let was = page.slot;
         page.slot = Slot::Entry;

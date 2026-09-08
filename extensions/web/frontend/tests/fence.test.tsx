@@ -32,8 +32,6 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** The act that leaves the view is the workspace column's own, which the shell draws at a phone
- *  width alone — so the drawer holding that column is where the member presses it. */
 test("leaving a view discards the read left behind rather than painting it", async () => {
   atPhoneWidth();
   let releaseConnectors: ((value: Response) => void) | null = null;

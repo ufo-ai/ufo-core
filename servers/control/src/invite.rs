@@ -1,28 +1,3 @@
-//! One-time new-workspace invites, each a grant to one signup subject.
-//!
-//! A verified email whose subject already has a workspace joins ungranted; only the flow that
-//! creates a workspace consults the ledger. `ufo-control invite <object-number> <email>` grants a
-//! waitlist object's signup subject and emails it the invitation. Redeeming consumes the grant —
-//! `consumed_at` claimed under a row lock while still null, so two concurrent flows can never both
-//! open a workspace on one grant — and stamps the claim's `invite_id` in the same transaction, so a
-//! crash can never leave a consumed grant detached from its claim. The consumption lands before the
-//! workspace write; repeated redemption by that claim is accepted.
-//!
-//! An object number names the waitlist object a grant approved, and only that. A grant approved
-//! from the intake form answers a form response, which is no waitlist object, so it carries none —
-//! inventing one would ask an operator to pick a number nothing holds and to check it is free
-//! against a ledger no agent can read. Postgres treats nulls as distinct, so any number of
-//! unnumbered grants coexist while the waitlist's own numbers stay one to one.
-//!
-//! A company grant names its domain; a personal-mail grant names the exact address. The member
-//! proves that subject by verifying their own email, so the invitation carries nothing to retype
-//! and a forwarded invitation grants nothing.
-//!
-//! `email_domain` is written with that same subject, for the reason `store` states about the claim
-//! ledger: it is the column the release being replaced looks a grant up by, and a personal-mail
-//! grant filed under `gmail.com` is one that release hands to any `@gmail.com` arrival, and one its
-//! Slack Connect sweep opens a channel named for the provider from.
-
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
@@ -52,9 +27,6 @@ pub const DDL: &[&str] = &[
        on ufo_control.invite_code (object_number) where consumed_at is null",
 ];
 
-/// What the intake form collected about one customer: what their company does, and what they want
-/// an agent to do. It reaches their workspace as the main agent's opening context, so the agent
-/// knows who it works for on its first turn rather than asking for what they already told us.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SignupProfile {
     pub business: String,
@@ -68,8 +40,6 @@ pub struct MintedInvite {
     pub expires_at: DateTime<Utc>,
 }
 
-/// What a redemption found. `Accepted` carries the grant it spent so the claim can be stamped with
-/// it, and a repeat by the same claim reads back as accepted rather than consumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Redemption {
     Unknown,
@@ -85,7 +55,6 @@ pub struct InviteAccepted {
     pub consumed_at: DateTime<Utc>,
 }
 
-/// Granting refused: the object or signup subject is already identified, or holds a live grant.
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
     #[error("{0} is already identified")]
@@ -118,7 +87,6 @@ impl InviteCodes {
         }
     }
 
-    /// Whether this address's signup subject holds a live grant that can create its workspace.
     pub async fn available(&self, email: &str) -> Result<bool, InviteError> {
         let signup = SignupEmailPolicy::default().validate(email)?;
         let connection = self.pool.get().await?;
@@ -135,8 +103,6 @@ impl InviteCodes {
         Ok(row.is_some())
     }
 
-    /// What the newest grant for this address's subject recorded, or None when the form collected
-    /// nothing. The newest grant wins.
     pub async fn profile(&self, email: &str) -> Result<Option<SignupProfile>, InviteError> {
         let signup = SignupEmailPolicy::default().validate(email)?;
         let connection = self.pool.get().await?;
@@ -222,8 +188,6 @@ impl InviteCodes {
             )
             .await;
         if let Err(raced) = inserted {
-            // The partial unique indexes are the arbiter, so a grant that raced another to the same
-            // object or subject is refused here rather than doubling one.
             if raced.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
                 let subject = match object_number {
                     Some(number) => format!("object #{number} or {}", signup.subject),
@@ -244,9 +208,6 @@ impl InviteCodes {
         })
     }
 
-    /// Spend this address's subject grant for one claim, under a row lock so two flows cannot open a
-    /// workspace on it. The claim's `invite_id` is stamped in the same transaction, so a consumed
-    /// grant is never detached from the claim that spent it.
     pub async fn redeem(&self, email: &str, claim_id: Uuid) -> Result<Redemption, InviteError> {
         let signup = SignupEmailPolicy::default().validate(email)?;
         let mut connection = self.pool.get().await?;
@@ -318,8 +279,6 @@ impl InviteCodes {
     }
 }
 
-/// Refuse a grant whose object or subject is already spoken for: a consumed grant identifies the
-/// customer for good, and a live one has to expire or be spent before another can be issued.
 async fn refuse_standing(
     transaction: &deadpool_postgres::Transaction<'_>,
     column: &str,

@@ -1,33 +1,12 @@
-/** The provider's own consent or install page, opened in a window this page owns.
- *
- *  It is sized for a consent screen and centred on the member's screen. That ownership is what the
- *  page is after: a browser closes a window a script opened, and only that one, so the provider's
- *  return page takes itself away and the member is left looking at the screen they never navigated
- *  off — which has already moved on underneath them, because the turn resumed on the server, or the
- *  step behind the act is watching for the install to land.
- *
- *  Every provider handoff the portal renders goes through here — the consent link in a reply, the
- *  act a first-run step presses, the connector's own consent page — because the window is worth the
- *  same in all three and a member should not have to notice which screen they started from. A
- *  browser that blocks the window gives back nothing, and the caller falls back to a link the member
- *  follows themselves.
- *
- *  `openConsentWindow` takes its URL afterwards for the act that has to mint one first: minting is a
- *  round trip, and a window opened after one has lost the gesture the browser demands to open it at
- *  all. So the act opens the window on the press and points it at the provider when the link lands —
- *  one press, with nothing left on the page for the member to find and press again.
- */
+/** A browser closes a window a script opened, and only that one, so the provider's return page can take
+ *  itself away. The window opens on the press: minting first would lose the gesture the browser demands. */
 
 const CONSENT_WINDOW = "ufo-connect";
 const CONSENT_WIDTH = 520;
 const CONSENT_HEIGHT = 720;
 
-/** What the provider's return page reads to know it is standing in a window this page opened, and
- *  may therefore take away. A window `window.open` makes starts with a copy of this tab's session
- *  storage and keeps it across the whole consent walk; a tab opened from a link — in a chat
- *  surface, or from the link this file falls back to — carries none, and is carried to a screen
- *  instead. `core/src/ufo/sdk/callback_page.py` spells the same key, and a gate holds the two
- *  equal. */
+/** A window `window.open` makes starts with a copy of this tab's session storage; a tab opened from a
+ *  link carries none. `core/src/ufo/sdk/callback_page.py` spells the same key, and a gate holds them equal. */
 const CONSENT_WINDOW_MARK = "ufo-consent-window";
 
 function consentFeatures(): string {
@@ -43,13 +22,11 @@ function consentFeatures(): string {
 }
 
 export function openConsentWindow(url = ""): Window | null {
-  /* Marked before the open, because the copy the new window starts with is taken then. A browser
-     that refuses storage leaves the mark unwritten, and the return page carries that window to the
-     connectors screen rather than closing it — the outcome is read either way. */
+  /* Marked before the open, because the copy the new window starts with is taken then. A browser that
+     refuses storage leaves it unwritten, and the return page carries that window to the connectors screen. */
   try {
     sessionStorage.setItem(CONSENT_WINDOW_MARK, "1");
   } catch {
-    /* storage refused */
   }
   const consent = window.open(url, CONSENT_WINDOW, consentFeatures());
   consent?.focus();

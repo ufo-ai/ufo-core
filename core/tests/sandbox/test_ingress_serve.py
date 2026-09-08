@@ -524,8 +524,6 @@ async def test_a_plain_http_deploy_binds_a_session_the_browser_will_keep(
     cookie = got.headers["set-cookie"]
     assert cookie.startswith(f"{INGRESS_SESSION_COOKIE}=")
     assert "Secure" not in cookie
-    # Everything else the attribute does not touch stands: the session is still the browser's
-    # alone and still host-only.
     assert "HttpOnly" in cookie and "domain" not in cookie.lower()
 
 
@@ -659,9 +657,6 @@ async def test_the_ingress_keeps_no_cookie_jar_of_its_own(db, ingress) -> None:
         headers={"cookie": f"{INGRESS_SESSION_COOKIE}={session}"},
     )
     assert again.json()["cookies"] == []
-    # The other half: `Client.send` extracts `Set-Cookie` whatever built the request, so an
-    # unpoliced jar would hold this origin's `a=1`/`b=2` and grow by every cookie every site ever
-    # sets. Nothing is stored, so nothing accumulates for the life of the process.
     assert len(ingress.upstream.cookies.jar) == 0
 
 
@@ -2306,8 +2301,6 @@ async def test_a_socket_to_a_stored_site_is_refused(
             pass
     assert refused.value.response.status_code == 501
     assert refused.value.response.body == SITE_HAS_NO_SOCKET.encode()
-    # 501 is cacheable by default (RFC 9110), and this refusal names one workspace's own site — so
-    # the denial carries the directive every other answer of this origin does.
     assert refused.value.response.headers["cache-control"] == UNCACHEABLE
     assert socket_origin.handshakes == []
 

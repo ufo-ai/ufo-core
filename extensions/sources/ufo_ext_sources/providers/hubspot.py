@@ -226,8 +226,6 @@ _ANALYTICS_REPORT_TIME_PERIODS = (
     "summarize/monthly",
 )
 
-# Junction streams: stream name → (parent_object, target_object). The parent slug is the v3 list
-# endpoint to walk; the target slug is the associations relation embedded via `?associations=`.
 _JUNCTION_STREAMS: dict[str, tuple[str, str]] = {
     "deal_contacts": ("deals", "contacts"),
     "deal_companies": ("deals", "companies"),

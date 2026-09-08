@@ -23,10 +23,6 @@ pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
-# Each arm edits the view that says the words and the suite that measures them together, because
-# `test_every_case_says_the_words_the_first_run_actually_sends` holds the two copies identical: an
-# arm that cut a sentence from one alone would leave the other saying it.
-
 [[arm]]
 name = "no-read-first"
 

@@ -16,18 +16,9 @@ import { WorkspaceUsage } from "@/views/Usage";
 
 export type PaneView = {
   label: string;
-  /** Every view is handed the place it stands at and the way to change it — a row that took neither
-   *  had to read the address itself and write its own, which is how one screen's route and the
-   *  address came to disagree until the next navigation. */
   render: (place: Placement, onPlace: (place: Placement) => void) => ReactNode;
-  /** Remount when the placement changes, so a mutation's outcome notice reaches the new mount. */
   remountOnPlace: boolean;
-  /** What the search the page's own header carries is labelled — the words for what it narrows,
-   *  never the bare verb, since one shell heads several tabs and a box called `Search` on every one
-   *  of them names none. The header owns the box because it outlives the read it redraws under. */
   search?: string;
-  /** A view that heads its own page — the shell draws no header over it, because the controls
-   *  reaching the whole page are the view's own and stand beside its title. */
   ownsHeader?: boolean;
 };
 
@@ -97,8 +88,6 @@ export const MESSAGING: PaneView = {
   render: () => <WorkspaceMessaging />,
 };
 
-/** The sections the portal renders itself. A `Section` outside this record is a screen an app
- *  ships, and the router lands its address on that app. */
 export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {
   connectors: CONNECTORS,
   messaging: MESSAGING,

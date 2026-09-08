@@ -25,7 +25,6 @@ from ufo_ext_sources.watermark import text_checkpoint
 PAGE_SIZE = 500
 _REFUSAL_STATUS = frozenset({401, 403})
 
-# Stream-name → top-level path (straight offset pagination, no parent fanout).
 _TOP_LEVEL_PATHS: dict[str, str] = {
     "lists": "/3.0/lists",
     "campaigns": "/3.0/campaigns",
@@ -33,7 +32,6 @@ _TOP_LEVEL_PATHS: dict[str, str] = {
     "reports": "/3.0/reports",
 }
 
-# Stream-name → the JSON key Mailchimp wraps its records under.
 _DATA_FIELDS: dict[str, str] = {
     "lists": "lists",
     "campaigns": "campaigns",
@@ -49,7 +47,6 @@ _DATA_FIELDS: dict[str, str] = {
     "email_activity": "emails",
 }
 
-# Cursor field → Mailchimp's `?since_*` query parameter for server-side incremental filtering.
 _CURSOR_PARAM: dict[str, str] = {
     "last_changed": "since_last_changed",
     "create_time": "since_create_time",

@@ -1,12 +1,3 @@
-//! Postgres custody of the hosted onboarding claim ledger. `schema` shapes `DDL`.
-//!
-//! Two columns hold one fact. `signup_subject` is the honest name for the identity a claim carries;
-//! `email_domain` predates personal-mail signup, when that identity could only ever be a domain,
-//! and it is the column the release being replaced selects and reads as the identity. Neither
-//! image can be taught the other's column name mid-rollout, so both are written with the subject
-//! and the domain is derived from the verified address instead. `email_domain` is droppable once
-//! no pod of that release is left to read it.
-
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
@@ -34,9 +25,6 @@ pub const DDL: &[&str] = &[
        where resulting_workspace_id is null",
 ];
 
-// The domain is read back off the verified address rather than out of `email_domain`: that column
-// carries the signup subject, which for a personal-mail address is the address itself. See
-// `insert_claim`.
 const COLUMNS: &str = "id, email, split_part(email, '@', 2) as email_domain, signup_subject, \
                        surface, surface_ref, expires_at, verified_at, invite_id";
 
@@ -44,8 +32,6 @@ const COLUMNS: &str = "id, email, split_part(email, '@', 2) as email_domain, sig
 pub struct OnboardClaim {
     pub claim_id: Uuid,
     pub email: String,
-    /// The verified address's own domain. It is what a company signup is identified by and is never
-    /// the identity of a personal-mail signup — `signup_subject` is that.
     pub email_domain: String,
     pub signup_subject: String,
     pub surface: String,
@@ -73,16 +59,6 @@ impl OnboardStore {
         Self { pool }
     }
 
-    /// Write the claim. The `email_domain` column is written with the signup subject rather than
-    /// with the domain: it is the column the release being replaced reads as the whole signup
-    /// identity — that image declares no `signup_subject` — and the identity of a personal-mail
-    /// address is that address.
-    ///
-    /// Left as the shared provider domain, a gateway pod of that release picking up this session
-    /// mid-rollout carries `gmail.com` as the identity: it lists every workspace whose first member
-    /// is at `gmail.com` as a candidate, and founds `uuid5(gmail.com)` on a personal member, which
-    /// hands every `@gmail.com` stranger a domain match on that workspace for good. Written as the
-    /// subject, every request that pod can build names this member's own subject and nobody else's.
     pub async fn insert_claim(&self, claim: &OnboardClaim) -> Result<(), StoreError> {
         let connection = self.pool.get().await?;
         connection
@@ -107,8 +83,6 @@ impl OnboardStore {
         Ok(())
     }
 
-    /// The claim this surface session is still working through — one at a time, held by the partial
-    /// unique index: a completed claim releases the pair for the next attempt.
     pub async fn live_claim(
         &self,
         surface: &str,
@@ -137,8 +111,6 @@ impl OnboardStore {
         }))
     }
 
-    /// Stamp the first verification and report whether this call is the one that did it. A second
-    /// caller gets false, so a replayed code cannot re-open a claim already spent.
     pub async fn mark_verified(&self, claim_id: Uuid) -> Result<bool, StoreError> {
         let connection = self.pool.get().await?;
         let row = connection
@@ -153,9 +125,6 @@ impl OnboardStore {
         Ok(row.is_some())
     }
 
-    /// Whether this claim opened the workspace or joined one already there. A join is not a new
-    /// customer — a contractor seated at their own email domain, or operator staff, resolves to a
-    /// workspace their domain does not name — so the two cannot share one mark.
     pub async fn complete(
         &self,
         claim_id: Uuid,

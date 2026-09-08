@@ -30,8 +30,6 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** One app's whole declaration, unwired: an account its member grants, a credential the workspace
- *  fills once, and the standing order that gives it an occasion to run. */
 function owed(over: Record<string, unknown> = {}) {
   return {
     connectors: [{
@@ -56,8 +54,8 @@ function owed(over: Record<string, unknown> = {}) {
   };
 }
 
-/** Pin the member's clock. The offset is minutes to add to local time to reach UTC, so a positive
- *  number is west of Greenwich. */
+/** `getTimezoneOffset` returns minutes to add to local time to reach UTC, so a positive number is west
+ *  of Greenwich. */
 function atOffset(minutes: number) {
   vi.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(minutes);
 }
@@ -175,8 +173,6 @@ test("required steps draw an asterisk and optional steps do not", async () => {
 });
 
 test("a credential step states whether the workspace has filled it", async () => {
-  /** The credential is filled once for the whole workspace, outside this screen, so the step states
-   *  the fact and offers no press: a filled one is done, an unfilled one says what is still owed. */
   wire({ [SETUP]: () => json(owed()) });
   mount();
 
@@ -202,9 +198,6 @@ test("a credential step states whether the workspace has filled it", async () =>
 });
 
 test("a completed open step advances to the next step in the payload", async () => {
-  /** The step the member settles closes behind them and the next one opens, so the drawer walks the
-   *  list with them. The connect is the act that re-reads: the grant lands, the re-read says the
-   *  account is held, and the open step moves on to the credential. */
   const opened = { location: { href: "" }, close: vi.fn(), focus: vi.fn() };
   vi.stubGlobal("open", vi.fn().mockReturnValue(opened));
   const streams = fakeStream();
@@ -316,9 +309,6 @@ test("a schedule the member composed stands in the field they wrote it in", asyn
 });
 
 test("a need the app offers no cadence for still carries an act", async () => {
-  /** A feed trigger takes a registered source, shared, and a trigger naming it — more than one
-   *  answer, so it is settled in chat. The row still has to carry the way there: stating the need
-   *  and offering nothing left the member reading a chore with no way to do it. */
   wire({
     [SETUP]: () =>
       json(
@@ -342,13 +332,6 @@ test("a need the app offers no cadence for still carries an act", async () => {
 });
 
 test("Build app stands below the todos and hands the ask over unsent", async () => {
-  /** The todos are what the app needs before it can read anything; this is the act that turns a
-   *  wired app into its screen, so it stands under them.
-   *
-   *  The ask is handed over rather than spent: it forks a site and binds a homepage, and a press
-   *  that starts that before the member has read what it asks for is a surprise. It rides to the
-   *  app's own new chat and stands in the composer, so the build runs in a conversation they
-   *  opened, can watch, and can correct. */
   wire({ [SETUP]: () => json(owed()) });
   mount();
 
@@ -358,15 +341,10 @@ test("Build app stands below the todos and hands the ask over unsent", async () 
   const handed = takePendingAsk(AGENT_ID, "new:" + AGENT_ID);
   expect(handed?.send).toBe(false);
   expect(handed?.text).toContain("Load your homepage skill");
-  // The ask names the skill and stops: the steps live in the skill, and repeating them here would
-  // be a second copy of the procedure that drifts the first time either changes.
   expect((handed?.text ?? "").length).toBeLessThan(160);
 });
 
 test("connect opens the consent window on the press, and points it at the turn's own link", async () => {
-  /** The link is minted per speaking member at stream time — never in the intent's answer — so the
-   *  turn's stream is where it arrives. The window is opened on the press because a window opened
-   *  after the round trip has lost the gesture the browser opens one for. */
   const opened = { location: { href: "" }, close: vi.fn(), focus: vi.fn() };
   vi.stubGlobal("open", vi.fn().mockReturnValue(opened));
   const streams = fakeStream();
@@ -429,9 +407,6 @@ test("the pick applies the app's own schedule, under the app's own name", async 
 });
 
 test("a re-pick on an armed schedule moves the cadence and nothing else", async () => {
-  /** The order already holds the prompt, and the kind holds content to the task's creator: a spec
-   *  that set `prompt` again is refused for every admin who did not arm the order, and the cadence
-   *  they pressed would stay unchanged. The re-pick sends the schedule alone. */
   atOffset(0);
   const { handler } = wire({
     [SETUP]: () =>
@@ -464,29 +439,20 @@ test("a re-pick on an armed schedule moves the cadence and nothing else", async 
 });
 
 test("a cadence label names the recurrence and promises no run now", () => {
-  // A schedule's first fire is its next cron occurrence: `next_fire` advances strictly past now and
-  // the kind runs nothing one-shot. A label reading "Now, and every hour" promised a run that never
-  // came, and left the member watching a silent app for an hour — for a week on a single weekday.
+  // A schedule's first fire is its next cron occurrence: `next_fire` advances strictly past now, and the
+  // kind runs nothing one-shot.
   expect(labelOf({ hour: null, minute: 0, weekdays: [] })).toBe("every hour");
   expect(labelOf({ hour: 9, minute: 0, weekdays: [1, 2, 3, 4, 5] })).toBe("every weekday at 9:00 AM");
   expect(labelOf({ hour: 9, minute: 0, weekdays: [] })).toBe("every day at 9:00 AM");
 });
 
 test("the cadence is stored in UTC, converted from the member's own clock", () => {
-  // Greenwich: what the member picked is what the cron says.
   expect(cronFor({ hour: 9, minute: 0, weekdays: [] }, 0)).toBe("0 9 * * *");
-  // Five hours west: 9am local is 14:00 UTC.
   expect(cronFor({ hour: 9, minute: 0, weekdays: [] }, 300)).toBe("0 14 * * *");
-  // An hour that crosses midnight takes its weekdays with it: Monday 9pm local, five hours west, is
-  // Tuesday 02:00 UTC — and a set that did not move would fire a day early every week.
   expect(cronFor({ hour: 21, minute: 0, weekdays: [1] }, 300)).toBe("0 2 * * 2");
-  // An hourly cadence names no wall-clock time, so there is nothing to convert.
   expect(cronFor({ hour: null, minute: 0, weekdays: [] }, 300)).toBe("0 * * * *");
 });
 
-/** The shell reads the roster to know which app the workspace is still building, and a build lands
- *  long after that read. This screen holds the fresh answer, so it says when the page is there and
- *  the roster is read again. */
 test("the screen says when the workspace has built the page, and stays quiet until it has", async () => {
   wire({ [SETUP]: () => json(owed()) });
   const built = vi.fn();

@@ -1,16 +1,5 @@
-//! The containment guard for a path built from model, agent, or script input.
-//!
-//! Checks 2 to 4 of `core/src/ufo/harness/containment.py`, in Rust, for the paths the `ufo fs`
-//! verb takes: the canonical parent asserted inside the root, a per-component `O_NOFOLLOW` descent
-//! from a root fd so every operation names its target relative to a pinned parent fd, and the
-//! target's own `lstat` that never follows a final link. A write stages a sibling
-//! `O_CREAT|O_EXCL|O_NOFOLLOW` and renames it, so a link planted at the name cannot steer the bytes.
-//!
-//! The wire ops (`OP_FILE`) keep calling `std::fs` on paths the host already rewrote; this guard is
-//! what the verb runs instead, because a path reaching it came from inside the sandbox.
-//!
-//! Refusal messages are `ContainmentError`'s own, because the host maps them to the model's
-//! `ValueError` and an operator dashboard groups on them.
+//! Checks 2 to 4 of `core/src/ufo/harness/containment.py`, in Rust. Refusal messages are
+//! `ContainmentError`'s own, because the host maps them to the model's `ValueError` and dashboards group on them.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{Read, Write};
@@ -25,9 +14,6 @@ fn dir_flags() -> libc::c_int {
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW
 }
 
-/// A path built from untrusted input does not name a file inside its root. One type for every
-/// refusal `containment.py` raises as a `ContainmentError` subclass: the message is what a caller
-/// reads, and the class only ever chose which `except` clause caught it.
 #[derive(Debug)]
 pub struct GuardError(String);
 
@@ -41,16 +27,14 @@ impl GuardError {
     }
 }
 
-/// The target's own stat, taken without following a final symlink.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry {
     pub size: u64,
     pub mode: libc::mode_t,
 }
 
-/// A validated target, addressed only through `parent`, an fd on the canonical parent directory the
-/// symlink-free descent reached. A directory renamed or replaced by a link after the descent takes
-/// the fd's inode with it, which is what keeps the check and the operation naming one file.
+/// A directory renamed or replaced by a link after the descent takes the fd's inode with it, which is
+/// what keeps the check and the operation naming one file.
 #[derive(Debug)]
 pub struct Contained {
     path: PathBuf,
@@ -69,8 +53,6 @@ impl Contained {
         &self.path
     }
 
-    /// The target's own stat, never following a final symlink. `None` when nothing holds the name;
-    /// a refusal when something other than a regular file does.
     pub fn lstat(&self) -> Result<Option<Entry>, GuardError> {
         match self.stat_at()? {
             None => Ok(None),
@@ -86,7 +68,6 @@ impl Contained {
         }
     }
 
-    /// Up to `limit` bytes, read through an `O_NOFOLLOW` fd whose `fstat` says regular file.
     pub fn read_bytes(&self, limit: u64) -> Result<Vec<u8>, GuardError> {
         let handle = self.open_regular()?;
         let mut bytes = Vec::new();
@@ -97,7 +78,6 @@ impl Contained {
         Ok(bytes)
     }
 
-    /// The mode bits of the staged file this call is about to rename, set on an `O_NOFOLLOW` fd.
     pub fn chmod(&self, mode: libc::mode_t) -> Result<(), GuardError> {
         let descriptor = self.open_at(libc::O_WRONLY | libc::O_NOFOLLOW, 0)?;
         let outcome = unsafe { libc::fchmod(descriptor, mode & 0o777) };
@@ -116,7 +96,6 @@ impl Contained {
         unsafe { libc::unlinkat(self.parent, name.as_ptr(), 0) };
     }
 
-    /// Rename `source` onto this target, both named relative to their pinned parents.
     pub fn replace_with(&self, source: &Contained) -> Result<(), GuardError> {
         let from = source.c_name()?;
         let onto = self.c_name()?;
@@ -136,9 +115,8 @@ impl Contained {
         self.replace_bytes(text.as_bytes(), mode)
     }
 
-    /// Write `bytes` to a staged sibling created `O_CREAT|O_EXCL|O_NOFOLLOW` and rename it onto the
-    /// target. Exclusive create is what refuses a name a link already holds instead of truncating
-    /// through it; the rename installs the bytes whole.
+    /// Exclusive create is what refuses a name a link already holds instead of truncating through it; the
+    /// rename installs the bytes whole.
     pub fn replace_bytes(&self, bytes: &[u8], mode: libc::mode_t) -> Result<(), GuardError> {
         let staged = format!("{STAGED_PREFIX}{}", random_hex());
         let staged_name = c_string(OsStr::new(&staged), &staged)?;
@@ -255,9 +233,8 @@ impl Contained {
     }
 }
 
-/// The canonical form of a root, refusing a symlinked one — the check a containment assertion
-/// cannot stand in for: under a symlinked root every path resolves inside the link's target and
-/// passes containment, while the bytes land wherever the link points.
+/// The check a containment assertion cannot stand in for: under a symlinked root every path resolves
+/// inside the link's target and passes containment, while the bytes land wherever the link points.
 pub fn contained_root(root: &Path) -> Result<PathBuf, GuardError> {
     let Ok(entry) = std::fs::symlink_metadata(root) else {
         return Err(GuardError::new(format!("{} not found", root.display())));
@@ -272,7 +249,6 @@ pub fn contained_root(root: &Path) -> Result<PathBuf, GuardError> {
         .map_err(|error| GuardError::new(format!("{}: {error}", root.display())))
 }
 
-/// A relative path read against `root`, never against the process's cwd.
 pub fn rooted(path: &str, root: &Path) -> PathBuf {
     let target = Path::new(path);
     if target.is_absolute() {
@@ -282,9 +258,6 @@ pub fn rooted(path: &str, root: &Path) -> PathBuf {
     }
 }
 
-/// All the checks, then a handle pinned to the target's parent. `create_parent` makes each missing
-/// directory as the descent reaches it, so a write to a path whose directories do not exist yet is
-/// checked component by component as it is built.
 pub fn contained_file(
     path: &str,
     root: &Path,
@@ -315,9 +288,6 @@ pub fn contained_file(
     })
 }
 
-/// The canonical path of a directory under `root`, reached without following a link at any
-/// component — the enumeration entry point, where the result is a directory to walk, so the
-/// descent's fds are released once each component is proved.
 pub fn contained_dir(path: &str, root: &Path, create: bool) -> Result<PathBuf, GuardError> {
     let canonical_root = contained_root(root)?;
     let target = rooted(path, &canonical_root);
@@ -334,9 +304,6 @@ pub fn contained_dir(path: &str, root: &Path, create: bool) -> Result<PathBuf, G
     Ok(resolved_target)
 }
 
-/// The canonical path of an existing regular file under `root`, for a reader that has to hand a
-/// path to something else. Every ancestor is proved link-free and the target itself is `lstat`ed,
-/// so the name cannot be a planted link.
 pub fn contained_regular(path: &str, root: &Path) -> Result<PathBuf, GuardError> {
     let target = contained_file(path, root, false)?;
     if target.lstat()?.is_none() {
@@ -345,10 +312,8 @@ pub fn contained_regular(path: &str, root: &Path) -> Result<PathBuf, GuardError>
     Ok(target.path().to_path_buf())
 }
 
-/// Whether an enumerated path is a regular file inside `root` that no symlink was crossed to
-/// reach — the filter an enumeration applies to its own hits, where a per-component descent per hit
-/// would cost more than the walk that produced it. A read of a hit still goes through
-/// `contained_file`: this answers what to list, not what to open.
+/// The filter an enumeration applies to its own hits, where a per-component descent per hit would cost
+/// more than the walk that produced it. A read of a hit still goes through `contained_file`.
 pub fn is_contained_regular(path: &Path, root: &Path) -> bool {
     let Ok(entry) = std::fs::symlink_metadata(path) else {
         return false;
@@ -425,9 +390,6 @@ fn open_root(root: &Path) -> Result<libc::c_int, GuardError> {
     Ok(descriptor)
 }
 
-/// The canonical form of `path`, resolved as far as the filesystem holds it and applied lexically
-/// beyond that — a not-yet-created target still gets its existing ancestors canonicalized, which is
-/// what `Path.resolve()` answers for the parent check.
 fn resolved(path: &Path) -> PathBuf {
     let parts: Vec<OsString> = path
         .components()
@@ -487,8 +449,6 @@ fn random_hex() -> String {
 mod tests {
     use super::*;
 
-    /// A workspace holding one file, and an outside directory holding the file an escape would
-    /// reach — `test_sbxfs.py`'s own fixture.
     fn workspace(tag: &str) -> (PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("ufo-guard-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -595,9 +555,6 @@ mod tests {
         std::fs::write(parent.join("app.py"), "workspace-old\n").unwrap();
         std::fs::write(outside.join("app.py"), "outside-old\n").unwrap();
         let file = contained_file("repo/app.py", &root, false).unwrap();
-        // The swap `test_sbxfs.py` performs inside the file lock: the checked directory is renamed
-        // away and a link out of the workspace takes its name. The pinned fd keeps the write on the
-        // inode the descent proved.
         std::fs::rename(&parent, root.join("moved")).unwrap();
         link(&outside, &parent);
         file.replace_bytes(b"workspace-new\n", 0o644).unwrap();
@@ -652,8 +609,8 @@ mod tests {
     #[test]
     fn a_path_that_names_no_file_in_the_root_is_refused() {
         let (root, _outside) = workspace("rootpath");
-        // The root's own name is a usable one, so it is check 2 that refuses it: its parent is the
-        // directory above the root.
+        // The root's own name is a usable one, so it is check 2 that refuses it: its parent is the directory
+        // above the root.
         let named = contained_file(root.to_str().unwrap(), &root, false).unwrap_err();
         assert!(named.message().contains("escapes"), "{}", named.message());
         let upward = contained_file("..", &root, false).unwrap_err();

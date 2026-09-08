@@ -129,8 +129,6 @@ HELD_FLAG = {
     "rules": [{"priority": 1, "serve_variation": "on"}],
 }
 ANSWERED_FLAG = {**HELD_FLAG, "updated_at": "2026-08-27T22:00:00Z", "updated_by": "someone"}
-# One entry of the app's flag collection, as Cloudflare answers it: the collection names a flag
-# `key` and carries no `flag_key`, which the single-flag read above does.
 LISTED_FLAG = {
     "key": "enable-wiki-app",
     "type": "string",

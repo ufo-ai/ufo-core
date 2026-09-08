@@ -43,35 +43,25 @@ import { useOfferedTabs } from "@/lib/surfaces";
 import type { Agent } from "@/lib/types";
 import { SECTION_VIEWS } from "@/views/registry";
 
-/** How long a term rests before it is read. A search that fired on every keystroke would run one
- *  fan-out per letter, and the member is still typing the word the last one answered. */
+/** A search that fired on every keystroke would run one fan-out per letter, and the member is still
+ *  typing the word the last one answered. */
 const REST_MS = 200;
 
 const BLANK = "Nothing matches this search.";
 
 const WORKING = "Searching…";
 
-/** The chord that opens the palette from anywhere, and closes it again. Meta holds it alone:
- *  `ctrl+k` is kill-line in every readline-shaped field, so it is not a chord to take away. */
+/** Meta holds it alone: `ctrl+k` is kill-line in every readline-shaped field. */
 const CHORD = "k";
 
 const SEARCH = "Search";
 
-/** The chord as the member meets it: the cap the row prints and the same chord spelled for the
- *  accessibility tree, both read off the key the guard above answers. */
 const SEARCH_CHORD: Chord = { key: CHORD, cap: "\u2318K", aria: "Meta+K" };
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
 };
 
-/** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
- *  buttons beside the search glyph — the palette adds no place the nav does not already carry —
- *  and each takes the glyph its kind is drawn with wherever a hit of that kind stands. App-shipped
- *  screens stand in the palette as the apps themselves, so only the portal's own sections list.
- *  The workspace row opens the destination's first offered tab, the same one its nav row does — and
- *  where that address is one already listed, the palette carries it once rather than under two
- *  names. */
 function places(landing: WorkspaceTab): { label: string; hash: string; icon: TablerIcon }[] {
   return [
     { label: "Chat", hash: HOME_HASH, icon: IconMessage },
@@ -86,16 +76,6 @@ function places(landing: WorkspaceTab): { label: string; hash: string; icon: Tab
   ].filter((row, at, rows) => rows.findIndex((other) => other.hash === row.hash) === at);
 }
 
-/** Search over the whole workspace, opened from the bar or by `⌘K`: one box, and under it what the
- *  member can do with the term, where they can go, and what the workspace holds — grouped by the
- *  kind that answered, so the reach is the same from every category. Arrow keys move the cursor
- *  and Enter takes the row under it; picking a hit opens the place holding it and shuts the dialog.
- *
- *  Only the acts a member can express as a route or a message stand here: the palette lands them in
- *  a chat with their words already in the composer, and the sending is theirs.
- *
- *  Every row is an address and the router writes it. The bar stands in the sidebar and again on the
- *  phone bar, and a hit taken in either one moves the page by the same act. */
 export function Spotlight({
   agents,
   className,
@@ -111,11 +91,8 @@ export function Spotlight({
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [groups, setGroups] = useState<Group[] | null>(null);
-  /** Whether the workspace read has finished. The kinds land one at a time and the panel draws each
-   *  as it arrives, so what has already landed does not say the search is over. */
   const [settled, setSettled] = useState(false);
   const wanted = typed.trim();
-  /** The agent a workspace-owned act is expressed to — the main one, as the artifacts screen does. */
   const named = agents.find((agent) => agent.main) ?? agents[0];
 
   const show = useCallback((next: boolean) => {
@@ -143,8 +120,8 @@ export function Spotlight({
     setSettled(false);
     const held = new AbortController();
     const timer = window.setTimeout(() => {
-      /* Each kind is drawn as it lands rather than at the end of the fan-out: the reads are one per
-         kind and the slowest of them would otherwise hold back every row the others answered. */
+      /* Each kind is drawn as it lands rather than at the end of the fan-out: the reads are one per kind and
+         the slowest would otherwise hold back every row the others answered. */
       searchEverywhere(wanted, agents, held.signal, (answering) => {
         if (!held.signal.aborted) setGroups(answering);
       })
@@ -153,8 +130,8 @@ export function Spotlight({
           setGroups(found);
           setSettled(true);
         })
-        /** A search that broke states it. Swallowing the fault leaves the box looking like a
-         *  workspace holding nothing, which is the one answer it must never give by accident. */
+        /** Swallowing the fault leaves the box looking like a workspace holding nothing, which is the one
+         *  answer it must never give by accident. */
         .catch((error: unknown) => {
           if (held.signal.aborted) return;
           setGroups([{ label: "Search", icon: IconSearch, hits: [], failed: String(error) }]);
@@ -188,8 +165,6 @@ export function Spotlight({
     place.label.toLowerCase().includes(lowered),
   );
 
-  /** What the panel says instead of rows: that the read is still running, or that the term found
-   *  nothing. The kinds land one at a time, so the read is over when the last of them lands. */
   const status = !wanted ? null : !settled ? WORKING : groups?.length ? null : BLANK;
   return (
     <Dialog open={open} onOpenChange={show}>
@@ -263,9 +238,6 @@ export function Spotlight({
   );
 }
 
-/** The palette drawn as the sidebar's own row: the same trigger the narrow bar carries, standing in
- *  the column under the act it sits beside, so the chord that opens it is printed where the member
- *  reads the rest of the sidebar. */
 export function SearchRow({ agents, collapsed }: { agents: Agent[]; collapsed: boolean }) {
   return (
     <SidebarRow>

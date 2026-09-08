@@ -11,9 +11,6 @@ locals {
   favicon_dark_svg = file("${path.root}/../../../assets/brand/ufo-mark-on-dark.svg")
 }
 
-# flyingobject.ai is retired: every request in the zone answers 301 to the same subdomain and path
-# under ufo.ai. The rule runs in the dynamic-redirect phase, ahead of the worker routes it made
-# obsolete, and matches http and https alike.
 resource "cloudflare_ruleset" "flyingobject_redirect" {
   zone_id = data.cloudflare_zone.flyingobject_ai.id
   name    = "flyingobject to ufo.ai"

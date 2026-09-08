@@ -4,8 +4,7 @@ import { expect, test } from "vitest";
 import { Legend, LegendItem } from "@/components/ui/legend";
 import type { LegendTone } from "@/components/ui/legend";
 
-/** The tone and the class it paints, as a record keyed by the union: a name the component drops and
- *  a name it grows are both a typecheck failure here, so "exactly these three" is `tsc`'s and not a
+/** Keyed by the union, so a name the component drops or grows is a typecheck failure here rather than a
  *  count a reader has to keep. */
 const TONES: Record<LegendTone, string> = {
   primary: "bg-live",

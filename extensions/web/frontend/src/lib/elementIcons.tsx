@@ -2,16 +2,6 @@ import type { SVGProps } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** One mark of the element pack. Each mark carries its own viewBox, a square window cropped and
- *  centred on that glyph's own extent, so all forty fill the same 86% of what they draw in and read
- *  at one weight beside the tabler marks they replace. The pack's art occupies between 16% and 52%
- *  of its source 64-unit canvas, so drawing every mark on `0 0 64 64` would leave them far lighter
- *  than the rest of the portal at a glyph's size. Cropping is the window only — no path datum is
- *  touched, so the art stays lossless and its caller still sets the size.
- *
- *  The mark is filled with `currentColor` and strokes nothing, so it takes the ink of whatever it
- *  sits in. The class pair is the hook styling and tests reach one mark by, the way a tabler
- *  component carries `tabler-icon tabler-icon-<slug>`. */
 function Mark({
   slug,
   viewBox,
@@ -361,8 +351,6 @@ export function Atef(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-/** Every mark the pack draws, keyed by the slug an `agent.icon` row holds, in the order
- *  the picker offers them. */
 export const ELEMENT_ICONS = {
   propylon: Propylon,
   nabatu: Nabatu,

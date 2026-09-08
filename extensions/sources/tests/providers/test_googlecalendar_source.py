@@ -99,7 +99,6 @@ async def test_event_attendees_stream_explodes_events_into_per_attendee_rows() -
         "event_attendees/e1:a@example.com",
         "event_attendees/e1:b@example.com",
     }
-    # a cancelled event carries no attendees list, so it emits neither rows nor tombstones
     assert result.deletes == ()
     assert result.next_cursor == "sync-1"
     assert result.snapshot is False

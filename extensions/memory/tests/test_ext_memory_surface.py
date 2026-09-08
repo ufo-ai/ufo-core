@@ -222,26 +222,22 @@ async def test_memories_list_shared_and_member_newest_first_with_state(explorer)
     by_body = {row["body"]: row for row in rows}
     assert all(row["age_days"] > 0 for row in rows)
 
-    # a superseded decision fact: decays on the 120d half-life, capped by confidence/10 = 0.5
     decision = by_body["the team ships on Fridays"]
     assert decision["superseded_by"] == str(replacement)
     assert decision["subject"] == SHARED_SUBJECT
     assert decision["half_life_days"] == 120.0
     assert 0.0 < decision["decay_factor"] < 0.5
 
-    # a semantic summary never decays — no half-life, full weight
     summary = by_body["consolidated summary"]
     assert summary["item_class"] == "semantic"
     assert summary["half_life_days"] is None
     assert summary["decay_factor"] == 1.0
 
-    # a due fact carries no embedding digest and no indexer lease
     due = by_body["still due for embedding"]
     assert due["embedding_digest"] is None
     assert due["embedding_claimed_at"] is None
     assert due["half_life_days"] == 365.0
 
-    # a member preference fact: 180d half-life, capped by confidence/10 = 0.8, already indexed
     pref = by_body["I prefer concise summaries"]
     assert pref["subject"] == member_subject(member_id)
     assert pref["confidence"] == 8

@@ -237,10 +237,6 @@ def run_clean(unpacked_dir: Path) -> list[str]:
     return all_deleted
 
 
-# ---------------------------------------------------------------------------
-# add subcommand
-# ---------------------------------------------------------------------------
-
 BLANK_SLIDE_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
@@ -394,10 +390,6 @@ def run_add(unpacked_dir: Path, source: str) -> None:
     else:
         _clone_existing(unpacked_dir, source)
 
-
-# ---------------------------------------------------------------------------
-# thumbnail subcommand
-# ---------------------------------------------------------------------------
 
 
 def _extract_slide_order(pptx_path: Path) -> list[dict]:
@@ -577,10 +569,6 @@ def run_thumbnail(pptx_path: Path, output_prefix: str, cols: int) -> list[str]:
 
     return saved
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def _cmd_clean(args: argparse.Namespace) -> None:

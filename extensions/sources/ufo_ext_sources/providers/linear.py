@@ -46,10 +46,6 @@ def _stream(
     )
 
 
-# Stream set mirrors Airbyte's source-linear catalog (16 streams): the five canonical content
-# streams (projects, issues, project_milestones, comments, users) plus the L0 metadata streams. The
-# four collections Linear exposes without an `updatedAt` filter (customer_statuses, customer_tiers,
-# issue_relations, project_statuses) carry no cursor and full-refresh each run.
 LINEAR_STREAMS: list[StreamSpec] = [
     _stream("projects", canonical=True),
     _stream("issues", canonical=True),
@@ -70,16 +66,6 @@ LINEAR_STREAMS: list[StreamSpec] = [
 ]
 
 
-# GraphQL read query per stream, transcribed from Airbyte's source-linear manifest. Each selects the
-# `nodes` a page carries plus `pageInfo { hasNextPage endCursor }`. Streams Linear filters by
-# `updatedAt` declare the nullable `$filter`/`$orderBy` variables `paginate` threads for incremental
-# runs; the four full-refresh collections take only `$after`.
-#
-# `issues` and `comments` name only what `render` and the page mapping read: the primary key, both
-# timestamps, and the prose each body is built from. Linear retires schema surface on its own
-# schedule, and one name the schema no longer has fails the whole document with a transport 400
-# rather than a 200 carrying `errors`, so a field selected and never read is a field that can stop
-# the stream. `test_linear_source` holds both selections to what the connector reads.
 ISSUES_QUERY = (
     "query Issues($after: String, $filter: IssueFilter, $orderBy: PaginationOrderBy) "
     "{ issues(after: $after, first: 25, filter: $filter, orderBy: $orderBy) "
@@ -233,11 +219,6 @@ CUSTOMER_TIERS_QUERY = (
 )
 
 
-# stream name → (GraphQL query, response root field, accepts_filter). The root field is the
-# camelCase resource key under `data` — not always the snake_case stream name (e.g. `customer_needs`
-# → `customerNeeds`). `accepts_filter` governs whether `paginate` threads the `orderBy: updatedAt`
-# sort and the `filter: { updatedAt: { gte } }` cursor gate; the four full-refresh collections take
-# none.
 _STREAM_QUERIES: dict[str, tuple[str, str, bool]] = {
     "issues": (ISSUES_QUERY, "issues", True),
     "customers": (CUSTOMERS_QUERY, "customers", True),

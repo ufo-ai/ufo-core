@@ -1,5 +1,3 @@
-//! The working directory's GitHub PR, watched best-effort through `gh`: a missing gh, a
-//! directory outside a repository, or a branch without a PR is an empty answer, never an error.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,19 +7,16 @@ use serde::Deserialize;
 
 const POLL: Duration = Duration::from_secs(30);
 
-/// The PR the footer states: the number it shows and the page a click opens.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Pr {
     pub number: u64,
     pub url: String,
 }
 
-/// The PR for the current branch in `cwd`, from `gh pr view`.
 pub fn current(cwd: &Path) -> Option<Pr> {
     ask(cwd, Path::new("gh"))
 }
 
-/// Poll the current PR, stating each change through `state`, until the listener hangs up.
 pub fn watch(cwd: &Path, state: impl Fn(Option<Pr>) -> bool) {
     let mut last = None;
     loop {

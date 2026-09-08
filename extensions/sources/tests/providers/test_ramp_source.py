@@ -78,7 +78,6 @@ async def test_transactions_follow_the_absolute_next_link_and_advance_the_waterm
     assert "from_date=2026-01-01T00%3A00%3A00Z" in seen[0]
     assert "order_by_date_asc=true" in seen[0]
     assert "page_size=100" in seen[0]
-    # the second request is the provider's own next link, so it carries no rebuilt query
     assert seen[1].endswith("/developer/v1/transactions?start=tx1")
 
 

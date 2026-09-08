@@ -1,5 +1,3 @@
-//! One fuzzy-filtered select list: the `choose` menu, the conversation page, and the `@`-path
-//! completion popup are all this state machine under different item sources.
 
 use std::cmp::Reverse;
 use std::collections::VecDeque;
@@ -30,7 +28,6 @@ const MAX_DEPTH: usize = 5;
 const MAX_ENTRIES: usize = 4000;
 const SKIP_DIRS: [&str; 3] = ["node_modules", "target", "__pycache__"];
 
-/// What a key did to the picker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PickOutcome {
     Continue,
@@ -38,7 +35,6 @@ pub enum PickOutcome {
     Cancelled,
 }
 
-/// One key the picker answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickKey {
     Up,
@@ -51,7 +47,6 @@ pub enum PickKey {
     Esc,
 }
 
-/// The picker: items, the typed filter, and the selection.
 pub struct Picker {
     items: Vec<String>,
     bold: Vec<bool>,
@@ -74,14 +69,12 @@ impl Picker {
         }
     }
 
-    /// Draw the item at `index` bold — what a caller marks a row it wants the eye to land on.
     pub fn set_bold(&mut self, index: usize, bold: bool) {
         if let Some(slot) = self.bold.get_mut(index) {
             *slot = bold;
         }
     }
 
-    /// Apply one key: typing narrows, arrows move, `Enter` answers the selection.
     pub fn apply_key(&mut self, key: PickKey) -> PickOutcome {
         match key {
             PickKey::Up => self.step(-1),
@@ -107,7 +100,6 @@ impl Picker {
         PickOutcome::Continue
     }
 
-    /// Move the selection by `delta`, wrapping at the ends.
     pub fn step(&mut self, delta: isize) {
         if self.visible.is_empty() {
             return;
@@ -116,12 +108,10 @@ impl Picker {
         self.selected = ((self.selected as isize + delta).rem_euclid(len)) as usize;
     }
 
-    /// How far `PageUp`/`PageDown` move — the window height the caller renders.
     pub fn set_page(&mut self, rows: usize) {
         self.page = rows.max(1);
     }
 
-    /// Narrow to items the filter fuzzy-matches, best score first, ties in the original order.
     pub fn set_filter(&mut self, filter: &str) {
         self.filter = filter.to_string();
         self.rank();
@@ -147,25 +137,20 @@ impl Picker {
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
     }
 
-    /// The current selection, if any row is visible.
     pub fn current(&self) -> Option<&str> {
         self.visible
             .get(self.selected)
             .map(|&index| self.items[index].as_str())
     }
 
-    /// How many items the filter leaves.
     pub fn visible_len(&self) -> usize {
         self.visible.len()
     }
 
-    /// Where the current selection sits in the items the picker was built from.
     pub fn current_index(&self) -> Option<usize> {
         self.visible.get(self.selected).copied()
     }
 
-    /// Select the item at `index` in the items the picker was built from, where the filter still
-    /// shows it; false leaves the selection where it was.
     pub fn select_index(&mut self, index: usize) -> bool {
         match self.visible.iter().position(|&at| at == index) {
             Some(row) => {
@@ -176,8 +161,6 @@ impl Picker {
         }
     }
 
-    /// The window `render` draws in `max_rows`: the first visible row shown and how many rows the
-    /// items take, one row held back for the `(i/n)` line when the list outruns the window.
     fn window(&self, max_rows: usize) -> (usize, usize) {
         let overflow = self.visible.len() > max_rows;
         let rows = if overflow {
@@ -192,8 +175,6 @@ impl Picker {
         (start, rows)
     }
 
-    /// The item drawn `offset` rows below the window's first line, in the items the picker was
-    /// built from — what a click on that row names. None past the items shown.
     pub fn index_at(&self, offset: usize, max_rows: usize) -> Option<usize> {
         if self.visible.is_empty() || max_rows == 0 {
             return None;
@@ -205,13 +186,10 @@ impl Picker {
         self.visible.get(start + offset).copied()
     }
 
-    /// A window of at most `max_rows` lines: the selection marked, matched characters accented,
-    /// and a muted `(i/n)` line closing the window when the list outruns it.
     pub fn render(&self, theme: &Theme, width: u16, max_rows: usize) -> Vec<Line<'static>> {
         self.draw(theme, width, max_rows, true)
     }
 
-    /// The same window with no row marked — the selection sits somewhere outside the list.
     pub fn render_unmarked(
         &self,
         theme: &Theme,
@@ -304,14 +282,10 @@ fn row_spans(
     spans
 }
 
-/// Score `haystack` against a case-insensitive subsequence of `needle`, `None` when it does not
-/// match. Higher is better: matches earn a run bonus when adjacent, a segment bonus at the start
-/// of a word, and pay for every character skipped between them.
 pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
     fuzzy_match(needle, haystack).map(|(score, _)| score)
 }
 
-/// The score with the byte offsets of the characters the best alignment matched.
 pub fn fuzzy_match(needle: &str, haystack: &str) -> Option<(i32, Vec<usize>)> {
     let want: Vec<char> = needle.chars().map(fold).collect();
     let hay: Vec<(usize, char)> = haystack.char_indices().collect();
@@ -413,9 +387,6 @@ fn fold(ch: char) -> char {
     ch.to_lowercase().next().unwrap_or(ch)
 }
 
-/// Complete an `@`-prefixed path token against the working directory: a breadth-first walk of
-/// `cwd` bounded by depth and entry count, ranked against `token`, shallowest first when it is
-/// empty. Directories carry a trailing `/`.
 pub fn path_candidates(cwd: &Path, token: &str, limit: usize) -> Vec<String> {
     let mut queue = VecDeque::from([(cwd.to_path_buf(), String::new(), 0usize)]);
     let mut seen = 0;

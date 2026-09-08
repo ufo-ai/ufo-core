@@ -7,10 +7,8 @@ import { Chart, ChartBars } from "@/components/ui/chart";
 const WIDE = 640;
 const TALL = 360;
 
-/** recharts sizes itself off the box it is given, and jsdom measures every box at nothing, so a
- *  plot in this environment draws no marks at all until something reports a width. This stands in
- *  for the browser's own observer and reports one, which is what puts the series in the DOM these
- *  assertions read. */
+/** recharts sizes itself off the box it is given and jsdom measures every box at nothing, so a plot
+ *  draws no marks until something reports a width. */
 class Measured {
   constructor(private report: ResizeObserverCallback) {}
   observe(target: Element) {
@@ -33,8 +31,7 @@ test("a trend answers as one graphic, named once, rather than as unnamed points"
   const plot = container.querySelector('[data-slot="chart"]')!;
   expect(plot.getAttribute("role")).toBe("img");
   expect(plot.getAttribute("aria-label")).toBe("Open pull requests each day");
-  // recharts v3 stamps role="application" and a tab stop when its own layer is on; the wrapper
-  // carries the name instead, so the plot is one image and never a thing to tab into.
+  // recharts v3 stamps `role=application` and a tab stop when its own accessibility layer is on.
   expect(container.querySelector('[role="application"]')).toBeNull();
   expect(plot.getAttribute("tabindex")).toBeNull();
 });
@@ -47,8 +44,6 @@ test("the plot keeps a measurable box, or the library draws nothing on first pai
 test("the plot draws no ground and no corner — the card it stands in owns both", () => {
   const { container } = render(<Chart label="Open pull requests each day" points={SERIES} />);
   const plot = container.querySelector('[data-slot="chart"]')!.className.split(" ");
-  // A fill inside a bordered box is one shape stated twice, so the plot states neither the ground
-  // nor the corner and a caller who needs one draws it around the plot.
   expect(plot).not.toContain("bg-fill");
   expect(plot).not.toContain("rounded-plot");
   expect(plot.filter((name) => name.startsWith("bg-") || name.startsWith("rounded-"))).toEqual([]);
@@ -95,7 +90,6 @@ test("the tallest column fills its track and the rest are read against it", () =
 
 test("a period with nothing counted still draws a column, at the floor rather than at nothing", () => {
   render(<ChartBars label="Merged each day" bars={BANDED} from="18 Aug" to="24 Aug" />);
-  // A zero drawn as no mark at all is a gap the reader takes for missing data rather than for none.
   expect(height(columns()[2])).toBe("2%");
 });
 

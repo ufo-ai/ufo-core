@@ -19,10 +19,7 @@ env:
   ECR_REGISTRY: 899147036157.dkr.ecr.us-east-1.amazonaws.com
   DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
   TF_DIR: infra/envs/testing
-  # The `ufo` binary the sandbox image bakes, out of the five-target set the client job stages. The
-  # sandbox base is amd64, so the template publish takes the musl build for that architecture.
   SANDBOX_CLIENT_BINARY: servers/control/clientbin/x86_64-unknown-linux-musl/ufo
-  # The datadog terraform provider (monitors.tf) reads these at plan and apply.
   DD_API_KEY: ${{ secrets.DD_API_KEY }}
   DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
 
@@ -61,8 +58,6 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Deploys tag the commit short SHA; a PR plans against the newest pushed bundle image so the
-      # aws_ecr_image digest lookup resolves.
       - name: Image tag
         id: tag
         if: steps.select.outputs.deploy == 'true'
@@ -77,10 +72,8 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # The binaries of a client tree are pushed once as ufo-clientbin:<git tree hash of client/>;
-      # a tag hit means this client source already built, so the five-target build is skipped and
-      # the gateway job copies the pushed set into its build context. The hash names the content,
-      # so different client source is always a miss and the immutable tag is never contested.
+      # The hash names the content, so different client source is always a miss and the immutable tag is
+      # never contested.
       - name: Select client work
         id: client
         if: steps.select.outputs.deploy == 'true'
@@ -129,8 +122,6 @@ jobs:
       - working-directory: client
         run: cargo build --release --target ${{ matrix.target }}
 
-      # Stage as <target>/<binary> so the merged download lands the whole tree the gateway
-      # serves from UFO_CLIENT_BIN_DIR.
       - name: Stage the binary under its target
         shell: bash
         run: |
@@ -148,10 +139,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Bundle image: `ufoctl bundle` freezes the assistant_hosted pack into a build context
-  # (Dockerfile + ufo.toml + ufo.lock + sandbox client), then docker build installs the pinned ufo
-  # distribution. The debugger and portal apps build first so their static pages ride inside the
-  # wheel.
   bundle:
     needs: [changes, client]
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
@@ -210,9 +197,8 @@ jobs:
             pnpm -C extensions/debugger/frontend run build
             pnpm -C extensions/web/frontend install --frozen-lockfile
             pnpm -C extensions/web/frontend run build
-            # A fault Datadog reports against a recorded session reads as source rather than as
-            # minified frames. The maps upload under the service and version the page records with,
-            # then leave the tree: nothing serves a `.map`, and the image carries none.
+            # The maps upload under the service and version the page records with, then leave the tree: nothing
+            # serves a `.map`, and the image carries none.
             extensions/web/frontend/node_modules/.bin/datadog-ci sourcemaps upload \
               extensions/web/ufo_ext_web/static/assets \
               --service=ufo-portal --release-version="$IMAGE_TAG" \
@@ -226,14 +212,8 @@ jobs:
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
 
-  # Sandbox cache daemon (RFC 0032), egress proxy (RFC 0035), and preview renderer (RFC 0037):
-  # Rust services rebuilt only when their source changes. Each built image carries two tags — the
-  # deploy's IMAGE_TAG and the git tree hash of its directory — so a deploy whose tree already
-  # built retags the pushed image instead of compiling it again. Images push before the apply that
-  # points the Deployments at this tag: a push afterwards starts the new ReplicaSet's progress
-  # deadline against an image that does not exist yet. The repositories are created by terraform
-  # (ecr.tf), which applies later in rollout — a brand-new environment skips the push on its first
-  # run and the next deploy lands the image.
+  # Images push before the apply that points the Deployments at this tag: a push afterwards starts the
+  # new ReplicaSet's progress deadline against an image that does not exist yet.
   images:
     needs: changes
     if: needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request'
@@ -297,9 +277,8 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.repository }}
           cache-to: type=gha,mode=max,scope=${{ matrix.repository }}
 
-      # After the push so a concurrent deploy of the same tree cannot fail the build: the tag is
-      # immutable and content-addressed, so losing the race means the identical source is already
-      # tagged.
+      # After the push so a concurrent deploy of the same tree cannot fail the build: the tag is immutable
+      # and content-addressed, so losing the race means the identical source is already tagged.
       - name: Tag the built tree
         if: steps.select.outputs.work == 'build'
         env:
@@ -314,9 +293,6 @@ jobs:
             esac
           fi
 
-  # The gateway image carries the ufo-control binary and the client binaries it serves, so its
-  # sources are the control tree and the client tree, joined as one tag: a deploy whose pair
-  # already built retags the pushed image instead of compiling it again.
   gateway:
     needs: [changes, client]
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
@@ -356,8 +332,6 @@ jobs:
           -t "$ECR_REGISTRY/ufo-control:$IMAGE_TAG"
           "$ECR_REGISTRY/ufo-control:${{ steps.select.outputs.sources }}"
 
-      # The five client binaries land as clientbin/<target>/<binary> in the gateway build
-      # context, where the Dockerfile copies them under UFO_CLIENT_BIN_DIR.
       - uses: actions/download-artifact@v4
         if: steps.select.outputs.work == 'build' && needs.client.result == 'success'
         with:
@@ -402,9 +376,8 @@ jobs:
     needs: [changes, client, bundle, images, gateway]
     if: ${{ !cancelled() && needs.changes.outputs.deploy == 'true' && (needs.client.result == 'success' || needs.client.result == 'skipped') && (needs.bundle.result == 'success' || needs.bundle.result == 'skipped') && (needs.images.result == 'success' || needs.images.result == 'skipped') && (needs.gateway.result == 'success' || needs.gateway.result == 'skipped') }}
     runs-on: ubuntu-latest
-    # Serialize applies; never cancel an in-flight one. Image builds run outside the group — they
-    # are tag-guarded and idempotent — so a queued deploy builds while the previous one applies.
-    # PR runs get a per-PR group so they can never displace a queued deploy.
+    # Image builds run outside the concurrency group — they are tag-guarded and idempotent — so a queued
+    # deploy builds while the previous one applies.
     concurrency:
       group: ${{ github.event_name == 'pull_request' && format('deploy-testing-pr-{0}', github.event.pull_request.number) || 'deploy-testing' }}
       cancel-in-progress: false
@@ -426,11 +399,6 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      # The sandbox image bakes the compiled `ufo` client, so the template publish below needs the
-      # linux binary this workflow's own client job already built — never a second Rust build here,
-      # and never a toolchain layer inside the sandbox image. A skipped client job means this tree
-      # already built, and the same pushed set the gateway reuses carries it. Both land the tree at
-      # `clientbin/<target>/ufo`, which UFO_CLIENT_BINARY names for the publish.
       - uses: actions/download-artifact@v4
         if: github.event_name != 'pull_request' && needs.client.result == 'success'
         with:
@@ -463,8 +431,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"
-          # Later steps read outputs via $(terraform output -raw …); the wrapper corrupts captured
-          # stdout, and nothing here consumes its step outputs.
+          # Later steps read outputs via `terraform output -raw`, and the wrapper corrupts captured stdout.
           terraform_wrapper: false
 
       - name: Terraform init
@@ -482,9 +449,8 @@ jobs:
           TESTING_DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: uv run python infra/testing_secrets.py
 
-      # Datadog refuses a tag configuration for a metric it has no point for, so the apply that
-      # ships a new distribution's emitter cannot also configure it — and that refusal fails every
-      # deploy queued behind this one, not only its own.
+      # Datadog refuses a tag configuration for a metric it has no point for, so the apply that ships a new
+      # distribution's emitter cannot also configure it — and that refusal fails every deploy queued behind it.
       - name: Seed new metric names
         if: github.event_name != 'pull_request'
         run: uv run python infra/seed_metrics.py
@@ -528,7 +494,6 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false "$RUNNER_TEMP/testing.tfplan"
 
-      # After the apply so a first run creates the ufo-clientbin repository before the push.
       - name: Push the client binaries for this tree
         if: github.event_name != 'pull_request' && needs.client.result == 'success'
         env:
@@ -561,7 +526,6 @@ jobs:
             certificate/ufo-ingress-tls \
             certificate/ufo-serve-tls
           .github/scripts/await_rollout.sh "$NAMESPACE" ufo-gateway ufo-sandbox-proxy ufo-ingress ufo-serve ufo-jobs
-          # Only when the env enables it: preview_enabled=false renders no Deployment to wait on.
           if kubectl --namespace "$NAMESPACE" get deployment/ufo-preview >/dev/null 2>&1; then
             .github/scripts/await_rollout.sh "$NAMESPACE" ufo-preview
           fi
@@ -640,13 +604,8 @@ jobs:
         working-directory: infra/envs/edge
         run: terraform init -input=false
 
-      # Cloudflare refuses to delete a queue or a database a Worker still binds, and Terraform plans
-      # that delete against the live script: a release that drops a binding and the resource behind
-      # it in one change leaves no reference for the graph to order on, so the destroy runs first and
-      # the API rejects it. The script settles in its own apply ahead of the module's. A plan
-      # targeting the script carries the resources it binds, so a new binding's resource is created
-      # before the script names it, and a retired one is unbound before the module's apply destroys
-      # it. The plan reaches no flag, so it carries neither environment's Flagship credential.
+      # Cloudflare refuses to delete a queue or a database a Worker still binds, and a release that drops
+      # both in one change leaves no reference for the graph to order on. The script settles in its own apply.
       - name: Terraform bindings plan
         working-directory: infra/envs/edge
         env:
@@ -819,8 +778,6 @@ jobs:
           PRODUCTION_ACCESS_RESULT: ${{ needs.production_access.result }}
         run: |
           test "$CHANGES_RESULT" = "success"
-          # A rollout or edge job displaced from its concurrency group was superseded: the newer
-          # queued deploy ships a descendant of this commit.
           case "$ROLLOUT_RESULT $EDGE_RESULT" in
             *cancelled*)
               echo "Superseded by a newer deploy."

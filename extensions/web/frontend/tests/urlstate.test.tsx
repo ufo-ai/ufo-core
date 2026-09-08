@@ -47,8 +47,6 @@ const OLDER_KEY = OLDER.id;
 
 const NO_TOKENS = { tokens: 0, token_micro_usd: 0, total_micro_usd: 0 };
 
-/** A usage read with nothing in it. What this file tests about the usage tab is the range the
- *  address carries, so the report holds no lines for the screen to draw. */
 const NO_USAGE = {
   window_seconds: null,
   total_micro_usd: 0,
@@ -155,8 +153,6 @@ test("the app list does not mark the Workspace row as current", () => {
   expect(standing(parseHash("#/workspace/team"), "workspace")).toBe(true);
 });
 
-/** A screen that left the workspace tabs kept its name, and the links members already hold spell
- *  the address it had then. The table reads that address as the section holding the same screen. */
 test("a screen moved off the workspace tabs still answers at the address it had", () => {
   expect(parseHash("#/workspace/wiki?q=slack")).toEqual({
     kind: "section",
@@ -177,9 +173,6 @@ test("connectors has one section address", () => {
   expect(parseHash("#/connectors")).toEqual({ kind: "section", section: "connectors", place: {} });
 });
 
-/** A tab segment naming a property every object inherits names no tab: the read is over the tab
- *  list itself, so these addresses report a bad link rather than standing a view no registry
- *  holds. */
 test("an address naming an inherited property of an object names no workspace tab", () => {
   for (const name of [
     "constructor",
@@ -195,9 +188,6 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-/** Tasks made the opposite move — off its own section, onto the workspace tabs — and the links to
- *  its old address spell the section it was. Only a name that made that move answers there: every
- *  other tab keeps `#/workspace/` as its one address. */
 test("a screen moved onto the workspace tabs still answers at the section address it had", () => {
   expect(parseHash("#/tasks")).toEqual({ kind: "workspace", view: "tasks", place: {} });
   expect(parseHash("#/tasks?q=nightly")).toEqual({
@@ -212,8 +202,6 @@ test("a screen moved onto the workspace tabs still answers at the section addres
   });
 });
 
-/** One table row holds the pattern, the read and the builder for a route, so every address the
- *  portal writes is one its own read answers with the route that wrote it. */
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {
   const root = "99999999-9999-4999-8999-999999999999";
   expect(conversationSlotHash(AGENT.id, CONVO_ID, "changes")).toBe(
@@ -228,9 +216,6 @@ test("a conversation slot has a builder, and it writes the address its own read 
   });
 });
 
-/** A screen with nothing to carry used to be matched by whole-string equality, so a link that
- *  arrived with anything after the path — a mail tracker, a copied query — opened the home
- *  composer instead of the screen the member asked for. */
 test("a screen that carries no place is read whatever the address arrived holding", () => {
   expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({
     kind: "workspace",
@@ -241,9 +226,6 @@ test("a screen that carries no place is read whatever the address arrived holdin
   expect(parseHash(FIRST_RUN_HASH + "?x=1")).toEqual({ kind: "first-run" });
 });
 
-/** Home stands a track like every other screen: its lanes are the apps the member opened, in the
- *  order the address states them, so a link to home hands someone else the row of lanes the member
- *  is looking at rather than a screen they have to arrange again. */
 test("home carries its lanes, and the bare address is home standing none", () => {
   expect(parseHash("")).toEqual({ kind: "home", place: {} });
   expect(parseHash("#")).toEqual({ kind: "home", place: {} });
@@ -257,9 +239,6 @@ test("home carries its lanes, and the bare address is home standing none", () =>
   expect(parseHash("#/?open=a~~b")).toEqual({ kind: "bad-link" });
 });
 
-/** An app opened twice on home is two lanes over one app, so the lane names the app and the
- *  instance both, and either lane says which app it stands. The picker names no app, which is what
- *  tells it from every lane that does. */
 test("a home lane names the app it stands, and the instance of it", () => {
   expect(mintHomeLane(AGENT.id, [])).toBe(AGENT.id);
   expect(mintHomeLane(AGENT.id, [HOME_NEW_LANE])).toBe(AGENT.id);
@@ -276,8 +255,6 @@ test("a home lane names the app it stands, and the instance of it", () => {
   });
 });
 
-/** The kind test the kit publishes: a page holds no route type at runtime, and this is the one
- *  answer it asks for rather than spelling the kinds again. */
 test("a route answers which kind it is, and narrows to it", () => {
   const route = parseHash(chatHash(CONVO_ID));
   expect(routeIs(route, "chat")).toBe(true);
@@ -403,9 +380,8 @@ test("a mangled track names no route, and never a screen quietly missing its slo
   expect(parseHash("#/connectors?open=" + "x".repeat(300))).toEqual({ kind: "bad-link" });
 });
 
-/** A track is the row of lanes a screen stands on, so one id in it twice is two hosts over one
- *  record and a row longer than the store holds is lanes the member would lose on the way back.
- *  Neither is a track, and the address says so rather than standing a screen on it. */
+/** One id in a track twice is two hosts over one record, and a row longer than the store holds is lanes
+ *  the member would lose on the way back. */
 test("a track naming a slot twice, or more lanes than a screen holds, names no route", () => {
   const lanes = (count: number) =>
     Array.from({ length: count }, (_, at) => "object/report/" + at).join("~");
@@ -505,9 +481,6 @@ test("paging with slots standing pushes and leaves nothing to unwind", () => {
   expect(steps).toEqual(["push", "push", "push", "back"]);
 });
 
-/** The codec merges the patch, so a place change holds every key the patch says nothing about. The
- *  merge written by hand listed the keys and omitted `range`, so a search, a page step or a lane
- *  opened on the usage tab erased the range the member had picked. */
 test("a place change holds the keys its patch does not name", () => {
   const { steps, places, record } = stepping({ range: "7d", chip: "Workspace" });
 
@@ -581,9 +554,6 @@ test("the conversation a sign-in carried through opens, and the hash names it", 
   expect(location.hash).toBe(chatHash(CONVO_ID));
 });
 
-/** One line answers every address the portal cannot read — a mis-cased conversation permalink, a
- *  mangled slot track, and a tab segment naming a property every object inherits alike — so it names
- *  no kind of link. */
 test("an address the portal cannot read reports a bad link, whichever part is mangled", async () => {
   history.replaceState(null, "", chatHash(MIXED_CASE_CONVO_ID));
   wire({ "/transcript": () => json({ messages: [] }) });
@@ -644,9 +614,6 @@ test("a filter chip rides the hash by replacement, never as a history entry", as
   await waitFor(() => expect(location.hash).toBe("#/workspace/team"));
 });
 
-/** One shell heads every tab and every section from one box, so the box has to belong to the view
- *  under it. A term typed and not submitted, left standing across a tab press, is a term the next
- *  Enter narrows the wrong records by. */
 test("a search term typed and not submitted does not follow the member to the next tab", async () => {
   location.hash = workspaceHash("team");
   serve();
@@ -679,10 +646,6 @@ test("a tab click releases the filters, so returning starts unfiltered", async (
   expect(await screen.findByText("No memories yet.")).toBeTruthy();
 });
 
-/** The usage tab read the range off the address itself and wrote it back by hand, so the shell's
- *  route and the address disagreed until the next navigation. The range is a place key like every
- *  other one: pressing a range moves the address, the read follows it, and a link naming a range
- *  lands on it. */
 test("the usage range rides the address, and a link naming one lands on it", async () => {
   location.hash = workspaceHash("usage");
   const calls = serve();

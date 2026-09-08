@@ -1,8 +1,5 @@
 name: Handbook
 
-# Regenerate docs/handbook/*.md from the current source and open a PR when it drifts.
-# Manual any time; on a schedule roughly every other day (odd days of month, ~48h;
-# the gap straddles month boundaries). Never merges — a refresh is a proposal for review.
 on:
   workflow_dispatch:
   schedule:
@@ -15,8 +12,6 @@ concurrency:
 jobs:
   regenerate:
     runs-on: ubuntu-latest
-    # The pipeline reads one LLM call per staged source file, so its wall clock grows
-    # with the tree: 23m over 575 files, 34m over 654. Keep headroom over that curve.
     timeout-minutes: 60
     env:
       OPENAI_MODEL: gpt-5.5

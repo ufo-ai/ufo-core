@@ -636,8 +636,6 @@ class _StubDbos:
 STRIPE_KEY = "sk_test_0xfeedface"
 PORTAL_CONFIGURATION = "bpc_test_config"
 SAVED_CARD = "pm_card_visa"
-# Not "web": the surface a browser belongs on is a manifest flag, and a deploy naming it anything
-# else must still get a return that lands on its own portal.
 HOME_SURFACE = "portal"
 
 
@@ -709,8 +707,6 @@ class _Providers:
                 },
             )
         if path == "/v1/payment_intents" and request.method == "POST":
-            # A key whose earlier request has not answered yet is a conflict, not a decline:
-            # the first request is still the one that will move the money.
             if self.in_flight:
                 return httpx.Response(
                     409,
@@ -720,24 +716,16 @@ class _Providers:
                 )
             form = _form(request)
             self.intents.append(form)
-            # A confirm reads `payment_method` from the request; it never falls back to the
-            # customer's invoice default, so an omitted card has nothing to charge.
             if form.get("confirm") == "true" and not form.get("payment_method"):
                 return httpx.Response(
                     400,
                     json={"error": {"message": "no payment method provided", "type": "card_error"}},
                 )
-            # Stripe collapses a repeat only when the caller supplies the key; without one it
-            # takes the money again, which is what makes the key load-bearing here. A reused key
-            # replays whatever the first answer was, a decline included, so a retry under the same
-            # key can never come back a success.
             key = request.headers.get("idempotency-key", f"none-{len(self.replayed)}")
             if key in self.replayed:
                 status, answer = self.replayed[key]
                 return httpx.Response(status, json=answer)
             if self.decline:
-                # A refused off-session charge is an HTTP 402 carrying card_declined, not a 2xx
-                # with a soft status, so the caller sees an error rather than a returned intent.
                 status, answer = 402, {"error": {"code": "card_declined", "type": "card_error"}}
             else:
                 status, answer = (
@@ -1090,7 +1078,6 @@ async def test_a_second_refill_the_workspace_needs_is_not_replayed(
     await _run_topup(workspace_id, providers)
     assert await _balance_of(workspace_id) == 25 * DOLLAR
 
-    # spend it back under the line, so a second refill is genuinely due
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await debit(connection, workspace_id, 20 * DOLLAR)
@@ -1176,7 +1163,6 @@ async def test_a_card_that_keeps_refusing_is_left_alone(
         await _run_topup(workspace_id, providers)
     assert len(providers.intents) == 1
 
-    # the admin fixes the card and arranges the refill again
     providers.decline = False
     await _manage_billing(
         workspace_id,

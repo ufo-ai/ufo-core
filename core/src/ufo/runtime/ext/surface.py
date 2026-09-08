@@ -234,8 +234,6 @@ ATTACHMENT_FETCH_TTL_SECONDS = 900
 ATTACHMENT_FETCH_TIMEOUT_SECONDS = 90
 """The deadline on one attachment's fetch into the workspace — under the probe ceiling, since the
 fetch is an off-turn probe whose signed token bounds its own egress window."""
-# The service caps a render at 20 pages (`UFO_PREVIEW_MAX_PAGES`), so a request over that renders
-# fewer pages than it asked for and a caller cannot tell the clamp from the file's own end.
 PREVIEW_PAGES_MAX = 20
 
 
@@ -3946,10 +3944,6 @@ class SurfaceContext:
                 held = await self.member_object(kind, name, agent_id, member_id, admin=True)
                 if held is None:
                     return ArmedOrder(held=False)
-                # The cron the order fires on, read off the kind's own spec: a screen that offered
-                # the cadences reads it back into the offer it took, so the answer stays on the
-                # step. The spec is the extension's, so it is read as the record it serialises to
-                # rather than by reaching for an attribute core cannot name.
                 cron = held.detail.spec.model_dump(mode="json").get("schedule")
                 return ArmedOrder(held=True, schedule=cron if isinstance(cron, str) else None)
             page = await self.list_member_objects(

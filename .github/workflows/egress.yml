@@ -1,8 +1,5 @@
 name: egress
 
-# The egress proxy (RFC 0035) is a standalone Rust data-plane crate outside the client workspace, so
-# it gets its own check. Its tests drive a fake control server in-process — no Postgres, no network —
-# so the job is fmt + clippy + test with nothing to stand up.
 on:
   push:
     branches: [main]

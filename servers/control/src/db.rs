@@ -1,16 +1,5 @@
-//! The pool over control's own `ufo_control` schema, and nothing else.
-//!
-//! The role this DSN names is granted the `ufo_control` schema and no privilege on any table in
-//! `public`, so a query that strays outside control's own ledgers fails as `permission denied`
-//! rather than reading a tenant's rows. Core's tables are reached over the onboarding RPC instead.
-//!
-//! TLS follows the DSN's own `sslmode`, which `tokio-postgres` parses and honours. The default is
-//! `prefer`, and `prefer` is not "TLS if it works": once the server answers the SSLRequest, a failed
-//! handshake is a connection error with no fallback to plaintext (`connect_tls.rs`). A managed
-//! instance always answers it, and its certificate is signed by a CA in no public root store, so
-//! `UFO_CONTROL_PG_CA_BUNDLE` is what makes the connection possible at all there — the control image
-//! ships the bundle and sets it. A local Postgres that offers no TLS falls back cleanly and needs
-//! none of this.
+//! `prefer` is not TLS if it works: once the server answers the SSLRequest a failed handshake is a
+//! connection error with no fallback to plaintext, and a managed instance's CA is in no public root store.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -41,9 +30,8 @@ pub enum DbError {
     Pool(#[from] deadpool_postgres::BuildError),
 }
 
-/// Build the gateway's pool. `max_size` is small on purpose: control's queries are short ledger
-/// reads and writes on the sign-in path, and every pod's ceiling is counted against the fleet's
-/// share of the instance.
+/// `max_size` is small on purpose: control's queries are short ledger reads on the sign-in path, and
+/// every pod's ceiling is counted against the fleet's share of the instance.
 pub async fn connect(dsn: &str, ca_bundle: Option<&Path>) -> Result<Pool, DbError> {
     let config: Config = dsn.parse()?;
     let tls = MakeRustlsConnect::new(client_config(ca_bundle)?);
@@ -87,9 +75,8 @@ fn client_config(ca_bundle: Option<&Path>) -> Result<ClientConfig, DbError> {
     )
 }
 
-/// One connection for the deploy-time verbs. `migrate` and `rls-bootstrap` issue DDL as the owner
-/// and exit, so they take a connection rather than a pool. The driver task is detached: it lives
-/// exactly as long as the client it serves, and dropping the client ends it.
+/// The driver task is detached: it lives exactly as long as the client it serves, and dropping the
+/// client ends it.
 pub async fn client(
     dsn: &str,
     ca_bundle: Option<&Path>,
@@ -104,8 +91,6 @@ pub async fn client(
     Ok(client)
 }
 
-/// The gateway's DSN and CA bundle, read once at the composition root so a misconfigured deploy
-/// fails at startup rather than on a member's first sign-in.
 pub fn gateway_dsn_from_env() -> Result<String, DbError> {
     std::env::var(GATEWAY_DSN_ENV)
         .ok()

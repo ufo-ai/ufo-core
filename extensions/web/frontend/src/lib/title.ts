@@ -16,21 +16,12 @@ const APPS = "Apps";
 export const SETUP = "Set up";
 const INVALID_LINK = "Invalid link";
 
-/** One step of where the member is: what a surface is called, and the address it stands at where
- *  the step is a place of its own. A band draws the step above its own name as its crumb, which is
- *  why the address rides the step rather than a verb — a crumb to an address is navigation, and a
- *  step no address reaches is the landmark's name and nothing to press. */
 export type Crumb = { label: string; at?: string };
 
-/** The step an app is: its own name, at its own address. The trail names an app here, and a framed
- *  page's own crumb is this same step, so no two bands name one app two ways. */
 export function agentCrumb(agent: { id: string; name: string }): Crumb {
   return { label: agentName(agent.name), at: agentHash(agent.id) };
 }
 
-/** What the browser tab says: where the member is, innermost first, then the page that holds it,
- *  ending in the product. A tab truncates from the right, so the word that tells two of them apart
- *  stands first, and every part is the name the page itself carries. */
 export function titled(...parts: string[]): string {
   return [...parts, PRODUCT].join(TRAIL);
 }
@@ -44,10 +35,6 @@ export function pageTitle(
   return titled(...trail(route, agents, rows, linked).map((step) => step.label));
 }
 
-/** The crumb a band draws before its own name, off the very trail the tab title is joined from: a
- *  band names the trail's innermost step, so its crumb is the step above that one — the same words
- *  the tab puts after the name. Where am I is derived once here, so the band and the tab cannot
- *  disagree about it. */
 export function pageCrumb(
   route: Route,
   agents: Agent[],
@@ -57,9 +44,6 @@ export function pageCrumb(
   return trail(route, agents, rows, linked)[1];
 }
 
-/** The trail as every reader of it takes it: innermost first, and only the steps that came back
- *  with a name — an agent the roster does not hold names nothing, and a step saying nothing is no
- *  step in the path. */
 function trail(
   route: Route,
   agents: Agent[],
@@ -71,8 +55,6 @@ function trail(
   );
 }
 
-/** Where the member is, one arm per kind the route table declares. The `never` at the end is what
- *  makes a route the table gains a compile error here, instead of a tab that says `undefined`. */
 function where(
   route: Route,
   agents: Agent[],
@@ -94,9 +76,6 @@ function where(
       const row = rows.find(
         (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
       );
-      /* A conversation the roster holds no app for — one carried on an extension's own surface — is
-         named by the app all the same and stands at no address of its own, so the crumb to it is
-         the name and nothing to press. */
       if (row) {
         return [
           { label: row.title },

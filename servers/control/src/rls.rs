@@ -1,12 +1,3 @@
-//! Provision and enforce the shared workspace database boundary.
-//!
-//! Three roles share one database. `ufo_owner` owns the tables and is exempt from row-level
-//! security, so it shapes schema and runs migrations. `ufo_serve` is an RLS *subject* — every one
-//! of its transactions pins `app.workspace_id` or fails closed. `ufo_control` is the gateway's own
-//! role: it is granted the `ufo_control` schema and nothing in `public`, so the pod on the public
-//! sign-in path cannot read a tenant's rows at all, and reaches core's tables only over the
-//! onboarding RPC.
-
 use sha2::{Digest, Sha256};
 use tokio_postgres::Client;
 
@@ -58,8 +49,6 @@ fn seed() -> Result<String, RlsError> {
         .ok_or(RlsError::MissingSeed(PG_ROLE_SEED_ENV))
 }
 
-/// A role's password, derived rather than stored: every party that needs it holds the one seed and
-/// arrives at the same string, so no second secret has to be distributed and rotated alongside it.
 pub fn role_password(seed: &str, role: &str) -> String {
     format!("{:x}", Sha256::digest(format!("{seed}:{role}").as_bytes()))
 }
@@ -86,7 +75,6 @@ pub fn control_dsn(postgres_host: &str, app_database: &str) -> Result<String, Rl
     ))
 }
 
-/// Create or refresh the serve role, its grants on `public`, and the DBOS database it owns.
 pub async fn ensure_serve_role(client: &Client) -> Result<(), RlsError> {
     let password = serve_password()?;
     client
@@ -115,10 +103,6 @@ pub async fn ensure_serve_role(client: &Client) -> Result<(), RlsError> {
     Ok(())
 }
 
-/// Create or refresh the gateway's own role. It is granted the `ufo_control` schema and nothing
-/// else: no `public` table privilege is issued here, and none is inherited, because every grant in
-/// `grant_serve_role` names `ufo_serve` and Postgres grants a fresh role nothing by default. The
-/// fence is the absence of a grant, and `tests/rls_it.rs` is what holds it there.
 pub async fn ensure_control_role(client: &Client) -> Result<(), RlsError> {
     let password = control_password()?;
     client
@@ -190,11 +174,6 @@ async fn ensure_database(client: &Client, name: &str, owner: &str) -> Result<(),
     Ok(())
 }
 
-/// Enable and refresh the workspace policy on every public table. A table whose policy already
-/// matches costs only the ACCESS SHARE lock `conformant`'s catalog read takes; a table that
-/// genuinely needs DDL takes it in one short transaction. Either way, a table wedged behind a
-/// holder's ACCESS EXCLUSIVE fails after `LOCK_TIMEOUT` naming its lock holders instead of wedging
-/// the whole bootstrap behind it.
 pub async fn bootstrap_policies(client: &mut Client) -> Result<(), RlsError> {
     client
         .batch_execute(&format!("set lock_timeout = '{LOCK_TIMEOUT}'"))
@@ -239,8 +218,6 @@ pub async fn bootstrap_policies(client: &mut Client) -> Result<(), RlsError> {
     Ok(())
 }
 
-/// A lock timeout is the one failure worth naming its cause: it means another session holds the
-/// table, and the operator needs to know which.
 async fn lock_aware(client: &Client, table: &str, error: RlsError) -> RlsError {
     let RlsError::Query(query) = &error else {
         return error;
@@ -254,13 +231,6 @@ async fn lock_aware(client: &Client, table: &str, error: RlsError) -> RlsError {
     }
 }
 
-/// RLS enabled and the managed policy already carrying this table's exact predicate. Reads catalogs
-/// only, so it never takes the ACCESS EXCLUSIVE the DDL path needs — but `pg_policies` resolves
-/// `qual`/`with_check` via `pg_get_expr`, which takes an ACCESS SHARE lock on the table, so this
-/// call still waits (and can time out) behind a holder's ACCESS EXCLUSIVE. The caller wraps this in
-/// the same lock handling as the DDL path for that reason. The expected expression is Postgres's
-/// own normalization of the predicate the DDL creates; a drift reads as non-conformant and costs
-/// one re-create — degradation is an extra DDL pass, never a skipped policy.
 async fn conformant(client: &Client, table: &str) -> Result<bool, RlsError> {
     let row = client
         .query_opt(

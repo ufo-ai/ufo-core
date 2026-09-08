@@ -260,8 +260,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         listed_rows = await scheduler.list_reported(conversation_id=conversation_id)
         emails = await owner_emails(row.task.created_by_member_id for row in listed_rows)
         inspections = await scheduler.inspect_many(tuple(listed.task for listed in listed_rows))
-        # A task that has never fired, or whose turn is compacted away, states no ending rather
-        # than one it cannot know.
         endings = {task_id: found.last_turn_status for task_id, found in inspections.items()}
         return tuple(
             OwnedRow(
@@ -384,8 +382,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 raise ValueError(f"scheduled task {name!r} changed while editing")
             if validated_schedule is None or spec.prompt is None:
                 raise ValueError("creating a scheduled task requires schedule and prompt")
-            # `run_now` puts the first fire in the past-or-present, so the next runner tick claims
-            # it and the fire after that is the cron's own.
             next_run_at = now if spec.run_now else next_fire(validated_schedule, now)
             paused = bool(spec.paused)
             _validate_future_fire(next_run_at, spec.expires_at, paused=paused)

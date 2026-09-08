@@ -15,7 +15,6 @@ module "vpc" {
   one_nat_gateway_per_az = !var.single_nat_gateway
   enable_dns_hostnames   = true
 
-  # Subnet tags the AWS Load Balancer Controller uses for auto-discovery.
   public_subnet_tags = {
     "kubernetes.io/role/elb"                      = "1"
     "kubernetes.io/cluster/${local.name}-cluster" = "shared"

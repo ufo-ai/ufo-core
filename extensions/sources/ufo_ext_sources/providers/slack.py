@@ -274,8 +274,6 @@ class SlackConnector(RestConnector):
                 if bound.before:
                     params |= {"latest": bound.before, "inclusive": "true"}
                 if bound.since:
-                    # the pinned floor, bounding the descent server-side; `inclusive` governs both
-                    # ends and true is right for each
                     params |= {"oldest": bound.since, "inclusive": "true"}
             try:
                 data = await self._slack_post(client, "/api/conversations.history", json=params)

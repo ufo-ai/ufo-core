@@ -10,16 +10,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Lane selection: a pull request runs only the lanes its changed paths touch; a push to main
-  # runs everything, so a wrong lane decision is caught at merge, never shipped. The filters are
-  # deliberately coarse — whole top-level directories plus one markdown rule — and every rule errs
-  # toward running: `not_docs_md` is a negation, so any file that is not docs markdown lights the
-  # widest lane, and cross-cutting inputs (`.github/`, `testsupport/`, any top-level file) light
-  # them all. Gating happens per job, never via `on.paths`: this workflow produces required
-  # contexts (`test`, `checks`, `rls`), and a workflow filtered out at the trigger never posts
-  # them, blocking the PR forever — a job skipped by `if:` posts skipped, which satisfies the
-  # ruleset. The `test` job asserts each lane's conclusion against the decision made here, so a
-  # lane selected to run that skips anyway fails the gate.
+  # Gating happens per job, never via `on.paths`: a workflow filtered out at the trigger never posts its
+  # required contexts, blocking the PR forever, while a job skipped by `if:` posts skipped.
   triage:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -32,8 +24,6 @@ jobs:
       wheel: ${{ github.event_name != 'pull_request' || steps.filter.outputs.wheel == 'true' }}
       client: ${{ github.event_name != 'pull_request' || steps.filter.outputs.client == 'true' }}
     steps:
-      # On pull_request the action reads changed files from the API, so no checkout. On push the
-      # outputs above are already true, so the step never runs — and never fails a main build.
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         if: github.event_name == 'pull_request'
         id: filter
@@ -65,9 +55,6 @@ jobs:
               - '.github/**'
               - '*'
 
-  # Static checks — no database. Runs concurrently with `test` on its own runner, so mypy and the
-  # rot-guard never sit on the test job's critical path. Skipped only when the whole diff is docs
-  # markdown: gates.py reads Rust, HTML, and portal TS sources, so its input set is the repo.
   checks:
     needs: triage
     if: needs.triage.outputs.checks == 'true'
@@ -83,10 +70,6 @@ jobs:
       - run: make check
       - run: uv run pytest --collect-only -m integration -q
 
-  # The frontend gate: the edge suite plus everything the production wheel bakes. Both apps build
-  # on every push, BEFORE the wheel gate below, so the gated wheel is the production shape. Runs
-  # apart from `checks` so pnpm and mypy never sit on each other's critical path; the required
-  # `test` job asserts its result.
   wheel:
     needs: triage
     if: needs.triage.outputs.wheel == 'true'
@@ -109,13 +92,9 @@ jobs:
             infra/modules/edge/pnpm-lock.yaml
             extensions/debugger/frontend/pnpm-lock.yaml
             extensions/web/frontend/pnpm-lock.yaml
-      # The landing page's behaviour is geometric and frame-timed, so its suite drives a browser.
       - run: pnpm -C infra/modules/edge install --frozen-lockfile
-      # `--with-deps` runs apt against the runner's mirrors before it fetches the browser. When a
-      # mirror stops answering, apt neither fails nor prints: the step goes silent and burns the
-      # job's whole 15 minutes, taking `test` down with it because it reads this job's conclusion.
-      # The runner image already carries Chromium's shared libraries, so the deps pass is walled
-      # and best-effort; the browser download is the half that must succeed, and it fails loud.
+      # `--with-deps` runs apt against the runner's mirrors first. When a mirror stops answering, apt neither
+      # fails nor prints: the step burns the job's whole 15 minutes, so the deps pass is walled best-effort.
       - name: Install the browser the landing-page suite drives
         run: |
           timeout 300 pnpm -C infra/modules/edge exec \
@@ -126,10 +105,8 @@ jobs:
       - run: pnpm -C extensions/debugger/frontend run build
       - run: pnpm -C extensions/web/frontend install --frozen-lockfile
       - run: pnpm -C extensions/web/frontend run build
-      # Every pnpm-built tree rides the wheel whole, proven file by file against the tree the build
-      # just wrote. Naming a few known paths cannot prove that: `load_apps` digests the whole app
-      # tree it finds, so a wheel holding a subset serves a content digest no test ever proved and
-      # 404s the names it dropped, with the suite green because the suite reads the repo tree.
+      # `load_apps` digests the whole app tree it finds, so a wheel holding a subset serves a content digest
+      # no test ever proved and 404s the names it dropped, with the suite green off the repo tree.
       - name: Gate production wheel
         run: |
           uv build --wheel --all-packages --out-dir /tmp/ufo-wheel
@@ -185,15 +162,8 @@ jobs:
                   entry.load()()
           PY
 
-  # The portal is a built app, and its three built trees — the portal's own, the app pages, and the
-  # kit a page is built against — are what the pytest shards read, so no shard installs pnpm. This
-  # job builds them and stops: the shards wait on a build, never on a suite. `web-test` below runs
-  # the portal's vitest against these same artifacts, off the shard critical path. The shards still
-  # need the runner's own node — two repl tests drive a real `LocalCarrier` through it — which
-  # `ubuntu-latest` ships. `wheel` builds its own copy because the wheel gate has to see the
-  # production shape assembled from a clean tree. Gated on the same docs-markdown flag as the shards
-  # that read its artifacts, so the pair skips together or runs together and the artifact contract
-  # between them cannot break.
+  # The shards need the runner's own node — two repl tests drive a real `LocalCarrier` through it —
+  # which `ubuntu-latest` ships.
   web-build:
     needs: triage
     if: needs.triage.outputs.checks == 'true'
@@ -230,10 +200,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The portal's suite proves the bundle and every view. Three of its files read the built trees, so
-  # it takes them from `web-build` rather than building a second copy: it then asserts against the
-  # exact bytes the shards and the wheel ship. Nothing consumes this job's result, so the `test`
-  # gate names it directly.
   web-test:
     needs: [triage, web-build]
     if: needs.triage.outputs.checks == 'true'
@@ -287,9 +253,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The terminal client's lane: its own crate's gates, suite, benches, and release builds. Held in
-  # its own file because the matrix over five targets is long, called from here so the triage above
-  # stays the one place a lane is chosen.
   client:
     needs: triage
     if: needs.triage.outputs.client == 'true'
@@ -323,16 +286,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the coding suite's tests read pinned commits; a shallow checkout has none
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --no-install-package actionlint-py
-      # The portal's Python tests read its built page, the app pages beside it, and the kit the
-      # sites extension materialises into a fork's sandbox. The `web` job built all three once; a
-      # missing artifact fails this step rather than letting the suite test an absent tree.
       - uses: actions/download-artifact@v4
         with:
           name: portal-static
@@ -353,8 +312,8 @@ jobs:
           chmod +x client/target/release/ufo
           echo "$GITHUB_WORKSPACE/client/target/release" >> "$GITHUB_PATH"
       - run: UV_NO_SYNC=1 make test SHARD="${{ matrix.shard }}"
-      # Artifact names take no `/`, so the shard is in the index here and spelled in full inside
-      # each `run-summary.json`.
+      # Artifact names take no `/`, so the shard is in the index here and spelled in full inside each
+      # `run-summary.json`.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -364,10 +323,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # The control plane is a Rust crate (RFC 0036). Its ledger, gateway, and Slack suites run against a
-  # real Postgres — partial unique indexes, row locks, and `for update skip locked` leases have no
-  # meaning against a fake — and each test takes a database of its own, so the connecting role owns
-  # the cluster. The RLS half runs in the `rls` job below, on its own cluster.
+  # Partial unique indexes, row locks and `for update skip locked` leases have no meaning against a
+  # fake, and each test takes a database of its own, so the connecting role owns the cluster.
   control-test:
     needs: triage
     if: needs.triage.outputs.control == 'true'
@@ -409,11 +366,8 @@ jobs:
     if: needs.triage.outputs.checks == 'true'
     uses: ./.github/workflows/integration.yaml
 
-  # Every assertion states the exact conclusion the triage decision implies, so a lane selected to
-  # run that skips anyway — a broken `if:`, a dropped need — goes red here instead of merging
-  # green. The triage assertion is first and unconditional: a failed triage leaves its outputs
-  # empty, every expectation would collapse to skipped, and the gate would pass with no coverage.
-  # A cancelled gate passes only when GitHub names a newer head; cancelling the current head fails.
+  # The triage assertion is first and unconditional: a failed triage leaves its outputs empty and every
+  # expectation would collapse to skipped. A cancelled gate passes only when GitHub names a newer head.
   test:
     if: always()
     needs: [triage, test-shard, web-test, control-test, integration, wheel, client]
@@ -450,13 +404,8 @@ jobs:
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.client.result }}" = "${{ needs.triage.outputs.client == 'true' && 'success' || 'skipped' }}"
 
-  # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel suite's
-  # :5541, nor `control-test`'s :5549). It CREATEs roles and databases, applies RLS policies, and
-  # mints the RLS-subject serve role — so it needs a superuser and is the sole owner of its cluster
-  # (global CREATE/DROP ROLE), which is why it runs on its own runner. A Postgres role is
-  # cluster-wide while a database is not, so sharing a cluster with `control-test` would let the two
-  # jobs write the same `ufo_serve` and `ufo_control` rows. This is the gate the U1 / ufo_dbos /
-  # serve-role bugs slipped past.
+  # A Postgres role is cluster-wide while a database is not, so sharing a cluster with `control-test`
+  # would let the two jobs write the same `ufo_serve` and `ufo_control` rows.
   rls:
     needs: triage
     if: needs.triage.outputs.control == 'true'

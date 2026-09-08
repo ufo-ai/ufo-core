@@ -1,19 +1,15 @@
-//! What persists across sessions under `$UFO_HOME`: the input history the editor walks. The hotkey
-//! reference the overlay renders lives here too, beside the keys the editor binds.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const HISTORY_LIMIT: usize = 500;
 
-/// Input history persisted one entry per line, newlines escaped as `\n`.
 pub struct History {
     path: PathBuf,
     pub entries: Vec<String>,
 }
 
 impl History {
-    /// Load history from `home/history`, tolerating absence.
     pub fn load(home: &Path) -> History {
         let path = home.join("history");
         let entries = fs::read_to_string(&path)
@@ -27,8 +23,6 @@ impl History {
         History { path, entries }
     }
 
-    /// Append one submitted entry and persist, deduplicating the immediate repeat and holding
-    /// the file to `HISTORY_LIMIT` entries.
     pub fn push(&mut self, entry: &str) {
         if entry.is_empty() || self.entries.last().map(String::as_str) == Some(entry) {
             return;
@@ -50,7 +44,6 @@ impl History {
     }
 }
 
-/// Key and action for every binding, in the order the `?` overlay lists them.
 pub fn hotkeys() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Enter", "Send"),

@@ -1,5 +1,3 @@
-/** The coding-account acts, tested where they live: one component the first run and the settings
- *  panel both mount, so the flow is pinned once rather than once per screen. */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -140,8 +138,6 @@ test("a refused paste states its line and holds the asking open", async () => {
   expect(screen.getByRole("dialog")).toBeTruthy();
 });
 
-/** The reason this is a component rather than a step: a member who rotated or revoked a key comes
- *  back through settings to replace it, and dropping the old one is the same act either way. */
 test("disconnecting drops the account and offers to connect again", async () => {
   const dropped: string[] = [];
   let held = true;
@@ -183,9 +179,6 @@ test("the polling stops when the asking is closed", async () => {
   expect(polls).toHaveLength(asked);
 }, 10_000);
 
-/** The first run draws the same accounts as the acts of that flow: one full-width act per provider,
- *  and a connected account standing as the completed signal rather than as something to manage —
- *  a member is connecting there, not maintaining, so nothing offers to drop what they just gave. */
 test("the first run's shape names each provider on its own act and signals what landed", async () => {
   const wired = wire({
     "/workspace/accounts": () =>
@@ -205,8 +198,6 @@ test("the first run's shape names each provider on its own act and signals what 
   expect(wired).toBeTruthy();
 });
 
-/** Cancel is the way out of an asking that did not land, and it must not report one: a member who
- *  opened the dialog and thought better of it holds exactly what they held before. */
 test("leaving an asking that did not land reports nothing", async () => {
   const settled = vi.fn();
   open({ "/openai/device$": () => json(DEVICE), "/openai/device/poll": () => json({ status: "pending" }) }, settled);
@@ -219,8 +210,6 @@ test("leaving an asking that did not land reports nothing", async () => {
   expect(settled).not.toHaveBeenCalled();
 });
 
-/** An account that landed is held however the member leaves the dialog — the connection happened at
- *  the provider, and Cancel is not an undo for it. */
 test("an account that landed is kept even when the member leaves by Cancel", async () => {
   const settled = vi.fn();
   let held = false;
@@ -245,9 +234,6 @@ test("an account that landed is kept even when the member leaves by Cancel", asy
   expect(settled).toHaveBeenCalled();
 }, 10_000);
 
-/** A 200 carrying something that is not JSON — a proxy's error page, a sign-in page served where a
- *  payload belongs — is read as a workspace that could not be reached. Left unguarded the parse
- *  rejects into nothing that can handle it, which fails the run without failing a test. */
 test("a body that will not parse is refused rather than thrown", async () => {
   open({ "/workspace/accounts": () => new Response("file body", { status: 200 }) });
 

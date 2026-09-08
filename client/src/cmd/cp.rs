@@ -1,13 +1,5 @@
-//! The `ufo cp` verb: copy files between this machine and a conversation's workspace.
-//!
-//! scp's grammar — `ufo cp report.pdf build:in/report.pdf` uploads, `ufo cp build:out/patch.diff .`
-//! downloads, and a directory on either side syncs the tree. The remote side rides the terminal
-//! surface's file routes under the member's own bearer: the channel resolves through the same
-//! member-scoped queue key every post uses, an upload get-or-creates the conversation so staging
-//! precedes the first turn, and a sync skips a file whose destination already has its size and a
-//! modified time at least as new — rsync's quick check, since a workspace write cannot preserve
-//! source times. Nothing else is policy: every file in a tree walks, and the transfers are
-//! silent but for the closing count.
+//! A sync skips a file whose destination already has its size and a modified time at least as new —
+//! rsync's quick check, since a workspace write cannot preserve source times.
 
 use std::env;
 use std::fs::{self, File};
@@ -83,8 +75,6 @@ pub fn parse(args: &[String]) -> Result<Call, String> {
     }
 }
 
-/// scp's reading of one argument: `channel:path` is remote when the part before the first colon
-/// is non-empty and holds no slash, so `./notes:draft.md` and plain paths stay local.
 pub fn endpoint(word: &str) -> Endpoint {
     if let Some((channel, path)) = word.split_once(':') {
         if !channel.is_empty() && !channel.contains('/') {
@@ -97,9 +87,6 @@ pub fn endpoint(word: &str) -> Endpoint {
     Endpoint::Local(word.to_string())
 }
 
-/// Whether the copy may skip a file: the destination already holds its size and a modified time
-/// at least as new. A workspace write stamps its own time, so equality of times never happens
-/// across a real transfer — newer-or-equal at the destination reads "already carried".
 pub fn carried(src_size: u64, src_modified: f64, dst: Option<(u64, f64)>) -> bool {
     match dst {
         Some((size, modified)) => size == src_size && modified >= src_modified,
@@ -244,8 +231,6 @@ fn pull(wire: &Wire, channel: &str, path: &str, local: &Path) -> Result<String, 
     Ok(format!("{copied} copied, {skipped} unchanged"))
 }
 
-/// scp's remote target rule for one file: a trailing slash (or a bare channel) means "into that
-/// directory", keeping the source's name; anything else is the destination name itself.
 pub fn remote_single_target(path: &str, basename: &str) -> String {
     if path.is_empty() || path.ends_with('/') {
         format!("{path}{basename}")

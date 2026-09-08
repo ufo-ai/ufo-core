@@ -329,7 +329,6 @@ async def test_a_shorter_run_record_never_clobbers_a_fuller_fallback_at_the_same
     conversation_id = uuid4()
     transcript = Transcript(blob=blob, conversation_id=conversation_id)
 
-    # The repair fallback lands first at seq 3, carrying the whole conversation before this turn.
     fallback = Conversation(
         seq=3,
         messages=(
@@ -343,7 +342,6 @@ async def test_a_shorter_run_record_never_clobbers_a_fuller_fallback_at_the_same
     )
     await transcript.write(fallback)
 
-    # The run's own record, rebuilt from a self-excluding read, holds only founding + answer.
     truncated_run = Conversation(
         seq=3,
         messages=(

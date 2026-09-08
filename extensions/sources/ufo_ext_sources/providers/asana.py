@@ -40,9 +40,6 @@ def _stream(
     )
 
 
-# Stream set mirrors Airbyte's source-asana catalog (16 streams): the four canonical work-tracking
-# streams (projects, tasks, stories, users) plus the workspace-taxonomy and metadata collections.
-# Asana documents `?modified_since` on tasks + projects only; every other stream full-refreshes.
 ASANA_STREAMS: list[StreamSpec] = [
     _stream(
         "projects",

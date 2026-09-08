@@ -1,9 +1,5 @@
-# UFO's own Slack app, installed only in the operator Slack workspace. The gateway uses its bot
-# token to open one public channel per new customer, invite that customer to it over Slack Connect,
-# and post the one message naming where they sign in. It makes outbound Web API calls only — no
-# event subscriptions, no interactivity, no redirect URL, no inbound endpoint of any kind — so it
-# needs no client id, client secret, or signing secret. It is not the customer-installed Slack app
-# (extensions/slack renders that one).
+# Outbound Web API calls only — no event subscriptions, interactivity, redirect URL or inbound endpoint
+# — so it needs no client id, client secret, or signing secret. Not the customer-installed Slack app.
 display_information:
   name: ufo onboarder
   description: Opens each new customer's shared channel and invites them to it.

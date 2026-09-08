@@ -22,7 +22,6 @@ const OBJECTS = Array.from({ length: HISTORY_FIXTURE_ROW_COUNT }, (_, at) => ({
   speaker: null,
 }));
 
-/** The local responses that draw a new chat with enough history to scroll. */
 export function historyFixturePayload(pathname: string): unknown | null {
   if (pathname === "/surface/web/api/agents") {
     return {
@@ -48,7 +47,6 @@ export function historyFixturePayload(pathname: string): unknown | null {
   return null;
 }
 
-/** The local boot and history responses in a Vite server. */
 export function historyFixture(): Plugin {
   return {
     name: "history-fixture",

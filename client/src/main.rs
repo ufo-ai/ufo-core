@@ -241,12 +241,8 @@ fn die(message: &str) -> ! {
     process::exit(1);
 }
 
-/// A `curl | sh` install leaves the exec'd binary with the exhausted pipe as stdin. The member is
-/// still at a terminal, so input comes from the terminal itself — the shell client read every
-/// prompt from `/dev/tty`. The terminal is adopted by its real device name (`ttyname` of stdout
-/// or stderr) because macOS refuses to register the `/dev/tty` alias with kqueue, which is what
-/// the event reader polls; the alias remains the fallback for the fully redirected case, whose
-/// plain-mode reads are blocking and never poll. A process with no terminal keeps its pipe.
+/// The terminal is adopted by its real device name, because macOS refuses to register the `/dev/tty`
+/// alias with kqueue, which is what the event reader polls. The alias stays the fully-redirected fallback.
 #[cfg(unix)]
 fn adopt_tty_stdin() {
     use std::io::IsTerminal;
@@ -316,8 +312,6 @@ fn hostname() -> String {
     }
 }
 
-/// Take back one queued message on its own connection: the member pressed Up to recall it, and
-/// the composer waits on the server's word that the words are theirs again.
 fn retract_instant(lane: SendLane, text: String, arrival_id: String, evt: Sender<WireEvent>) {
     thread::spawn(move || {
         let retracted = lane.retract(&arrival_id).unwrap_or(false);
@@ -329,8 +323,6 @@ fn retract_instant(lane: SendLane, text: String, arrival_id: String, evt: Sender
     });
 }
 
-/// Admit one message into the running turn on its own connection, retrying under one
-/// idempotency key; a send that never acks falls back to the wire's boundary queue.
 fn send_instant(lane: SendLane, text: String, evt: Sender<WireEvent>, cmd: Sender<WireCmd>) {
     thread::spawn(move || {
         let send_id = random_hex::<16>();
@@ -438,7 +430,6 @@ fn update_resume(workspace_url: Option<&str>, label: &str, tty: bool) {
     }
 }
 
-/// Whether `text` is a conversation id — the shape `--resume` tells from a channel.
 fn is_conversation_id(text: &str) -> bool {
     text.len() == CONVERSATION_ID_LEN
         && text.char_indices().all(|(at, ch)| {
@@ -465,8 +456,6 @@ fn print_resume(workspace_url: Option<&str>, channel: &str, tty: bool) {
     }
 }
 
-// ── wire thread ─────────────────────────────────────────────────────────────────────────────────
-
 enum WireEvent {
     Dir(Directive),
     OpStarted(OpRequest),
@@ -476,8 +465,6 @@ enum WireEvent {
         attempt: u32,
         retry_in_s: u64,
     },
-    /// Sign-in landed: the workspace, the channel the conversation moved to, and a session on it
-    /// the loop opens other conversations from.
     WorkspaceChanged {
         url: String,
         channel: String,
@@ -538,16 +525,13 @@ struct Reconnect {
 }
 
 impl Wire {
-    /// Post, read the stream it opens, then post whatever that read left to send. Each post's stop
-    /// goes to the loop before the post itself, which blocks until the reply's headers arrive —
-    /// a member ends a turn while it is still thinking, and this thread cannot hear the key.
+    /// Each post's stop goes to the loop before the post itself, which blocks until the reply's headers
+    /// arrive — a member ends a turn while it is still thinking, and this thread cannot hear the key.
     fn run(mut self, first: String) {
         let _ = ufo::system_skills::sync(&self.home, &self.session);
         let mut body = if first.is_empty() {
             Some(PostBody::Empty)
         } else {
-            // The opening message posts alone. A line that lands in the same instant is the next
-            // turn's, and joining it here would leave the turn it belongs to nothing to post.
             self.queue.push_back(first);
             Some(self.take_queue())
         };
@@ -563,8 +547,6 @@ impl Wire {
             let stream = match self.session.post(post.clone()) {
                 Ok(stream) => stream,
                 Err(error) => {
-                    // A failed idle listen is nobody's action: park as an unlistened session
-                    // does, and the member's next message re-opens the wire.
                     if matches!(post, PostBody::Listen) {
                         body = self.next_body();
                         continue;
@@ -636,7 +618,6 @@ impl Wire {
         }
     }
 
-    /// True when the directive ends this stream (an op rendezvous).
     fn handle(&mut self, directive: Directive) -> bool {
         match directive {
             Directive::Run(op) => {
@@ -797,8 +778,6 @@ impl Wire {
                     continue;
                 }
             }
-            // The idle listen: a member command wins the wait instantly; the interval
-            // elapsing posts an empty reconnect that asks whether the conversation spoke.
             if let Some(seconds) = self.listen.filter(|_| !self.detached) {
                 match self
                     .cmd
@@ -820,7 +799,6 @@ impl Wire {
         }
     }
 
-    /// Everything queued goes out as one post, each message echoed to the member.
     fn take_queue(&mut self) -> PostBody {
         let joined: Vec<String> = self.queue.drain(..).collect();
         for message in &joined {
@@ -881,15 +859,11 @@ impl Wire {
     }
 }
 
-// ── tty mode ────────────────────────────────────────────────────────────────────────────────────
-
 enum LoopEvent {
     Term(TermEvent),
-    /// One event off a wire, tagged with the generation of the conversation it serves.
     Wire(u32, WireEvent),
     Clip(ClipEntry, Result<Clip, String>),
     Pr(Option<pr::Pr>),
-    /// One conversation fetch answered, tagged with the fetch's generation.
     Conversations(u32, Result<Vec<ConversationRow>, String>),
     StdinClosed,
 }
@@ -912,10 +886,6 @@ fn attach_dropped(app: &mut App, source: &std::path::Path, home: &std::path::Pat
     }
 }
 
-/// The loop's hold on the conversation on the wire now: the wire's command and event lanes, the
-/// prompts its stream raised, the stop and send lanes prepared for it, and the name the footer
-/// shows. Opening another conversation replaces it whole, and the old wire's late words carry a
-/// generation the loop no longer answers to.
 struct Live {
     generation: u32,
     wired: bool,
@@ -930,7 +900,6 @@ struct Live {
 }
 
 impl Live {
-    /// No conversation yet: the page is open on launch with nothing behind it.
     fn unwired(evt_tx: &Sender<LoopEvent>) -> Live {
         let (cmd, _) = channel::<WireCmd>();
         Live {
@@ -947,7 +916,6 @@ impl Live {
         }
     }
 
-    /// A wire on `target` as generation `generation`, opening with `first` when it is not empty.
     #[allow(clippy::too_many_arguments)]
     fn start(
         generation: u32,
@@ -994,8 +962,6 @@ impl Live {
     }
 }
 
-/// Open the conversation page over the transcript and ask for its first list; signed out, there
-/// is no workspace to list and the member is told so.
 fn show_page(app: &mut App, lister: Option<&Lister>, back: bool, evt: &Sender<LoopEvent>) {
     match lister {
         Some(lister) => {
@@ -1006,8 +972,6 @@ fn show_page(app: &mut App, lister: Option<&Lister>, back: bool, evt: &Sender<Lo
     }
 }
 
-/// Read one page of the member's conversations off the loop; the answer lands as an event
-/// carrying the fetch's generation.
 fn fetch_conversations(lister: Lister, fetch: Fetch, evt: Sender<LoopEvent>) {
     thread::spawn(move || {
         let result = lister.list(&fetch.search);
@@ -1015,9 +979,6 @@ fn fetch_conversations(lister: Lister, fetch: Fetch, evt: Sender<LoopEvent>) {
     });
 }
 
-/// Where a page pick leads: a listed row resumes the member's own terminal conversation on its
-/// channel, so this terminal is its sandbox again, or joins any other by id, keeping the sandbox
-/// it has; words typed into the page's entry bar open a fresh terminal conversation with them.
 struct Opening {
     target: Target,
     label: String,
@@ -1046,8 +1007,6 @@ impl Opening {
     }
 }
 
-/// Leave the conversation on the wire for `opening`: the transcript starts over and a wire of
-/// the next generation opens it; whatever the old wire still says is nobody's.
 #[allow(clippy::too_many_arguments)]
 fn open_conversation(
     app: &mut App,
@@ -1205,8 +1164,6 @@ fn run_tty(
                                 }
                             }
                         } else if live.listening {
-                            // The wire may be mid-bounce, so the message rides the send lane
-                            // rather than waiting for that stream to end.
                             app.begin_turn();
                             match live.sends.clone() {
                                 Some(lane) => {
@@ -1271,9 +1228,6 @@ fn run_tty(
                         None => app.retracted(&text, &arrival_id, false),
                     },
                     Reply::Detach => {
-                        // A detached member left the turn: its frames must not re-open the
-                        // presentation, and their next message takes the queueing lane that
-                        // rejoins the turn.
                         live.listening = false;
                         live.stop_requested = false;
                         let _ = live.cmd.send(WireCmd::Detach);
@@ -1488,8 +1442,6 @@ fn run_tty(
                     }
                     live.stop_requested = false;
                     if !live.gate.secrets.is_empty() {
-                        // Only the stream that delivered the prompts opens the entry: an idle
-                        // bounce ending here must not reset what the member is typing.
                         if !app.collecting_secret() {
                             app.end_turn(false);
                             let prompt = live.gate.secrets.front().map(|(_, _, p)| p.clone());
@@ -1498,8 +1450,6 @@ fn run_tty(
                             }
                         }
                     } else if armed && !live.gate.asked && live.gate.questions.is_empty() {
-                        // An idle bounce: the prompt already stands, and the wire reconnects on
-                        // its own.
                         if app.is_working() {
                             app.end_turn(false);
                         }
@@ -1525,8 +1475,6 @@ fn run_tty(
     code
 }
 
-/// End-of-stream disposition once secrets are done: the next question, the prompt, or — with
-/// nothing left to do — the session's end (`false`).
 fn settle(app: &mut App, gate: &mut Gate) -> bool {
     if let Some((prompt, options)) = gate.questions.front() {
         app.end_turn(true);
@@ -1548,8 +1496,6 @@ fn settle(app: &mut App, gate: &mut Gate) -> bool {
     false
 }
 
-/// Whether a directive arriving on an idle listen puts something in front of the member — the
-/// conversation woke without them, and the turn presentation opens for it.
 fn wakes_display(directive: &Directive) -> bool {
     matches!(
         directive,
@@ -1590,8 +1536,8 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
     }
 }
 
-/// The lane a wire's events ride into the loop, each tagged with `generation` — the conversation
-/// the wire serves, so a wire left behind for another conversation is heard by nobody.
+/// Each event is tagged with the generation of the conversation the wire serves, so a wire left behind
+/// for another conversation is heard by nobody.
 fn wire_sender(tx: Sender<LoopEvent>, generation: u32) -> Sender<WireEvent> {
     let (wire_tx, wire_rx) = channel::<WireEvent>();
     thread::spawn(move || {
@@ -1603,8 +1549,6 @@ fn wire_sender(tx: Sender<LoopEvent>, generation: u32) -> Sender<WireEvent> {
     });
     wire_tx
 }
-
-// ── plain mode ──────────────────────────────────────────────────────────────────────────────────
 
 fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
     let tty = std::io::stdout().is_terminal();
@@ -1740,8 +1684,6 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
     print_resume(latest_workspace.as_deref(), &latest_channel, tty);
     code
 }
-
-// ── json mode ───────────────────────────────────────────────────────────────────────────────────
 
 fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: String) -> i32 {
     let channel_name = session.target.label().to_string();

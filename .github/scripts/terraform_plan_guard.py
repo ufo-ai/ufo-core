@@ -8,9 +8,6 @@ from pathlib import Path
 FLAG_TOMBSTONES = frozenset(
     json.loads((Path(__file__).parents[2] / "infra" / "flag_tombstones.json").read_text())
 )
-# The resources this repo has retired. An address here is one the deploy is permitted to destroy,
-# and one no root may declare again — the contract test holds the second half, so the record cannot
-# outlive its job by quietly permitting a deletion nobody meant.
 RETIRED_RESOURCES = frozenset(
     json.loads((Path(__file__).parents[2] / "infra" / "retired_resources.json").read_text())
 )
@@ -40,11 +37,8 @@ REGENERABLE_RESOURCE_TYPES = frozenset(
         "kubernetes_namespace_v1",
         "kubernetes_secret",
         "kubernetes_secret_v1",
-        # A `terraform_data` instance holds only its own `input` and creates nothing outside the
-        # state, so its delete destroys nothing. Its replace is also the only way a create-time
-        # provisioner runs again: a failed one taints the instance, and refusing the replacement
-        # every later plan proposes would stop the deploy at this guard until an operator ran
-        # `terraform untaint` against the remote state by hand.
+        # A failed create-time provisioner taints the instance, and refusing every later replacement
+        # would stop the deploy until an operator ran `terraform untaint`.
         "terraform_data",
         "tls_self_signed_cert",
     }

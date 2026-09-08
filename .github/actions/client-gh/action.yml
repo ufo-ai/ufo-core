@@ -7,10 +7,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # The payload is a pure function of the three constants build-gh.sh pins — the Go toolchain, the
-    # cli release, and the target — so that script's hash is the whole key. A hit skips the toolchain
-    # install and the cross-compile both; bumping either pin edits the script, so the key moves with
-    # it. The restored archive still meets `gzip -t` below, which a hit and a build share.
     - id: payload
       uses: actions/cache@v4
       with:

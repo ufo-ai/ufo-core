@@ -315,9 +315,6 @@ async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> Setup
     )
     # A slot the deploy supplies from its own environment is filled: `WorkspaceScope.credential`
     # falls back to it when the workspace stored none, so the agent obtains the secret and works.
-    # Asking the table alone answers "did this workspace bring its own key", which is a different
-    # question — and it reported a working app unready for ever, with a row stating a need the
-    # member had no act for.
     filled_slots = stored_slots | {slot for slot in wanted_slots if deploy_env(slot.upper())}
     credentials = tuple(
         SetupCredentialState(

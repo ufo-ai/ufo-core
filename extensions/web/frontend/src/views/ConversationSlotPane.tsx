@@ -10,9 +10,8 @@ import type { Crumb } from "@/lib/title";
 import type { ConversationAgent } from "@/lib/types";
 import { formatSize } from "@/lib/size";
 
-/** A word is the whole of some of these controls — a file name, `Open site`, the way out of the
- *  pane — and a word set in a 13px line is 18px tall. At a phone width each keeps the control
- *  height as the box a finger has to land on, which the words themselves do not change. */
+/** A word set in a 13px line is 18px tall, so at a phone width each control keeps the control height as
+ *  the box a finger has to land on. */
 const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
 
 export type ConversationSlotSummary = {
@@ -51,8 +50,6 @@ type Source = { url: string; title: string; snippet: string; published_date: str
 type SourcesPayload = { type: "sources"; sources: Source[]; truncated: boolean };
 type TaskStatus = "pending" | "in_progress" | "completed";
 type ConversationTask = { description: string; status: TaskStatus };
-/** The todo board one conversation holds, as its `tasks` slot answers it. Read here as the slot's
- *  own list, and by the app-building wizard as the progress of its run. */
 export type TasksSlotPayload = {
   type: "tasks";
   title: string;
@@ -135,12 +132,7 @@ export function ConversationSlotPane({
   slot: string;
   rootConversationId?: string;
   summary?: ConversationSlotSummary;
-  /** Standing in a slot rather than on an address of its own. The slot draws the frame, the name
-   *  and the way out, so what is left here is the list itself — and the slot's own region is what
-   *  names it, since a second landmark inside that one, reading the same word, is a place a member
-   *  moving by landmark arrives at twice. */
   embedded?: boolean;
-  /** The app holding the conversation this pane is one of, as the trail names it. */
   crumb?: Crumb;
 }) {
   const inventory = usePanelRead<ConversationSlotsPayload>(

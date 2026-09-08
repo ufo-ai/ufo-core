@@ -1,5 +1,3 @@
-# Image registry for the runtime bundle, hosted gateway, sandbox cache daemon, and the client
-# binaries of a client tree.
 
 locals {
   ecr_repositories = ["ufo", "ufo-control", "ufo-cache", "ufo-egress", "ufo-preview", "ufo-clientbin"]

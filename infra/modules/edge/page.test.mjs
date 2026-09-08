@@ -15,15 +15,12 @@ let origin;
 before(async () => {
   const worker = await importWorker("page");
   const env = { ORIGIN_BASE: APEX };
-  // The page's render asks the worker for nothing, so a call out of the worker is a call the
-  // suite must see.
   globalThis.fetch = async () => {
     assert.fail("the page drove the worker to call its origin");
   };
   server = createServer(async (incoming, outgoing) => {
     const chunks = [];
     for await (const chunk of incoming) chunks.push(chunk);
-    // Presented as the apex: the worker bounces plain-http browsers to https before rendering.
     const reply = await worker.fetch(
       new Request(`${APEX}${incoming.url}`, {
         method: incoming.method,
@@ -46,8 +43,6 @@ after(async () => {
 });
 
 const DESKTOP = { viewport: { width: 1200, height: 800 } };
-// An iPhone 15-class device: the viewport, pixel density and pointer Safari reports there, so the
-// page's coarse-pointer rules resolve the way they do on the phone.
 const PHONE = {
   viewport: { width: 390, height: 844 },
   deviceScaleFactor: 3,
@@ -62,8 +57,6 @@ async function open(device = DESKTOP) {
   return page;
 }
 
-// The faces and the art are in the document, so the render stands on the document alone. The tab
-// mark is the one thing the page reaches for, and it comes off the worker's own route.
 test("the page carries its own fonts and art, and reaches only for the mark", async () => {
   const page = await browser.newPage(DESKTOP);
   const asked = [];
@@ -82,9 +75,6 @@ test("the page carries its own fonts and art, and reaches only for the mark", as
   await page.close();
 });
 
-// Every face the page inlines is weight the visitor pays for before any text appears, so the set
-// is pinned: a face that arrives here has to be one the render reaches, and a face whose
-// unicode-range the copy never touches gives itself away as "unloaded".
 test("the page inlines no font face its render never reaches", async () => {
   const page = await open();
   await page.evaluate(() => document.fonts.ready);
@@ -99,8 +89,6 @@ test("the page inlines no font face its render never reaches", async () => {
   await page.close();
 });
 
-// Sign In is the worker's own route to the app host. Join leads out to the waitlist form, which is
-// another origin, so it opens in its own tab and hands that tab no opener.
 const JOIN_FORM =
   "https://docs.google.com/forms/d/e/1FAIpQLSeXdDbu8pE64Q2zIf4OYQLz0Gu_ETM7P--4_DjtwRQmKS1FIQ/viewform";
 
@@ -123,7 +111,6 @@ test("the bar carries the mark and the two account controls, and nothing else", 
   await page.close();
 });
 
-// The display line is the page: on every device it renders whole, on one line, inside the window.
 for (const [where, device] of [
   ["a desktop", DESKTOP],
   ["a phone", PHONE],
@@ -150,7 +137,6 @@ for (const [where, device] of [
   });
 }
 
-// The product is named ufo; nothing a member reads plays the part.
 const BANNED_METAPHOR =
   /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
 

@@ -1,5 +1,3 @@
-//! The SIGINT handler's own state: the terminal modes it puts back and the resume line it
-//! prints, held where an async-signal-safe handler can reach them.
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
@@ -8,9 +6,6 @@ static RESUME: AtomicUsize = AtomicUsize::new(0);
 static MODES: AtomicPtr<(libc::c_int, libc::termios)> = AtomicPtr::new(std::ptr::null_mut());
 static ALT: AtomicBool = AtomicBool::new(false);
 
-/// Hold the terminal's modes as they are, before raw mode replaces them: the handler exits
-/// through `_exit`, which runs no destructor, so it puts these back itself or the member's
-/// shell is left without echo.
 pub fn hold_modes() {
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
         return;
@@ -27,7 +22,6 @@ pub fn release_modes() {
     drop_held(MODES.swap(std::ptr::null_mut(), Ordering::SeqCst));
 }
 
-/// Whether the alternate screen is up, and so whether the handler leaves it.
 pub fn hold_alt(entered: bool) {
     ALT.store(entered, Ordering::SeqCst);
 }
@@ -38,8 +32,8 @@ fn drop_held(held: *mut (libc::c_int, libc::termios)) {
     }
 }
 
-/// Put the terminal back from inside the handler. Async-signal-safe: an atomic load, `write`,
-/// and `tcsetattr`, all on the POSIX safe list — crossterm's own calls are not.
+/// Async-signal-safe: an atomic load, `write`, and `tcsetattr`, all on the POSIX safe list —
+/// crossterm's own calls are not.
 fn restore_terminal() {
     if ALT.load(Ordering::SeqCst) {
         let leave = crate::ui::term::ALT_LEAVE.as_bytes();

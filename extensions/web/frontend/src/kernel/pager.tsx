@@ -1,11 +1,8 @@
 import { Button } from "@/components/ui/button";
 import type { WorkspacePlace } from "@/lib/route";
 
-/** Where a pane stands, and what the change to it was: the place itself, and the outcome a mutation
- *  left for the mount that comes after it. */
 export type Placement = WorkspacePlace & { notice?: string };
 
-/** The Newer and Older steps under a listing, drawn only for the cursors the payload holds. */
 export function Pager({
   payload,
   onPlace,

@@ -40,71 +40,35 @@ import { Moment, isMoment } from "@/lib/moments";
 import type { Agent, SpecSchema } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
-/** The conversation a record belongs to is where the member goes, never a column they read: the
- *  value is a uuid, which is the wire's word for a thread and nobody's answer to "which one". The
- *  name carries the press, and the row's own `View` still opens the record itself. */
 const CONVERSATION_FIELD = "conversation";
-/** A row's durable id is the wire's join key — the radar feed resolves a run's task by it — and
- *  the name is already the member's word for the record, so it is never a column either. */
 const ID_FIELD = "id";
 
-/** How many of the kind's own declared fields the index carries beside the name and the prose. The
- *  kind states its fields in the order it leads with, so the first is the one a member came to read
- *  — a scheduled task's last run — and the rest stand on the record's own page. A column for every
- *  declared field is a table read sideways to answer a question nobody asked. */
 const LEADING_FIELDS = 1;
 
-/** How many a kind carrying no prose leads with instead. The width the prose column would have
- *  taken goes to one more of the kind's own facts, rather than to a column of blank. */
 const FACT_LED_FIELDS = 2;
 
-/** The kind whose record has a pane of its own: a scheduled task is read and changed on one screen
- *  — an editable prompt, a pill per choice, no submit — so its record draws that pane in place of
- *  the spec-and-status column every other kind reads. */
 const SCHEDULED_TASK_KIND = "scheduled_task";
 
-/** The one field no index reads down. A scheduled task's prompt is a whole instruction: every row
- *  cut it mid-word, and a cut arrives at the reader indistinguishable from a prompt that ended. So
- *  a kind declaring it carries no prose column at all and reads by its facts, and its summary is no
- *  way around that — the projection composes the summary out of the same prompt. Every other kind
- *  reads down the one-line summary. */
 const PROMPT_FIELD = "prompt";
 
-/** Whether a row is stopped. It is the first thing asked of a task and the last thing a column
- *  should cost: it reads as a chip beside the name, where the member is already looking, and
- *  nowhere else — a filter for it would narrow to the rows the chip already marks. */
 const STATE_FIELD = "paused";
 
-/** The flag that narrows an index to the viewer's own rows, worded the way the artifacts scope
- *  says the same thing — the wire's `mine` is nobody's label. */
 const MINE_FIELD = "mine";
 const MINE_LABEL = "Created by me";
 
-/** The run a member reads together with how it went, and the field that says how. An ending in a
- *  column of its own — `done`, beside no run — names nothing, so it reads inside the cell of the
- *  run it belongs to and takes no column. */
 const RUN_FIELD = "last_run_at";
 const ENDING_FIELD = "last_run_status";
 
-/** How many characters of a spec value still read beside their label. A schedule, a day, a name fit
- *  the value column; a prompt does not, and neither does a url nobody can break a line in, so past
- *  this they take their own wrapped block under the label instead of being cut. */
 const FACT_VALUE_LINE = 72;
 
 export type ObjectValue = string | number | boolean | null;
 
 export type ObjectRow = { name: string; summary: string } & Record<string, ObjectValue>;
 
-/** One row of an index. The projection names the agent that owns the row whether the read ran in
- *  one namespace or across the audience, so an act reaches the right intent lane either way. */
 type IndexRow = ObjectRow & { agent_id: string; agent_name: string };
 
 export type ObjectLink = { relation: string; kind: string; name: string; opens: boolean };
 
-/** What every object page knows about the kind it renders, ahead of any one row: the fields it
- *  declared for columns and filters, the schema its form draws, and which acts the intent lane
- *  takes for it — apply and delete answered apart, so a kind the lane only ever deletes offers no
- *  control that would be refused. */
 type Kind = {
   kind: string;
   fields: string[];
@@ -125,15 +89,10 @@ type DetailPayload = Kind & {
   updated_at: string | null;
 };
 
-/** The member's word for a kind. The wire names one `scheduled_task`; every line a member reads
- *  names it `scheduled task`, and no screen states an identifier the member never typed. */
 function noun(kind: string): string {
   return kind.replaceAll("_", " ");
 }
 
-/** A column head, and the label on the tab that narrows by that column. The schema titles the
- *  fields it declares; a field the schema never mentions (`next_run_at`) is the wire's own word,
- *  and reads as `Next Run At` — the Title Case every other head on every other screen takes. */
 function heading(field: string, schema: SpecSchema | null): string {
   const titled = schema?.properties?.[field]?.title;
   if (titled) return titled;
@@ -149,8 +108,6 @@ function enumerated(schema: SpecSchema | null, field: string): boolean {
   return Boolean(property.enum ?? (property.anyOf ?? []).some((entry) => entry.enum));
 }
 
-/** An enum member is one of a closed set the member picks from, so it is drawn as the thing picked
- *  rather than set in the mono a wire identifier takes. */
 function Chip({ children }: { children: ReactNode }) {
   return (
     <span className="shrink-0 rounded-control border border-edge px-sm py-hair text-small">
@@ -159,11 +116,6 @@ function Chip({ children }: { children: ReactNode }) {
   );
 }
 
-/** One value of an index cell or a status row. The column or the label already carries the field's
- *  name, so the value stands alone — and a value the record does not hold takes an em dash rather
- *  than an empty cell, which reads as a table that failed to draw. A moment reads as its distance
- *  from now — the wait the member is holding for, or how lately the row moved — and holds the
- *  whole stamp for the pointer. */
 const ADDRESS = /^https?:\/\/\S+$/;
 
 function cell(field: string, value: ObjectValue, schema: SpecSchema | null): ReactNode {
@@ -188,9 +140,6 @@ function cell(field: string, value: ObjectValue, schema: SpecSchema | null): Rea
   return value;
 }
 
-/** How the run in a cell went, after the moment it ran at — the same `Last · status` line the
- *  conversation's own automations panel reads. A record with no run behind it states no ending, and
- *  a run whose turn the workspace no longer holds states the moment alone. */
 function ending(row: ObjectRow): string {
   const said = row[ENDING_FIELD];
   if (row[RUN_FIELD] === null || row[RUN_FIELD] === undefined) return "";
@@ -200,27 +149,19 @@ function ending(row: ObjectRow): string {
 export const OWNER_FIELD = "owner_email";
 const OWNER_HEADING = "Created By";
 
-/** Who made a row, in the member's words — the wire's `owner_email` never renders raw. A row
- *  carrying no creator is the workspace's own. */
 export function creator(value: ObjectValue | undefined, viewer: string | null): string {
   return ownerLabel(typeof value === "string" && value ? value : null, viewer);
 }
 
-/** Where an object page stands: the app whose namespace holds it, one kind, and one of its
- *  objects. The app is part of the address because two apps name their objects independently —
- *  `scheduled_task/morning-digest` is a different record under each — and the screens a record is
- *  reached from, the radar feed and the wiki, span every app the member reaches. */
 export type ObjectAddress = { agent: string; kind: string; name: string };
 
 const SLOT_PREFIX = "object/";
 const SLOT_SEPARATOR = "/";
 
-/** The route id for one object in one app namespace. */
 export function slotOf(at: ObjectAddress): string {
   return SLOT_PREFIX + at.agent + SLOT_SEPARATOR + at.kind + SLOT_SEPARATOR + at.name;
 }
 
-/** The object named by a route id, or null when the id names another kind of view. */
 export function objectAt(id: string): ObjectAddress | null {
   if (!id.startsWith(SLOT_PREFIX)) return null;
   const [agent, kind, ...rest] = id.slice(SLOT_PREFIX.length).split(SLOT_SEPARATOR);
@@ -229,7 +170,6 @@ export function objectAt(id: string): ObjectAddress | null {
   return { agent, kind, name };
 }
 
-/** One object kind's index and selected record sheet. */
 export function ObjectPane({
   agentId,
   kind,
@@ -242,19 +182,10 @@ export function ObjectPane({
 }: {
   agentId: string | null;
   kind: string;
-  /** What heads this listing where a page carries more than one kind. */
   section?: string;
-  /** Whether the listing offers the act that writes another record. A screen that already names one
-   *  app passes false: the kind's own workspace screen is where a member writes one, and it is the
-   *  screen that asks which app runs it. */
   makes?: boolean;
-  /** What a page holding more than one kind says about which one is showing. It leads the toolbar,
-   *  where what family to show already stands. */
   lead?: ReactNode;
-  /** The page's own name, where this pane is the page. A tab inside another page passes none —
-   *  the pane it stands in is already headed. */
   title?: string;
-  /** The selected record path carried by the route. */
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
@@ -327,15 +258,6 @@ function ObjectSheets({
   );
 }
 
-/** The band a listing standing among others is headed by: what these records are, and the act that
- *  makes another of them. The name is a heading under the page's, not a second page title — the
- *  page was named once, above, and two names set alike would read as two pages rather than as a
- *  page and the listings on it.
- *
- *  It carries no search. A page of several listings would carry one box per listing, and a member
- *  looking for a name they half remember does not know which of them holds it — so a box that
- *  searches one of the listings on the screen is a box that fails on half the screen. The listings
- *  are short and stand whole; what a search would narrow is already in front of the member. */
 function SectionBand({ name, action }: { name: string; action: ReactNode }) {
   return (
     <div
@@ -480,9 +402,6 @@ function ObjectIndex({
             ) : title ? (
               <Header heading={1} title={title} acts={making} />
             ) : null}
-            {/* A pane that heads itself stands its act on that heading. One standing inside a panel
-                has no heading of its own, so the act joins the bar rather than taking a band of its
-                own above it — one row of controls over the records they act on. */}
             <PageToolbar>
               {section ? null : searching}
               {lead}
@@ -591,9 +510,6 @@ function ObjectIndex({
   );
 }
 
-/** The create act of an index read across the audience has one question a single namespace never
- *  raises: which agent runs the new row. The picker is drawn only where there is a choice to
- *  make — a select with one option states one the member does not have. */
 function NewObject({
   schema,
   kind,
@@ -640,7 +556,6 @@ function NewObject({
   );
 }
 
-/** One object's record inside a sheet. */
 export function ObjectDetail({
   agentId,
   kind,
@@ -658,7 +573,6 @@ export function ObjectDetail({
     status: Record<string, ObjectValue> | null,
     apply: (spec: Record<string, SpecValue>) => Promise<NoticeState>,
   ) => ReactNode;
-  /** What a link inside the record reaches for and whether it preserves the current route path. */
   onOpen: (at: ObjectAddress, aside: boolean) => void;
   onBack: () => void;
 }) {
@@ -750,9 +664,6 @@ export function ObjectDetail({
                 </div>
                 {record.deletes ? (
                   <div className="flex flex-wrap gap-sm">
-                    {/* A kind with a pane of its own is edited in that pane, where every control
-                        commits itself; a form behind an Edit act would be a second way to say the
-                        same thing, with a submit the pane deliberately has not got. */}
                     {record.kind !== SCHEDULED_TASK_KIND &&
                     record.applies &&
                     record.spec_schema &&
@@ -773,8 +684,6 @@ export function ObjectDetail({
   );
 }
 
-/** The record every kind is read by: what it was applied with, what the workspace made of it, and
- *  what it points at. A kind whose record is a screen of its own draws that instead. */
 function SpecAndStatus({
   agentId,
   record,
@@ -870,7 +779,6 @@ function specFact(field: string, value: ObjectValue, schema: SpecSchema | null):
   };
 }
 
-/** One typed object mutation. */
 export type SpecEnvelope = {
   verb: "apply";
   kind: string;
@@ -878,7 +786,6 @@ export type SpecEnvelope = {
   spec: Record<string, SpecValue>;
 };
 
-/** The schema-driven form for creating and editing typed objects. */
 export function SpecPanel({
   schema,
   kind,

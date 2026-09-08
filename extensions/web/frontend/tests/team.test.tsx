@@ -17,8 +17,6 @@ import {
   MEMBER,
 } from "./harness";
 
-/** The add as the member collection projects it: the action's own schema, its label, and the call
- *  template the roster read pre-bound. */
 const ADD_MEMBER = {
   name: "add_member",
   description: "Add a member to this workspace ahead of their first contact.",
@@ -34,8 +32,6 @@ const ADD_MEMBER = {
   label: "Add member",
 };
 
-/** Open the add: the page's act, then the form it draws in the sheet, whose submit carries the
- *  same label. */
 async function openAdd() {
   await userEvent.click(await screen.findByRole("button", { name: "Add member" }));
   const sheet = await screen.findByRole("dialog", { name: "Add member" });
@@ -56,15 +52,11 @@ const ROSTER = {
   actions: [ADD_MEMBER],
 };
 
-/** The same roster once the lead's access is off — what the re-read answers, so a landed apply is
- *  read back off the roster rather than assumed by the row that sent it. */
 const DISABLED_LEAD = {
   ...ROSTER,
   members: [{ ...ROSTER.members[0], seated: false }, ROSTER.members[1]],
 };
 
-/** What the roster's tracks sum to: the role and the status on fact tracks, the address and the
- *  acts cell beside it on shared ones. */
 const FLOOR =
   "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 0 * var(--size-act))";
 
@@ -333,8 +325,6 @@ test("a failed roster read states the fault through the shared fence", async () 
   expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
 });
 
-/** The confirm arms on the first press and fires on the second, so a disable is two presses of the
- *  one control. */
 async function confirmed(row: HTMLElement, verb: string) {
   const act = within(row).getByRole("button", { name: verb });
   await userEvent.click(act);
@@ -425,9 +415,6 @@ test("an admin promotes a member, and the access state rides unchanged", async (
   });
 });
 
-/** The kind's own guards are what refuse, so the roster states the refusal rather than quietly
- *  leaving the row as it was — the last active admin disabling themselves is the case, and a screen
- *  that said nothing would read as a control that does nothing. */
 test("a refused apply states the refusal and leaves the row standing", async () => {
   wire({
     "/workspace/team": () => json(ROSTER),
@@ -443,9 +430,6 @@ test("a refused apply states the refusal and leaves the row standing", async () 
   expect(rowOf("lead@example.com").textContent).toContain("Active");
 });
 
-/** The tracks are fixed pixels, so a table declaring more of them than the desktop leaves holds its
- *  width and the column scrolls sideways — and what falls off the right is the act the row is
- *  pressed by. The roster is the widest shape it draws: three facts and the acts. */
 test("the roster's widest table fits the desktop page it is read on", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);

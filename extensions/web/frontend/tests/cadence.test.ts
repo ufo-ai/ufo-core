@@ -2,8 +2,7 @@ import { expect, test } from "vitest";
 
 import { asMode, cadenceOf, cronOf, labelOf, type Cadence } from "@/lib/cadence";
 
-/** The offset the member's browser reports, in the sign `getTimezoneOffset` uses: minutes to add to
- *  a local clock to reach UTC. */
+/** `getTimezoneOffset`'s sign: minutes to add to a local clock to reach UTC. */
 const CHICAGO = 300;
 
 test("a cadence is written as the cron it fires on, in UTC", () => {
@@ -15,8 +14,6 @@ test("a cadence is written as the cron it fires on, in UTC", () => {
   expect(cronOf({ mode: "custom", cron: "15 2,14 * * *" }, CHICAGO)).toBe("15 2,14 * * *");
 });
 
-/** An hour the offset carries over midnight takes its weekdays with it: a Monday 9pm in Chicago is
- *  Tuesday 02:00 UTC, and a day that did not move would fire a week's worth of runs early. */
 test("an hour that crosses midnight moves the days it fires on", () => {
   expect(cronOf({ mode: "weekly", weekday: 1, hour: 21, minute: 0 }, CHICAGO)).toBe("0 2 * * 2");
   expect(cadenceOf("0 2 * * 2", CHICAGO)).toEqual({
@@ -37,8 +34,6 @@ test.each<Cadence>([
   expect(cadenceOf(cronOf(cadence, CHICAGO), CHICAGO)).toEqual(cadence);
 });
 
-/** A cron no offer stands for is read as the cron itself, rather than as the nearest offer: a
- *  cadence on the screen the schedule does not hold would be changed by being looked at. */
 test.each([
   "15 2,14 * * *",
   "0 */5 * * *",
@@ -58,9 +53,6 @@ test("a cadence is named in the member's own clock", () => {
   expect(labelOf({ mode: "custom", cron: "15 2,14 * * *" })).toBe("15 2,14 * * *");
 });
 
-/** A `custom` cadence is the cron itself and names no clock, so a read of it as a timed offer takes
- *  the clock out of that cron. A default hour there moves every later fire of a task whose time the
- *  member never touched. */
 test("a cadence read off a custom pick keeps the clock the cron holds", () => {
   const custom: Cadence = { mode: "custom", cron: "30 12 * * *" };
   expect(asMode(custom, "daily", custom.cron, CHICAGO)).toEqual({
@@ -76,8 +68,6 @@ test("a cadence read off a custom pick keeps the clock the cron holds", () => {
   });
 });
 
-/** A cron no offer stands for holds no clock to keep, so the offer it is read as takes the default
- *  hour rather than a time read out of a cron that names none. */
 test("a cadence read off a cron no offer stands for takes the default hour", () => {
   expect(
     asMode({ mode: "custom", cron: "15 2,14 * * *" }, "daily", "15 2,14 * * *", CHICAGO),
