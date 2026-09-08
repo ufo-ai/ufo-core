@@ -29,12 +29,12 @@ import {
   QUIET,
   Section,
 } from "@/kernel/panel";
-import type { ListingSpec } from "@/kernel/listing";
-import { BASE, postIntent } from "@/lib/api";
+import type { ListingSpec, RowContext } from "@/kernel/listing";
+import { BASE, postAction } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import { BrandMark, BRAND_MARKS } from "@/lib/brandMark";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
-import type { ActionInput, ActionView, CredentialPrompt } from "@/lib/types";
+import type { ActionView, CredentialPrompt } from "@/lib/types";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import {
   CredentialValueFields,
@@ -56,22 +56,20 @@ const WORKSPACE_EXTENSION = "workspace_credentials";
 const SLOT_KIND = "credential_slot";
 const DEFAULT_HEADER = "Authorization";
 
-const WS_PLACEHOLDER = "add-workspace-key";
-const SVC_PLACEHOLDER = "add-service-key";
-
-type PlaceholderRow = Slot & { placeholder: typeof WS_PLACEHOLDER | typeof SVC_PLACEHOLDER };
-
-function isPlaceholder(row: Slot): row is PlaceholderRow {
-  return (row as PlaceholderRow).placeholder !== undefined;
-}
+/* The shapes `ufo_ext_workspace_credentials` refuses a declaration for — held here too, so the
+   form says no before the round-trip rather than after it. */
+const VARIABLE_PATTERN = "[A-Z][A-Z0-9_]{2,63}";
+const HOST_PATTERN = "[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+";
+const HEADER_PATTERN = "[A-Za-z][A-Za-z0-9-]{0,63}";
 
 type CredentialsPayload = { slots: Slot[]; actions: ActionView[] };
 
 function credentialRequest(row: Slot) {
   return {
     reason:
-      row.extension + " authenticates with this value; it is stored encrypted and never shown again.",
-    prompts: [{ slot: row.slot, prompt: row.description || row.slot }],
+      (row.host ? "Sent to " + row.host + " and nowhere else. " : "") +
+      "Stored encrypted and never shown again.",
+    prompts: [{ slot: row.slot, prompt: row.description || row.env || row.slot }],
   };
 }
 
@@ -82,45 +80,17 @@ const MODEL_PROVIDER_SLOTS = [
   "openrouter_api_key",
 ] as const;
 
-const SERVICE_KEY_SLOTS = [
-  "datadog_api_key",
-  "datadog_application_key",
-  "datadog_api_host",
-  "perplexity_api_key",
-  "turbopuffer_api_key",
-  "browserbase_api_key",
-  "browser_use_api_key",
-] as const;
+const SECTION_ORDER = ["Model providers", "Service keys", "Workspace keys", "MCP"];
 
-const MCP_SLOTS = [MCP_SERVERS_SLOT] as const;
-
-const EXTENSION_SECTIONS: Record<string, string> = {
-  workspace_credentials: "Workspace keys",
-  browser_use: "Service keys",
-  browserbase: "Service keys",
-  perplexity: "Service keys",
-  keyed_connectors: "Service keys",
-  mcp: "MCP",
-  turbopuffer: "Service keys",
-};
-
+/* A closed set of four. A section per extension gave Slack a heading and one row under it, and
+   every extension that declares a key would earn one the same way. */
 function credentialSection(row: Slot) {
-  if (isPlaceholder(row))
-    return row.placeholder === WS_PLACEHOLDER ? "Workspace keys" : "Service keys";
+  if (row.extension === WORKSPACE_EXTENSION) return "Workspace keys";
   const slot = row.slot.toLowerCase();
+  if (slot === MCP_SERVERS_SLOT) return "MCP";
   if (MODEL_PROVIDER_SLOTS.includes(slot as (typeof MODEL_PROVIDER_SLOTS)[number]))
     return "Model providers";
-  if (SERVICE_KEY_SLOTS.includes(slot as (typeof SERVICE_KEY_SLOTS)[number]))
-    return "Service keys";
-  if (MCP_SLOTS.includes(slot as (typeof MCP_SLOTS)[number])) return "MCP";
-  return EXTENSION_SECTIONS[row.extension] ?? extensionTitle(row.extension);
-}
-
-function extensionTitle(extension: string) {
-  return extension
-    .split("_")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+  return "Service keys";
 }
 
 /** The longest provider the portal draws that the slot's own name starts with. Read off the two sets
@@ -150,11 +120,8 @@ function slotName(slot: string) {
     .replace(/^-+|-+$/g, "");
 }
 
-let heldServiceSlots: Slot[] = [];
-
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
-  note: "Credential values are shared across the workspace.",
   lead: (
     <Section
       title="Coding providers"
@@ -164,92 +131,79 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     </Section>
   ),
   group: credentialSection,
-  rows: (payload) => {
-    heldServiceSlots = payload.slots.filter(
-      (slot) =>
-        !slot.filled &&
-        credentialSection(slot) !== "Workspace keys" &&
-        slot.slot !== MCP_SERVERS_SLOT,
-    );
-    const rows: Slot[] = payload.slots.filter(
-      (slot) => slot.filled || slot.extension === WORKSPACE_EXTENSION,
-    );
-    {
-      rows.push({
-        name: WS_PLACEHOLDER,
-        slot: WS_PLACEHOLDER,
-        description: "Declare a key of the workspace's own.",
-        extension: WORKSPACE_EXTENSION,
-        filled: false,
-        host: "",
-        env: "",
-        header: DEFAULT_HEADER,
-        placeholder: WS_PLACEHOLDER,
-      } as PlaceholderRow);
-    }
-    const unsetService = heldServiceSlots.filter(
-      (slot) => slot.slot !== MCP_SERVERS_SLOT,
-    );
-    if (unsetService.length) {
-      rows.push({
-        name: SVC_PLACEHOLDER,
-        slot: SVC_PLACEHOLDER,
-        description: "Fill one of the service keys waiting for a value.",
-        extension: "service_keys",
-        filled: false,
-        host: "",
-        env: "",
-        header: DEFAULT_HEADER,
-        placeholder: SVC_PLACEHOLDER,
-      } as PlaceholderRow);
-    }
-    return rows;
-  },
+  /* An unset slot is nothing to read and nothing to replace, so it draws no row; a workspace
+     declaration draws one either way, because it names a key even before it holds a value. */
+  rows: (payload) =>
+    payload.slots
+      .filter((slot) => slot.filled || slot.extension === WORKSPACE_EXTENSION)
+      .sort((left, right) => {
+        const leftSection = credentialSection(left);
+        const rightSection = credentialSection(right);
+        if (leftSection !== rightSection) {
+          const leftRank = SECTION_ORDER.indexOf(leftSection);
+          const rightRank = SECTION_ORDER.indexOf(rightSection);
+          const rankedLeft = leftRank === -1 ? SECTION_ORDER.length : leftRank;
+          const rankedRight = rightRank === -1 ? SECTION_ORDER.length : rightRank;
+          if (rankedLeft !== rankedRight) return rankedLeft - rankedRight;
+          return leftSection.localeCompare(rightSection);
+        }
+        return left.slot.localeCompare(right.slot);
+      }),
   rowKey: (row) => row.name,
   search: (row) => [row.slot, row.description, row.extension, row.host, row.env].join(" "),
   list: {
-    mark: (row) =>
-      isPlaceholder(row) ? null : (
-        <MarkTile>
-          <BrandMark provider={slotProvider(row.slot)} className="text-ink" />
-        </MarkTile>
-      ),
-    primary: { field: "slot" },
+    mark: (row) => (
+      <MarkTile>
+        <BrandMark provider={slotProvider(row.slot)} className="text-ink" />
+      </MarkTile>
+    ),
+    /* The variable, not the slug core files it under: a workspace key drawn as `acme_api_key`
+       beside `OPENAI_API_KEY` reads as a second kind of name for the same thing. */
+    primary: { field: "env", render: (env, row) => env || row.slot },
     meta: [
-      {
-        field: "description",
-        render: (description, row) =>
-          isPlaceholder(row) ? <span className="text-ink-quiet">{description}</span> : codeSpans(description),
-      },
-      { field: "host", render: (host, row) => (host ? codeSpans(`${row.env} → ${host}`) : null) },
+      { field: "description", render: (description) => codeSpans(description) },
+      { field: "host", render: (host) => codeSpans(host) },
     ],
   },
 
   empty: "No credential is set.",
+  /* Over the rows rather than among them: an act drawn as a row is filtered out by a search, and
+     the member searching for the key they have not added yet is the one who needs it. */
+  offer: (payload, context) => {
+    const request = context.actions.find((view) => view.name === "request_credentials");
+    const unset = payload.slots.filter(
+      (slot) => !slot.filled && slot.extension !== WORKSPACE_EXTENSION,
+    );
+    return (
+      <div className="flex gap-sm">
+        <DeclareCredential
+          busy={context.busy}
+          context={context}
+          taken={payload.slots}
+        />
+        {request && unset.length ? (
+          <SetCredential
+            slots={unset}
+            busy={context.busy}
+            onPicked={(row) => void context.action(request, credentialRequest(row))}
+          />
+        ) : null}
+      </div>
+    );
+  },
   views: (payload) => payload.actions,
-  actions: (row, { act, action, busy, actions }) => {
+  actions: (row, context) => {
+    const { act, action, busy, actions } = context;
     const request = actions.find((view) => view.name === "request_credentials");
-    if (isPlaceholder(row)) {
-      return (
-        <div className={ACTS}>
-          {row.placeholder === WS_PLACEHOLDER ? (
-            <DeclareCredential busy={busy} onDeclared={act} act={action} actions={actions} />
-          ) : null}
-          {row.placeholder === SVC_PLACEHOLDER && request ? (
-            <SetCredential
-              slots={heldServiceSlots}
-              busy={busy}
-              onPicked={(picked) => action(request, credentialRequest(picked))}
-            />
-          ) : null}
-        </div>
-      );
-    }
     return (
       <div className={ACTS}>
         {row.filled ? (
           <span data-part="status" className="flex items-center gap-xs text-label text-ink-soft">
-            <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
+            <IconCheck
+              role="img"
+              aria-label={(row.env || row.slot) + " filled"}
+              className="size-icon"
+            />
             Filled
           </span>
         ) : (
@@ -258,19 +212,13 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
           </span>
         )}
         {row.extension === WORKSPACE_EXTENSION ? (
-          <DeclareCredential
-            busy={busy}
-            onDeclared={act}
-            act={action}
-            actions={actions}
-            slot={row}
-          />
+          <DeclareCredential busy={busy} context={context} slot={row} />
         ) : null}
         {request ? (
           <Button
             variant="row"
             disabled={busy}
-            onClick={() => action(request, credentialRequest(row))}
+            onClick={() => void action(request, credentialRequest(row))}
           >
             {row.slot === MCP_SERVERS_SLOT ? "Update" : row.filled ? "Replace" : "Set"}
           </Button>
@@ -280,7 +228,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
           variant="row"
           disabled={busy}
           onClick={() =>
-            act({
+            void act({
               verb: "delete",
               kind: row.extension === WORKSPACE_EXTENSION ? SLOT_KIND : "credential",
               name: row.name,
@@ -296,10 +244,10 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
         <PromptHeader provider={askedProvider(request.prompts)}>
           <DialogTitle>
             {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
-              ? "Save MCP Server"
+              ? "Save MCP server"
               : request.prompts.length === 1
-                ? "Add service key"
-                : "Add service keys"}
+                ? "Credential value"
+                : "Credential values"}
           </DialogTitle>
           <DialogDescription>
             {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
@@ -330,78 +278,52 @@ function PromptHeader({ provider, children }: { provider: string | null; childre
   );
 }
 
-/** The value is collected at create time: saving runs the credential collection's `request_credentials`
- *  for the new slot, so one save lands the declaration and the value together under its sealed handoff. */
+/** A pasted endpoint is filed as the host the egress proxy matches on, trimmed where the member
+ *  can see it happen rather than saved as a value the proxy will never match. */
+function hostOf(said: string) {
+  return said
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/[/?#].*$/, "")
+    .replace(/\.$/, "");
+}
+
+/** The sealed handoff a row's Set opens, minted and spent here on the value the form already holds
+ *  — so a new key is declared and filled by one save and the secret is typed once. */
+async function storeValue(agentId: string, actions: ActionView[], row: Slot, value: string) {
+  const request = actions.find((view) => view.name === "request_credentials");
+  const stranded = "The key is declared. Its value was not stored — set it from its row.";
+  if (!request) return stranded;
+  const outcome = await postAction(agentId, request.call, credentialRequest(row));
+  const sealed = outcome.credentials?.sealed;
+  if (!sealed) return outcome.message || stranded;
+  let res: Response;
+  try {
+    res = await fetch(BASE + "/credentials", {
+      method: "POST",
+      body: new URLSearchParams({ sealed, slot: row.slot, value }),
+      credentials: "same-origin",
+    });
+  } catch {
+    return "Network error — try again.";
+  }
+  return res.ok ? "" : (await res.text().catch(() => "")) || stranded;
+}
+
+/** The variable an admin names is the name the declaration is filed under, not a separate one, so
+ *  a slot cannot be declared under one name and exported under another. */
 function DeclareCredential({
   busy,
-  onDeclared,
-  act,
-  actions,
+  context,
+  taken = [],
   slot,
 }: {
   busy: boolean;
-  onDeclared: (envelope: unknown) => void;
-  act: (view: ActionView, input: ActionInput) => void;
-  actions: ActionView[];
+  context: RowContext;
+  taken?: Slot[];
   slot?: Slot;
 }) {
-  const mainAgent = useMainAgent();
   const [open, setOpen] = useState(false);
-  const [env, setEnv] = useState(slot?.env ?? "");
-  const [host, setHost] = useState(slot?.host ?? "");
-  const [header, setHeader] = useState(slot?.header ?? DEFAULT_HEADER);
-  const [description, setDescription] = useState(slot?.description ?? "");
-  const [value, setValue] = useState("");
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
-  const [saving, setSaving] = useState(false);
-  const ready = Boolean(env.trim() && host.trim());
-
-  async function declare() {
-    if (!mainAgent || saving) return;
-    const envelope = {
-      verb: "apply",
-      kind: SLOT_KIND,
-      name: slotName(env),
-      spec: {
-        slot: env.trim().toLowerCase(),
-        env: env.trim(),
-        host: host.trim(),
-        header: header.trim() || DEFAULT_HEADER,
-        description: description.trim(),
-      },
-    };
-    setSaving(true);
-    const outcome = await postIntent(mainAgent.id, envelope);
-    if (!outcome.applied) {
-      setSaving(false);
-      setNotice(outcomeNotice(outcome));
-      return;
-    }
-    setOpen(false);
-    setSaving(false);
-    if (slot) {
-      onDeclared(envelope);
-      return;
-    }
-    const request = actions.find((view) => view.name === "request_credentials");
-    if (!request) {
-      onDeclared(envelope);
-      return;
-    }
-    /* The value goes through the sealed prompt rather than this form: the request opens the same
-       sealed handoff a row's Replace opens. */
-    act(request, credentialRequest({
-      name: slotName(env),
-      slot: env.trim().toLowerCase(),
-      description: description.trim(),
-      extension: WORKSPACE_EXTENSION,
-      filled: false,
-      host: host.trim(),
-      env: env.trim(),
-      header: header.trim() || DEFAULT_HEADER,
-    }));
-  }
-
   return (
     <>
       {slot ? (
@@ -413,80 +335,191 @@ function DeclareCredential({
           Add workspace key
         </Button>
       )}
-      <Sheet
-        open={open}
-        title={slot ? "Edit workspace key" : "Add workspace key"}
-        onClose={() => setOpen(false)}
-      >
-        <OutcomeNotice state={notice} />
-        <div className="flex flex-col gap-lg">
+      {/* Mounted only while it stands, so every open starts on empty fields rather than on the
+          last key's host and the secret typed into it. */}
+      {open ? (
+        <Sheet
+          open
+          title={slot ? "Edit workspace key" : "Add workspace key"}
+          onClose={() => setOpen(false)}
+        >
+          <DeclareForm
+            context={context}
+            taken={taken}
+            slot={slot}
+            onSaved={() => setOpen(false)}
+          />
+        </Sheet>
+      ) : null}
+    </>
+  );
+}
+
+function DeclareForm({
+  context,
+  taken,
+  slot,
+  onSaved,
+}: {
+  context: RowContext;
+  taken: Slot[];
+  slot?: Slot;
+  onSaved: () => void;
+}) {
+  const mainAgent = useMainAgent();
+  const [env, setEnv] = useState(slot?.env ?? "");
+  const [host, setHost] = useState(slot?.host ?? "");
+  const [header, setHeader] = useState(slot?.header ?? DEFAULT_HEADER);
+  const [description, setDescription] = useState(slot?.description ?? "");
+  const [value, setValue] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const [saving, setSaving] = useState(false);
+  const name = slotName(env);
+  const clash =
+    slot === undefined && name !== ""
+      ? (taken.find((held) => slotName(held.slot) === name) ?? null)
+      : null;
+  const ready =
+    Boolean(env.trim() && host.trim() && (slot || value.trim())) && clash === null && !saving;
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!mainAgent || !ready) return;
+    const declared: Slot = {
+      name,
+      slot: env.trim().toLowerCase(),
+      description: description.trim(),
+      extension: WORKSPACE_EXTENSION,
+      filled: false,
+      host: hostOf(host),
+      env: env.trim(),
+      header: header.trim() || DEFAULT_HEADER,
+    };
+    setSaving(true);
+    const outcome = await context.act({
+      verb: "apply",
+      kind: SLOT_KIND,
+      name: declared.name,
+      spec: {
+        slot: declared.slot,
+        env: declared.env,
+        host: declared.host,
+        header: declared.header,
+        description: declared.description,
+      },
+    });
+    if (!outcome.applied) {
+      setSaving(false);
+      setNotice(outcomeNotice(outcome));
+      return;
+    }
+    const failure = slot ? "" : await storeValue(mainAgent.id, context.actions, declared, value);
+    setSaving(false);
+    if (failure) {
+      setNotice({ text: failure, refused: true });
+      return;
+    }
+    onSaved();
+  }
+
+  return (
+    <form onSubmit={save} className="flex flex-col gap-2xl">
+      <OutcomeNotice state={notice} />
+      <div className="flex flex-col gap-lg">
+        <Field
+          label="Variable"
+          htmlFor="credential-env"
+          description="The name the sandbox exports. Upper case letters, digits and underscore, 3 to 64 characters."
+        >
+          <Input
+            id="credential-env"
+            /* Without it the drawer's Close takes the focus, where Enter discards the form. */
+            autoFocus={slot === undefined}
+            autoComplete="off"
+            placeholder="PROVIDER_API_KEY"
+            required
+            pattern={VARIABLE_PATTERN}
+            disabled={slot !== undefined}
+            value={env}
+            onChange={(event) => setEnv(event.target.value)}
+          />
+        </Field>
+        {clash ? (
+          <p role="status" className="m-0 text-label text-ink-soft">
+            {env.trim()}{" "}
+            {clash.extension === WORKSPACE_EXTENSION
+              ? "is already declared. Edit it from its row."
+              : "is declared by an installed extension. Choose another name."}
+          </p>
+        ) : null}
+        <Field
+          label="Host"
+          htmlFor="credential-host"
+          description="The provider host the value is sent to. A public DNS name, without scheme or path."
+        >
+          <Input
+            id="credential-host"
+            autoFocus={slot !== undefined}
+            autoComplete="off"
+            placeholder="api.example.com"
+            required
+            pattern={HOST_PATTERN}
+            value={host}
+            onChange={(event) => setHost(event.target.value)}
+            onBlur={(event) => setHost(hostOf(event.target.value))}
+          />
+        </Field>
+        <Field
+          label="Header"
+          htmlFor="credential-header"
+          description="The request header the value is sent in."
+        >
+          <Input
+            id="credential-header"
+            autoComplete="off"
+            placeholder={DEFAULT_HEADER}
+            pattern={HEADER_PATTERN}
+            value={header}
+            onChange={(event) => setHeader(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="Description"
+          htmlFor="credential-description"
+          description="What the key is for. Shown in its row on this screen."
+        >
+          <Input
+            id="credential-description"
+            autoComplete="off"
+            placeholder="Billing API key."
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+          />
+        </Field>
+        {slot ? null : (
           <Field
-            label="Variable"
-            htmlFor="credential-env"
-            description="What the sandbox exports, and the name the key is filed under."
+            label="Value"
+            htmlFor="credential-value"
+            description="Stored encrypted and never shown again. The sandbox gets a placeholder; the proxy sends the real value to this host alone."
           >
             <Input
-              id="credential-env"
+              id="credential-value"
+              type="password"
               autoComplete="off"
-              placeholder="ACME_API_KEY"
+              placeholder="Paste the key"
               required
-              disabled={slot !== undefined}
-              value={env}
-              onChange={(event) => setEnv(event.target.value)}
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
             />
           </Field>
-          <Field label="Host" htmlFor="credential-host" description="Where the value is sent.">
-            <Input
-              id="credential-host"
-              autoComplete="off"
-              placeholder="api.acme.com"
-              required
-              value={host}
-              onChange={(event) => setHost(event.target.value)}
-            />
-          </Field>
-          <Field label="Header" htmlFor="credential-header" description="The header it rides in.">
-            <Input
-              id="credential-header"
-              autoComplete="off"
-              placeholder={DEFAULT_HEADER}
-              value={header}
-              onChange={(event) => setHeader(event.target.value)}
-            />
-          </Field>
-          <Field label="Description" htmlFor="credential-description">
-            <Input
-              id="credential-description"
-              autoComplete="off"
-              placeholder="Acme API key (Settings → API)."
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-            />
-          </Field>
-          {!slot ? (
-            <Field
-              label="Value"
-              htmlFor="credential-value"
-              description="Typed once and stored encrypted, never shown again. The sandbox holds a placeholder only; the proxy sends the real value to this host alone."
-            >
-              <Input
-                id="credential-value"
-                type="password"
-                autoComplete="off"
-                placeholder="Paste the key"
-                value={value}
-                onChange={(event) => setValue(event.target.value)}
-              />
-            </Field>
-          ) : null}
-        </div>
-        <div className="flex justify-end">
-          <Button variant="send" disabled={!ready || busy || saving} onClick={() => void declare()}>
-            Save
-          </Button>
-        </div>
-      </Sheet>
-    </>
+        )}
+      </div>
+      <div className="flex justify-end">
+        <Button type="submit" variant="send" size="bar" busy={saving} disabled={!ready}>
+          Save
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -499,49 +532,68 @@ function SetCredential({
   busy: boolean;
   onPicked: (row: Slot) => void;
 }) {
-  const unsetServiceSlots = slots;
   const [asking, setAsking] = useState(false);
-  const [picked, setPicked] = useState("");
   return (
     <div className="flex">
-      <Button variant="outline" size="bar" onClick={() => setAsking(true)}>
+      <Button variant="outline" size="bar" disabled={busy} onClick={() => setAsking(true)}>
         Add service key
       </Button>
-      <Sheet open={asking} title="Add service key" onClose={() => setAsking(false)}>
-        <Field label="Credential" htmlFor="credential-slot">
-          <Select value={picked} onValueChange={setPicked}>
-            <SelectTrigger id="credential-slot">
-              <SelectValue placeholder="Choose a credential" />
-            </SelectTrigger>
-            <SelectContent>
-              {unsetServiceSlots.map((slot) => (
-                <SelectItem key={slot.slot} value={slot.slot}>
-                  <span className="flex min-w-0 items-center gap-sm">
-                    <BrandMark
-                      provider={slotProvider(slot.slot)}
-                      className="size-(--size-icon)"
-                    />
-                    <span className="min-w-0 truncate">{slot.slot}</span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-        <div className="flex justify-end">
-          <Button
-            variant="send"
-            disabled={!picked || busy}
-            onClick={() => {
+      {asking ? (
+        <Sheet open title="Add service key" onClose={() => setAsking(false)}>
+          <PickCredential
+            slots={slots}
+            busy={busy}
+            onPicked={(row) => {
               setAsking(false);
-              const row = unsetServiceSlots.find((slot) => slot.slot === picked);
-              if (row) onPicked(row);
+              onPicked(row);
             }}
-          >
-            Continue
-          </Button>
-        </div>
-      </Sheet>
+          />
+        </Sheet>
+      ) : null}
+    </div>
+  );
+}
+
+function PickCredential({
+  slots,
+  busy,
+  onPicked,
+}: {
+  slots: Slot[];
+  busy: boolean;
+  onPicked: (row: Slot) => void;
+}) {
+  const [picked, setPicked] = useState("");
+  const row = slots.find((slot) => slot.slot === picked);
+  return (
+    <div className="flex flex-col gap-2xl">
+      <Field label="Credential" htmlFor="credential-slot">
+        <Select value={picked} onValueChange={setPicked}>
+          <SelectTrigger id="credential-slot">
+            <SelectValue placeholder="Choose a credential" />
+          </SelectTrigger>
+          <SelectContent>
+            {slots.map((slot) => (
+              <SelectItem key={slot.slot} value={slot.slot}>
+                <span className="flex min-w-0 items-center gap-sm">
+                  <BrandMark provider={slotProvider(slot.slot)} className="size-(--size-icon)" />
+                  <span className="min-w-0 truncate">{slot.slot}</span>
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      <div className="flex justify-end">
+        <Button
+          variant="send"
+          size="bar"
+          disabled={!row || busy}
+          onClick={() => row && onPicked(row)}
+        >
+          Continue
+        </Button>
+      </div>
     </div>
   );
 }

@@ -183,6 +183,9 @@ export function CardGrid<Row>({
 }
 
 export function codeSpans(text: string): ReactNode {
+  /* An empty field renders nothing rather than an empty span: a meta line separates the parts it
+     was given, and a part that draws no glyph would take a separator dot of its own. */
+  if (!text) return null;
   const segments = text.split("`");
   return segments.map((segment, index) =>
     index % 2 === 1 && index < segments.length - 1 ? (

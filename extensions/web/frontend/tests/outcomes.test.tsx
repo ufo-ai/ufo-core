@@ -152,7 +152,7 @@ test("a credential intent that answers with a request renders the prompt carryin
   expect(intents[0]).toEqual({
     url: "/surface/web/agents/" + AGENT.id + "/actions/credential/request_credentials",
     body: {
-      reason: "models authenticates with this value; it is stored encrypted and never shown again.",
+      reason: "Stored encrypted and never shown again.",
       prompts: [{ slot: "OPENAI_API_KEY", prompt: "the key" }],
     },
   });
@@ -187,7 +187,7 @@ test("the credentials screen offers the member their own coding accounts", async
   expect(screen.getByText("Claude")).toBeTruthy();
   expect(
     [...document.querySelectorAll("main h2")].map((heading) => heading.textContent),
-  ).toEqual(["Coding providers", "Model providers", "Workspace keys"]);
+  ).toEqual(["Coding providers", "Model providers"]);
 });
 
 test("credentials group and sort the filled slots, and render their literals", async () => {
@@ -198,7 +198,6 @@ test("credentials group and sort the filled slots, and render their literals", a
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(await screen.findByText("Credential values are shared across the workspace.")).toBeTruthy();
   expect(
     (await screen.findAllByText("Filled", { selector: '[data-part="status"]' })).length,
   ).toBe(2);
@@ -206,7 +205,6 @@ test("credentials group and sort the filled slots, and render their literals", a
     "Coding providers",
     "Model providers",
     "Service keys",
-    "Workspace keys",
   ]);
   expect(screen.queryByText("APOLLO_API_KEY")).toBeNull();
   expect(screen.getByRole("button", { name: "Add workspace key" })).toBeTruthy();
@@ -215,24 +213,39 @@ test("credentials group and sort the filled slots, and render their literals", a
   expect(code.textContent).not.toContain("`");
   const cards = screen
     .getAllByRole("listitem")
-    .filter((card) => card.querySelector("[data-part=primary]"))
-    .filter((card) => !/^add-/.test(card.querySelector("[data-part=primary]")?.textContent ?? ""));
+    .filter((card) => card.querySelector("[data-part=primary]"));
   expect(cards.map((card) => card.querySelector("[data-part=primary]")?.textContent)).toEqual([
     "OPENAI_API_KEY",
     "DATADOG_API_KEY",
   ]);
 });
 
-test("workspace credential slots are visible and editable through prepared intents", async () => {
+test("a workspace key is declared and filled by one save, and edited by one intent", async () => {
   location.hash = "#/workspace/credentials";
   const intents: unknown[] = [];
+  const posts: string[] = [];
   wire({
     "/workspace/credentials": () =>
-      json({ actions: CREDENTIAL_ACTIONS, slots: [WORKSPACE_SLOT] }),
+      json({ actions: CREDENTIAL_ACTIONS, slots: [WORKSPACE_SLOT, SLOT] }),
     "/workspace/accounts": () => json({ accounts: [] }),
     "/intents": (_url, init) => {
       intents.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Saved." });
+    },
+    "/request_credentials": () =>
+      json({
+        applied: true,
+        message: "",
+        turn_id: TURN_ID,
+        credentials: {
+          sealed: "seal-token",
+          reason: "Sent to api.new.example alone. Stored encrypted and never shown again.",
+          prompts: [{ slot: "new_api_key", prompt: "" }],
+        },
+      }),
+    "/credentials": (_url, init) => {
+      posts.push(String(init?.body));
+      return json({ stored: true });
     },
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
@@ -241,57 +254,183 @@ test("workspace credential slots are visible and editable through prepared inten
   expect(screen.getByText("No value")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Set" })).toBeTruthy();
 
+  /* A field takes the focus, not the header's Close, where Enter would discard the form. */
   await userEvent.click(screen.getByRole("button", { name: "Add workspace key" }));
-  await userEvent.type(screen.getByLabelText("Variable"), "NEW_API_KEY");
-  await userEvent.type(screen.getByLabelText("Host"), "api.new.example");
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await waitFor(() =>
-    expect(intents.some((one) => (one as { name?: string }).name === "new-api-key")).toBe(true),
-  );
-  expect(
-    intents.filter((one) => (one as { name?: string }).name === "new-api-key")[0],
-  ).toEqual({
-    verb: "apply",
-    kind: "credential_slot",
-    name: "new-api-key",
-    spec: {
-      slot: "new_api_key",
-      env: "NEW_API_KEY",
-      host: "api.new.example",
-      header: "Authorization",
-      description: "",
-    },
-  });
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Variable")));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
+  /* Closing the sheet drops what was typed into it — a reopen never shows the last secret. */
+  await userEvent.click(screen.getByRole("button", { name: "Add workspace key" }));
+  await userEvent.type(screen.getByLabelText("Variable"), "ABANDONED_KEY");
+  await userEvent.type(screen.getByLabelText("Value"), "sk-abandoned");
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add workspace key" }));
+  expect((screen.getByLabelText("Variable") as HTMLInputElement).value).toBe("");
+  expect((screen.getByLabelText("Value") as HTMLInputElement).value).toBe("");
+
+  await userEvent.type(screen.getByLabelText("Variable"), "NEW_API_KEY");
+  /* Pasted as an endpoint, filed as the host the proxy matches on. */
+  await userEvent.type(screen.getByLabelText("Host"), "https://api.new.example/v1");
+  await userEvent.tab();
+  expect((screen.getByLabelText("Host") as HTMLInputElement).value).toBe("api.new.example");
+  /* The value is part of the declaration, so Save does not stand until it is typed. */
+  expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  await userEvent.type(screen.getByLabelText("Value"), "sk-new");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(posts).toHaveLength(1));
+  expect(intents).toEqual([
+    {
+      verb: "apply",
+      kind: "credential_slot",
+      name: "new-api-key",
+      spec: {
+        slot: "new_api_key",
+        env: "NEW_API_KEY",
+        host: "api.new.example",
+        header: "Authorization",
+        description: "",
+      },
+    },
+  ]);
+  const sent = new URLSearchParams(posts[0]);
+  expect(sent.get("sealed")).toBe("seal-token");
+  expect(sent.get("slot")).toBe("new_api_key");
+  expect(sent.get("value")).toBe("sk-new");
+  /* One save, one prompt: the sheet is gone and no second dialog stands asking for the secret. */
+  expect(screen.queryByLabelText("Value")).toBeNull();
+
+  /* A variable already declared is edited from its row, never overwritten from here. */
+  await userEvent.click(screen.getByRole("button", { name: "Add workspace key" }));
+  await userEvent.type(screen.getByLabelText("Variable"), "ACME_API_KEY");
+  expect(
+    await screen.findByText("ACME_API_KEY is already declared. Edit it from its row."),
+  ).toBeTruthy();
+  /* A name an installed extension holds names the remedy that exists for it. */
+  await userEvent.clear(screen.getByLabelText("Variable"));
+  await userEvent.type(screen.getByLabelText("Variable"), "OPENAI_API_KEY");
+  expect(
+    await screen.findByText(
+      "OPENAI_API_KEY is declared by an installed extension. Choose another name.",
+    ),
+  ).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+
+  intents.length = 0;
   await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  /* The Variable is fixed on an edit, so the focus lands on the first field that takes one. */
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Host")));
   const host = screen.getByLabelText("Host");
   await userEvent.clear(host);
   await userEvent.type(host, "api.eu.acme.com");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await waitFor(() =>
-    expect(intents.some((one) => (one as { name?: string }).name === "acme-api-key" && (one as { spec?: { host?: string } }).spec?.host === "api.eu.acme.com")).toBe(true),
-  );
-  expect(
-    intents.filter((one) => (one as { name?: string }).name === "acme-api-key").at(-1),
-  ).toMatchObject({
+  await waitFor(() => expect(intents).toHaveLength(1));
+  expect(intents[0]).toMatchObject({
     verb: "apply",
     kind: "credential_slot",
     name: "acme-api-key",
     spec: { host: "api.eu.acme.com" },
   });
+  /* An edit asks for no value, so it spends no seal. */
+  expect(posts).toHaveLength(1);
 
+  intents.length = 0;
   await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm remove" }));
-  await waitFor(() =>
-    expect(intents.some((one) => (one as { verb?: string }).verb === "delete")).toBe(true),
-  );
-  expect(
-    intents.filter((one) => (one as { verb?: string }).verb === "delete")[0],
-  ).toEqual({
+  await waitFor(() => expect(intents).toHaveLength(1));
+  expect(intents[0]).toEqual({
     verb: "delete",
     kind: "credential_slot",
     name: "acme-api-key",
   });
+});
+
+test("Enter in the workspace key form saves it", async () => {
+  location.hash = "#/workspace/credentials";
+  const intents: unknown[] = [];
+  wire({
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }),
+    "/workspace/accounts": () => json({ accounts: [] }),
+    "/intents": (_url, init) => {
+      intents.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+    "/request_credentials": () =>
+      json({
+        applied: true,
+        message: "",
+        credentials: {
+          sealed: "seal-token",
+          reason: "",
+          prompts: [{ slot: "new_api_key", prompt: "" }],
+        },
+      }),
+    "/credentials": () => json({ stored: true }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Add workspace key" }));
+  await userEvent.type(screen.getByLabelText("Variable"), "NEW_API_KEY");
+  await userEvent.type(screen.getByLabelText("Host"), "api.new.example");
+  await userEvent.type(screen.getByLabelText("Value"), "sk-new{Enter}");
+
+  await waitFor(() => expect(intents).toHaveLength(1));
+});
+
+test("a credential row names the variable, and a row with no prose leads with no separator", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () =>
+      json({
+        actions: CREDENTIAL_ACTIONS,
+        slots: [
+          SLOT,
+          { ...WORKSPACE_SLOT, filled: true, description: "" },
+          { name: "slack", slot: "SLACK_BOT_TOKEN", extension: "slack", description: "", filled: true },
+        ],
+      }),
+    "/workspace/accounts": () => json({ accounts: [] }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  /* The variable an admin typed, in the case every other row is drawn in — not `acme_api_key`. */
+  const row = (await screen.findByText("ACME_API_KEY")).closest("li")!;
+  expect(within(row).queryByText("acme_api_key")).toBeNull();
+  /* What a reader hears is what the row is titled, not the slug behind it. */
+  expect(within(row).getByRole("img", { name: "ACME_API_KEY filled" })).toBeTruthy();
+  /* An absent description takes no separator dot of its own. */
+  expect(row.querySelector("[data-part=body]")?.textContent).toBe("api.acme.com");
+
+  /* An extension that declares a key does not earn a heading of its own. */
+  expect([...document.querySelectorAll("main h2")].map((heading) => heading.textContent)).toEqual([
+    "Coding providers",
+    "Model providers",
+    "Service keys",
+    "Workspace keys",
+  ]);
+  expect(screen.getByText("SLACK_BOT_TOKEN").closest("section")!.querySelector("h2")!.textContent).toBe(
+    "Service keys",
+  );
+});
+
+test("a search over the credentials keeps the acts that add one", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () =>
+      json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, EMPTY_SLOT] }),
+    "/workspace/accounts": () => json({ accounts: [] }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.type(
+    await screen.findByRole("searchbox", { name: "Search credentials" }),
+    "nothing-matches-this{Enter}",
+  );
+
+  expect(await screen.findByText("Nothing matches.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Add workspace key" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Add service key" })).toBeTruthy();
 });
 
 test("a coding provider row and a credential row each lead with their provider's mark", async () => {
@@ -333,11 +472,11 @@ test("a credential family stands further from the family above it than from its 
   wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, HOST_SLOT, EMPTY_SLOT] }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await screen.findByText("Credential values are shared across the workspace.");
+  await screen.findByRole("button", { name: "Add workspace key" });
   const families = [...document.querySelectorAll("main h2")]
     .filter((heading) => heading.textContent !== "Coding providers")
     .map((heading) => heading.closest("section")!);
-  expect(families).toHaveLength(3);
+  expect(families).toHaveLength(2);
   const between = families[0].parentElement!;
   expect(between.className).toContain("gap-8xl");
   expect(families[0].className).toContain("gap-6xl");
@@ -567,7 +706,7 @@ test("an unset slot is set from the act over the rows", async () => {
 
   await waitFor(() => expect(intents.length).toBe(1));
   expect(intents[0]).toEqual({
-    reason: "coding authenticates with this value; it is stored encrypted and never shown again.",
+    reason: "Stored encrypted and never shown again.",
     prompts: [{ slot: "APOLLO_API_KEY", prompt: "paste the key from `api.datadoghq.com`" }],
   });
   expect(await screen.findByLabelText("the key")).toBeTruthy();
@@ -610,7 +749,7 @@ test("a credential prompt is headed by the one provider every slot it asks for b
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
 
-  const head = (await screen.findByText("Add service keys")).closest("[data-slot=dialog-header]")!;
+  const head = (await screen.findByText("Credential values")).closest("[data-slot=dialog-header]")!;
   expect(head.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
     "--brand-slack",
   );
@@ -640,7 +779,7 @@ test("a credential prompt spanning two providers is headed by the words alone", 
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
 
-  const head = (await screen.findByText("Add service keys")).closest("[data-slot=dialog-header]")!;
+  const head = (await screen.findByText("Credential values")).closest("[data-slot=dialog-header]")!;
   expect(head.querySelector("[data-slot=mark]")).toBeNull();
 });
 

@@ -21,9 +21,11 @@ import { useViewer } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionInput, ActionView, CredentialRequest } from "@/lib/types";
 
+const IDLE: IntentOutcome = { applied: false, message: "" };
+
 export type RowContext = {
-  act: (envelope: unknown) => void;
-  action: (view: ActionView, input: ActionInput) => void;
+  act: (envelope: unknown) => Promise<IntentOutcome>;
+  action: (view: ActionView, input: ActionInput) => Promise<IntentOutcome>;
   busy: boolean;
   viewer: string | null;
   actions: ActionView[];
@@ -117,28 +119,29 @@ export function Listing<Payload, Row>({
     onPlace({ chip: value ?? undefined, after: undefined });
 
   async function act(envelope: unknown) {
-    if (!mainAgent) return;
+    if (!mainAgent) return IDLE;
     setBusy(true);
-    settle(await postIntent(mainAgent.id, envelope));
+    return settle(await postIntent(mainAgent.id, envelope));
   }
 
   async function action(view: ActionView, input: ActionInput) {
-    if (!mainAgent) return;
+    if (!mainAgent) return IDLE;
     setBusy(true);
-    settle(await postAction(mainAgent.id, view.call, input));
+    return settle(await postAction(mainAgent.id, view.call, input));
   }
 
   function settle(outcome: IntentOutcome) {
     setBusy(false);
     if (outcome.credentials) {
       setCredentials(outcome.credentials);
-      return;
+      return outcome;
     }
     if (outcome.applied) {
       onPlace({ notice: outcome.message });
-      return;
+      return outcome;
     }
     setNotice(outcomeNotice(outcome));
+    return outcome;
   }
 
   const term = query.trim().toLowerCase();
@@ -212,8 +215,15 @@ export function Listing<Payload, Row>({
                 ? rows
                 : rows.filter((row) => (!chip?.has || chip.has(row)) && bySearch(row));
             const note = unknown ? "That filter is not available." : "Nothing matches.";
+            /* A narrowed search states that it matched nothing; the acts over the rows are not
+               rows and stand through it, so the member can still add one. */
             if (!matched.length && (spec.cards || spec.list))
-              return <PanelBlank body={note} />;
+              return (
+                <div className={BANDS}>
+                  {offer}
+                  <PanelBlank body={note} />
+                </div>
+              );
             const records = (rows: Row[]) =>
               spec.cards ? (
                 <Cards
