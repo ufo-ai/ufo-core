@@ -3,7 +3,18 @@
 Raising needs a live turn — the row carries the turn's own authority and agent — so `apply` refuses
 and names the tool. What the kind supplies is the register: every notification raised for the acting
 member, its subject and latest body, how often it was raised and by which agent, and the delete
-that dismisses one. A row is the member's own; an admin inspects, as for every member-owned kind."""
+that dismisses one.
+
+A row is the member's own and nobody else's, which is where this kind departs from the member-owned
+default. Every other such kind lets a workspace admin inspect a row, because the row is a thing the
+workspace holds and an admin answers for it. A notification is not that. It is one agent's judgement
+about what should interrupt one person, addressed to that person, and reading someone else's is
+nearer to reading their mail than to inspecting an object. The workspace's second admin would
+otherwise open this app and see the first admin's whole inbox, which is what a member reported.
+
+The kind therefore lists no `mine`. Every row a caller can see is theirs, so the flag could only
+ever read true, and a filter that cannot separate anything is a filter the reader has to test to
+learn nothing."""
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -36,7 +47,7 @@ RAISE_REFUSAL = (
     "raising a notification happens in a turn — the `notify` tool records it under that turn's "
     "authority"
 )
-DELETE_GATE = "only the member a notification concerns or a workspace admin may dismiss it"
+DELETE_GATE = "only the member a notification concerns may dismiss it"
 
 
 class NotificationSpec(BaseModel):
@@ -58,12 +69,18 @@ def _owner(row: Notification) -> ObjectOwner:
 
 @dataclass(frozen=True)
 class NotificationObjects(MemberReadableObjects[NotificationSpec, ObjectOwner]):
-    """The kind's handlers over `NotificationStore`. The gate is the base's: a row is seen by the
-    member it concerns and by a workspace admin, and dismissed by the same."""
+    """The kind's handlers over `NotificationStore`. The gate narrows the base's: a row is seen and
+    dismissed by the member it concerns, and by nobody else."""
 
     kind_name: ClassVar[str] = NOTIFICATION_KIND
     mutate_gate: ClassVar[str] = RAISE_REFUSAL
     delete_gate: ClassVar[str] = DELETE_GATE
+
+    def _visible(self, owner: ObjectOwner, acting: UUID | None, is_admin: bool) -> bool:
+        """Ownership alone, admin or not. The base admits a workspace admin to every row; here that
+        would hand one member every other member's notifications, and the read projection the
+        homepage draws from is the same gate, so the page would show them too."""
+        return self._owned(owner, acting)
 
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
@@ -80,7 +97,6 @@ class NotificationObjects(MemberReadableObjects[NotificationSpec, ObjectOwner]):
                     "triaged": row.triaged_turn_id is not None,
                     "delivered_surface": row.delivered_surface,
                     "created_at": row.created_at.isoformat(),
-                    "mine": row.member_id == member_id,
                 },
             )
             for row in await NotificationStore(_require_ext(ext)).rows()
@@ -156,16 +172,17 @@ NOTIFICATION_OBJECT = ObjectKind(
     description=(
         "One message an agent turn raised for a member and put in the Notification app's inbox: "
         "the subject it is about, the latest account of what happened, how many times that subject "
-        "has been raised, and which agent raised it. Seen by the member it concerns and by a "
-        "workspace admin. Raising is not an apply: the `notify` tool records a notification under "
+        "has been raised, and which agent raised it. Seen by the member it concerns and by nobody "
+        "else, an admin included, since it is addressed to that member rather than held by the "
+        "workspace. Raising is not an apply: the `notify` tool records a notification under "
         "the raising turn's authority, so this kind's list and get read. Deleting dismisses one."
     ),
     guidance=(
         "List to see what has been raised for the member and how often; get to read one "
         "notification's subject and body beside when it was first and last raised and whether a "
         "triage turn has read it and where it was delivered. Listing filters and orders on "
-        "`subject`, `occurrences`, `producer`, `triaged`, `delivered_surface`, `created_at`, and "
-        "`mine`; get "
+        "`subject`, `occurrences`, `producer`, `triaged`, `delivered_surface` and `created_at`; "
+        "get "
         "shows a `created_in` link naming the conversation it was raised in and a `scoped_to` link "
         "naming the agent that raised it. Applying a manifest is refused: raise with `notify`. "
         "When a member says a notification is handled or unwanted, delete it by name."
@@ -173,6 +190,6 @@ NOTIFICATION_OBJECT = ObjectKind(
     spec_model=NotificationSpec,
     store=NotificationObjects(),
     list_fields=frozenset(
-        {"subject", "occurrences", "producer", "triaged", "delivered_surface", "created_at", "mine"}
+        {"subject", "occurrences", "producer", "triaged", "delivered_surface", "created_at"}
     ),
 )

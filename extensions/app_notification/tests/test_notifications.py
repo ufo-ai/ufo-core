@@ -391,7 +391,7 @@ async def test_the_kind_reads_the_members_own_rows_and_dismisses_them(db: None) 
     assert listed["name"] == row.name
     assert listed["subject"] == SOURCE
     assert listed["producer"] == "assistant"
-    assert listed["mine"] is True
+    assert "mine" not in listed
     assert theirs["objects"] == []
     assert got["spec"] == {"subject": SOURCE, "body": "14 deals moved"}
     assert {link["relation"] for link in got["links"]} == {"created_in", "scoped_to"}
@@ -399,7 +399,12 @@ async def test_the_kind_reads_the_members_own_rows_and_dismisses_them(db: None) 
     assert remaining == []
 
 
-async def test_an_admin_reads_and_dismisses_another_members_notification(db: None) -> None:
+async def test_an_admin_does_not_read_or_dismiss_another_members_notification(db: None) -> None:
+    """Where this kind departs from the member-owned default. Every other such kind lets a
+    workspace admin inspect a row, because the row is a thing the workspace holds. A notification
+    is one agent's judgement about what should interrupt one person, addressed to them, so a second
+    admin opening this app would otherwise read the first admin's whole inbox. The homepage draws
+    on the same gate, which is how it was noticed."""
     workspace_id, member_id, agent_id, _, conversation_id = await _seed()
     admin = await _member(workspace_id, is_admin=True)
     ctx = _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id)
@@ -410,14 +415,16 @@ async def test_an_admin_reads_and_dismisses_another_members_notification(db: Non
         listed = json.loads(
             await _dispatch(_object_tool("object_list"), inspector, kind=NOTIFICATION_KIND)
         )
-        await _dispatch(
-            _object_tool("object_delete"), inspector, kind=NOTIFICATION_KIND, name=row.name
-        )
+        with pytest.raises(UnknownObject):
+            await _dispatch(
+                _object_tool("object_delete"), inspector, kind=NOTIFICATION_KIND, name=row.name
+            )
+        mine = json.loads(await _dispatch(_object_tool("object_list"), ctx, kind=NOTIFICATION_KIND))
         remaining = await _rows(workspace_id)
 
-    assert [entry["name"] for entry in listed["objects"]] == [row.name]
-    assert listed["objects"][0]["mine"] is False
-    assert remaining == []
+    assert listed["objects"] == []
+    assert [entry["name"] for entry in mine["objects"]] == [row.name]
+    assert len(remaining) == 1
 
 
 def test_every_agent_holds_notify_and_the_notification_agent_does_not() -> None:
