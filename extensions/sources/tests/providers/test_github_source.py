@@ -506,3 +506,77 @@ async def test_org_scoped_streams_are_qualified_by_the_org_they_were_walked_from
 
     result = await _fetch("users", handle)
     assert _refs(result) == {"users/acme/42", "users/beta/42"}
+
+
+async def test_the_actions_api_lands_its_records_from_a_counted_envelope() -> None:
+    """`/actions/runs` is the one GitHub collection that arrives wrapped — `{total_count,
+    workflow_runs}` rather than the bare array every other stream answers with — so the walk reads
+    the records out of the envelope. Reading the body as an array instead lands nothing while the
+    link header still advances: no error, no refusal, and the page cap that ends a run counts landed
+    records, so a run that lands none of them never reaches it and walks the whole history."""
+    pages: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/actions/runs":
+            pages.append(str(request.url))
+            if len(pages) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "total_count": 2,
+                        "workflow_runs": [
+                            {"id": 11, "name": "ci", "updated_at": "2026-03-01T00:00:00Z"}
+                        ],
+                    },
+                    headers={
+                        "Link": (
+                            "<https://api.github.com/repos/acme/repo1/actions/runs?page=2>; "
+                            'rel="next"'
+                        )
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 2,
+                    "workflow_runs": [
+                        {"id": 12, "name": "deploy", "updated_at": "2026-02-01T00:00:00Z"}
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("workflow_runs", handle)
+
+    assert _refs(result) == {"workflow_runs/acme/repo1/11", "workflow_runs/acme/repo1/12"}
+    assert len(pages) == 2
+
+
+async def test_workflows_lands_its_records_from_its_own_envelope_key() -> None:
+    """The second Actions collection wraps its items under `workflows`, not the `workflow_runs` key
+    its sibling uses, so the record path is the stream's own rather than one spelling per API."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/actions/workflows":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "workflows": [
+                        {"id": 21, "name": "ci.yaml", "updated_at": "2026-03-02T00:00:00Z"}
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("workflows", handle)
+
+    assert _refs(result) == {"workflows/acme/repo1/21"}

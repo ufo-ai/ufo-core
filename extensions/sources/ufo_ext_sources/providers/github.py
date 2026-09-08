@@ -55,6 +55,7 @@ from ufo.sdk.sources import (
     StreamSpec,
     WalkPage,
     get_path,
+    records_at,
     with_context,
 )
 from ufo_ext_sources.watermark import text_checkpoint
@@ -154,7 +155,7 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream("tags", primary_key="name", cursor_field=None),
     _stream("teams", cursor_field=None),
     _stream("workflow_runs", cursor_field="updated_at", canonical=True),
-    _stream("workflows", cursor_field="updated_at"),
+    _stream("workflows", cursor_field="updated_at", canonical=True),
 ]
 
 
@@ -186,6 +187,14 @@ _PATHS: dict[str, str] = {
     "organizations": "/user/orgs",
     "teams": "/orgs/{org}/teams",
     "users": "/orgs/{org}/members",
+}
+
+# Where a stream's records sit inside its response body. The Actions API is the one corner of
+# GitHub's REST surface that wraps a collection in a counted envelope; every other path here
+# answers with the bare array a stream absent from this table reads.
+_RECORD_PATHS: dict[str, str] = {
+    "workflow_runs": "workflow_runs",
+    "workflows": "workflows",
 }
 
 
@@ -314,7 +323,9 @@ class GitHubConnector(RestConnector):
                 yield page
             return
 
-        async for page in self._paginate_link_header(client, path, params=params):
+        async for page in self._paginate_link_header(
+            client, path, params=params, record_path=_RECORD_PATHS.get(stream.name)
+        ):
             yield page
 
     async def _repository_pages(
@@ -364,7 +375,12 @@ class GitHubConnector(RestConnector):
         async for org in self._iter_user_orgs(client):
             scoped = path.format(org=org)
             try:
-                async for page in self._paginate_link_header(client, scoped, params=dict(params)):
+                async for page in self._paginate_link_header(
+                    client,
+                    scoped,
+                    params=dict(params),
+                    record_path=_RECORD_PATHS.get(stream.name),
+                ):
                     if stream.name == "users" and semaphore is not None:
                         page = await self._enrich_users(client, page, semaphore=semaphore)
                     yield with_context(page, **{ORG_PARTITION_FIELD: org})
@@ -408,7 +424,9 @@ class GitHubConnector(RestConnector):
             if bound.since:
                 params["since"] = bound.since
         try:
-            async for page in self._paginate_link_header(client, scoped, params=dict(params)):
+            async for page in self._paginate_link_header(
+                client, scoped, params=dict(params), record_path=_RECORD_PATHS.get(stream.name)
+            ):
                 if stream.name == "issues":
                     page = [record for record in page if "pull_request" not in record]
                 if not page:
@@ -523,12 +541,22 @@ class GitHubConnector(RestConnector):
         return list(await asyncio.gather(*[one(member) for member in page]))
 
     async def _paginate_link_header(
-        self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        record_path: str | None = None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """RFC 5988 link-header walk. Empty/202 responses (GitHub's stats endpoints answer 202 with
-        an empty body while computing) yield nothing rather than raise."""
+        an empty body while computing) yield nothing rather than raise. `record_path` reaches into
+        an enveloped collection; the repo and org catalog walks pass none and read the array."""
         async for page in self._get_link_header_pages(
-            client, path, params=params, page_size=PAGE_SIZE, parse_records=_parse_records
+            client,
+            path,
+            params=params,
+            page_size=PAGE_SIZE,
+            parse_records=partial(_parse_records, record_path=record_path),
         ):
             yield page
 
@@ -544,11 +572,10 @@ def _partition_field(path: str) -> str | None:
     return None
 
 
-def _parse_records(response: httpx.Response) -> list[dict[str, Any]]:
+def _parse_records(response: httpx.Response, record_path: str | None) -> list[dict[str, Any]]:
     if not response.content:
         return []
-    body = response.json()
-    return body if isinstance(body, list) else []
+    return records_at(response.json(), record_path)
 
 
 def _repo_identity(
