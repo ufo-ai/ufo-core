@@ -29,6 +29,7 @@ DELIVERY = "notification_0003"
 CARRY = "notification_0004"
 SPAWN = "notification_0005"
 RECONNECT = "notification_0006"
+BRIEF = "notification_0007"
 EDITED_PROMPT = "only tell me about churn"
 
 
@@ -52,6 +53,7 @@ TRIAGE_MODULE = _revision(TRIAGE)
 DELIVERY_MODULE = _revision(DELIVERY)
 SPAWN_MODULE = _revision(SPAWN)
 RECONNECT_MODULE = _revision(RECONNECT)
+BRIEF_MODULE = _revision(BRIEF)
 RELEASED_PROMPT: str = TRIAGE_MODULE.RELEASED_PROMPT
 RELEASED_VERSION: str = TRIAGE_MODULE.RELEASED_VERSION
 TRIAGE_PROMPT: str = DELIVERY_MODULE.PREVIOUS_PROMPT
@@ -62,6 +64,8 @@ DELIVERY_VERSION: str = SPAWN_MODULE.PREVIOUS_VERSION
 DELIVERY_TOOLS: list[str] = list(SPAWN_MODULE.PREVIOUS_TOOLS)
 SPAWN_PROMPT: str = RECONNECT_MODULE.PREVIOUS_PROMPT
 SPAWN_VERSION: str = RECONNECT_MODULE.PREVIOUS_VERSION
+RECONNECT_PROMPT: str = BRIEF_MODULE.PREVIOUS_PROMPT
+RECONNECT_VERSION: str = BRIEF_MODULE.PREVIOUS_VERSION
 LIVE_TOOLS = list(NOTIFICATION_AGENT.tools or ())
 
 
@@ -334,3 +338,43 @@ def test_the_reconnect_prompt_reaches_a_row_two_releases_behind(tmp_path: Path) 
     assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
     assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
     assert after["other"] == (DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)
+
+
+def test_the_brief_prompt_reaches_the_shipped_row_and_no_other(tmp_path: Path) -> None:
+    """`deliver` hands its text to the member's own agent, which says it in its own voice, so the
+    release asks the app for a brief rather than the message a person reads. The prompt moves where
+    the row still reads as any earlier release wrote it, a member's own wording stands, and other
+    extensions' rows and archived rows stand."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, RECONNECT)
+    engine = _seed(database_path, RECONNECT_PROMPT, RECONNECT_VERSION, LIVE_TOOLS)
+    command.upgrade(config, BRIEF)
+    after = _rows(engine)
+    command.downgrade(config, RECONNECT)
+    restored = _rows(engine)
+
+    assert "puts it to them in its own voice" in NOTIFICATION_AGENT_PROMPT
+    assert "in your own words" in RECONNECT_PROMPT
+    assert "in your own words" not in NOTIFICATION_AGENT_PROMPT
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (RECONNECT_PROMPT, RECONNECT_VERSION, LIVE_TOOLS)
+    assert after["archived"] == (RECONNECT_PROMPT, RECONNECT_VERSION, LIVE_TOOLS)
+    assert restored["shipped"] == (RECONNECT_PROMPT, RECONNECT_VERSION, LIVE_TOOLS)
+
+
+def test_the_brief_prompt_reaches_a_row_two_releases_behind(tmp_path: Path) -> None:
+    """The roll window leaves rows behind: one created by the release before last still holds that
+    release's prompt when this carry runs, so the earlier texts are the whole set, not the last."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, RECONNECT)
+    engine = _seed(database_path, SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)
+    command.upgrade(config, BRIEF)
+    after = _rows(engine)
+
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)

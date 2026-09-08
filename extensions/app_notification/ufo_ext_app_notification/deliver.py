@@ -47,10 +47,12 @@ RELAY_INSTRUCTION = (
     "about it if they want it. Do nothing else until they answer."
 )
 DELIVER_DESCRIPTION = (
-    "Tell the member the notifications named in `refs`, as one message, on the chat surface they "
-    "used most recently. Every call is a message a person reads: use it for what they would act "
-    "on today, and at most once per batch. Notifications you do not name stay readable on the "
-    "portal and nowhere else."
+    "Brief the member's own agent on the notifications named in `refs`, on the chat surface they "
+    "used most recently. `text` is what that agent is told, not what the member reads: it says "
+    "the message in its own voice, in the conversation it already has with them. Say what "
+    "happened and what it means for them, and leave the wording to it. Every call costs the "
+    "member a message: use it for what they would act on today, and at most once per batch. "
+    "Notifications you do not name stay readable on the portal and nowhere else."
 )
 NOT_THE_NOTIFICATION_AGENT = (
     "deliver is the Notification app's own verb; this agent is not that app's provision"
@@ -83,7 +85,9 @@ class DeliverInput(BaseModel):
         min_length=1,
         max_length=MESSAGE_MAX,
         description=(
-            "What the member reads, in your words: what happened and what it means for them."
+            "What the member's own agent is told, in your words: what happened and what it "
+            "means for them. That agent says it to them in its own voice; this is not the "
+            "message they read."
         ),
     )
 

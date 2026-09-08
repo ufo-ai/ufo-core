@@ -146,9 +146,13 @@ Do not recreate a missing scheduled task unless the user explicitly asks.
 
 ## Alerting from scheduled runs
 
-A scheduled task re-invokes you in the same conversation, so your run's reply *is* the alert — it
+A scheduled task re-invokes you in the same conversation, so your run's reply is the alert — it
 posts to the conversation the task was scheduled in. Reply with the update only when the run
 discovers genuinely new or noteworthy information.
+
+The run's *report* is a different thing from its alert. A run with something to report writes it to
+a markdown file and shares it: that file is the published result, and it is what the radar lists.
+The reply is the line that tells the member the file is worth opening.
 
 **When to reply:**
 
@@ -183,5 +187,7 @@ relevant context on unrelated later turns.
 - Only durable, cross-task facts belong in memory: a genuine config change the run made (universe
   edits, an approve/reject decision, a posting change). Write those as a single canonical item and
   update it in place — never re-emit a cumulative note as a fresh near-duplicate each run.
-- If a run must record a per-run snapshot at all, prefer `event` kind (short half-life) over `fact`,
-  so it decays instead of accumulating.
+- If a run must record a per-run snapshot at all, write it with `item_class: episodic`. That is the
+  setting that keeps it out of later turns: recall offers an episodic item as a topic to open, never
+  as quoted context. `memory_kind` only sets how fast a row's ranking decays, so an `event` row with
+  the default `item_class: fact` is still injected verbatim into every later turn that recalls it.

@@ -25,7 +25,7 @@ from ufo_ext_app_notification.notify_tool import NOTIFICATION_AGENT_NAME, NOTIFY
 from ufo_ext_app_notification.store import EXTENSION_NAME, untriaged_workspaces
 
 NAME = EXTENSION_NAME
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-notification-home"
 DRAIN_JOB = "notification_drain"
