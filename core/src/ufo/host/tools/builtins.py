@@ -8,10 +8,12 @@ rules apply whether a byte arrives via a shell command or a file op. `read`, `ed
 the in-sandbox `ufo fs` CLI, so windowing happens beside the files and only a bounded JSON result
 crosses back. Document reads send bounded bytes to `ufo-preview`; a connected
 terminal relays those bytes through the deploy because it cannot reach the synthetic preview host.
-`read` records every path it returns so `edit`/`write` can refuse to touch a file the
-turn has not read — the guard that keeps a blind string-replace from clobbering content the model
-never saw. `glob` and `grep` run the in-sandbox `ufo fs` matcher and ripgrep, so file discovery and
-content search happen in the container and a bounded result crosses back. `share_file` lands
+`read` records every path it returns, and `bash` every path its command names, so `edit`/`write`
+can refuse to touch a file the turn has reached by neither — the guard that keeps a blind
+string-replace from clobbering content the model never saw, without refusing a file the turn
+already inspected through the shell. `glob` and `grep` run the in-sandbox `ufo fs` matcher and
+ripgrep, so file discovery and content search happen in the container and a bounded result crosses
+back. `share_file` lands
 produced workspace files in the blob store under `artifacts/<uuid>/` — a directory as a `.tar.gz`
 of itself, and on S3 the sandbox uploads each itself to a presigned PUT bound to the size and
 sha256 a preflight measured — and returns a TTL-token URL per file that core's artifact route
@@ -113,7 +115,12 @@ from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, C
 
 GREP_HEAD_LIMIT = 100
 WRITE_GUARD_REFUSAL = "must be read before it is written"
-READ_FIRST_HINT = " Call read on {path} first, then repeat this call."
+"""The client's own overwrite refusal, which knows only that the host withheld permission. The
+rule that decides permission lives here, so the host recognizes this text and answers with
+`TOUCH_GUARD_REFUSAL` in its place."""
+TOUCH_GUARD_REFUSAL = "file {path} must be read or named in a bash command before it is {verb}"
+TOUCH_FIRST_HINT = " Call read on {path}, or name it in a bash command, then repeat this call."
+BASH_PATH_METACHARACTERS = "*?[]{}$`~"
 FILE_PATH_JSON_MAX_CHARS = 10_000
 FILE_TOOL_RESULT_MAX_CHARS = 20_000
 ARTIFACT_FALLBACK_NAME = "download"
@@ -348,6 +355,37 @@ class MessageSpawnInput(BaseModel):
     message: str = Field(description="The follow-up message to deliver.")
 
 
+def bash_named_paths(command: str) -> set[str]:
+    """The files a shell command names outright. A token that carries a glob or an expansion names
+    whatever the shell resolves it to, which the host cannot know, so only a literal path counts."""
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError:
+        return set()
+    return {
+        token
+        for token in tokens
+        if not token.startswith("-")
+        and not any(char in token for char in BASH_PATH_METACHARACTERS)
+        and ("/" in token or "." in PurePosixPath(token).name)
+    }
+
+
+def workspace_key(path: str) -> str:
+    """One spelling for one file, so a path named relative to the workspace and the same path named
+    absolutely answer the guard alike."""
+    return str(PurePosixPath(WORKSPACE_DIR) / path)
+
+
+def record_touched_path(ctx: ToolContext, path: str) -> None:
+    ctx.touched_paths.add(path)
+    ctx.touched_paths.add(workspace_key(path))
+
+
+def path_was_touched(ctx: ToolContext, path: str) -> bool:
+    return path in ctx.touched_paths or workspace_key(path) in ctx.touched_paths
+
+
 async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
     """Run one command through the task journal and report what ended it. A command still running at
     its budget is not stopped: it goes on detached and the result hands back the handles it can be
@@ -357,7 +395,12 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
 
     Only the sandbox failing to run the command at all is an error, and it reports the deadline that
     fired rather than a bare `exit code: 124`, which `timeout` inside the command produces just as
-    the sandbox does — a caller reading the code alone cannot tell which fired."""
+    the sandbox does — a caller reading the code alone cannot tell which fired.
+
+    A command that names a file counts as having reached that file, so the write and edit guards
+    take it as they take a `read`."""
+    for path in bash_named_paths(args.command):
+        record_touched_path(ctx, path)
     if args.background:
         return await _bash_background(ctx, args.command)
     if padded := flat_sleeps(args.command):
@@ -465,7 +508,7 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
     if args.limit is not None:
         params["limit"] = args.limit
     result = await ctx.sandbox.run_ufo_fs("read", params)
-    ctx.read_paths.add(args.file_path)
+    record_touched_path(ctx, args.file_path)
     if result.get("type") == "image":
         return ToolResult(
             content=(
@@ -502,7 +545,7 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
     data = args.content.encode()
     staged = f"{WORKSPACE_DIR}/ufo-write-{uuid4().hex}.stage"
     await ctx.sandbox.write_file(staged, data)
-    allow_existing = args.file_path in ctx.read_paths
+    allow_existing = path_was_touched(ctx, args.file_path)
     try:
         result = await ctx.sandbox.run_ufo_fs(
             "write",
@@ -519,26 +562,31 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
         }
     )
     tool_result = _file_tool_result(result)
-    ctx.read_paths.add(args.file_path)
+    record_touched_path(ctx, args.file_path)
     return tool_result
 
 
 def _write_refusal(path: str, allow_existing: bool, error: ValueError) -> ValueError:
-    """The write guard's refusal with the one act that clears it. The guard runs beside the files,
-    where the rename it protects happens, so the refusal text is the client's; what the model must
-    do next is known here, where the read set the guard was told about lives. Only the
-    unread-overwrite refusal earns the hint — a staging or rename failure is not one read away
-    from landing."""
+    """The write guard's refusal, in the rule's own words and with the acts that clear it. The guard
+    runs beside the files, where the rename it protects happens, and it knows only that the host
+    withheld permission; the rule and the touched set it was decided from live here, so the client's
+    text is restated here. Only the untouched-overwrite refusal is restated — a staging or rename
+    failure is not one read away from landing."""
     if allow_existing or WRITE_GUARD_REFUSAL not in str(error):
         return error
-    return ValueError(f"{error}.{READ_FIRST_HINT.format(path=path)}")
+    return ValueError(
+        TOUCH_GUARD_REFUSAL.format(path=path, verb="written")
+        + "."
+        + TOUCH_FIRST_HINT.format(path=path)
+    )
 
 
 async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
-    if args.file_path not in ctx.read_paths:
+    if not path_was_touched(ctx, args.file_path):
         raise ValueError(
-            f"file {args.file_path} must be read before it is edited."
-            + READ_FIRST_HINT.format(path=args.file_path)
+            TOUCH_GUARD_REFUSAL.format(path=args.file_path, verb="edited")
+            + "."
+            + TOUCH_FIRST_HINT.format(path=args.file_path)
         )
     edits = [
         {
@@ -1275,7 +1323,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="write",
         description=(
             "Create a file in workspace storage at a given path. Read the file first if it already "
-            "exists: overwriting a path this turn has not read is REFUSED. Does NOT send to user — "
+            "exists, or name it in a bash command: overwriting a path this turn has neither read "
+            "nor named in a bash command is REFUSED. Does NOT send to user — "
             "call share_file afterward to share it. Use for creating new files; use edit for "
             "modifying existing ones."
         ),
@@ -1285,8 +1334,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="edit",
         description=(
-            "Performs exact string replacements in files. Read the file first: an edit to a path "
-            "this turn has not read is REFUSED. An edit FAILS if old_string is not "
+            "Performs exact string replacements in files. Read the file first, or name it in a "
+            "bash command: an edit to a path this turn has neither read nor named in a bash "
+            "command is REFUSED. An edit FAILS if old_string is not "
             "unique in the file (unless replace_all=true). Multiple edits are applied "
             "sequentially; all must succeed or none are applied."
         ),

@@ -9,8 +9,9 @@ A handler reaches the outside world only through the fields here: the sandbox fo
 shell, the blob store for artifacts, the turn/agent it runs under, `spawn` to delegate a typed
 subtask to a child turn, the message requester who gates private authorization, the exact
 conversation audience that scopes disclosure, and `artifact_token_secret` with which
-`share_file` mints the signed download URLs the web surface verifies. `read_paths` is the working
-set that lets `edit` refuse to touch a file the turn has not read first. `connector_account` hands
+`share_file` mints the signed download URLs the web surface verifies. `touched_paths` is the
+working set that lets `edit` refuse to touch a file the turn has neither read nor named in a bash
+command. `connector_account` hands
 a connector tool the broker's connected-account id it passes to the broker's server-side execute
 API, resolved from the turn-agent's grants admitted to the requester (their own plus shared)
 so a tool reaches only the accounts its requester may use. `skills` is the loadable
@@ -616,7 +617,7 @@ class ToolContext:
     artifact_token_secret: str
     grants: GrantStore | None = None
     subagents: SubagentControl | None = None
-    read_paths: set[str] = field(default_factory=set)
+    touched_paths: set[str] = field(default_factory=set)
     idempotency_key: str | None = None
     target: ObjectActionTarget | None = None
     granted_actions: frozenset[str] = frozenset()

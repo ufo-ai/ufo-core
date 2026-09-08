@@ -8,9 +8,10 @@ whether a round reads them.
 
 The buckets, and the case that stands for each:
 
-- `ValueError: file ... must be read before it is written/edited` — the write and edit guards. A
-  call that never read the file is refused before anything lands, so the eval asks for a change to
-  a staged file and grades the guard's silence, not the file's content.
+- `ValueError: file ... must be read or named in a bash command before it is written/edited` — the
+  write and edit guards. A call that reached the file by neither act is refused before anything
+  lands, so the eval asks for a change to a staged file and grades the guard's silence, not the
+  file's content.
 - `ValidationError` naming a missing `target` on `SpawnInput` — the whole spawn input nested one
   level down, under `payload`. Graded on the wire shape of the call, which is where the fault is.
 - `ValidationError` naming a missing `title` on `UpdateTodoListInput` — the same shape fault on a
@@ -47,8 +48,8 @@ from evals.harness.capability import (
 from evals.harness.harness import Json, JsonObject
 from evals.harness.scorers import answer_text
 
-WRITE_GUARD = "must be read before it is written"
-EDIT_GUARD = "must be read before it is edited"
+WRITE_GUARD = "must be read or named in a bash command before it is written"
+EDIT_GUARD = "must be read or named in a bash command before it is edited"
 ESCAPE_GUARD = "escapes /workspace"
 MATCH_GUARD = "old_string not found"
 VALIDATION_GUARD = "validation error"
@@ -120,11 +121,12 @@ def _evidence(calls: tuple[ToolInvocation, ...], marker: str, path: str) -> Json
     return {"guard": marker, "refusals": refusals, "landed": landings}
 
 
-def _read_first_grader(marker: str, path: str, tool: str) -> Grader:
-    """The change lands on `path` and the read guard never refused a call on the way.
+def _reached_first_grader(marker: str, path: str, tool: str) -> Grader:
+    """The change lands on `path` and the guard never refused a call on the way.
 
     The guard is stated in the tool's own description, so a refusal is a round that did not read
-    the contract — not a discovery the case should tolerate."""
+    the contract — not a discovery the case should tolerate. The rule takes either act that reaches
+    the file, so a bash command naming it counts as the read does."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         evidence = _evidence(output.calls, marker, path)
@@ -136,19 +138,21 @@ def _read_first_grader(marker: str, path: str, tool: str) -> Grader:
         landed = _landed(output.calls, path)
         if not landed:
             return CapabilityVerdict(False, f"no write or edit landed on {path}", evidence)
-        read_before = any(
-            call.name == "read"
-            and call.succeeded
-            and str(call.input.get("file_path", "")).endswith(path)
+        reached_before = any(
+            call.succeeded
+            and (
+                (call.name == "read" and str(call.input.get("file_path", "")).endswith(path))
+                or (call.name == "bash" and path in str(call.input.get("command", "")))
+            )
             for call in output.calls[: output.calls.index(landed[0])]
         )
-        if not read_before:
+        if not reached_before:
             return CapabilityVerdict(False, f"{path} changed without a read of it", evidence)
-        return CapabilityVerdict(True, f"read then {landed[0].name} on {path}", evidence)
+        return CapabilityVerdict(True, f"reached then {landed[0].name} on {path}", evidence)
 
     return DescribedGrader(
-        f"a successful `read` of {path} precedes the {tool} that changes it, and no call is "
-        f"refused with {marker!r}",
+        f"a successful `read` of {path}, or a bash command naming it, precedes the {tool} that "
+        f"changes it, and no call is refused with {marker!r}",
         grade,
     )
 
@@ -316,14 +320,14 @@ CASES = (
             "`- billing rework shipped`. Keep nothing else."
         ),
         workspace_files=FILES,
-        grader=_read_first_grader(WRITE_GUARD, SUMMARY_PATH, "write"),
+        grader=_reached_first_grader(WRITE_GUARD, SUMMARY_PATH, "write"),
         digest_tag="dispatch:write-reads-first",
     ),
     CapabilityCase(
         name="edit-reads-first",
         message=f"In /workspace/{SETTINGS_PATH}, set retries to 5. Change nothing else.",
         workspace_files=FILES,
-        grader=_read_first_grader(EDIT_GUARD, SETTINGS_PATH, "edit"),
+        grader=_reached_first_grader(EDIT_GUARD, SETTINGS_PATH, "edit"),
         digest_tag="dispatch:edit-reads-first",
     ),
     CapabilityCase(

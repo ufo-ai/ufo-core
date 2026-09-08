@@ -22,8 +22,14 @@ from evals.suites.dispatch_recovery import (
 )
 
 BY_NAME = {case.name: case for case in CASES}
-WRITE_REFUSAL = f"ValueError: file /workspace/{SUMMARY_PATH} must be read before it is written"
-EDIT_REFUSAL = f"ValueError: file /workspace/{SETTINGS_PATH} must be read before it is edited"
+WRITE_REFUSAL = (
+    f"ValueError: file /workspace/{SUMMARY_PATH} must be read or named in a bash command "
+    "before it is written"
+)
+EDIT_REFUSAL = (
+    f"ValueError: file /workspace/{SETTINGS_PATH} must be read or named in a bash command "
+    "before it is edited"
+)
 ESCAPE_REFUSAL = "ValueError: path '/home/oai/share/rows.csv' escapes /workspace"
 HOME_REFUSAL = "ValueError: path '/home/user/.ufo' escapes /workspace"
 ROOT_REFUSAL = "ValueError: path '/' escapes /workspace"
@@ -84,6 +90,25 @@ async def test_write_case_fails_a_write_the_turn_never_read() -> None:
 
     assert not verdict.passed
     assert "without a read" in verdict.reason
+
+
+async def test_write_case_passes_a_write_after_a_bash_command_that_named_the_file() -> None:
+    """The guard takes a bash command that names the file as it takes a read, so the case grades
+    the trajectory the tools now allow."""
+    grader = BY_NAME["write-reads-first"].grader
+    path = f"/workspace/{SUMMARY_PATH}"
+
+    verdict = await grader(
+        CapabilityOutput(
+            "done",
+            (
+                _call("bash", {"command": f"cat {path}"}, result="# summary"),
+                _call("write", {"file_path": path}),
+            ),
+        )
+    )
+
+    assert verdict.passed
 
 
 async def test_edit_case_reads_the_edit_guard_refusal() -> None:

@@ -400,7 +400,7 @@ async def test_read_numbers_lines_and_appends_truncation_footer(
     await ctx.sandbox.write_file("notes.txt", b"a\nb\nc\nd\ne\n")
     result = await _run("read", ctx, file_path="notes.txt", offset=1, limit=2)
     assert result.content[0].text == "1\ta\n2\tb\n\n[lines 1-2 of 5]; 3 more - read with offset=3"
-    assert "notes.txt" in ctx.read_paths
+    assert "notes.txt" in ctx.touched_paths
 
 
 async def test_read_is_one_based_and_windows_from_offset(
@@ -501,12 +501,12 @@ async def test_changes_reports_what_the_shell_did_to_a_checkout(
     }
 
 
-async def test_write_guard_refuses_overwriting_an_unread_file(
+async def test_write_guard_refuses_overwriting_a_file_the_turn_never_reached(
     file_ctx: tuple[ToolContext, Path],
 ) -> None:
     ctx, workspace = file_ctx
     await ctx.sandbox.write_file("exist.txt", b"original")
-    with pytest.raises(ValueError, match="must be read before it is written"):
+    with pytest.raises(ValueError, match="must be read or named in a bash command"):
         await _run("write", ctx, file_path="exist.txt", content="clobber")
     assert (workspace / "exist.txt").read_text() == "original"
 

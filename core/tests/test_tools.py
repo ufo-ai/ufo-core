@@ -33,8 +33,8 @@ from ufo.host.tools.builtins import (
     BUILTIN_TOOLS,
     DOCUMENT_KINDS,
     FILE_TOOL_RESULT_MAX_CHARS,
-    READ_FIRST_HINT,
     REQUEST_CREDENTIALS_TOOL_DEF,
+    TOUCH_FIRST_HINT,
     SpawnInput,
     _file_tool_result,
 )
@@ -407,20 +407,74 @@ async def test_bash_keeps_the_carrier_python_after_the_login_profile_resets_path
     assert (workspace / "relative.txt").read_text() == "relative"
 
 
-def _check_edit_and_write_state_the_read_first_rule_in_their_descriptions() -> None:
-    """Both tools refuse a path the turn has not read, and the refusal is a hard raise. A rule
-    enforced in code and written only in a profile prompt is one the model carries across every
-    round from memory; the description is the sentence it re-reads at the moment it calls."""
+def _check_edit_and_write_state_the_read_or_bash_rule_in_their_descriptions() -> None:
+    """Both tools refuse a path the turn has neither read nor named in a bash command, and the
+    refusal is a hard raise. A rule enforced in code and written only in a profile prompt is one the
+    model carries across every round from memory; the description is the sentence it re-reads at the
+    moment it calls."""
     schemas = {schema.name: schema for schema in REGISTRY.schemas()}
-    assert "Read the file first" in schemas["edit"].description
-    assert "REFUSED" in schemas["edit"].description
+    for name in ("edit", "write"):
+        assert "name it in a bash command" in schemas[name].description
+        assert "neither read nor named in a bash command is REFUSED" in schemas[name].description
     assert "Read the file first if it already exists" in schemas["write"].description
-    assert "REFUSED" in schemas["write"].description
 
 
-async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
+async def test_edit_requires_a_read_or_a_bash_command_that_named_the_file(tmp_path: Path) -> None:
+    """A file the turn already inspected through the shell is a file the model saw, and the bash
+    command names it in whichever spelling the shell took, so the guard matches the two spellings
+    of one path."""
+
+    @dataclass
+    class EditingSandbox(FakeSandbox):
+        async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+            return {"replacements": 1}
+
+    ctx = make_context(EditingSandbox(), tmp_path)
+    with pytest.raises(ValueError, match="must be read or named in a bash command"):
+        await run(
+            "edit",
+            ctx,
+            file_path="code.py",
+            edits=[{"old_string": "x = 1", "new_string": "x = 2"}],
+        )
+
+    await run("bash", ctx, command="wc -l /workspace/code.py")
+    edited = await run(
+        "edit", ctx, file_path="code.py", edits=[{"old_string": "x = 1", "new_string": "x = 2"}]
+    )
+
+    assert json.loads(edited.content[0].text)["path"] == "code.py"
+
+
+async def test_a_bash_command_lets_the_write_overwrite_the_file_it_named(tmp_path: Path) -> None:
+    """The rule is decided here and carried to the files as `allow_existing`, so the shell command
+    that named the file is what the overwrite rides on."""
+
+    @dataclass
+    class RecordingSandbox(FakeSandbox):
+        calls: list[dict[str, object]] = field(default_factory=list)
+
+        async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+            self.calls.append(args)
+            return {"created": False}
+
+    sandbox = RecordingSandbox()
+    ctx = make_context(sandbox, tmp_path)
+
+    await run("bash", ctx, command="head -n 5 notes.md")
+    await run("write", ctx, file_path="/workspace/notes.md", content="body")
+
+    assert sandbox.calls[-1]["allow_existing"] is True
+
+
+async def test_a_bash_command_that_names_no_file_leaves_the_guard_standing(tmp_path: Path) -> None:
+    """The rule takes a command that reached the file, not any command at all — a glob names
+    whatever the shell resolves it to, which the host never sees."""
     ctx = make_context(FakeSandbox(), tmp_path)
-    with pytest.raises(ValueError, match="must be read before it is edited"):
+
+    await run("bash", ctx, command="ls /workspace/*.py")
+
+    with pytest.raises(ValueError, match="must be read or named in a bash command"):
         await run(
             "edit",
             ctx,
@@ -429,10 +483,10 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
         )
 
 
-async def test_the_read_guard_refusals_name_the_read_that_clears_them(tmp_path: Path) -> None:
-    """The guard states the rule; the refusal has to state the act. The edit guard raises beside the
-    read set, the write guard raises beside the files and its text arrives from `ufo fs`, so both
-    refusals are extended here where the path the model must read is known."""
+async def test_the_touch_guard_refusals_name_the_acts_that_clear_them(tmp_path: Path) -> None:
+    """The guard states the rule; the refusal has to state the acts. The edit guard raises beside
+    the touched set, the write guard raises beside the files and its text arrives from `ufo fs`, so
+    both refusals are stated here where the path the model must reach is known."""
 
     @dataclass
     class RefusingSandbox(FakeSandbox):
@@ -461,13 +515,14 @@ async def test_the_read_guard_refusals_name_the_read_that_clears_them(tmp_path: 
             content="body",
         )
 
-    assert str(edited.value).endswith(READ_FIRST_HINT.format(path="code.py"))
-    assert str(written.value).endswith(READ_FIRST_HINT.format(path="/workspace/notes.md"))
+    assert str(edited.value).endswith(TOUCH_FIRST_HINT.format(path="code.py"))
+    assert str(written.value).endswith(TOUCH_FIRST_HINT.format(path="/workspace/notes.md"))
+    assert "must be read or named in a bash command" in str(written.value)
     assert str(unrelated.value) == "staged file is gone"
 
 
-async def test_a_write_the_turn_already_read_carries_no_read_first_hint(tmp_path: Path) -> None:
-    """A read path that still fails failed for another reason, so the hint would name an act the
+async def test_a_write_the_turn_already_reached_carries_no_touch_hint(tmp_path: Path) -> None:
+    """A reached path that still fails failed for another reason, so the hint would name an act the
     turn has already done."""
 
     @dataclass
@@ -476,12 +531,12 @@ async def test_a_write_the_turn_already_read_carries_no_read_first_hint(tmp_path
             raise ValueError("file /workspace/notes.md must be read before it is written")
 
     ctx = make_context(RefusingSandbox(), tmp_path)
-    ctx.read_paths.add("/workspace/notes.md")
+    ctx.touched_paths.add("/workspace/notes.md")
 
     with pytest.raises(ValueError) as refused:
         await run("write", ctx, file_path="/workspace/notes.md", content="body")
 
-    assert READ_FIRST_HINT.format(path="/workspace/notes.md") not in str(refused.value)
+    assert TOUCH_FIRST_HINT.format(path="/workspace/notes.md") not in str(refused.value)
 
 
 @pytest.mark.integration
@@ -527,7 +582,7 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
     assert (workspace / "notes.txt").read_text() == "old /workspace/final path\n"
 
     await ctx.sandbox.write_file("large.txt", b"old\n" * 10_000)
-    ctx.read_paths.add("large.txt")
+    ctx.touched_paths.add("large.txt")
     large = await run(
         "write",
         ctx,
@@ -553,7 +608,7 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
     outside_file = outside / "target.txt"
     outside_file.write_text("outside\n")
     (workspace / "link.txt").symlink_to(outside_file)
-    ctx.read_paths.add("link.txt")
+    ctx.touched_paths.add("link.txt")
     with pytest.raises(ValueError, match="not a regular file"):
         await run(
             "write",
