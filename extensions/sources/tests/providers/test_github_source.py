@@ -8,8 +8,9 @@ no delete signal, so the sync runner's row-level cursor handles re-reads), the p
 a repo-scoped stream checkpoints (each repo keeps its own `?since` watermark, so a capped run
 resumes without skipping an unvisited repo's history), a newest-first stream stopping its page walk
 at the repo's watermark and, once capped, resuming its backfill downward by `{high, until}` window
-via `?until`, and a grant that cannot enumerate orgs at all (`/user/orgs` → 403) surfacing as
-`StreamSkipped` so the run records a skip, not a failure."""
+via `?until`, the Actions runs stream bounding every pass at its pinned floor with `created=>=`, and
+a grant that cannot enumerate orgs at all (`/user/orgs` → 403) surfacing as `StreamSkipped` so the
+run records a skip, not a failure."""
 
 import json
 import logging
@@ -554,6 +555,50 @@ async def test_the_actions_api_lands_its_records_from_a_counted_envelope() -> No
 
     assert _refs(result) == {"workflow_runs/acme/repo1/11", "workflow_runs/acme/repo1/12"}
     assert len(pages) == 2
+
+
+async def test_a_pinned_floor_bounds_workflow_runs_server_side() -> None:
+    """Actions runs outnumber every other collection a busy repo publishes, and the stream is
+    ordered `none`, so every pass re-walks each repo whole rather than resuming from a watermark.
+    Its zero-day window pins the floor at registration and the slice sends it as the Actions API's
+    own `created=>=` range, which is what keeps a pass to the runs made since the row was — without
+    it the pass walks the repo's entire run history and the per-run cap ends it partway, every run.
+
+    The filter is the Actions API's alone, so a repo stream that is not one of its collections must
+    not carry it: `deployments` is pinned by the same floor and sends no `created`."""
+    pinned = datetime(2026, 9, 8, 4, 45, tzinfo=UTC)
+    runs: list[dict[str, str]] = []
+    deployments: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/actions/runs":
+            runs.append(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "workflow_runs": [
+                        {"id": 11, "name": "ci", "updated_at": "2026-09-08T05:00:00Z"}
+                    ],
+                },
+            )
+        if request.url.path == "/repos/acme/repo1/deployments":
+            deployments.append(dict(request.url.params))
+            return httpx.Response(200, json=[{"id": 31, "updated_at": "2026-09-08T05:00:00Z"}])
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("workflow_runs", handle, backfill_after=pinned)
+    await _fetch("deployments", handle, backfill_after=pinned)
+
+    spec = next(s for s in GitHubConnector().streams() if s.name == "workflow_runs")
+    assert spec.backfill_window_days == 0
+    assert runs[0]["created"] == ">=2026-09-08T04:45:00Z"
+    assert "created" not in deployments[0]
+    assert _refs(result) == {"workflow_runs/acme/repo1/11"}
 
 
 async def test_workflows_lands_its_records_from_its_own_envelope_key() -> None:

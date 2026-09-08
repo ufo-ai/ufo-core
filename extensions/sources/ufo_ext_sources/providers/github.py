@@ -28,9 +28,13 @@ run resumes downward without the position drift that
 would lose records prepended between slices; steady-state stops early once a page sits strictly
 below the repo watermark (a tying page re-yields, so a tied-but-new record lands and the repeats
 dedup downstream). Every other repo-scoped stream is `none` — checkpointed at the repo boundary
-only. GitHub surfaces no delete signal, so the sync runner's row-level cursor skips already-seen
-rows. A grant that can't enumerate orgs at all (`/user/orgs` refused with a 403) can read no stream,
-so the walk raises `StreamSkipped` and the run records a skip, not a failure. The write path is
+only. `workflow_runs` is the one of those that carries a floor: Actions runs outnumber every other
+collection a busy repo publishes, so the stream declares a zero-day backfill window and each repo
+slice sends the pinned floor as the Actions API's `created=>=` range. A `none` stream re-walks
+whole every pass, so that bound governs every pass, not just the first. GitHub surfaces no delete
+signal, so the sync runner's row-level cursor skips already-seen rows. A grant that can't
+enumerate orgs at all (`/user/orgs` refused with a 403) can read no stream, so the walk raises
+`StreamSkipped` and the run records a skip, not a failure. The write path is
 intentionally absent — the source seam only reads."""
 
 import asyncio
@@ -69,6 +73,8 @@ _GITHUB_ACCEPT = "application/vnd.github+json, application/vnd.github.star+json"
 _GITHUB_API_VERSION = "2022-11-28"
 _STATE_ALL_STREAMS = frozenset({"issues", "pull_requests"})
 _UNTIL_STREAMS = frozenset({"commits"})
+_CREATED_FLOOR_STREAMS = frozenset({"workflow_runs"})
+WORKFLOW_RUNS_BACKFILL_WINDOW_DAYS = 0
 _REPO_SKIP_STATUS = frozenset({404, 409, 410})
 _ORG_SKIP_STATUS = frozenset({403, 404, 410})
 _ORG_SCOPE_GATE_STATUS = frozenset({403})
@@ -154,7 +160,12 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream("stargazers", cursor_field="starred_at", created_at_field="starred_at"),
     _stream("tags", primary_key="name", cursor_field=None),
     _stream("teams", cursor_field=None),
-    _stream("workflow_runs", cursor_field="updated_at", canonical=True),
+    _stream(
+        "workflow_runs",
+        cursor_field="updated_at",
+        canonical=True,
+        backfill_window_days=WORKFLOW_RUNS_BACKFILL_WINDOW_DAYS,
+    ),
     _stream("workflows", cursor_field="updated_at", canonical=True),
 ]
 
@@ -286,8 +297,8 @@ class GitHubConnector(RestConnector):
         self_user_id: str | None,
         backfill_after: datetime | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Widen the default seam by the row's pinned backfill floor, which only the
-        newest-first per-repo walks read."""
+        """Widen the default seam by the row's pinned backfill floor, which the newest-first
+        per-repo walks and `workflow_runs` read."""
         return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
 
     async def paginate(
@@ -354,7 +365,7 @@ class GitHubConnector(RestConnector):
         walk = PartitionWalk(
             ordering=stream.ordering,
             partitions=partial(self._repo_partitions, client),
-            pages=partial(self._repo_pages, client, stream, path),
+            pages=partial(self._repo_pages, client, stream, path, floor),
             floor=floor,
         ).stream(cursor)
         try:
@@ -394,6 +405,7 @@ class GitHubConnector(RestConnector):
         client: httpx.AsyncClient,
         stream: StreamSpec,
         path: str,
+        floor: str | None,
         repo_key: str,
         bound: PartitionBound,
     ) -> AsyncIterator[WalkPage]:
@@ -408,7 +420,11 @@ class GitHubConnector(RestConnector):
         The pinned floor arrives as `bound.since` and takes the same two roads: `commits` sends
         `?since`, so the older history is never fetched; `events`/`issue_events` filter it
         client-side, which caps what lands but not what is fetched, their API having no time filter.
-        Both compare as the ISO strings GitHub returns."""
+        Both compare as the ISO strings GitHub returns.
+
+        `workflow_runs` is ordered `none`, so `PartitionWalk` hands it no bound at all and its floor
+        arrives as `floor` instead — sent as the Actions API's `created=>=` range, which bounds the
+        repo's runs server-side on every pass."""
         owner, _, repo = repo_key.partition("/")
         scoped = path.format(owner=owner, repo=repo)
         params: dict[str, Any] = {"per_page": PAGE_SIZE}
@@ -423,6 +439,8 @@ class GitHubConnector(RestConnector):
                 params["until"] = bound.before
             if bound.since:
                 params["since"] = bound.since
+        elif stream.name in _CREATED_FLOOR_STREAMS and floor:
+            params["created"] = f">={floor}"
         try:
             async for page in self._paginate_link_header(
                 client, scoped, params=dict(params), record_path=_RECORD_PATHS.get(stream.name)

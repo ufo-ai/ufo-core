@@ -55,10 +55,9 @@ JOB_KEY = f"{sources_manifest.NAME}:{sources_manifest.CONNECTED_SOURCES_RETRY_JO
 
 
 class _WindowedConnector(RestConnector):
-    """A stand-in provider whose canonical set holds one windowed stream and one without a window.
-    No shipped connector marks a windowed stream canonical, so nothing in the catalog exercises the
-    window resolution the registrar owns. It stands in for the provider and is never the thing
-    asserted — the rows the registrar writes are."""
+    """A stand-in provider whose canonical set holds a windowed stream, a zero-day one, and one
+    declaring no window at all — the three answers the registrar has to resolve. It stands in for
+    the provider and is never the thing asserted — the rows the registrar writes are."""
 
     name = WINDOWED
     base_url = "https://api.windowed.test"
@@ -70,6 +69,9 @@ class _WindowedConnector(RestConnector):
                 source_object="dated",
                 canonical=True,
                 backfill_window_days=STREAM_WINDOW_DAYS,
+            ),
+            StreamSpec(
+                name="instant", source_object="instant", canonical=True, backfill_window_days=0
             ),
             StreamSpec(name="undated", source_object="undated", canonical=True),
             StreamSpec(name="lookup", source_object="lookup"),
@@ -543,7 +545,9 @@ async def test_the_connections_window_governs_every_stream_that_takes_one(
 ) -> None:
     """The window resolves per row: the connection's where it names one, the stream's declaration
     where it does not, and none at all for a stream that declares none — such a stream reads its
-    whole history, and a cutoff on it would be honoured by nothing."""
+    whole history, and a cutoff on it would be honoured by nothing. A zero-day declaration is a
+    window, not the absence of one: it pins the row at the instant it was registered, so the stream
+    reads forward from there rather than reading everything."""
     monkeypatch.setitem(CONNECTORS, WINDOWED, _WindowedConnector)
     silent, asking = await _workspace(), await _workspace()
     await _connect_without_the_hook(silent, WINDOWED)
@@ -553,10 +557,13 @@ async def test_the_connections_window_governs_every_stream_that_takes_one(
     await _register(asking)
 
     declared, asked = _pins(await _rows(silent)), _pins(await _rows(asking))
-    assert set(declared) == {"dated", "undated"} == set(asked)
+    assert set(declared) == {"dated", "instant", "undated"} == set(asked)
     assert declared["dated"][0] == STREAM_WINDOW_DAYS
     assert declared["dated"][1] is not None
     assert asked["dated"][0] == RAISED_WINDOW_DAYS
+    assert declared["instant"][0] == 0
+    assert declared["instant"][1] is not None
+    assert asked["instant"][0] == RAISED_WINDOW_DAYS
     assert declared["undated"] == asked["undated"] == (None, None)
 
 
@@ -595,19 +602,33 @@ async def test_lowering_the_connections_window_leaves_live_rows_where_they_are(
 ) -> None:
     """Narrowing would strand the pages between the two floors — never re-walked, never tombstoned
     — so a lowered window leaves every live row exactly as it is, cursor included, and governs only
-    the rows registered after it."""
+    the rows registered after it.
+
+    The connection carries one integer for streams that declare different windows, so which
+    direction it moved is each row's own answer, not the connection's: the same seven days narrow
+    the thirty-day stream and widen the zero-day one. Reading the direction off the connection
+    would either strand the narrowed row's pages or leave the widened row never reaching back."""
     monkeypatch.setitem(CONNECTORS, WINDOWED, _WindowedConnector)
     state = await _workspace()
     connection_id = await _connect_without_the_hook(state, WINDOWED)
     await _register(state)
     await _stamp_cursor(state, "watermark")
-    before = await _rows(state)
+    before = _pins(await _rows(state))
 
     await _set_window(state, connection_id, LOWERED_WINDOW_DAYS)
     await _register(state)
 
-    assert _pins(await _rows(state)) == _pins(before)
-    assert {row["cursor"] for row in await _rows(state)} == {"watermark"}
+    rows = await _rows(state)
+    after = _pins(rows)
+    cursors = {row["config"]["stream"]: row["cursor"] for row in rows}
+    assert after["dated"] == before["dated"]
+    assert after["undated"] == before["undated"]
+    assert cursors["dated"] == cursors["undated"] == "watermark"
+    assert after["instant"][0] == LOWERED_WINDOW_DAYS
+    assert datetime.fromisoformat(str(after["instant"][1])) == datetime.fromisoformat(
+        str(before["instant"][1])
+    ) - timedelta(days=LOWERED_WINDOW_DAYS)
+    assert cursors["instant"] is None
 
 
 async def test_a_row_that_took_the_streams_declared_window_repins_from_that_window(
