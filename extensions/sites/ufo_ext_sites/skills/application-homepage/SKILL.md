@@ -113,8 +113,10 @@ Then write `/workspace/ufo-app/app.tsx`:
 - Named imports from `ufo/kit` and nothing else. No exports.
 - `mountApp(document.getElementById("root")!, () => <App />)`.
 - One `data-app-region="slug"` container per design region, in the design's order.
-- Gap steps `hair 2xs sm 2xl 6xl 8xl` only. No raw colour or length, no `<style>` tag, no
-  `data-slot`.
+- Space every part with `gap-hair`, `gap-2xs`, `gap-sm`, `gap-2xl`, `gap-6xl`, `gap-8xl` and
+  nothing else. The scale skips steps on purpose, so there is no `gap-xs`, `gap-md`, `gap-lg` or
+  `gap-xl` to reach for.
+- No raw colour or length, no `<style>` tag, no `data-slot`.
 - The deploy refuses these outright, so write none of them:
   - `space-x-` / `space-y-` — stack with flex and a gap
   - `dark:` — the colour scheme carries itself; write no dark variant
@@ -175,3 +177,13 @@ would.
   the region and the pixels — everything a repair needs. One recorded drawing spent twenty-five
   steps reading it and produced no better SVG for them.
 - Do not deploy the project as its own source. `deploy_website` builds it.
+- Write the page for a member who has nothing in it yet, because that is the state it is measured
+  in. Every region draws its own container and a line saying it is empty, never nothing at all, and
+  every read that can be absent is guarded before you reach through it. A region that renders
+  nothing is measured as missing however carefully its slug is marked, and a read through data that
+  is not there throws before the page mounts. Two recorded builds lost six deploys to `lacks
+  visible <region>` and two more to `the page never mounted`.
+- A flex row holding text needs `min-w-0` on the child that holds it. Without it the text refuses
+  to shrink and the deploy answers `document is 361px` at a 360 px lane, or names the label it
+  clipped.
+- A `Stat` carries no border. It is already a tile; a figure divides by the space around it.

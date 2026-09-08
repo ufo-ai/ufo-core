@@ -22,6 +22,7 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_REGION_MIN_AREA,
     APPLICATION_REGION_MIN_HEIGHT,
     APPLICATION_REGION_MIN_WIDTH,
+    COMPOSITION_STEPS,
     DESKTOP_WIDTH,
     KIT_QUIET_TEXT_MIN,
     MAX_MESSAGE_CHARS,
@@ -35,6 +36,7 @@ from ufo_ext_sites.application_audit import (
     application_design_fidelity,
     application_design_region_fold_failure,
     application_design_region_size_failure,
+    application_region_failure,
     application_region_relation,
     audit_application,
     validate_application_design,
@@ -1506,6 +1508,8 @@ def test_the_skill_names_every_class_the_deploy_refuses() -> None:
     skill = " ".join((APPLICATION_SKILL_DIR / "SKILL.md").read_text().split())
     for _pattern, reason in PAGE_CLASS_REFUSALS:
         assert " ".join(reason.split()) in skill, f"the skill never tells the child: {reason}"
+    for step in COMPOSITION_STEPS:
+        assert f"`gap-{step}`" in skill, f"the skill never names the step gap-{step}"
 
 
 def test_a_deploy_refusal_cannot_be_handed_back_as_a_blocker() -> None:
@@ -1679,8 +1683,8 @@ def test_application_design_fidelity_preserves_design_fold_placement() -> None:
     assert accepted.failures == ()
     assert accepted.passed == accepted.total
     assert rejected.failures == (
-        "light 360px lacks visible summary",
-        "dark 360px lacks visible summary",
+        "light 360px renders summary below the fold, where the design puts it above",
+        "dark 360px renders summary below the fold, where the design puts it above",
     )
 
 
@@ -1898,6 +1902,30 @@ def test_application_design_fidelity_sizes_regions_against_the_design_page() -> 
     )
 
     assert application_design_fidelity(report).failures == ()
+
+
+def test_a_region_the_page_never_rendered_says_so() -> None:
+    """One message covered a region the page never rendered and one it rendered below the fold,
+    and a repair treats them differently: the first is written or unhidden, the second is moved.
+    A recorded build spent six of its ten deploys on that line. Nothing can separate an absent
+    region from one hidden behind a control that shows a single region at a time — neither is
+    measured — so the message names both rather than implying the one."""
+
+    designed = ApplicationAuditRegion(name="summary", left=0.05, top=0.0, width=0.9, height=0.1)
+
+    missing = application_region_failure("light", "summary", None, designed)
+    assert missing is not None
+    assert "measured no summary" in missing
+    assert "hides it behind a control" in missing
+
+    below = ApplicationAuditRegion(
+        name="summary", left=0.05, top=0.9, width=0.9, height=0.05, above_fold=False
+    )
+    assert application_region_failure("light", "summary", below, designed) == (
+        "light 360px renders summary below the fold, where the design puts it above"
+    )
+
+    assert application_region_failure("light", "summary", designed, designed) is None
 
 
 def test_application_design_region_floors_hold_one_pixel_size_at_every_page_height() -> None:

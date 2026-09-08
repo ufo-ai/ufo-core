@@ -405,6 +405,31 @@ def application_design_region_fold_failure(
     return None
 
 
+def application_region_failure(
+    scheme: str,
+    name: str,
+    measured: ApplicationAuditRegion | None,
+    designed: ApplicationAuditRegion,
+) -> str | None:
+    """Why the built page does not carry this design region at 360 px, or None.
+
+    A repair treats the two differently, and one message for both left a build guessing: a region
+    the page never rendered is written or unhidden, a region below the fold is moved. Nothing can
+    tell an absent region from one hidden behind a control that shows a single region at a time —
+    neither is measured — so the first names both rather than implying the one."""
+    if measured is None:
+        return (
+            f"{scheme} {NARROW_WIDTH}px measured no {name}: the page renders no such region, or "
+            "hides it behind a control that shows one region at a time"
+        )
+    if designed.above_fold and not measured.above_fold:
+        return (
+            f"{scheme} {NARROW_WIDTH}px renders {name} below the fold, where the design puts "
+            "it above"
+        )
+    return None
+
+
 def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity:
     """Measure named region identity, first-screen membership, and vertical order at 360 px.
 
@@ -466,11 +491,13 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
         else:
             failures.append(f"{scheme} {NARROW_WIDTH}px region names differ")
         for name in design_names:
-            region = app_by_name.get(name)
-            if region is not None and (not design_by_name[name].above_fold or region.above_fold):
+            failure = application_region_failure(
+                scheme, name, app_by_name.get(name), design_by_name[name]
+            )
+            if failure is None:
                 passed += 1
             else:
-                failures.append(f"{scheme} {NARROW_WIDTH}px lacks visible {name}")
+                failures.append(failure)
         for first_index, first_name in enumerate(design_names):
             for second_name in design_names[first_index + 1 :]:
                 expected = application_region_relation(
