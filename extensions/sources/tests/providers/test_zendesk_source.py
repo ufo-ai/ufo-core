@@ -131,3 +131,53 @@ async def test_stream_skipped_on_refusal() -> None:
 
     with pytest.raises(StreamSkipped):
         await _fetch("tickets", handle)
+
+
+async def test_sla_policies_read_the_key_zendesk_actually_answers_with() -> None:
+    """`slas/policies.json` holds its rows under `sla_policies`, which is the stream's own name and
+    so the default the dispatch already derives. An override naming anything else reads no rows at
+    all: the list comes back absent rather than wrong, so the run lands nothing and reports fine."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/slas/policies.json":
+            return httpx.Response(
+                200,
+                json={
+                    "sla_policies": [
+                        {"id": 7, "title": "Urgent", "updated_at": "2026-03-01T00:00:00Z"}
+                    ],
+                    "next_page": None,
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("sla_policies", handle)
+
+    assert _refs(result) == {"sla_policies/7"}
+
+
+async def test_attribute_definitions_lift_both_condition_lists_to_rows() -> None:
+    """The routing-attribute conditions arrive nested one level deeper than every other list here,
+    as two same-shaped lists under `definitions`. Read as a flat collection it is an object, not
+    records, which fails the page contract outright. One attribute may sit in both lists, so the
+    condition it was listed under qualifies the row rather than one overwriting the other."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/routing/attributes/definitions.json":
+            return httpx.Response(
+                200,
+                json={
+                    "definitions": {
+                        "conditions_all": [{"id": "att-1", "title": "Language"}],
+                        "conditions_any": [{"id": "att-1", "title": "Language"}],
+                    }
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("attribute_definitions", handle)
+
+    assert _refs(result) == {
+        "attribute_definitions/att-1/all",
+        "attribute_definitions/att-1/any",
+    }

@@ -13,7 +13,7 @@ tenant URL fails loud. A refusal (401/403) raises `StreamSkipped`. The credentia
 through the auth proxy the runner threads; this connector holds no token. The write path is
 intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -46,14 +46,26 @@ _SIDELOAD: dict[str, dict[str, Any]] = {
 
 _DATA_FIELD_OVERRIDES = {
     "account_attributes": "attributes",
-    "attribute_definitions": "definitions",
     "ticket_audits": "audits",
     "ticket_skips": "skips",
     "ticket_activities": "activities",
-    "sla_policies": "policies",
     "schedules": "schedules",
     "deleted_tickets": "deleted_tickets",
 }
+
+# `routing/attributes/definitions` answers with the one nested body on this surface: two lists of
+# the same shape under `definitions`, holding the conditions an attribute may be matched by. Both
+# can name one attribute, so the condition it was listed under is part of which record this is.
+_DEFINITION_CONDITIONS = {"conditions_all": "all", "conditions_any": "any"}
+
+
+def _condition_qualified(key: str | None, record: Mapping[str, Any]) -> str | None:
+    """A routing-attribute condition keyed by the attribute alone would have the two lists overwrite
+    each other, so the condition qualifies the page's key and its identity alike."""
+    condition = record.get("condition")
+    if key is None or not isinstance(condition, str):
+        return None
+    return f"{key}/{condition}"
 
 
 def _stream(
@@ -205,6 +217,16 @@ class ZendeskConnector(RestConnector):
             path = f"{path}?{parsed.query}"
         return path
 
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "attribute_definitions":
+            return super().record_identity(record, stream)
+        return _condition_qualified(super().record_identity(record, stream), record)
+
+    def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "attribute_definitions":
+            return super().record_ref(record, stream)
+        return _condition_qualified(super().record_ref(record, stream), record)
+
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
@@ -219,6 +241,10 @@ class ZendeskConnector(RestConnector):
                 return
             if stream.name in _INCREMENTAL_CURSOR_STREAMS:
                 async for page in self._paginate_incremental_cursor(client, stream, cursor=cursor):
+                    yield page
+                return
+            if stream.name == "attribute_definitions":
+                async for page in self._paginate_attribute_definitions(client, stream):
                     yield page
                 return
             async for page in self._paginate_default(client, stream):
@@ -253,6 +279,26 @@ class ZendeskConnector(RestConnector):
             if data.get("end_of_stream"):
                 return
             path = self._next_page_path(data.get("after_url") or data.get("next_page"))
+
+    async def _paginate_attribute_definitions(
+        self, client: httpx.AsyncClient, stream: StreamSpec
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """The routing-attribute conditions, both lists lifted to rows stamped with the condition
+        they were listed under. The body nests them one level deeper than every other list here, so
+        reading it as a flat collection under `definitions` yields the object itself rather than
+        records — and an attribute in both lists is two rows, which is why the stamp is identity."""
+        path: str | None = f"/api/v2/{stream.source_object}.json?per_page={PAGE_SIZE}"
+        while path:
+            data = await self._get(client, path)
+            definitions = data.get("definitions") or {}
+            records = [
+                {**record, "condition": condition}
+                for field, condition in _DEFINITION_CONDITIONS.items()
+                for record in definitions.get(field) or []
+            ]
+            if records:
+                yield records
+            path = self._next_page_path(data.get("next_page"))
 
     async def _paginate_default(
         self, client: httpx.AsyncClient, stream: StreamSpec
