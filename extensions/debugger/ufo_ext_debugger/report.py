@@ -59,9 +59,13 @@ PROBLEM_MAX_CHARS = 600
 CREDENTIALED_URL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@]*@")
 REPORT_DESCRIPTION = (
     "Report a problem in this workspace to the engineers who run this deploy. Use it for a fault "
-    "no turn can repair — a connection that stopped authenticating, an empty credential slot, a "
-    "task that faults on every run, a sandbox or site that stopped answering — and whenever a "
-    "member asks for a problem to be reported, whatever the problem is. Say what you attempted, "
+    "neither a turn nor the member can repair — a task that faults on every run, a sandbox or "
+    "site that stopped answering, a credential this deploy holds and they do not — and whenever "
+    "a member asks for a problem to be reported, whatever the problem is. What they would fix by "
+    "connecting or reconnecting an account of their own — a revoked token, an unfilled slot of "
+    "theirs — belongs in `notify` where you hold it, since that reaches the person who can clear "
+    "it; where you do not hold it, report it here, because nothing else would carry it. Say what "
+    "you attempted, "
     "what happened, and what you expected, in your own words; never paste command output. An "
     "engineer opens the transcript of this turn from the record, so the detail is already there. "
     "One call per problem. Nothing "

@@ -6,7 +6,12 @@ message in a queue another agent triages. The member is a startup founder with G
 Stripe connected, and what they want interrupted for is what changes what they do today: revenue
 moving, production down, a person waiting on them. Over-raising is the expensive failure — a queue
 full of green runs and receipts is one the triage agent stops trusting — and so is raising ufo's own
-condition: a connection that stopped authenticating is `report_problem`'s, not a notification.
+condition: a task that faults every run is `report_problem`'s, not a notification.
+
+`notify` and `report_problem` are both in the set the agent holds, and the line between them is
+whether the member can clear the thing by connecting or reconnecting an account. A revoked Stripe
+token is theirs to fix, so it is a notification and not a report; the case that carries it fails on
+a report, because a report sends it to engineers who cannot reconnect anything.
 
 Raising and the copy that follows it are graded apart. A reply that announces the queue is worth
 catching, but ANDing it onto the raise verdict failed a correct raise for a blemish in the sentence
@@ -16,14 +21,19 @@ The suite is built as opposing pairs and neither half can be passed by learning 
 a churn spike, a deploy failed on main, an investor's deadline going unanswered, a customer turning,
 a cluster of failed payments, and two of those landing in one report (two subjects, two calls, never
 one merged and never three). Restraint: green CI, newsletters and receipts, one small refund, a
-member who is reading the answer as it is written, the agent's own failed step, and the sync whose
-own connection broke — which routes to `report_problem` and never to `notify`.
+member who is reading the answer as it is written, and the agent's own failed step.
 
 The cases are member messages to the main agent standing in for the background turns that raise
 notifications in production; the harness admits no speakerless turn. Deterministic graders
 throughout: what was called, how many times, and with which subjects are exact facts about the
 trajectory. Every case runs one sample, since one raise in three of a routine run is the noise this
-suite exists to catch."""
+suite exists to catch.
+
+A subject is graded by the source it names, not by its exact text. The tool's own field asks for
+`<source>/<id>` where an id exists and `source/<name>` where none does, so `github/412` and
+`source/github` are both the right answer for one deploy that failed and the grader cannot prefer
+either. What it does hold is that one raise names one source and no other, which is the property
+every case here was written to measure."""
 
 import re
 
@@ -34,13 +44,21 @@ from evals.harness.capability import (
     Grader,
     WorkspaceFile,
 )
-from evals.harness.scorers import attempted_tools_scorer, restraint_scorer
+from evals.harness.scorers import restraint_scorer
 
 NOTIFY = "notify"
-REPORT_PROBLEM = "report_problem"
-STRIPE = "source/stripe"
-GITHUB = "source/github"
-GMAIL = "source/gmail"
+REPORT = "report_problem"
+STRIPE = "stripe"
+GITHUB = "github"
+GMAIL = "gmail"
+
+
+def _source_of(subject: str) -> str:
+    """The source a subject names, in either form the tool's field asks for: `source/stripe` names
+    stripe, and so does `stripe/team-plan-failures`."""
+    head, _, tail = subject.partition("/")
+    return tail.partition("/")[0] if head == "source" else head
+
 
 REPORT_FRAME = (
     "This is the nightly report for your connected {source}; {path} in the workspace is the "
@@ -153,8 +171,8 @@ def _file(path: str, content: str) -> WorkspaceFile:
 MENTIONS_THE_QUEUE = re.compile(r"\bnotif|\bqueue", re.IGNORECASE)
 
 
-def _raised_exactly(subjects: frozenset[str]) -> Grader:
-    """One `notify` per subject in `subjects`, no more and none for anything else.
+def _raised_exactly(sources: frozenset[str]) -> Grader:
+    """One `notify` naming each source in `sources`, no more and none for anything else.
 
     Raising is the only thing these cases grade. Whether the reply then announces the queue is a
     separate property with its own case below: folding the two together failed a correct raise for
@@ -166,16 +184,34 @@ def _raised_exactly(subjects: frozenset[str]) -> Grader:
         raised = [
             str(call.arguments.get("subject")) for call in output.calls if call.call == NOTIFY
         ]
-        if sorted(raised) != sorted(subjects):
+        named = [_source_of(subject) for subject in raised]
+        if sorted(named) != sorted(sources):
             return CapabilityVerdict(
-                False, f"raised {sorted(raised)}, wanted one each of {sorted(subjects)}"
+                False, f"raised {sorted(raised)}, wanted one each about {sorted(sources)}"
             )
-        return CapabilityVerdict(True, f"raised once each about {sorted(subjects)}")
+        return CapabilityVerdict(True, f"raised once each about {sorted(sources)}")
 
     return grade
 
 
-def _raises_and_says_nothing_about_it(subject: str) -> Grader:
+def _raised_and_not_reported(subjects: frozenset[str]) -> Grader:
+    """The razor between the two tools the agent holds: what the member clears by connecting or
+    reconnecting an account is a notification, and only what an engineer can clear is a report. A
+    run that raises correctly and reports as well still fails — the report reaches people who
+    cannot reconnect the member's account, so it spends an engineer on a thing the member owns."""
+    raised_exactly = _raised_exactly(subjects)
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        if any(call.call == REPORT for call in output.calls):
+            return CapabilityVerdict(
+                False, "reported it to the engineers; only the member can reconnect their account"
+            )
+        return await raised_exactly(output)
+
+    return grade
+
+
+def _raises_and_says_nothing_about_it(source: str) -> Grader:
     """The copy rule on its own: the raise has to happen, and the reply must not announce it. The
     member reads the reply; the notification reaches them by itself, so a line about the tool or the
     queue is one they cannot act on and did not ask for. Every match the regex found across forty
@@ -186,8 +222,8 @@ def _raises_and_says_nothing_about_it(subject: str) -> Grader:
         raised = [
             str(call.arguments.get("subject")) for call in output.calls if call.call == NOTIFY
         ]
-        if raised != [subject]:
-            return CapabilityVerdict(False, f"raised {raised}, wanted one about {subject!r}")
+        if [_source_of(one) for one in raised] != [source]:
+            return CapabilityVerdict(False, f"raised {raised}, wanted one about {source!r}")
         said = MENTIONS_THE_QUEUE.search(output.response)
         if said is not None:
             return CapabilityVerdict(False, f"the reply announces the queue: {said.group(0)!r}")
@@ -332,13 +368,13 @@ CASES = (
         digest_tag="notify:own-failed-step",
     ),
     CapabilityCase(
-        name="broken-connection-is-a-problem-report-not-a-notification",
+        name="a-broken-connection-of-theirs-is-raised",
         message=(
             f"This is the nightly report for your connected Stripe account; {AUTH_LOG} in the "
             "workspace is the sync's own log. Read it and do whatever the report calls for."
         ),
-        grader=attempted_tools_scorer(((REPORT_PROBLEM, {}),), (NOTIFY,), ()),
+        grader=_raised_and_not_reported(frozenset({STRIPE})),
         workspace_files=(_file(AUTH_LOG, AUTH_LINES),),
-        digest_tag="notify:broken-connection-routes-elsewhere",
+        digest_tag="notify:broken-connection-of-theirs",
     ),
 )

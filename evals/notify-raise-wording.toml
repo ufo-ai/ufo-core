@@ -20,27 +20,42 @@ sandbox = { backend = "local" }
 flags = { backend = "open" }
 
 [[arm]]
-name = "silence-rule"
+name = "no-razor"
 
 [[arm.replacements]]
 path = "extensions/app_notification/ufo_ext_app_notification/notify_tool.py"
-old = '''    "what this turn already told them or a fault you can repair."
-)'''
-new = '''    "what this turn already told them or a fault you can repair. Never mention this tool, the "
-    "queue, or that anyone was notified: your reply says what you found, and the notification "
-    "reaches the member on its own."
-)'''
+old = '''    "can do: a revoked token, an expired grant, a slot they never filled. That is the line "
+    "against `report_problem` — what a member fixes by connecting or reconnecting an account is "
+    "a notification, and what only an engineer can fix is a report. Nothing answers back "'''
+new = '''    "can do: a revoked token, an expired grant, a slot they never filled. Nothing answers back "'''
 
 [[arm]]
-name = "no-ufo-condition"
+name = "old-wording"
 
 [[arm.replacements]]
 path = "extensions/app_notification/ufo_ext_app_notification/notify_tool.py"
-old = '''    "an email that needs a decision or is going unanswered, a customer or investor turning. It is "
-    "not for ufo's own condition: a connection that stopped authenticating or a task that faults "
-    "is `report_problem` and a line in your reply, never a notification. Nothing answers back "'''
-new = '''    "an email that needs a decision or is going unanswered, a customer or investor turning. "
-    "Nothing answers back "'''
+old = '''    "an email that needs a decision or is going unanswered, a customer or investor turning. It "
+    "is also where a broken account of theirs goes, because connecting one is a thing only they "
+    "can do: a revoked token, an expired grant, a slot they never filled. That is the line "
+    "against `report_problem` — what a member fixes by connecting or reconnecting an account is "
+    "a notification, and what only an engineer can fix is a report. Nothing answers back "'''
+new = '''    "an email that needs a decision or is going unanswered, a customer or investor turning. It "
+    "is not for ufo's own condition: a connection that stopped authenticating or a task that "
+    "faults is `report_problem` and a line in your reply, never a notification. Nothing answers "
+    "back "'''
+
+[[arm]]
+name = "razor-on-notify-only"
+
+[[arm.replacements]]
+path = "extensions/debugger/ufo_ext_debugger/report.py"
+old = '''    "a member asks for a problem to be reported, whatever the problem is. What they would fix by "
+    "connecting or reconnecting an account of their own — a revoked token, an unfilled slot of "
+    "theirs — belongs in `notify` where you hold it, since that reaches the person who can clear "
+    "it; where you do not hold it, report it here, because nothing else would carry it. Say what "
+    "you attempted, "'''
+new = '''    "a member asks for a problem to be reported, whatever the problem is. Say what "
+    "you attempted, "'''
 
 [[arm]]
 name = "no-already-told"

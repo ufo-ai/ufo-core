@@ -13,7 +13,9 @@ from evals.suites.notify_raise import (
     CASES,
     GITHUB,
     NOTIFY,
+    REPORT,
     STRIPE,
+    _raised_and_not_reported,
     _raised_exactly,
     _raises_and_says_nothing_about_it,
 )
@@ -27,6 +29,15 @@ def _raise(subject: str) -> ToolInvocation:
         name=NOTIFY,
         input={"subject": subject, "body": "churn is up"},
         result="Queued. Nothing answers back on this conversation.",
+        has_result=True,
+    )
+
+
+def _report() -> ToolInvocation:
+    return ToolInvocation(
+        name=REPORT,
+        input={"problem": "the stripe connection stopped authenticating"},
+        result="Reported to the engineers of this deploy.",
         has_result=True,
     )
 
@@ -81,6 +92,48 @@ async def test_the_copy_case_passes_a_quiet_reply() -> None:
 async def test_the_copy_case_still_needs_the_raise() -> None:
     """It cannot be passed by saying nothing and doing nothing."""
     verdict = await _raises_and_says_nothing_about_it(STRIPE)(_output())
+
+    assert not verdict.passed
+
+
+async def test_either_shipped_subject_shape_passes() -> None:
+    """The tool's own field asks for `<source>/<id>` where an id exists and `source/<name>` where
+    none does, so both are the right answer for one deploy that failed. Grading the literal string
+    failed the model for obeying the tool: three signal cases scored 0/3 in the 2026-09-07 control
+    on subjects like `github/412` and `gmail/priya-corvidcapital-dataroom`."""
+    for subject in ("source/github", "github/412", "github/8f21c0d"):
+        verdict = await _raised_exactly(frozenset({GITHUB}))(_output(_raise(subject)))
+
+        assert verdict.passed, subject
+
+
+async def test_a_subject_naming_another_source_still_fails() -> None:
+    verdict = await _raised_exactly(frozenset({GITHUB}))(_output(_raise("stripe/team-plan")))
+
+    assert not verdict.passed
+
+
+async def test_the_razor_case_passes_a_raise_with_no_report() -> None:
+    """A revoked token is the member's to clear, so the notification alone is the right act."""
+    verdict = await _raised_and_not_reported(frozenset({STRIPE}))(_output(_raise(STRIPE)))
+
+    assert verdict.passed
+
+
+async def test_the_razor_case_fails_a_raise_that_also_reports() -> None:
+    """The half that makes the case measure the razor rather than the raise. A report sends a
+    revoked token to engineers who cannot reconnect the member's account, so raising and reporting
+    is not "both bases covered" — it is the wrong tool called alongside the right one."""
+    verdict = await _raised_and_not_reported(frozenset({STRIPE}))(
+        _output(_raise(STRIPE), _report())
+    )
+
+    assert not verdict.passed
+    assert "reported it to the engineers" in verdict.reason
+
+
+async def test_the_razor_case_fails_a_report_instead_of_a_raise() -> None:
+    verdict = await _raised_and_not_reported(frozenset({STRIPE}))(_output(_report()))
 
     assert not verdict.passed
 

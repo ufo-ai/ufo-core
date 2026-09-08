@@ -28,6 +28,7 @@ TRIAGE = "notification_0002"
 DELIVERY = "notification_0003"
 CARRY = "notification_0004"
 SPAWN = "notification_0005"
+RECONNECT = "notification_0006"
 EDITED_PROMPT = "only tell me about churn"
 
 
@@ -50,6 +51,7 @@ def _revision(revision: str) -> ModuleType:
 TRIAGE_MODULE = _revision(TRIAGE)
 DELIVERY_MODULE = _revision(DELIVERY)
 SPAWN_MODULE = _revision(SPAWN)
+RECONNECT_MODULE = _revision(RECONNECT)
 RELEASED_PROMPT: str = TRIAGE_MODULE.RELEASED_PROMPT
 RELEASED_VERSION: str = TRIAGE_MODULE.RELEASED_VERSION
 TRIAGE_PROMPT: str = DELIVERY_MODULE.PREVIOUS_PROMPT
@@ -58,6 +60,8 @@ TRIAGE_TOOLS: list[str] = list(DELIVERY_MODULE.PREVIOUS_TOOLS)
 DELIVERY_PROMPT: str = SPAWN_MODULE.PREVIOUS_PROMPT
 DELIVERY_VERSION: str = SPAWN_MODULE.PREVIOUS_VERSION
 DELIVERY_TOOLS: list[str] = list(SPAWN_MODULE.PREVIOUS_TOOLS)
+SPAWN_PROMPT: str = RECONNECT_MODULE.PREVIOUS_PROMPT
+SPAWN_VERSION: str = RECONNECT_MODULE.PREVIOUS_VERSION
 LIVE_TOOLS = list(NOTIFICATION_AGENT.tools or ())
 
 
@@ -269,3 +273,64 @@ def test_the_spawn_grant_reaches_a_row_two_releases_behind(tmp_path: Path) -> No
     assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
     assert after["other"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
     assert after["archived"] == (TRIAGE_PROMPT, TRIAGE_VERSION, TRIAGE_TOOLS)
+
+
+def test_the_reconnect_prompt_reaches_the_shipped_row_and_no_other(tmp_path: Path) -> None:
+    """The release that sends a member's broken account to them carries the consumer for it: the
+    triage prompt that passes such a row on instead of dropping it as a routine sync. The prompt
+    moves where the row still reads as any earlier release wrote it, a member's own wording stands,
+    and other extensions' rows and archived rows stand."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, SPAWN)
+    engine = _seed(database_path, SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)
+    command.upgrade(config, RECONNECT)
+    after = _rows(engine)
+    command.downgrade(config, SPAWN)
+    restored = _rows(engine)
+
+    assert "reconnecting it is a thing only they can do" in NOTIFICATION_AGENT_PROMPT
+    assert "reconnecting it" not in SPAWN_PROMPT
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)
+    assert after["archived"] == (SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)
+    assert restored["shipped"] == (SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)
+
+
+def test_the_reconnect_carry_repairs_an_allowlist_left_two_releases_behind(tmp_path: Path) -> None:
+    """A row the roll window left on an older release holds that release's allowlist, and no
+    provisioning pass repairs one — `_fill` writes setup and purpose alone. Stamping the version
+    without the allowlist would leave such a row reporting this release while holding an allowlist
+    with no `spawn`, running a prompt that orders it."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, SPAWN)
+    engine = _seed(database_path, DELIVERY_PROMPT, DELIVERY_VERSION, TRIAGE_TOOLS)
+    command.upgrade(config, RECONNECT)
+    after = _rows(engine)
+
+    assert "spawn" not in TRIAGE_TOOLS
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (DELIVERY_PROMPT, DELIVERY_VERSION, TRIAGE_TOOLS)
+    assert after["archived"] == (DELIVERY_PROMPT, DELIVERY_VERSION, TRIAGE_TOOLS)
+
+
+def test_the_reconnect_prompt_reaches_a_row_two_releases_behind(tmp_path: Path) -> None:
+    """Each release leaves rows behind it, so a row the roll window put at the release before last
+    is still there when this one runs. It moves off every earlier text, or it runs the older
+    instructions under this version."""
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, SPAWN)
+    engine = _seed(database_path, DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)
+    command.upgrade(config, RECONNECT)
+    after = _rows(engine)
+
+    assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["edited"] == (EDITED_PROMPT, VERSION, LIVE_TOOLS)
+    assert after["other"] == (DELIVERY_PROMPT, DELIVERY_VERSION, DELIVERY_TOOLS)

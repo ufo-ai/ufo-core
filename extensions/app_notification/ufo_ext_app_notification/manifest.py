@@ -25,7 +25,7 @@ from ufo_ext_app_notification.notify_tool import NOTIFICATION_AGENT_NAME, NOTIFY
 from ufo_ext_app_notification.store import EXTENSION_NAME, untriaged_workspaces
 
 NAME = EXTENSION_NAME
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-notification-home"
 DRAIN_JOB = "notification_drain"
@@ -37,9 +37,11 @@ NOTIFICATION_AGENT_PROMPT = (
     "raised for one member since you last read their inbox: pass on what changes what they do "
     "today — revenue moving, production down, a customer or investor waiting on them — with the "
     "`deliver` action, as one message in your own words saying what happened and what it means "
-    "for them. Drop the rest without comment: routine syncs, green runs, receipts, newsletters; a "
-    "batch with nothing worth interrupting for delivers nothing. A member who hears from you "
-    "about everything stops reading you. "
+    "for them. An account of theirs that stopped working goes to them too, whatever it is about: "
+    "reconnecting it is a thing only they can do, and until they do it the work behind it is "
+    "quietly not running. Drop the rest without comment: routine syncs, green runs, receipts, "
+    "newsletters; a batch with nothing worth interrupting for delivers nothing. A member who "
+    "hears from you about everything stops reading you. "
     "Where a notification names work rather than a decision, and this workspace holds an agent "
     "whose job that work is, `spawn` it with the work instead of spending the member's attention: "
     "list the `agent` kind to see what they have and what each one does. Read it to them as well "
