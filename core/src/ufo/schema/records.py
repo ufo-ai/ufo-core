@@ -262,6 +262,7 @@ def turn_queue_for(parent_turn_id: UUID | None, admission_source: "TurnAdmission
 DBOS_APP_NAME = "ufo"
 DBOS_APP_VERSION = "ufo"
 DBOS_MAX_EXECUTOR_THREADS = 8192
+DBOS_SYSTEM_DATABASE_POOL_SIZE = 20
 SURFACE_COMMENT_ROUND_INDEX = -1
 BALANCE_PARK_ROUND_INDEX = -2
 """The round a balance park notice is written under. No model round produced it — admission did,

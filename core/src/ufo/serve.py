@@ -151,6 +151,7 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.hub import Hub, InProcessHub
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.jobs import (
+    JOB_QUEUE_NAME,
     InvokerFactory,
     JobRunner,
     PageChangeRunner,
@@ -206,12 +207,45 @@ from ufo.schema.records import (
     DBOS_APP_NAME,
     DBOS_APP_VERSION,
     DBOS_MAX_EXECUTOR_THREADS,
+    DBOS_SYSTEM_DATABASE_POOL_SIZE,
+    EXPRESS_QUEUE_NAME,
+    TURN_QUEUE_NAME,
     RuntimeIdentity,
 )
 
 RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, JOIN_PATH, "/v1/onboard", "/ufo")
 RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
 RUNTIME_IMAGE_ENV = "UFO_RUNTIME_IMAGE"
+
+
+@dataclass(frozen=True)
+class Fleet:
+    """Which durable work a serve process claims. Every process runs the same composition root over
+    the same image and config; the fleet is the whole difference between them — the DBOS queues this
+    executor dequeues from, and whether it carries the surfaces' live delivery (their inbound
+    listeners and the writeback pollers).
+
+    A turn is model rounds and network waits; indexing a changed page is chunking and embedding,
+    which holds the GIL. Run on one interpreter they contend, and a large reindex starves the
+    portal, the turn loop, and every surface at once. Splitting them across fleets is what makes
+    that impossible rather than unlikely — and it splits their capacity too, since each fleet's
+    replica count is now its own.
+
+    The queue sets partition the application registry: turns and express carry member work and
+    jobs carries background executions. Recurring ticks use DBOS's internal queue, which every
+    executor drains. `WHOLE_FLEET` claims every application queue for a deploy that is one process
+    (a node, a stack, an eval run). Every fleet names its queues in full — a queue no fleet claims
+    is one nothing would ever dequeue, which `test_fleet.py` refuses."""
+
+    name: str
+    queues: tuple[str, ...]
+    surfaces: bool
+
+
+TURNS_FLEET = Fleet(name="turns", queues=(TURN_QUEUE_NAME, EXPRESS_QUEUE_NAME), surfaces=True)
+JOBS_FLEET = Fleet(name="jobs", queues=(JOB_QUEUE_NAME,), surfaces=False)
+WHOLE_FLEET = Fleet(name="all", queues=TURNS_FLEET.queues + JOBS_FLEET.queues, surfaces=True)
+FLEETS = {fleet.name: fleet for fleet in (WHOLE_FLEET, TURNS_FLEET, JOBS_FLEET)}
 
 
 def _payload_digest(payload: object) -> str:
@@ -259,10 +293,11 @@ def _assert_no_reserved_routes(app: FastAPI) -> None:
         )
 
 
-def run() -> None:
-    """Start the shared fleet: one process serving every workspace, resolving the workspace per
-    request (from the caller's token) and per turn (from the workflow argument), scoping each
-    transaction by the ambient `current_workspace`."""
+def run(fleet: Fleet) -> None:
+    """Start one process of `fleet`: it serves every workspace, resolving the workspace per request
+    (from the caller's token) and per turn (from the workflow argument), scoping each transaction by
+    the ambient `current_workspace`. The fleet decides only which durable work this process claims —
+    the boot below is the same one every fleet runs."""
     config = load_config()
     init_o11y(config.o11y.otlp_endpoint)
     init_service_checks(
@@ -417,10 +452,13 @@ def run() -> None:
             "executor_id": str(instance_id),
             "run_admin_server": False,
             "max_executor_threads": DBOS_MAX_EXECUTOR_THREADS,
+            "sys_db_pool_size": DBOS_SYSTEM_DATABASE_POOL_SIZE,
             "serializer": ReplaySafeSerializer(),
         }
     )
+    DBOS.listen_queues(fleet.queues)
     DBOS.launch()
+    app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client
     app.state.instance_id = instance_id
@@ -509,7 +547,7 @@ def run() -> None:
         ),
     )
     _assert_no_reserved_routes(app)
-    log("serve.started", host=config.serve.host, port=config.serve.port)
+    log("serve.started", fleet=fleet.name, host=config.serve.host, port=config.serve.port)
     try:
         uvicorn.run(
             app,
@@ -1318,7 +1356,13 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app-loop stall, so `run` drives it on a dedicated thread from the moment the seat exists, and
     retires the seat only after `DBOS.destroy` has stopped all execution — a seat freed while
     queued workflows still run would hand a peer a second live execution. Configured `[[sources]]`
-    rows register first: once at boot, off the sync poll."""
+    rows register first: once at boot, off the sync poll.
+
+    The three reconcilers run on every fleet: each is the fleet-wide safety net for durable work
+    the whole deploy holds, so a jobs process reclaims a dead turns process's turns and the reverse.
+    Surface delivery is the turns fleet's alone — an inbound listener is one connection admitted
+    across all replicas by a fenced lease, and a jobs process winning that lease would land a
+    member's messages on the fleet that runs the indexer."""
     await register_sources(app.state.configured_sources)
     async with asyncio.TaskGroup() as group:
         tasks = [
@@ -1326,11 +1370,12 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
             group.create_task(CancelReconciler(client=app.state.dbos).run()),
             group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
         ]
-        for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
-            if poller is not None:
-                tasks.append(group.create_task(poller.run()))
-        for listener in app.state.surface_listeners:
-            tasks.append(group.create_task(listener.run()))
+        if app.state.fleet.surfaces:
+            for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
+                if poller is not None:
+                    tasks.append(group.create_task(poller.run()))
+            for listener in app.state.surface_listeners:
+                tasks.append(group.create_task(listener.run()))
         try:
             yield
         finally:

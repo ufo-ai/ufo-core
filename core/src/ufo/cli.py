@@ -72,7 +72,7 @@ from ufo.schema.records import (
     DEFAULT_REASONING_EFFORT,
     ReasoningEffort,
 )
-from ufo.serve import home_surface
+from ufo.serve import FLEETS, WHOLE_FLEET, home_surface
 from ufo.serve import run as serve_run
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
@@ -428,7 +428,14 @@ def new_migration(slug: str) -> None:
 
 
 @main.command()
-def serve() -> None:
+@click.option(
+    "--fleet",
+    type=click.Choice(sorted(FLEETS)),
+    default=WHOLE_FLEET.name,
+    show_default=True,
+    help="The durable work this process claims: turns and their surfaces, background jobs, or all.",
+)
+def serve(fleet: str) -> None:
     """Run surfaces, workers, jobs, and the egress-control RPC the Rust proxy calls."""
     config = load_config()
     surface = home_surface(load_manifests(config.pack.name))
@@ -437,7 +444,7 @@ def serve() -> None:
             f"portal {_serve_base(config)}/surface/{surface} — "
             "run `ufoctl portal` to open a session in your browser"
         )
-    serve_run()
+    serve_run(FLEETS[fleet])
 
 
 @main.command()

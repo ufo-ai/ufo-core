@@ -171,13 +171,18 @@ MOVED_MODULES = {
     "ufo.turns.workspace_changes": "ufo.runtime.turns.workspace_changes",
     "ufo.workspace": "ufo.runtime.workspace",
 }
+DBOS_CLIENT_POOL_SIZE = 5
 
 
 def replay_safe_client(system_database_url: str) -> DBOSClient:
     """The one way this repo constructs a DBOSClient: rows are recorded under this serializer's
     name, so a client built without it cannot decode what the engine wrote — DBOS degrades the
     read to the raw serialized string instead of raising."""
-    return DBOSClient(system_database_url=system_database_url, serializer=ReplaySafeSerializer())
+    return DBOSClient(
+        system_database_url=system_database_url,
+        serializer=ReplaySafeSerializer(),
+        system_database_pool_size=DBOS_CLIENT_POOL_SIZE,
+    )
 
 
 def _rebuild(model_class: type[BaseModel], fields: dict[str, object]) -> BaseModel:

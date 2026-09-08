@@ -14,9 +14,12 @@ import pytest
 import yaml
 
 from infra.testing_secrets import SECRET_INPUTS
+from ufo.db import MAX_OVERFLOW, OWNER_MAX_OVERFLOW, OWNER_POOL_SIZE, POOL_SIZE
+from ufo.harness.durability import DBOS_CLIENT_POOL_SIZE
 from ufo.product import PRODUCT_CENSUS_SECONDS
 from ufo.runtime.jobs import JOB_FAILED_METRIC
 from ufo.runtime.sources.sync import SOURCE_SYNC_CHECK
+from ufo.schema.records import DBOS_SYSTEM_DATABASE_POOL_SIZE
 
 ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -38,6 +41,9 @@ RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
 M6I_XLARGE_DEFAULT_VCPUS = 4
+RUNTIME_DATABASE_LOOPS = 3
+NON_RUNTIME_DATABASE_CONNECTIONS = 68
+TESTING_DATABASE_CONNECTIONS = 397
 STORAGE_QUERY = (
     "min(last_30m):avg:aws.rds.free_storage_space{dbinstanceidentifier:"
     "${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space"
@@ -3418,6 +3424,7 @@ def _check_runtime_rollout_drains_before_the_proxy_gate() -> None:
             "deployment/ufo-sandbox-proxy",
             "deployment/ufo-ingress",
             "deployment/ufo-serve",
+            "deployment/ufo-jobs",
         }
         commands = [
             shlex.split(line)
@@ -3496,6 +3503,7 @@ def _check_runtime_apply_waits_for_prior_drains() -> None:
             "ufo-sandbox-proxy",
             "ufo-ingress",
             "ufo-serve",
+            "ufo-jobs",
         ]
         assert os.access(ROOT / AWAIT_DRAINED, os.X_OK)
 
@@ -3872,6 +3880,7 @@ def _check_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
             "otel-collector",
             "ufo-gateway",
             "ufo-ingress",
+            "ufo-jobs",
             "ufo-preview",
             "ufo-sandbox-proxy",
             "ufo-serve",
@@ -4583,9 +4592,9 @@ def _check_database_capacity_monitors() -> None:
             "prod",
             "db_connections_high",
             "avg(last_15m):avg:aws.rds.database_connections"
-            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 250",
-            "250",
-            "208",
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 380",
+            "380",
+            "350",
         ),
     ]:
         assert _monitor_attribute(monitor, "query", environment) == query
@@ -4595,6 +4604,28 @@ def _check_database_capacity_monitors() -> None:
         assert _monitor_attribute(monitor, "tags", environment) == (
             f'["env:{environment}", "managed-by:terraform"]'
         )
+
+
+def _check_runtime_fleets_fit_the_database_connection_budget() -> None:
+    per_runtime = (
+        RUNTIME_DATABASE_LOOPS * (POOL_SIZE + MAX_OVERFLOW + OWNER_POOL_SIZE + OWNER_MAX_OVERFLOW)
+        + DBOS_SYSTEM_DATABASE_POOL_SIZE
+        + DBOS_CLIENT_POOL_SIZE
+    )
+    for environment in DEPLOY_ENVIRONMENTS:
+        source = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        replicas = {
+            fleet: int(count)
+            for fleet, count in re.findall(
+                r"^    (serve|jobs)_replicas += +(\d+)$", source, re.MULTILINE
+            )
+        }
+        assert replicas == {"serve": 2, "jobs": 2}
+        ceiling = NON_RUNTIME_DATABASE_CONNECTIONS + sum(replicas.values()) * per_runtime
+        assert ceiling == 348
+        assert ceiling < int(_monitor_attribute("db_connections_high", "warning", environment))
+        if environment == "testing":
+            assert ceiling < TESTING_DATABASE_CONNECTIONS
 
 
 def _check_edge_doors_use_separate_environment_origins() -> None:
@@ -4783,6 +4814,7 @@ def test_deploy_workflow_sync_contract() -> None:
         _check_the_job_failure_monitor_consumes_the_reported_counter,
         _check_a_sparse_counters_alert_can_clear_itself,
         _check_database_capacity_monitors,
+        _check_runtime_fleets_fit_the_database_connection_budget,
         _check_deploy_workflow_static_contract,
     ):
         check()

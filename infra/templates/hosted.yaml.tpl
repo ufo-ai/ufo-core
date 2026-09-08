@@ -695,8 +695,10 @@ spec:
       containers:
         - name: serve
           image: ${bundle_image}
-          # ENTRYPOINT ["ufoctl"] is baked in; `serve` runs the shared fleet.
-          args: [serve]
+          # ENTRYPOINT ["ufoctl"] is baked in. `--fleet turns` claims the turns and express queues
+          # and the surfaces' live delivery; background executions are ufo-jobs' below, so an
+          # indexing run cannot reach this fleet's interpreter.
+          args: [serve, --fleet, turns]
           # Endpoint/NLB-target deregistration propagates for a beat after the pod turns
           # Terminating; keep the listener accepting until it lands, then SIGTERM starts the drain.
           lifecycle:
@@ -897,3 +899,123 @@ spec:
   secretName: ufo-serve-tls
   issuerRef: {name: ${cluster_issuer}, kind: ClusterIssuer}
   dnsNames: [${shared_host}]
+---
+# The jobs fleet: the same bundle image over the same ufo-serve Secret, claiming the background
+# execution queue (`jobs`) instead of the member ones. Every per-workspace job execution runs here
+# — the source sync, the page-change fan-out, the memory extension's index, consolidate and
+# section passes — so chunking and embedding a large reindex holds this fleet's GIL and never the
+# one serving the portal, the turn loop, and the surfaces.
+#
+# It takes no inbound traffic: no Service, no Ingress, and no preStop wait, since it has no
+# listener to drain. It still binds 8710, which is what the probes read and what keeps one
+# composition root and one shutdown path across both fleets. It runs under ufo-serve's
+# ServiceAccount because it needs exactly that identity — the same blob bucket, read-write.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ufo-jobs
+  namespace: ${namespace}
+  labels: {app: ufo-jobs}
+spec:
+  replicas: ${jobs_replicas}
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
+  selector:
+    matchLabels: {app: ufo-jobs}
+  template:
+    metadata:
+      labels: {app: ufo-jobs}
+      annotations: {flyingobject.ai/deployment-id: "${deployment_id}"}
+    spec:
+%{ if workload_ha }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: ufo-jobs}
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels: {app: ufo-jobs}
+          maxSkew: 1
+          matchLabelKeys: [pod-template-hash]
+          nodeTaintsPolicy: Honor
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+%{ endif }
+      terminationGracePeriodSeconds: ${termination_grace_period_seconds}
+      serviceAccountName: ufo-serve
+      enableServiceLinks: false
+      containers:
+        - name: jobs
+          image: ${bundle_image}
+          # ENTRYPOINT ["ufoctl"] is baked in; `--fleet jobs` claims the job execution queue alone.
+          args: [serve, --fleet, jobs]
+          ports:
+            - {name: http, containerPort: 8710}
+          envFrom:
+            - secretRef: {name: ufo-platform-secrets}
+          env:
+            - {name: AWS_REGION, value: "${region}"}
+            - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
+            - {name: UFO_RUNTIME_REVISION, value: "${image_tag}"}
+            - {name: UFO_RUNTIME_IMAGE, value: "${bundle_image}"}
+%{ if preview_enabled }
+            # The preview service the render-previews job calls directly (RFC 0037). That job runs
+            # on this fleet, so this is where the address has to be.
+            - {name: UFO_PREVIEW_URL, value: "http://ufo-preview.${namespace}.svc.cluster.local:8930"}
+%{ endif }
+            - name: UFO_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
+            - name: UFO_ARTIFACT_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_ARTIFACT_TOKEN_SECRET}
+            # The RLS-bypassing owner DSN every job's candidate read enumerates workspaces through.
+            - name: UFO_OWNER_DSN
+              valueFrom:
+                secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            # The Datadog key the source-sync job submits the `ufo.source_sync` service check with.
+            - name: DD_API_KEY
+              valueFrom:
+                secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}
+            - {name: DD_SITE, value: "${rum_site}"}
+          volumeMounts:
+            # The same rendered fleet config serve reads; the fleet is the argument, not a setting.
+            - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
+          # Chunking and embedding are CPU-bound, so this fleet reserves a whole core where serve
+          # reserves a quarter. Like serve it carries no memory limit: a limit here trades a slow
+          # pass for an OOMKilled job that restarts from its last recorded step.
+          resources:
+            requests: {cpu: "1", memory: 512Mi}
+          readinessProbe:
+            tcpSocket: {port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: config
+          secret:
+            secretName: ufo-serve
+            items:
+              - {key: ufo.toml, path: ufo.toml}
+%{ if workload_ha }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ufo-jobs
+  namespace: ${namespace}
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels: {app: ufo-jobs}
+%{ endif }

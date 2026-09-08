@@ -249,7 +249,8 @@ data "kubectl_file_documents" "hosted" {
     serve_role_arn                   = module.platform.app_s3_role_arn
     ingress_role_arn                 = module.platform.ingress_s3_role_arn
     workload_ha                      = false
-    serve_replicas                   = 4
+    serve_replicas                   = 2
+    jobs_replicas                    = 2
     prestop_seconds                  = local.prestop_seconds
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60
     graceful_shutdown_seconds        = local.graceful_shutdown_seconds

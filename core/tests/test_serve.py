@@ -211,7 +211,7 @@ def test_serve_verifies_the_owner_database_before_it_seats_the_instance(
     monkeypatch.setattr(serve, "record_fleet_seat", seated)
     try:
         with pytest.raises(ConnectionRefusedError):
-            serve.run()
+            serve.run(serve.WHOLE_FLEET)
     finally:
         asyncio.run(dispose_db())
 
@@ -330,6 +330,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
+            fleet=serve.WHOLE_FLEET,
             dbos=object(),
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
@@ -352,6 +353,42 @@ async def test_serve_lifespan_waits_for_background_shutdown(
     assert listener.stopped.is_set()
 
 
+async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three reconcilers are the whole deploy's safety net, so both fleets run them — a jobs
+    process reclaims a dead turns process's turns and the reverse. Surface delivery is the turns
+    fleet's alone: a listener is one connection admitted across all replicas by a fenced lease, and
+    a jobs process winning it would land a member's messages on the fleet running the indexer."""
+    recovery = ShutdownProbe()
+    reconciler = ShutdownProbe()
+    stranded = ShutdownProbe()
+    poller = ShutdownProbe()
+    speaker = ShutdownProbe()
+    listener = ShutdownProbe()
+    monkeypatch.setattr(serve, "ExecutorRecovery", lambda: recovery)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client: reconciler)
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            fleet=serve.JOBS_FLEET,
+            dbos=object(),
+            writeback_poller=poller,
+            mid_turn_reply_poller=speaker,
+            surface_listeners=(listener,),
+            configured_sources=(),
+        )
+    )
+    async with serve._serve_lifespan(app):
+        await recovery.started.wait()
+        await reconciler.started.wait()
+        await stranded.started.wait()
+        await asyncio.sleep(0)
+        assert not poller.started.is_set()
+        assert not speaker.started.is_set()
+        assert not listener.started.is_set()
+
+
 async def test_serve_lifespan_propagates_a_background_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -363,6 +400,7 @@ async def test_serve_lifespan_propagates_a_background_failure(
     monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: stranded)
     app = SimpleNamespace(
         state=SimpleNamespace(
+            fleet=serve.WHOLE_FLEET,
             dbos=object(),
             writeback_poller=None,
             mid_turn_reply_poller=None,

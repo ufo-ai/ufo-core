@@ -15,9 +15,11 @@ never stalling its neighbors, and twin replica boots start a one-shot once — a
 scoped ExtensionContext, so recovery replays a completed handler instead of running it again and a
 core job and an extension job ride the identical path. `JOB_QUEUE` runs at
 most `JOB_WORKER_CONCURRENCY` `job_workflow` executions per process, bounded backpressure in
-Postgres, never a thread bloom; the tick itself rides DBOS's internal queue — one durable insert
-per candidate workspace, milliseconds — so a tick never waits behind a slow job for a worker
-slot."""
+Postgres, never a thread bloom; a recurring tick rides DBOS's internal queue — one candidate read
+and one durable insert per candidate workspace, milliseconds — so it never waits behind a slow job
+for a slot. A one-shot tick rides `JOB_QUEUE`, as does the execution it fans out. The expensive
+handler work is therefore confined to `ufo.serve.JOBS_FLEET`, while every image can drain every
+application queue across a rollout or rollback."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace

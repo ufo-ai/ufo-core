@@ -521,7 +521,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
-          .github/scripts/await_drained.sh "$NAMESPACE" ufo-sandbox-proxy ufo-ingress ufo-serve
+          .github/scripts/await_drained.sh "$NAMESPACE" ufo-sandbox-proxy ufo-ingress ufo-serve ufo-jobs
 
       - name: Terraform apply
         if: github.event_name != 'pull_request'
@@ -560,7 +560,7 @@ jobs:
             certificate/ufo-gateway-tls \
             certificate/ufo-ingress-tls \
             certificate/ufo-serve-tls
-          .github/scripts/await_rollout.sh "$NAMESPACE" ufo-gateway ufo-sandbox-proxy ufo-ingress ufo-serve
+          .github/scripts/await_rollout.sh "$NAMESPACE" ufo-gateway ufo-sandbox-proxy ufo-ingress ufo-serve ufo-jobs
           # Only when the env enables it: preview_enabled=false renders no Deployment to wait on.
           if kubectl --namespace "$NAMESPACE" get deployment/ufo-preview >/dev/null 2>&1; then
             .github/scripts/await_rollout.sh "$NAMESPACE" ufo-preview

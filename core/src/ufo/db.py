@@ -44,13 +44,14 @@ STATEMENT_LOG_MAX_CHARS = 2_000
 WORKSPACE_GUC = "app.workspace_id"
 # Every pool below is a ceiling one event loop can reach, and the fleet's total is what has to fit.
 # Measured on the testing instance 2026-07-31: `max_connections` 400, `superuser_reserved` 3, so 397
-# are the fleet's to spend. Serve's replica count is the `serve_replicas` template variable (4 on
-# testing, 2 on prod — the arithmetic below takes testing's, the larger fleet); every other
+# are the fleet's to spend. The two runtime fleets each run 2 replicas; every other
 # `hosted.yaml.tpl` deployment is the literal `replicas: 2`, and nothing autoscales, so the count
 # has no user term. Every `init_db` root is counted, not just serve's:
 #
-#   ufo-serve           4 pods x 3 loops (uvicorn, DBOS, heartbeat) x (5 + 5)    = 120 app
-#                       4 pods x 3 loops x (2 + 3)                               =  60 owner
+#   ufo-serve           2 pods x 3 loops (uvicorn, DBOS, heartbeat) x (5 + 5)    =  60 app
+#                       2 pods x 3 loops x (2 + 3)                               =  30 owner
+#   ufo-jobs            2 pods x 3 loops (uvicorn, DBOS, heartbeat) x (5 + 5)    =  60 app
+#                       2 pods x 3 loops x (2 + 3)                               =  30 owner
 #   ufo-ingress         2 pods x 1 loop x (5 + 5)                                =  20
 #   ufo-sandbox-proxy   2 pods x 1 loop x (5 + 5)                                =  20
 #   ufo-gateway         2 pods x 1 loop x (5 + 5) through this module            =  20
