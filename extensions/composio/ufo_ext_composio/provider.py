@@ -22,8 +22,14 @@ OAUTH_ROUTE_MOUNT = "/ext/composio/oauth"
 COMPOSIO_ACCOUNT_PARAM = "connected_account_id"
 COMPOSIO_STATUS_PARAM = "status"
 REDIRECT_STATUS = 302
-FAILED_CONSENT_STATUS = 502
-NO_CONSENT_LINK_STATUS = 502
+FAILED_CONSENT_STATUS = 503
+NO_CONSENT_LINK_STATUS = 503
+"""5xx statuses the proxied edge delivers to the member instead of replacing.
+
+The edge discards an origin's 502 or 504 and paints its own host-error page over it — measured in
+`ufo.harness.sandbox.ingress_serve.EDGE_REPLACED_STATUSES`, where a 503 carrying the origin's own
+body arrives verbatim. These pages exist to be read: they carry Composio's own words, which name
+the repair an operator must make. A 502 here reads as an infrastructure outage and says nothing."""
 BROKER_ERROR_CAP = 400
 
 
@@ -70,10 +76,10 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
     member, agent, and conversation.
 
     A broker that cannot mint the link answers with what Composio said, on the page the member is
-    already looking at: the failure names the toolkit and Composio's own words (the auth config the
-    project does not hold, a refused request), which is what an operator needs to repair the
-    deploy. An unanswered `ComposioError` reaches the member as a bare Internal Server Error that
-    names nothing."""
+    already looking at, under a status the edge delivers rather than replaces: the failure names
+    the toolkit and Composio's own words (the auth config the project does not hold, a refused
+    request), which is what an operator needs to repair the deploy. An unanswered `ComposioError`
+    reaches the member as a bare Internal Server Error that names nothing."""
     params = request.query_params
     state = params.get("state", "")
     callback = params.get("callback", "")

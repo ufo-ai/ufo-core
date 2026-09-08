@@ -45,6 +45,7 @@ from ufo_ext_connectors.tools import (
 
 from ufo.config import Config
 from ufo.db import workspace_tx
+from ufo.harness.sandbox.ingress_serve import EDGE_REPLACED_STATUSES
 from ufo.host.ext.loader import turn_tools
 from ufo.host.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.runtime.access.connectors import ConnectorRegistry
@@ -102,6 +103,11 @@ COMPOSIO_AUTH_CONFIG_MAX_LIMIT = 50
 """The page size Composio's v3.1 `/auth_configs` listing allows at most, pinned as the literal the
 API documents rather than read from the client — a client constant asserted against itself would
 let a page Composio refuses (its 400 is the connect request's Internal Server Error) pass here."""
+INGRESS_READ_TIMEOUT_SECONDS = 90.0
+"""How long the `ufo-serve` ingress waits on this origin before it answers 504 itself
+(`nginx.ingress.kubernetes.io/proxy-read-timeout` in `infra/templates/hosted.yaml.tpl`), pinned as
+the literal the template sets. A connect request that outlives it is answered by nginx with an
+edge-replaced status, so the member reads the edge's page instead of the operator's repair."""
 GRANOLA_SLUG = "GRANOLA_MCP_LIST_MEETINGS"
 TOOLKIT_CATALOG = {
     "github": ("GitHub", ["OAUTH2"], 871),
@@ -423,6 +429,50 @@ async def test_named_config_lookup_pages_within_composios_limit() -> None:
     ]
 
 
+def test_granola_names_the_auth_config_the_operator_created() -> None:
+    """The name is pinned as a literal, not read back from the client: it must equal the name of the
+    config on the deploy's Composio project character for character, and a lookup for any other
+    name finds nothing and refuses every Granola connect request."""
+    assert composio.CUSTOM_AUTH_CONFIGS[CUSTOM_CONFIG_SLUG] == "granola_mcp-8pqzpe"
+
+
+async def test_named_config_lookup_stops_walking_inside_the_ingress_timeout() -> None:
+    """A project whose listing never ends refuses inside the request budget. Every page is a fresh
+    Composio call with its own timeout, so an uncapped walk outlives the ingress read timeout and
+    turns a lookup into a 504 the edge replaces — the member then reads no reason at all. The walk
+    reads at most `AUTH_CONFIG_PAGE_WALK_CAP` pages and fails with the same loud refusal a project
+    holding no such config gets."""
+    pages = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal pages
+        if request.method == "GET" and request.url.path.endswith("/auth_configs"):
+            pages += 1
+            filler = [
+                {"id": f"ac_other_{pages}_{n}", "name": f"granola_mcp-other{pages}{n}"}
+                for n in range(composio.AUTH_CONFIG_PAGE_LIMIT)
+            ]
+            return httpx.Response(
+                200, json={"items": filler, "next_cursor": f"{SECOND_PAGE_CURSOR}_{pages}"}
+            )
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    with pytest.raises(composio.ComposioError, match=CUSTOM_CONFIG_NAME) as refusal:
+        await client.connect_link(
+            toolkit=CUSTOM_CONFIG_SLUG,
+            user_id="ufo_ws",
+            callback_url="https://ufo.example.com/back",
+        )
+    assert refusal.value.status == composio.NOT_FOUND_STATUS
+    assert pages == composio.AUTH_CONFIG_PAGE_WALK_CAP
+    # The walk is followed by the link mint, so the cap has to leave one more Composio call inside
+    # the ingress budget.
+    assert (composio.AUTH_CONFIG_PAGE_WALK_CAP + 1) * composio.COMPOSIO_TIMEOUT_SECONDS <= (
+        INGRESS_READ_TIMEOUT_SECONDS
+    )
+
+
 async def test_feed_sync_credential_executes_the_toolkits_tools_for_its_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -737,6 +787,7 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     with ws(uuid4()):
         response = await provider.oauth_route(ctx, _request(query))
     assert response.status_code == provider.FAILED_CONSENT_STATUS
+    assert response.status_code not in EDGE_REPLACED_STATUSES
     assert "location" not in response.headers
     # The member may have reached consent from anywhere, so the body states the outcome and lets
     # them close the page rather than sending them to a chat that need not exist.
@@ -764,7 +815,11 @@ async def test_oauth_route_answers_a_broker_failure_with_what_composio_said(
     query = f"provider={CUSTOM_CONFIG_SLUG}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
     with ws(uuid4()):
         response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == 503
     assert response.status_code == provider.NO_CONSENT_LINK_STATUS
+    # The page carries the repair an operator must make, so it has to reach the member: the edge
+    # deletes an origin 502 and paints its own host-error page, which names nothing.
+    assert response.status_code not in EDGE_REPLACED_STATUSES
     assert "location" not in response.headers
     body = response.body.decode()
     assert CUSTOM_CONFIG_SLUG in body and CUSTOM_CONFIG_NAME in body

@@ -74,7 +74,7 @@ config of that name fails loud on the connect request.
 One entry today: `granola_mcp`, Composio's mirror of Granola's official MCP server
 (`get_meetings`, `get_meeting_transcript`, `list_meetings`, `query_meetings`). Granola registers an
 OAuth client per user (DCR), so no broker can mint one; the operator registered the client and
-stored it in the config named `granola_mcp-ropkzh`, and Composio holds and refreshes the tokens.
+stored it in the config named `granola_mcp-8pqzpe`, and Composio holds and refreshes the tokens.
 
 Granola also syncs a feed, over a second connector kind. A `RestConnector` issues provider REST
 over a `Credential`, and the broker transport proxies each request to the provider's own host;

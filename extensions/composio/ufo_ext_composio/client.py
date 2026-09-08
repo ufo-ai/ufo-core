@@ -40,6 +40,7 @@ TOOL_PAGE_LIMIT = 100
 MAX_LISTED_TOOLS = 500
 TOOLKIT_SEARCH_LIMIT = 10
 AUTH_CONFIG_PAGE_LIMIT = 50  # Composio's documented maximum page size on /auth_configs
+AUTH_CONFIG_PAGE_WALK_CAP = 2
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
 IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
@@ -109,7 +110,7 @@ for what earns one, is in docs/composio-provider-coverage.md."""
 
 
 CUSTOM_AUTH_CONFIGS: dict[str, str] = {
-    "granola_mcp": "granola_mcp-ropkzh",
+    "granola_mcp": "granola_mcp-8pqzpe",
 }
 """Toolkits reached through an auth config an operator created on this deploy's Composio project,
 keyed by slug to that config's name.
@@ -399,12 +400,18 @@ class ComposioClient:
         config, so neither another config for the toolkit nor a freshly created managed one
         authenticates anything — a link minted against either dies at the provider's consent.
 
-        The listing is walked page by page to its end: Composio caps a page at
-        `AUTH_CONFIG_PAGE_LIMIT` and answers 400 to a larger one, so a single oversized page reads
-        no config at all, and one page of the project's configs would hide the named one behind
-        Composio's own order."""
+        The listing is walked page by page: Composio caps a page at `AUTH_CONFIG_PAGE_LIMIT` and
+        answers 400 to a larger one, so a single oversized page reads no config at all, and one
+        page of the project's configs would hide the named one behind Composio's own order.
+
+        The walk stops after `AUTH_CONFIG_PAGE_WALK_CAP` pages. Each page is a fresh request with a
+        `COMPOSIO_TIMEOUT_SECONDS` timeout, and this lookup runs inside a member's connect request,
+        which the ingress cuts at 90 s and answers with an edge-replaced 504 that names nothing. Two
+        pages plus the link mint that follows them fit that budget; three do not. A project holding
+        more than two pages of configs for one toolkit needs the same operator repair as a project
+        holding none, so the walk refuses loudly inside the budget instead."""
         cursor = ""
-        while True:
+        for _ in range(AUTH_CONFIG_PAGE_WALK_CAP):
             params = {"toolkit_slug": toolkit, "limit": str(AUTH_CONFIG_PAGE_LIMIT)}
             if cursor:
                 params["cursor"] = cursor
