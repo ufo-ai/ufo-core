@@ -195,7 +195,7 @@ test("the credentials screen offers the member their own coding accounts", async
   expect(screen.getByText("Claude")).toBeTruthy();
   expect(
     [...document.querySelectorAll("main h2")].map((heading) => heading.textContent),
-  ).toEqual(["Coding providers", "Model providers"]);
+  ).toEqual(["Coding providers", "Model providers", "Workspace keys"]);
 });
 
 test("credentials group and sort the filled slots, and render their literals", async () => {
@@ -214,14 +214,17 @@ test("credentials group and sort the filled slots, and render their literals", a
     "Coding providers",
     "Model providers",
     "Service keys",
+    "Workspace keys",
   ]);
   expect(screen.queryByText("APOLLO_API_KEY")).toBeNull();
+  expect(screen.getByRole("button", { name: "Add workspace key" })).toBeTruthy();
   const code = screen.getByText("api.datadoghq.com");
   expect(code.tagName).toBe("CODE");
   expect(code.textContent).not.toContain("`");
   const cards = screen
     .getAllByRole("listitem")
-    .filter((card) => card.querySelector("[data-part=primary]"));
+    .filter((card) => card.querySelector("[data-part=primary]"))
+    .filter((card) => !/^add-/.test(card.querySelector("[data-part=primary]")?.textContent ?? ""));
   expect(cards.map((card) => card.querySelector("[data-part=primary]")?.textContent)).toEqual([
     "OPENAI_API_KEY",
     "DATADOG_API_KEY",
@@ -246,13 +249,16 @@ test("workspace credential slots are visible and editable through prepared inten
   expect(screen.getByText("No value")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Set" })).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Add a credential" }));
-  await userEvent.type(screen.getByLabelText("Name"), "new_api_key");
+  await userEvent.click(screen.getByRole("button", { name: "Add workspace key" }));
   await userEvent.type(screen.getByLabelText("Variable"), "NEW_API_KEY");
   await userEvent.type(screen.getByLabelText("Host"), "api.new.example");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await waitFor(() => expect(intents).toHaveLength(1));
-  expect(intents[0]).toEqual({
+  await waitFor(() =>
+    expect(intents.some((one) => (one as { name?: string }).name === "new-api-key")).toBe(true),
+  );
+  expect(
+    intents.filter((one) => (one as { name?: string }).name === "new-api-key")[0],
+  ).toEqual({
     verb: "apply",
     kind: "credential_slot",
     name: "new-api-key",
@@ -270,8 +276,12 @@ test("workspace credential slots are visible and editable through prepared inten
   await userEvent.clear(host);
   await userEvent.type(host, "api.eu.acme.com");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await waitFor(() => expect(intents).toHaveLength(2));
-  expect(intents[1]).toMatchObject({
+  await waitFor(() =>
+    expect(intents.some((one) => (one as { name?: string }).name === "acme-api-key" && (one as { spec?: { host?: string } }).spec?.host === "api.eu.acme.com")).toBe(true),
+  );
+  expect(
+    intents.filter((one) => (one as { name?: string }).name === "acme-api-key").at(-1),
+  ).toMatchObject({
     verb: "apply",
     kind: "credential_slot",
     name: "acme-api-key",
@@ -280,8 +290,12 @@ test("workspace credential slots are visible and editable through prepared inten
 
   await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm remove" }));
-  await waitFor(() => expect(intents).toHaveLength(3));
-  expect(intents[2]).toEqual({
+  await waitFor(() =>
+    expect(intents.some((one) => (one as { verb?: string }).verb === "delete")).toBe(true),
+  );
+  expect(
+    intents.filter((one) => (one as { verb?: string }).verb === "delete")[0],
+  ).toEqual({
     verb: "delete",
     kind: "credential_slot",
     name: "acme-api-key",
@@ -339,7 +353,7 @@ test("a credential family stands further from the family above it than from its 
   const families = [...document.querySelectorAll("main h2")]
     .filter((heading) => heading.textContent !== "Coding providers")
     .map((heading) => heading.closest("section")!);
-  expect(families).toHaveLength(2);
+  expect(families).toHaveLength(3);
   const between = families[0].parentElement!;
   expect(between.className).toContain("gap-8xl");
   expect(families[0].className).toContain("gap-6xl");
@@ -536,7 +550,9 @@ test("a workspace with no credential set says so", async () => {
   wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No credential is set.")).toBeTruthy();
+  expect(
+    await screen.findByRole("button", { name: "Add workspace key" }),
+  ).toBeTruthy();
 });
 
 /** The screen a Slack reply names when a turn asks for a credential — "set it in Workspace →
@@ -564,7 +580,7 @@ test("an unset slot is set from the act over the rows", async () => {
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Set a credential" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add service key" }));
   await userEvent.click(await screen.findByRole("combobox", { name: "Credential" }));
   const option = await screen.findByRole("option", { name: "APOLLO_API_KEY" });
   expect(option.querySelector("[style*='--brand-apollo']")).toBeTruthy();
@@ -588,8 +604,10 @@ test("a workspace with no credential set still offers the act", async () => {
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(await screen.findByText("No credential is set.")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Set a credential" })).toBeTruthy();
+  expect(
+    await screen.findByRole("button", { name: "Add workspace key" }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Add service key" })).toBeTruthy();
 });
 
 /** A prompt is raised from a row here and from a chat reply elsewhere, so it says whose value a
@@ -619,7 +637,7 @@ test("a credential prompt is headed by the one provider every slot it asks for b
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
 
-  const head = (await screen.findByText("Set Credentials")).closest("[data-slot=dialog-header]")!;
+  const head = (await screen.findByText("Add service keys")).closest("[data-slot=dialog-header]")!;
   expect(head.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
     "--brand-slack",
   );
@@ -649,7 +667,7 @@ test("a credential prompt spanning two providers is headed by the words alone", 
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
 
-  const head = (await screen.findByText("Set Credentials")).closest("[data-slot=dialog-header]")!;
+  const head = (await screen.findByText("Add service keys")).closest("[data-slot=dialog-header]")!;
   expect(head.querySelector("[data-slot=mark]")).toBeNull();
 });
 

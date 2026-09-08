@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Sheet } from "@/components/ui/sheet";
 import { Field, Input } from "@/components/ui/field";
 import {
   Select,
@@ -21,12 +22,19 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { codeSpans } from "@/kernel/cards";
-import { OutcomeNotice, type NoticeState, QUIET, Section } from "@/kernel/panel";
+import {
+  OutcomeNotice,
+  outcomeNotice,
+  type NoticeState,
+  QUIET,
+  Section,
+} from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
-import { BASE } from "@/lib/api";
+import { BASE, postIntent } from "@/lib/api";
+import { useMainAgent } from "@/lib/mainAgent";
 import { BrandMark, BRAND_MARKS } from "@/lib/brandMark";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
-import type { ActionView, CredentialPrompt } from "@/lib/types";
+import type { ActionInput, ActionView, CredentialPrompt } from "@/lib/types";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import {
   CredentialValueFields,
@@ -50,6 +58,18 @@ type Slot = {
 const WORKSPACE_EXTENSION = "workspace_credentials";
 const SLOT_KIND = "credential_slot";
 const DEFAULT_HEADER = "Authorization";
+
+/** Synthetic rows the screen draws so a section stands when no row of its own does: the acts that
+ *  fill a section live in the section, where a member sent here from a chat reply lands on it
+ *  rather than on a bare page. */
+const WS_PLACEHOLDER = "add-workspace-key";
+const SVC_PLACEHOLDER = "add-service-key";
+
+type PlaceholderRow = Slot & { placeholder: typeof WS_PLACEHOLDER | typeof SVC_PLACEHOLDER };
+
+function isPlaceholder(row: Slot): row is PlaceholderRow {
+  return (row as PlaceholderRow).placeholder !== undefined;
+}
 
 type CredentialsPayload = { slots: Slot[]; actions: ActionView[] };
 
@@ -82,7 +102,6 @@ const SERVICE_KEY_SLOTS = [
 
 const MCP_SLOTS = [MCP_SERVERS_SLOT] as const;
 
-const SECTION_ORDER = ["Model providers", "Service keys", "Workspace keys", "MCP"];
 const EXTENSION_SECTIONS: Record<string, string> = {
   workspace_credentials: "Workspace keys",
   browser_use: "Service keys",
@@ -94,6 +113,8 @@ const EXTENSION_SECTIONS: Record<string, string> = {
 };
 
 function credentialSection(row: Slot) {
+  if (isPlaceholder(row))
+    return row.placeholder === WS_PLACEHOLDER ? "Workspace keys" : "Service keys";
   const slot = row.slot.toLowerCase();
   if (MODEL_PROVIDER_SLOTS.includes(slot as (typeof MODEL_PROVIDER_SLOTS)[number]))
     return "Model providers";
@@ -135,6 +156,20 @@ function askedProvider(prompts: CredentialPrompt[]) {
   return asked.size === 1 ? [...asked][0] : null;
 }
 
+/** The name the `credential_slot` kind addresses a declaration by — the variable's own name as a
+ *  slug, derived here the same way the kind derives it, and the same name the `credential` kind
+ *  gives the slot, so the row the panel writes is the row it reads back. */
+function slotName(slot: string) {
+  return slot
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** The unset service rows of the read the listing last drew, held for the placeholder's act: a
+ *  row's `actions` sees its own row, and the Add-service-key act chooses among the others. */
+let heldServiceSlots: Slot[] = [];
+
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   note: "Credential values are shared across the workspace.",
@@ -149,59 +184,93 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     </Section>
   ),
   group: credentialSection,
-  /* The values the workspace holds, and no row for a slot nobody has filled: an unset slot is
-     nothing to read and nothing to replace, and a member fills one by asking the agent for it. */
-  rows: (payload) =>
-    payload.slots
-      .filter((slot) => slot.filled || slot.extension === WORKSPACE_EXTENSION)
-      .sort((left, right) => {
-        const leftRank = SECTION_ORDER.indexOf(credentialSection(left));
-        const rightRank = SECTION_ORDER.indexOf(credentialSection(right));
-        const normalizedLeftRank = leftRank === -1 ? SECTION_ORDER.length : leftRank;
-        const normalizedRightRank = rightRank === -1 ? SECTION_ORDER.length : rightRank;
-        if (normalizedLeftRank !== normalizedRightRank)
-          return normalizedLeftRank - normalizedRightRank;
-        const leftSection = credentialSection(left);
-        const rightSection = credentialSection(right);
-        if (leftSection !== rightSection) return leftSection.localeCompare(rightSection);
-        return left.slot.localeCompare(right.slot);
-      }),
+  /* Every slot draws its row, filled or not, and a section with no row of its own draws a
+     placeholder carrying the act that fills it — Workspace keys is always there to declare into,
+     and Service keys offers its unset slots where they belong rather than over the page. */
+  rows: (payload) => {
+    heldServiceSlots = payload.slots.filter(
+      (slot) =>
+        !slot.filled &&
+        credentialSection(slot) !== "Workspace keys" &&
+        slot.slot !== MCP_SERVERS_SLOT,
+    );
+    /* A slot with a value is a row; a slot without one is not, except a workspace declaration,
+       which names the key and stands to be edited or removed empty. The unset service slots are
+       reached through their section's act instead, so an empty section never reads as a fault. */
+    const rows: Slot[] = payload.slots.filter(
+      (slot) => slot.filled || slot.extension === WORKSPACE_EXTENSION,
+    );
+    {
+      rows.push({
+        name: WS_PLACEHOLDER,
+        slot: WS_PLACEHOLDER,
+        description: "Declare a key of the workspace's own.",
+        extension: WORKSPACE_EXTENSION,
+        filled: false,
+        host: "",
+        env: "",
+        header: DEFAULT_HEADER,
+        placeholder: WS_PLACEHOLDER,
+      } as PlaceholderRow);
+    }
+    const unsetService = heldServiceSlots.filter(
+      (slot) => slot.slot !== MCP_SERVERS_SLOT,
+    );
+    if (unsetService.length) {
+      rows.push({
+        name: SVC_PLACEHOLDER,
+        slot: SVC_PLACEHOLDER,
+        description: "Fill one of the service keys waiting for a value.",
+        extension: "service_keys",
+        filled: false,
+        host: "",
+        env: "",
+        header: DEFAULT_HEADER,
+        placeholder: SVC_PLACEHOLDER,
+      } as PlaceholderRow);
+    }
+    return rows;
+  },
   rowKey: (row) => row.name,
   search: (row) => [row.slot, row.description, row.extension, row.host, row.env].join(" "),
   list: {
-    mark: (row) => (
-      <MarkTile>
-        <BrandMark provider={slotProvider(row.slot)} className="text-ink" />
-      </MarkTile>
-    ),
+    mark: (row) =>
+      isPlaceholder(row) ? null : (
+        <MarkTile>
+          <BrandMark provider={slotProvider(row.slot)} className="text-ink" />
+        </MarkTile>
+      ),
     primary: { field: "slot" },
     meta: [
-      { field: "description", render: (description) => codeSpans(description) },
+      {
+        field: "description",
+        render: (description, row) =>
+          isPlaceholder(row) ? <span className="text-ink-quiet">{description}</span> : codeSpans(description),
+      },
       { field: "host", render: (host, row) => (host ? codeSpans(`${row.env} → ${host}`) : null) },
     ],
   },
+
   empty: "No credential is set.",
-  /* Every slot with a value has a row, and a slot with none has none — so the act that fills one
-     stands here, for the member a surface sent to this screen to fill it. */
-  offer: (payload, { act, action, busy, actions }) => {
-    const request = actions.find((view) => view.name === "request_credentials");
-    const unset = payload.slots.filter((slot) => !slot.filled);
-    return (
-      <div className="flex gap-sm">
-        {request && unset.length ? (
-          <SetCredential
-            slots={unset}
-            busy={busy}
-            onPicked={(row) => action(request, credentialRequest(row))}
-          />
-        ) : null}
-        <DeclareCredential busy={busy} onDeclared={act} />
-      </div>
-    );
-  },
   views: (payload) => payload.actions,
   actions: (row, { act, action, busy, actions }) => {
     const request = actions.find((view) => view.name === "request_credentials");
+    if (isPlaceholder(row)) {
+      return (
+        <div className={ACTS}>
+          {row.placeholder === WS_PLACEHOLDER ? (
+            <DeclareCredential busy={busy} onDeclared={act} act={action} actions={actions} />
+          ) : null}
+          {row.placeholder === SVC_PLACEHOLDER && request ? (
+            <SetCredential
+              slots={heldServiceSlots}
+              busy={busy}
+              onPicked={(picked) => action(request, credentialRequest(picked))}
+            />
+          ) : null}
+        </div>
+      );
+    }
     return (
       <div className={ACTS}>
         {row.filled ? (
@@ -215,7 +284,13 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
           </span>
         )}
         {row.extension === WORKSPACE_EXTENSION ? (
-          <DeclareCredential busy={busy} onDeclared={act} slot={row} />
+          <DeclareCredential
+            busy={busy}
+            onDeclared={act}
+            act={action}
+            actions={actions}
+            slot={row}
+          />
         ) : null}
         {request ? (
           <Button
@@ -249,8 +324,8 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
             {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
               ? "Save MCP Server"
               : request.prompts.length === 1
-                ? "Set Credential"
-                : "Set Credentials"}
+                ? "Add service key"
+                : "Add service keys"}
           </DialogTitle>
           <DialogDescription>
             {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
@@ -284,50 +359,82 @@ function PromptHeader({ provider, children }: { provider: string | null; childre
   );
 }
 
-/** The name the `credential_slot` kind addresses a declaration by — the slot's own name as a slug,
- *  derived here the same way the kind derives it, and the same name the `credential` kind gives the
- *  slot, so the row the panel writes is the row it reads back. */
-function slotName(slot: string) {
-  return slot
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-/** The workspace's own credential slot: an admin names the variable the sandbox exports, the host
- *  its value rides to, and the header it rides in. The value is not typed here — the declaration
- *  lands first, and the value goes through the same private prompt every other slot's does. */
+/** The workspace's own credential slot: an admin names the variable the sandbox exports — that
+ *  variable is the name the declaration is filed under, not a separate one — the host its value
+ *  rides to, and the header it rides in. What it is for is optional prose.
+ *
+ *  The value is collected at create time: saving runs the credential collection's
+ *  `request_credentials` action for the new slot, which raises the same sealed prompt a row's
+ *  Replace raises, so one save lands the declaration and the value together and the secret keeps
+ *  its sealed handoff. */
 function DeclareCredential({
   busy,
   onDeclared,
+  act,
+  actions,
   slot,
 }: {
   busy: boolean;
   onDeclared: (envelope: unknown) => void;
+  act: (view: ActionView, input: ActionInput) => void;
+  actions: ActionView[];
   slot?: Slot;
 }) {
+  const mainAgent = useMainAgent();
   const [open, setOpen] = useState(false);
-  const [name, setName] = useState(slot?.slot ?? "");
   const [env, setEnv] = useState(slot?.env ?? "");
   const [host, setHost] = useState(slot?.host ?? "");
   const [header, setHeader] = useState(slot?.header ?? DEFAULT_HEADER);
   const [description, setDescription] = useState(slot?.description ?? "");
-  const ready = Boolean(name.trim() && env.trim() && host.trim());
+  const [value, setValue] = useState("");
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const [saving, setSaving] = useState(false);
+  const ready = Boolean(env.trim() && host.trim());
 
-  function declare() {
-    setOpen(false);
-    onDeclared({
+  async function declare() {
+    if (!mainAgent || saving) return;
+    const envelope = {
       verb: "apply",
       kind: SLOT_KIND,
-      name: slotName(name),
+      name: slotName(env),
       spec: {
-        slot: name.trim(),
+        slot: env.trim().toLowerCase(),
         env: env.trim(),
         host: host.trim(),
         header: header.trim() || DEFAULT_HEADER,
         description: description.trim(),
       },
-    });
+    };
+    setSaving(true);
+    const outcome = await postIntent(mainAgent.id, envelope);
+    if (!outcome.applied) {
+      setSaving(false);
+      setNotice(outcomeNotice(outcome));
+      return;
+    }
+    setOpen(false);
+    setSaving(false);
+    if (slot) {
+      onDeclared(envelope);
+      return;
+    }
+    const request = actions.find((view) => view.name === "request_credentials");
+    if (!request) {
+      onDeclared(envelope);
+      return;
+    }
+    /* The value goes through the sealed prompt rather than this form: the request opens the same
+       private dialog every other slot's fill runs through, and the listing reports the store. */
+    act(request, credentialRequest({
+      name: slotName(env),
+      slot: env.trim().toLowerCase(),
+      description: description.trim(),
+      extension: WORKSPACE_EXTENSION,
+      filled: false,
+      host: host.trim(),
+      env: env.trim(),
+      header: header.trim() || DEFAULT_HEADER,
+    }));
   }
 
   return (
@@ -338,85 +445,89 @@ function DeclareCredential({
         </Button>
       ) : (
         <Button variant="outline" size="bar" disabled={busy} onClick={() => setOpen(true)}>
-          Add a credential
+          Add workspace key
         </Button>
       )}
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{slot ? "Edit Credential" : "Add Credential"}</DialogTitle>
-            <DialogDescription>
-              The sandbox gets the variable holding a placeholder. The proxy sends the real value to
-              this host alone, so the key never enters the sandbox. Set the value after saving.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-lg">
-            <Field label="Name" htmlFor="credential-name" description="Lower case, e.g. acme_api_key.">
+      <Sheet
+        open={open}
+        title={slot ? "Edit workspace key" : "Add workspace key"}
+        onClose={() => setOpen(false)}
+      >
+        <OutcomeNotice state={notice} />
+        <div className="flex flex-col gap-lg">
+          <Field
+            label="Variable"
+            htmlFor="credential-env"
+            description="What the sandbox exports, and the name the key is filed under."
+          >
+            <Input
+              id="credential-env"
+              autoComplete="off"
+              placeholder="ACME_API_KEY"
+              required
+              disabled={slot !== undefined}
+              value={env}
+              onChange={(event) => setEnv(event.target.value)}
+            />
+          </Field>
+          <Field label="Host" htmlFor="credential-host" description="Where the value is sent.">
+            <Input
+              id="credential-host"
+              autoComplete="off"
+              placeholder="api.acme.com"
+              required
+              value={host}
+              onChange={(event) => setHost(event.target.value)}
+            />
+          </Field>
+          <Field label="Header" htmlFor="credential-header" description="The header it rides in.">
+            <Input
+              id="credential-header"
+              autoComplete="off"
+              placeholder={DEFAULT_HEADER}
+              value={header}
+              onChange={(event) => setHeader(event.target.value)}
+            />
+          </Field>
+          <Field label="Description" htmlFor="credential-description">
+            <Input
+              id="credential-description"
+              autoComplete="off"
+              placeholder="Acme API key (Settings → API)."
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </Field>
+          {!slot ? (
+            <Field
+              label="Value"
+              htmlFor="credential-value"
+              description="Typed once and stored encrypted, never shown again. The sandbox holds a placeholder only; the proxy sends the real value to this host alone."
+            >
               <Input
-                id="credential-name"
+                id="credential-value"
+                type="password"
                 autoComplete="off"
-                placeholder="acme_api_key"
-                required
-                disabled={slot !== undefined}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
+                placeholder="Paste the key"
+                value={value}
+                onChange={(event) => setValue(event.target.value)}
               />
             </Field>
-            <Field label="Variable" htmlFor="credential-env" description="What the sandbox exports.">
-              <Input
-                id="credential-env"
-                autoComplete="off"
-                placeholder="ACME_API_KEY"
-                required
-                value={env}
-                onChange={(event) => setEnv(event.target.value)}
-              />
-            </Field>
-            <Field label="Host" htmlFor="credential-host" description="Where the value is sent.">
-              <Input
-                id="credential-host"
-                autoComplete="off"
-                placeholder="api.acme.com"
-                required
-                value={host}
-                onChange={(event) => setHost(event.target.value)}
-              />
-            </Field>
-            <Field label="Header" htmlFor="credential-header" description="The header it rides in.">
-              <Input
-                id="credential-header"
-                autoComplete="off"
-                placeholder={DEFAULT_HEADER}
-                value={header}
-                onChange={(event) => setHeader(event.target.value)}
-              />
-            </Field>
-            <Field label="Description" htmlFor="credential-description">
-              <Input
-                id="credential-description"
-                autoComplete="off"
-                placeholder="Acme API key (Settings → API)."
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-              />
-            </Field>
-          </div>
-          <DialogFooter>
-            <Button variant="send" disabled={!ready || busy} onClick={declare}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          ) : null}
+        </div>
+        <div className="flex justify-end">
+          <Button variant="send" disabled={!ready || busy || saving} onClick={() => void declare()}>
+            Save
+          </Button>
+        </div>
+      </Sheet>
     </>
   );
 }
 
-const PICKED_SLOT = "credential-slot";
-
-/** The act over the rows: the screen lists the values the workspace holds, so a slot with none is
- *  reached by naming it. Picking one raises the same prompt a row's Replace raises, and the value
- *  is typed there rather than here — the prompt is what carries the seal. */
+/** The act over the unset service slots: the section lists the values the workspace holds, so a
+ *  slot with none is reached by naming it there. Picking one raises the same prompt a row's
+ *  Replace raises, and the value is typed there — the prompt is what carries the seal. */
 function SetCredential({
   slots,
   busy,
@@ -426,56 +537,49 @@ function SetCredential({
   busy: boolean;
   onPicked: (row: Slot) => void;
 }) {
+  const unsetServiceSlots = slots;
   const [asking, setAsking] = useState(false);
   const [picked, setPicked] = useState("");
-  const row = slots.find((slot) => slot.slot === picked);
   return (
     <div className="flex">
       <Button variant="outline" size="bar" onClick={() => setAsking(true)}>
-        Set a credential
+        Add service key
       </Button>
-      <Dialog open={asking} onOpenChange={setAsking}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Set Credential</DialogTitle>
-            <DialogDescription>
-              Name the slot to fill. Its value is stored encrypted and never shown again.
-            </DialogDescription>
-          </DialogHeader>
-          <Field label="Credential" htmlFor={PICKED_SLOT} description={row?.description}>
-            <Select value={picked} onValueChange={setPicked}>
-              <SelectTrigger id={PICKED_SLOT}>
-                <SelectValue placeholder="Choose a credential" />
-              </SelectTrigger>
-              <SelectContent>
-                {slots.map((slot) => (
-                  <SelectItem key={slot.slot} value={slot.slot}>
-                    <span className="flex min-w-0 items-center gap-sm">
-                      <BrandMark
-                        provider={slotProvider(slot.slot)}
-                        className="size-(--size-icon)"
-                      />
-                      <span className="min-w-0 truncate">{slot.slot}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <DialogFooter>
-            <Button
-              variant="send"
-              disabled={row === undefined || busy}
-              onClick={() => {
-                setAsking(false);
-                if (row) onPicked(row);
-              }}
-            >
-              Continue
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <Sheet open={asking} title="Add service key" onClose={() => setAsking(false)}>
+        <Field label="Credential" htmlFor="credential-slot">
+          <Select value={picked} onValueChange={setPicked}>
+            <SelectTrigger id="credential-slot">
+              <SelectValue placeholder="Choose a credential" />
+            </SelectTrigger>
+            <SelectContent>
+              {unsetServiceSlots.map((slot) => (
+                <SelectItem key={slot.slot} value={slot.slot}>
+                  <span className="flex min-w-0 items-center gap-sm">
+                    <BrandMark
+                      provider={slotProvider(slot.slot)}
+                      className="size-(--size-icon)"
+                    />
+                    <span className="min-w-0 truncate">{slot.slot}</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <div className="flex justify-end">
+          <Button
+            variant="send"
+            disabled={!picked || busy}
+            onClick={() => {
+              setAsking(false);
+              const row = unsetServiceSlots.find((slot) => slot.slot === picked);
+              if (row) onPicked(row);
+            }}
+          >
+            Continue
+          </Button>
+        </div>
+      </Sheet>
     </div>
   );
 }
