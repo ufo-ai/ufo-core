@@ -702,6 +702,26 @@ _COMMENT_ONLY_AUTH_DIFF = (
     "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
     "@@ -1,2 +1,1 @@\n-  # a stale comment\n"
 )
+_REALIGNED_AUTH_DIFF = (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -22,9 +19,8 @@ module "irsa_external_secrets" {\n'
+    '-  role_name                      = "${local.name}-external-secrets"\n'
+    "-  attach_external_secrets_policy = true\n"
+    "-  # Scope to this environment's secrets only.\n"
+    '+  role_name                             = "${local.name}-external-secrets"\n'
+    "+  attach_external_secrets_policy        = true\n"
+    '   external_secrets_secrets_manager_arns = ["arn:aws:secretsmanager:*"]\n'
+    "--- a/infra/modules/platform/ses.tf\n+++ b/infra/modules/platform/ses.tf\n"
+    "@@ -19,8 +11,7 @@ locals {\n"
+    "-  # The verified identity is the sender's domain.\n"
+    '-  ses_domain = element(split("@", var.ses_sender), 1)\n'
+    '+  ses_domain            = element(split("@", var.ses_sender), 1)\n'
+)
+_REALIGNED_WITH_DELETION_AUTH_DIFF = _REALIGNED_AUTH_DIFF + (
+    "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
+    '@@ -48,7 +44,6 @@ data "aws_iam_policy_document" "app_s3" {\n'
+    '-    actions = ["s3:GetObject", "s3:PutObject"]\n'
+)
 _NARROWING_ARGUMENT_AUTH_DIFF = (
     "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
     '@@ -63,6 +63,7 @@ module "irsa_app_s3" {\n'
@@ -805,6 +825,27 @@ def _check_authorization_expansions_co_deploy_but_contractions_split() -> None:
         gate.validate_deploy_change(
             ("infra/modules/platform/ses.tf", "servers/control/src/email.rs")
         )
+
+
+def _check_a_whitespace_realignment_of_a_grant_line_is_not_a_contraction() -> None:
+    """Deleting a comment realigns the `=` column of the grant lines around it, so the unified diff
+    shows live arguments as removed and added again with the same content. The grant does not
+    change and the deploy proceeds. A grant line removed and not realigned back still splits the
+    deploy, in the same diff as a realignment."""
+    gate = _deploy_change_gate()
+    gate.validate_deploy_change(
+        (
+            "infra/modules/platform/iam.tf",
+            "infra/modules/platform/ses.tf",
+            "core/src/ufo/serve.py",
+        ),
+        _REALIGNED_AUTH_DIFF,
+    )
+    for contracting_diff in (_CONTRACTION_AUTH_DIFF, _REALIGNED_WITH_DELETION_AUTH_DIFF):
+        with pytest.raises(ValueError, match="contract IAM only after"):
+            gate.validate_deploy_change(
+                ("infra/modules/platform/iam.tf", "core/src/ufo/serve.py"), contracting_diff
+            )
 
 
 def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
@@ -4701,6 +4742,7 @@ def _check_deploy_workflow_static_contract() -> None:
         _check_testing_deploy_writes_provider_credentials_before_apply,
         _check_testing_deploy_seeds_metric_names_before_apply,
         _check_authorization_expansions_co_deploy_but_contractions_split,
+        _check_a_whitespace_realignment_of_a_grant_line_is_not_a_contraction,
         _check_plans_run_only_for_selected_deployment_inputs,
         _check_production_edge_preserves_the_promoted_workspace,
         _check_production_shared_edge_uses_current_main,

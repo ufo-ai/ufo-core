@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 AUTHORIZATION_PATHS = frozenset(
@@ -36,11 +37,55 @@ DENY_EFFECT = '"Deny"'
 BLOCK_HEADER = re.compile(r'(resource|data|module)\s+"([^"]+)"(?:\s+"([^"]+)")?')
 PRINCIPAL_ARGUMENT = re.compile(r"^\s*(?:role|roles|user|users|group|groups)\s*=\s*(.+)$")
 REFERENCE = re.compile(r"\b(?:data\.\w+\.\w+|\w+\.\w+)")
+WHITESPACE_RUN = re.compile(r"\s+")
 
 
 def _is_grant_content(line: str) -> bool:
     body = line.strip()
     return bool(body) and not body.startswith(("#", "//"))
+
+
+def _normalized(line: str) -> str:
+    return WHITESPACE_RUN.sub(" ", line.strip())
+
+
+def _without_realignments(authorization_diff: str) -> list[str]:
+    """The diff with each removed line that reappears added in the same hunk, differing only in
+    whitespace, dropped together with the line that replaces it. Deleting a comment lets
+    `terraform fmt` realign the `=` column of the block around it, and the live grant lines then
+    read as removed content they are not. Only the matched pairs go: a removed grant line with no
+    realigned twin still reads as a contraction."""
+    kept: list[str] = []
+    hunk: list[str] = []
+
+    def flush() -> None:
+        changed = {
+            sign: Counter(
+                _normalized(line[1:])
+                for line in hunk
+                if line.startswith(sign) and _is_grant_content(line[1:])
+            )
+            for sign in "+-"
+        }
+        realigned = changed["+"] & changed["-"]
+        pending = {sign: realigned.copy() for sign in "+-"}
+        for line in hunk:
+            sign = line[:1]
+            body = _normalized(line[1:])
+            if sign in pending and pending[sign][body]:
+                pending[sign][body] -= 1
+                continue
+            kept.append(line)
+        hunk.clear()
+
+    for line in authorization_diff.splitlines():
+        if line.startswith(("@@", "---", "+++", "diff --git")):
+            flush()
+            kept.append(line)
+            continue
+        hunk.append(line)
+    flush()
+    return kept
 
 
 def _opens_top_level_block(line: str) -> bool:
@@ -71,7 +116,7 @@ def _authorization_contracts(authorization_diff: str) -> bool:
     open_blocks = 0
     declared: set[str] = set()
     bound: list[frozenset[str]] = []
-    for line in authorization_diff.splitlines():
+    for line in _without_realignments(authorization_diff):
         if line.startswith(("---", "+++")):
             continue
         if line.startswith("+"):
