@@ -30,9 +30,9 @@ name = "previous-carrier"
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = '''When detail crosses the chosen register's inline boundary, put it in one artifact and never
-duplicate its body inline. For a member, the artifact is a Markdown file in /workspace — one you
-wrote, or one a subagent wrote in your sandbox — carried by a tag at the end of the closing message,
-under the file's own name:
+duplicate its body inline. For a member, the artifact is a file in /workspace — a Markdown write-up
+or a chart, one you wrote or one a subagent wrote in your sandbox — carried by a tag at the end of
+the closing message, under the file's own name:
 
 <artifact path="/workspace/nightly-runner-queue.md"/>
 

@@ -28,6 +28,7 @@ from evals.suites import (
     billing_actions,
     browser_nav,
     business_goal,
+    chart_delivery,
     closing_message,
     code_review,
     coding_caveat_completeness,
@@ -278,6 +279,15 @@ TASKS: tuple[EvalTask, ...] = (
         "writing_launch_thread",
         writing_subagent.LAUNCH_CASES,
         judge_model=SEMANTIC_JUDGE_MODEL,
+    ),
+    capability_task(
+        "chart_delivery",
+        chart_delivery.CASES,
+        judge_model=VISUAL_JUDGE_MODEL,
+        judge_max_tokens=16_000,
+        judge_reasoning="high",
+        wait_seconds=chart_delivery.WORKFLOW_WAIT_SECONDS,
+        nightly=False,
     ),
     capability_task(
         "document_visual",

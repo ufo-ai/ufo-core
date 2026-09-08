@@ -100,7 +100,8 @@ def test_shell_writes_the_report_and_sends_it_only_when_the_member_asks() -> Non
     assert "distinguish the rule from the instance" in prose
     assert "put the full report in one Markdown artifact" in prose
     assert "never duplicate its body inline" in prose
-    assert "For a member, the artifact is a Markdown file in /workspace" in prose
+    assert "For a member, the artifact is a file in /workspace — a Markdown write-up" in prose
+    assert "or a chart, one you wrote" in prose
     assert "one a subagent wrote in your sandbox" in prose
     assert "carried by a tag at the end of the closing message," in prose
     assert '<artifact path="/workspace/nightly-runner-queue.md"/>' in SHELL

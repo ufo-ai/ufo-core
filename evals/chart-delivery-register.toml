@@ -1,0 +1,65 @@
+name = "chart-delivery-register"
+base = "HEAD"
+suites = ["chart_delivery", "delegated_response_register"]
+cases = [
+  "series-over-period",
+  "spend-across-categories",
+  "two-month-comparison",
+  "four-quarter-total",
+  "delegated-latency-result-only",
+]
+repeats = 3
+concurrency = 3
+max_stacks = 1
+budget_usd = 60.0
+est_usd_per_case = 0.60
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+# The sandbox draws the chart, so the carrier is docker: the template image holds matplotlib and the
+# local carrier runs host subprocesses that do not. Pass counts read the whole contract at once, so
+# read the arms by what the samples did — every figure below is charts drawn, of 12 positive samples.
+#
+# Round one measured the rule at 134, 69, 37 and 0 words: 12, 8, 11 and 0. The trigger sentence is
+# the whole rule and the length above it bought nothing, so the floor sentence, the axis-label
+# sentence and the no-file deference came out. Round two cut three more words: naming the artifact
+# tag in the rule charted 12 against control's 12 and reached the tag 7 times against 8, so the rule
+# ships at 31 words without it.
+#
+# Round two also found that no wording fixes the double delivery — one PNG sent by share_file and
+# carried by the tag. Control doubled 6 of 12; share_file's old "ONLY way out of the sandbox"
+# description doubled 6; dropping the ban on sending a file both ways doubled 7. The description
+# keeps its factual half, that a file reaches a member by one of two routes, and lost the ban, which
+# measured inert. The double delivery is open and wants a mechanism, not a sentence.
+#
+# What is left to measure is the floor itself, against the anchor that keeps proving the rule works.
+# `delegated-latency-result-only` rides every arm as the neighbor case: its five phase timings sit on
+# the floor and the member says "I do not need a file". It has never passed in any arm, the no-rule
+# anchor included, so it fails on its own rubric rather than on the chart.
+
+[[arm]]
+name = "no-floor"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/delivery_register.md"
+old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
+written as a PNG under /workspace. Fewer numbers stay in words.'''
+new = '''An answer to a member that rests on numbers carries one chart of them, written as a PNG under
+/workspace.'''
+
+[[arm]]
+name = "no-chart-rule"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/turns/delivery_register.md"
+old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
+written as a PNG under /workspace. Fewer numbers stay in words.
+'''
+new = ""

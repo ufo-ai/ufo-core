@@ -41,12 +41,12 @@ name = "artifact-says-it-once"
 [[arm.replacements]]
 path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = """
-duplicate its body inline. For a member, the artifact is a Markdown file in /workspace — one you
+duplicate its body inline. For a member, the artifact is a file in /workspace — a Markdown write-up
 """
 new = """
 duplicate its body inline. The artifact carries each finding once: it does not copy back a source
 its reader already holds, and a later section restating an earlier one in other words is that
-finding twice. For a member, the artifact is a Markdown file in /workspace — one you
+finding twice. For a member, the artifact is a file in /workspace — a Markdown write-up
 """
 
 # Six rounds to read two files the task named by path. Each round is paid for before anything is
