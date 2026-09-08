@@ -20,7 +20,7 @@ sandbox = { backend = "docker" }
 name = "no-workspace-path"
 
 [[arm.replacements]]
-path = "core/src/ufo/runtime/turns/delivery_register.md"
+path = "core/src/ufo/runtime/prompts/delivery_register.md"
 old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
 written as a PNG under /workspace. Fewer numbers stay in words.'''
 new = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them.
@@ -30,7 +30,7 @@ Fewer numbers stay in words.'''
 name = "numbers-already-said"
 
 [[arm.replacements]]
-path = "core/src/ufo/runtime/turns/delivery_register.md"
+path = "core/src/ufo/runtime/prompts/delivery_register.md"
 old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
 written as a PNG under /workspace. Fewer numbers stay in words.'''
 new = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
@@ -41,7 +41,7 @@ already said. Fewer numbers stay in words.'''
 name = "no-chart-rule"
 
 [[arm.replacements]]
-path = "core/src/ufo/runtime/turns/delivery_register.md"
+path = "core/src/ufo/runtime/prompts/delivery_register.md"
 old = '''An answer to a member that rests on five or more numbers in one measure carries one chart of them,
 written as a PNG under /workspace. Fewer numbers stay in words.
 '''

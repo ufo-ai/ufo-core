@@ -5,6 +5,8 @@ does not remember there is anything to call it about — a heartbeat fire and a 
 arrive with fresh context. So every turn on a conversation carrying an objective gets its frontier
 injected: the directive, what is unclosed, and which conditions are unmet."""
 
+from pathlib import Path
+
 from ufo.sdk.context import agent_current
 from ufo.sdk.manifest import (
     HookContext,
@@ -26,25 +28,7 @@ from ufo_ext_objectives.tools import (
 NAME = "objectives"
 VERSION = "0.1.0"
 SECTION_NAME = "objectives"
-SECTION_BODY = (
-    "Work that outlives this turn goes in an objective. A heartbeat or a subagent hand-back wakes "
-    "you in a NEW turn holding none of your current working memory — only the durable record. "
-    "Before ending a turn that delegated or scheduled anything, call plan_objective so that "
-    "decision survives.\n"
-    "A step is a unit you would hand to a specialist worker, or one that will take you several "
-    "rounds and can fail on its own terms — ship the migration, get the PR through review, "
-    "confirm the rollout held. Not a file write, not a tool call, not a note to yourself. If a "
-    "step cannot fail in an interesting way, it is not a step: fold it into the one it serves. "
-    "Most objectives are three to seven steps.\n"
-    "Each step's accepts are the conditions that close it, and they must name state you did not "
-    "invent for the purpose — a path the member named, a command whose meaning is not yours to "
-    "define, a check someone else would run. A marker file you create so the condition can pass "
-    "proves nothing; a condition that cannot fail is worse than none, because it manufactures "
-    "confidence. Record attempts with record_step, which re-reads those conditions rather than "
-    "taking your word, and returns 'unmet' when you believed you were done and the state "
-    "disagrees. Attempts climbing while closed holds flat means split the work or ask, not "
-    "another round."
-)
+SECTION_BODY = (Path(__file__).parent / "prompts" / "objectives_section.md").read_text().strip()
 FRONTIER_MAX_STEPS = 12
 
 

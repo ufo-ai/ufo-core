@@ -24,20 +24,14 @@ flags = { backend = "open" }
 name = "no-work-rule"
 
 [[arm.replacements]]
-path = "extensions/app_notification/ufo_ext_app_notification/manifest.py"
-old = '''    "Where a notification names work rather than a decision, and this workspace holds an agent "
-    "whose job that work is, `spawn` it with the work instead of spending the member's attention: "
-    "list the `agent` kind to see what they have and what each one does. Read it to them as well "
-    "only when they would act on it today. "'''
+path = "extensions/app_notification/ufo_ext_app_notification/prompts/agent_notification.md"
+old = '''Where a notification names work rather than a decision, and this workspace holds an agent whose job that work is, `spawn` it with the work instead of spending the member's attention: list the `agent` kind to see what they have and what each one does. Read it to them as well only when they would act on it today. '''
 new = ''
 
 [[arm]]
 name = "no-list-the-agents"
 
 [[arm.replacements]]
-path = "extensions/app_notification/ufo_ext_app_notification/manifest.py"
-old = '''    "whose job that work is, `spawn` it with the work instead of spending the member's attention: "
-    "list the `agent` kind to see what they have and what each one does. Read it to them as well "
-    "only when they would act on it today. "'''
-new = '''    "whose job that work is, `spawn` it with the work instead of spending the member's attention. "
-    "Read it to them as well only when they would act on it today. "'''
+path = "extensions/app_notification/ufo_ext_app_notification/prompts/agent_notification.md"
+old = '''whose job that work is, `spawn` it with the work instead of spending the member's attention: list the `agent` kind to see what they have and what each one does. Read it to them as well only when they would act on it today. '''
+new = '''whose job that work is, `spawn` it with the work instead of spending the member's attention. Read it to them as well only when they would act on it today. '''

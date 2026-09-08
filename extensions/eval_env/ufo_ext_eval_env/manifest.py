@@ -15,6 +15,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import ClassVar, Literal
 from uuid import UUID, uuid4
 
@@ -94,14 +95,9 @@ APP_QA_EDIT_CALL_LIMIT = 8
 APP_QA_EDIT_OLD_BYTES_LIMIT = 16_384
 APP_QA_EDIT_NEW_BYTES_LIMIT = 16_384
 APP_QA_EDIT_BUDGET_KEY = "app-qa-repair/{turn_id}/edit-budget"
-APP_QA_REPAIR_PROMPT = """You repair one existing ufo application from deterministic product QA.
-
-The first turn is a warm-up. Reply only `READY`. Do not use tools.
-
-The next turn contains the live audit issues. Read `/workspace/ufo-app/app.tsx`, then use exact,
-small edits to fix only those issues. Keep the data, behavior, structure, and `preview.svg`
-unchanged. Do not build, audit, deploy, replace the full source, or change another path. Finish
-after the edits land."""
+APP_QA_REPAIR_PROMPT = (
+    (Path(__file__).parent / "prompts" / "agent_app_qa_repair.md").read_text().strip()
+)
 
 
 class AppQaEditBudget(BaseModel):

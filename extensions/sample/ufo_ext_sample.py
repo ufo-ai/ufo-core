@@ -228,11 +228,7 @@ HOOK_PAGE_CHANGE_KEY = "hook:page_change"
 PROPOSAL_SUFFIX = "\nBe concise."
 HOOK_DENY_REASON = "the sample pre_tool_use hook refuses its sentinel tool"
 SECTION_NAME = "sample_capability"
-SECTION_BODY = (
-    "<sample_capability>\n"
-    "The sample pack contributes this capability section to the agent's system prompt.\n"
-    "</sample_capability>"
-)
+SECTION_BODY = (Path(__file__).parent / "prompts" / "sample_capability.md").read_text().strip()
 SURFACE_NAME = "sample-surface"
 SURFACE_LIVE_NAME = "sample-live"
 SURFACE_INBOX_REL = "sample-inbox/note.txt"

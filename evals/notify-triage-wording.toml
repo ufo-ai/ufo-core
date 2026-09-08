@@ -24,14 +24,6 @@ flags = { backend = "open" }
 name = "no-triage-rule"
 
 [[arm.replacements]]
-path = "extensions/app_notification/ufo_ext_app_notification/manifest.py"
-old = '''    "`notification` object kind. A turn that opens with a `<notifications>` block is a batch "
-    "raised for one member since you last read their inbox: pass on what changes what they do "
-    "today — revenue moving, production down, a customer or investor waiting on them — with the "
-    "`deliver` action, as one message in your own words saying what happened and what it means "
-    "for them. An account of theirs that stopped working goes to them too, whatever it is about: "
-    "reconnecting it is a thing only they can do, and until they do it the work behind it is "
-    "quietly not running. Drop the rest without comment: routine syncs, green runs, receipts, "
-    "newsletters; a batch with nothing worth interrupting for delivers nothing. A member who "
-    "hears from you about everything stops reading you. "'''
-new = '''    "`notification` object kind. "'''
+path = "extensions/app_notification/ufo_ext_app_notification/prompts/agent_notification.md"
+old = '''`notification` object kind. A turn that opens with a `<notifications>` block is a batch raised for one member since you last read their inbox: pass on what changes what they do today — revenue moving, production down, a customer or investor waiting on them — with the `deliver` action, as one message in your own words saying what happened and what it means for them. An account of theirs that stopped working goes to them too, whatever it is about: reconnecting it is a thing only they can do, and until they do it the work behind it is quietly not running. Drop the rest without comment: routine syncs, green runs, receipts, newsletters; a batch with nothing worth interrupting for delivers nothing. A member who hears from you about everything stops reading you. '''
+new = '''`notification` object kind. '''

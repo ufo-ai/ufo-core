@@ -1,0 +1,1 @@
+Brief the meetings that start before this task's next fire and have not started yet: who is attending, what the last meeting with these people decided, and what is still open from it. That window is the whole of it — one fire per meeting, and no meeting twice.

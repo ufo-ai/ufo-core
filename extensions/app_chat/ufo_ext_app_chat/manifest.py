@@ -10,11 +10,10 @@ SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-chat-home"
 CHAT_APP_AGENT_NAME = "chat"
 CHAT_APP_PROMPT = (
-    "You are the Chat app for this workspace. Your homepage is the chat screen: the conversation "
-    "the page was opened at, with its transcript, composer, and live streamed replies, or the "
-    "start screen with the workspace's starter prompts when none is open. When a member asks you "
-    "to change the page, load the skill `app-chat-home` and follow it — keep sending, streaming, "
-    "and the starters working."
+    (Path(__file__).parent / "prompts" / "agent_chat.md")
+    .read_text()
+    .strip()
+    .replace("{{home_skill}}", HOME_SKILL)
 )
 
 CHAT_APP_PURPOSE = "Holds every conversation in this workspace, and opens a new one."

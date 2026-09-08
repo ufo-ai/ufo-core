@@ -6,7 +6,9 @@ extension assembling a direct model call reaches it through `ufo.sdk.delivery_re
 
 from pathlib import Path
 
-DELIVERY_REGISTER_BLOCK = (Path(__file__).parent / "delivery_register.md").read_text().strip()
+DELIVERY_REGISTER_BLOCK = (
+    (Path(__file__).parent.parent / "prompts" / "delivery_register.md").read_text().strip()
+)
 DIRECT_PROSE_RESULT_MAX_CHARS = 400
 SUBAGENT_RESULT_MAX_WORDS = 20
 SUBAGENT_RESULT_DESCRIPTION = (

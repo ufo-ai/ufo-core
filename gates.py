@@ -149,6 +149,15 @@ FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
 }
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
+CORE_SRC_ROOT = "core/src"
+PEOPLE_DOCS = frozenset({"AGENTS.md", "CLAUDE.md", "README.md"})
+PROMPT_POINTS = {
+    "PromptSection": "body",
+    "SubagentProfile": "prompt",
+    "AgentSpec": "prompt",
+    "SetupSchedule": "prompt",
+}
+PROMPT_LITERAL_BOUND = 100
 EXT_SCAFFOLD_DIRS = frozenset({"tests"})
 SDK_PUBLIC_PREFIX = "ufo.sdk"
 MANIFEST_MODULE = RUNTIME_SRC / "ext" / "manifest.py"
@@ -2237,6 +2246,91 @@ def _ratio_failures(pairings: list[tuple[str, str, str, float]]) -> list[str]:
     return failures
 
 
+def _prompt_home_failures() -> list[str]:
+    """Every prompt lives in a directory named `prompts/`. One glob over the repo — `*/prompts/*.md`
+    — is then the whole set, so an agent looking for the text a model reads finds it without knowing
+    which module loads it. A package cannot write into another's tree, so the directory repeats per
+    package rather than centralizing into one; the predictable name is what does the work.
+
+    Only a `.md` a module reads is held. A skill is a directory of its own with its own gates, and
+    `AGENTS.md`/`CLAUDE.md` are written for people."""
+    failures = []
+    for root in (CORE_SRC_ROOT, EXTENSIONS_ROOT, PACKS_ROOT):
+        for path in sorted((ROOT / root).rglob("*.md")):
+            rel = path.relative_to(ROOT)
+            if _vendored(path) or "skills" in rel.parts or path.name in PEOPLE_DOCS:
+                continue
+            if "prompts" not in rel.parts:
+                failures.append(
+                    f"{rel}: a prompt lives in a prompts/ directory — move it to "
+                    f"{rel.parent / 'prompts' / rel.name}"
+                )
+    return failures
+
+
+def _prompt_placement_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """A declared prompt is a file, never a Python string. The four points that hand text straight
+    to a model — a pack's `PromptSection`, a `SubagentProfile`, the `AgentSpec` an extension ships,
+    and the `SetupSchedule` a provision arms — each read a `.md` under their package's `prompts/`,
+    so the text a reviewer reads is the text the model gets, a wording change is a diff of prose
+    rather than of re-wrapped string literals, and the eval arms an ablation needs are files to
+    swap.
+
+    Only the literal fails. A prompt assembled from parts, or read through anything that reaches
+    `read_text`, is already living in a file; a short one under PROMPT_LITERAL_BOUND is a test stub
+    or a one-line identity, not a prompt. The bound is what separates them: every prompt this repo
+    ships cleared it before the gate landed, and the stubs sat far beneath."""
+    failures = []
+    for rel, tree in trees.items():
+        if rel.parts[0] not in ("core", "extensions", "packs") or _vendored(ROOT / rel):
+            continue
+        assigned = {
+            target.id: node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            field = PROMPT_POINTS.get(ast.unparse(node.func).split(".")[-1])
+            if field is None:
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != field:
+                    continue
+                value = keyword.value
+                if isinstance(value, ast.Name):
+                    value = assigned.get(value.id, value)
+                if any(
+                    isinstance(inner, ast.Attribute) and inner.attr == "read_text"
+                    for inner in ast.walk(value)
+                ):
+                    continue
+                written = _literal_chars(value)
+                if written >= PROMPT_LITERAL_BOUND:
+                    point = ast.unparse(node.func).split(".")[-1]
+                    failures.append(
+                        f"{rel}:{node.lineno}: {point}.{field} is {written} chars of Python "
+                        f"string — move it to a .md the module reads"
+                    )
+    return failures
+
+
+def _literal_chars(node: ast.expr) -> int:
+    """How much of an expression a model would read as written text."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return len(node.value)
+    if isinstance(node, ast.JoinedStr):
+        return sum(
+            len(part.value)
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return 0
+
+
 def _skill_palette_failures() -> list[str]:
     """The portal theme follows the artifact palette, except body-size secondary text follows the
     AA-safe ufo-style step. Every printed ratio is recomputed, and a palette restatement may write
@@ -2360,6 +2454,8 @@ def main() -> int:
     failures.extend(_waiting_line_failures())
     failures.extend(_app_bundle_failures())
     failures.extend(_app_rebuild_failures())
+    failures.extend(_prompt_placement_failures(trees))
+    failures.extend(_prompt_home_failures())
     terraform = _env_terraform()
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")

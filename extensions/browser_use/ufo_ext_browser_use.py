@@ -61,7 +61,7 @@ RUN_TIMED_OUT = "timed_out"
 RUN_ERRORED = "errored"
 
 SECTION_NAME = "browser"
-SECTION_BODY = (Path(__file__).parent / "browser_use_section.md").read_text().strip()
+SECTION_BODY = (Path(__file__).parent / "prompts" / "browser_use_section.md").read_text().strip()
 
 BROWSER_USE_TRANSPORT: httpx.AsyncBaseTransport | None = None
 

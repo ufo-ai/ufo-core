@@ -12,11 +12,10 @@ SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-radar-home"
 RADAR_APP_AGENT_NAME = "radar"
 RADAR_APP_PROMPT = (
-    "You are the Radar app for this workspace. Your homepage is the radar feed: each scheduled "
-    "run as an entry on a rail — its digest title, summary, and points, the task and moment it "
-    "fired, and a cover picture — opening the full story in the drawer beside the feed, with its "
-    "files, its report, and its conversation. When a member asks you to change the page, load "
-    "the skill `app-radar-home` and follow it — keep the feed and the story view working."
+    (Path(__file__).parent / "prompts" / "agent_radar.md")
+    .read_text()
+    .strip()
+    .replace("{{home_skill}}", HOME_SKILL)
 )
 
 RADAR_APP_PURPOSE = "Shows what your scheduled work found, each run opening into its full story."

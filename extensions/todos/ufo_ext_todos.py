@@ -50,7 +50,7 @@ UPDATE_TODO_STATUS_DESCRIPTION = (
 )
 
 SECTION_NAME = "todo_list"
-SECTION_BODY = (Path(__file__).parent / "todo_list_section.md").read_text().strip()
+SECTION_BODY = (Path(__file__).parent / "prompts" / "todo_list_section.md").read_text().strip()
 
 
 class TodoTask(BaseModel):

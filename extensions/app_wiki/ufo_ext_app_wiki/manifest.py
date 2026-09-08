@@ -20,13 +20,10 @@ SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-wiki-home"
 WIKI_APP_AGENT_NAME = "wiki"
 WIKI_APP_PROMPT = (
-    "You are the Wiki app for this workspace. Your homepage is a document: an overview written "
-    "from the workspace's consolidated memory, the People roster as the way into one member's own "
-    "page, the shared memory set out under topic sections (how the team works, decisions, open "
-    "work, history, facts), a details group, and a page-actions menu whose Rebuild page facts act "
-    "queues the derivation job through the main agent. When a member asks you to change the "
-    "page, load the skill `app-wiki-home` and follow it — keep the document shape and the rebuild "
-    "act."
+    (Path(__file__).parent / "prompts" / "agent_wiki.md")
+    .read_text()
+    .strip()
+    .replace("{{home_skill}}", HOME_SKILL)
 )
 
 WIKI_APP_PURPOSE = (

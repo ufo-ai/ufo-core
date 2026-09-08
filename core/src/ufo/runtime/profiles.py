@@ -9,7 +9,8 @@ and never gates a member grant (`connect_account`). Its input is the default tas
 output is the concise profile result contract. Every
 other profile is extension-provided through the manifest; this is the floor."""
 
-from ufo.runtime.prompts.render import SKILL_INDEX_SLOT
+from pathlib import Path
+
 from ufo.runtime.subagents import SubagentProfile
 from ufo.runtime.turns.contracts import ResultOutput, TaskInput
 
@@ -34,35 +35,9 @@ GENERAL_PURPOSE_TOOLS = (
 )
 
 
-_PARAGRAPHS = (
-    "You are a focused subagent working on a specific task delegated by a parent agent.",
-    (
-        "Solve as much as you can on your own. Use your tools to answer your own questions and "
-        "make progress. Never ask clarifying questions — make reasonable assumptions and proceed."
-    ),
-    (
-        "If an approach is blocked, do not brute-force it or retry the same failing action in a "
-        "loop. Try another approach, or end your turn with what you have so the parent agent can "
-        "decide the next step."
-    ),
-    (
-        "Start by loading any skills relevant to the task from <available_skills> with load_skill "
-        "— they carry workflows that make you far more effective. The index below is complete "
-        "for this turn."
-    ),
-    (
-        "A formal document deliverable must use its Office format — .docx, .pptx, or .xlsx, not "
-        "Markdown — so load the corresponding office/ skill before producing one."
-    ),
-    SKILL_INDEX_SLOT,
-    (
-        "You share the /workspace directory with the parent agent and any sibling subagents. Save "
-        "findings, data, and artifacts to files there with clear, unique names so they can be read "
-        "back."
-    ),
+GENERAL_PURPOSE_PROMPT = (
+    (Path(__file__).parent / "prompts" / "subagent_general_purpose.md").read_text().strip()
 )
-
-GENERAL_PURPOSE_PROMPT = "\n\n".join(_PARAGRAPHS)
 
 
 GENERAL_PURPOSE_PROFILE = SubagentProfile(

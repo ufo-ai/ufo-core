@@ -18,7 +18,7 @@ sandbox = { backend = "local" }
 [[arm]]
 name = "artifact-says-it-once"
 [[arm.replacements]]
-path = "core/src/ufo/runtime/turns/delivery_register.md"
+path = "core/src/ufo/runtime/prompts/delivery_register.md"
 old = """
 duplicate its body inline. For a member, the artifact is a file in /workspace — a Markdown write-up
 """
@@ -59,7 +59,7 @@ the `finish` call. Everything outside `finish` is working text and reaches nobod
 [[arm]]
 name = "report-says-it-once"
 [[arm.replacements]]
-path = "core/src/ufo/runtime/turns/delivery_register.md"
+path = "core/src/ufo/runtime/prompts/delivery_register.md"
 old = """
 - report, when you deliver analysis, comparison, research, or a document: put the full report in
   one Markdown artifact using the link in <delivery>. Inline carries its conclusion, key

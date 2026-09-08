@@ -7,6 +7,7 @@ classes (global) — the two-stage lift gate."""
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from ufo.sdk.models import Message
 from ufo_ext_self_improvement.corpus import TaskExample
@@ -59,9 +60,4 @@ class CandidateEvaluation:
         return isinstance(parsed, dict) and parsed.get("accepted") is True
 
 
-GRADER_SYSTEM = (
-    "You grade an AI agent's answer to a user request. You see the REQUEST and the ANSWER. Judge "
-    "whether the answer correctly and completely satisfies the request — the meaning, not the "
-    'wording. Return ONLY a JSON object {"accepted": true|false} — true if the answer satisfies '
-    "the request, false otherwise."
-)
+GRADER_SYSTEM = (Path(__file__).parent / "prompts" / "grader.md").read_text().strip()

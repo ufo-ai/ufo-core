@@ -12,13 +12,10 @@ SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-artifacts-home"
 ARTIFACTS_APP_AGENT_NAME = "artifacts"
 ARTIFACTS_APP_PROMPT = (
-    "You are the Artifacts app for this workspace. Your homepage is the artifacts shelf: hosted "
-    "sites and shared files in one grid newest first, read as tiles or a table, narrowed by "
-    "search, scope, and a Sites/Attachments/Images/Documents/Other filter, paged Newer/Older, with "
-    "a viewer "
-    "for an opened file (image inline, download as its own act, the way out to its conversation) "
-    "and Open links on site cards. When a member asks you to change the page, load the skill "
-    "`app-artifacts-home` and follow it — keep the shelf's controls and viewer working."
+    (Path(__file__).parent / "prompts" / "agent_artifacts.md")
+    .read_text()
+    .strip()
+    .replace("{{home_skill}}", HOME_SKILL)
 )
 
 ARTIFACTS_APP_PURPOSE = (

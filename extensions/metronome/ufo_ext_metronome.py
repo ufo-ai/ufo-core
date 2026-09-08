@@ -48,6 +48,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
+from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
@@ -131,27 +132,7 @@ MANAGE_BILLING_DESCRIPTION = (
 
 BILLING_SECTION_NAME = "billing"
 BILLING_SECTION_BODY = (
-    "The workspace runs on a prepaid balance: turns spend it, and a turn is refused once the "
-    "balance reaches the headroom a turn needs to begin, which is at or above zero. A workspace "
-    "serving its turns with its own model provider key is the exception — its turns run while the "
-    "balance is above zero — and a workspace with no balance at all is not limited by one, which "
-    "is what a null balance and reserve mean. When a "
-    "workspace admin asks about billing, what they have left, or how to add a card, "
-    "run the workspace object's manage_billing action with operation 'status' and report the "
-    "balance, the reserve beneath it, "
-    "and whether a card is on file. A workspace whose card has already paid a refill keeps working "
-    "for a fixed amount past that line, so a low balance there is not the same as being stopped. "
-    "Report what status returns rather "
-    "than inferring why a turn stopped. For adding or changing a card, or "
-    "for invoices, run it with operation 'portal' and give them the "
-    "returned portal_url as a link to open. There is no plan to sell and none to activate, so "
-    "never offer one or say one is pending. If an admin says they are already on a plan, do not "
-    "contradict them — nothing here can see a billing arrangement made before this, so say you "
-    "will check with the team. An admin can arrange automatic refills from the card on file: run "
-    "it with operation 'autopay', giving the amount to add and the balance to refill below, both "
-    "in whole dollars, and omit both to stop. A card has to be saved first, because the refill "
-    "runs with "
-    "nobody present. If they ask to add credit as a one-off, say you will pass that to the team."
+    (Path(__file__).parent / "prompts" / "billing_section.md").read_text().strip()
 )
 
 INGEST_TRANSPORT: httpx.AsyncBaseTransport | None = None

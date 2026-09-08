@@ -4,20 +4,13 @@ body, return it — or None when the model returns nothing or an unchanged promp
 would reject anyway)."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ufo.sdk.models import Message
 from ufo_ext_self_improvement.corpus import EXAMPLE_CHARS, MAX_EXAMPLES, TaskClass
 from ufo_ext_self_improvement.model import ModelLeg
 
-PROPOSER_SYSTEM = (
-    "You improve an AI agent's system prompt. You are given the agent's CURRENT system prompt, a "
-    "TASK CLASS it handles, and EXAMPLES of turns where that task hit friction (the request and "
-    "the problem). Propose a revised system prompt that handles this class more reliably by "
-    "addressing the problems with a clearer procedure — WITHOUT narrowing the agent to this one "
-    "class or "
-    "breaking its other behavior. Preserve the prompt's voice and scope; make the smallest change "
-    "that helps. Return ONLY the full revised system prompt, verbatim, no preamble or code fences."
-)
+PROPOSER_SYSTEM = (Path(__file__).parent / "prompts" / "proposer.md").read_text().strip()
 
 
 @dataclass(frozen=True)

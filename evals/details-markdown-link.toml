@@ -26,7 +26,7 @@ sandbox = { backend = "local" }
 name = "no-link-carrier"
 
 [[arm.replacements]]
-path = "core/src/ufo/runtime/turns/delivery_register.md"
+path = "core/src/ufo/runtime/prompts/delivery_register.md"
 old = '''When detail crosses the chosen register's inline boundary, put it in one artifact and never
 duplicate its body inline. For a member, the artifact is a file in /workspace — a Markdown write-up
 or a chart, one you wrote or one a subagent wrote in your sandbox — linked from the closing
